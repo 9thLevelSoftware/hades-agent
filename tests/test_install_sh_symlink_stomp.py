@@ -75,14 +75,14 @@ def test_re_running_setup_path_block_preserves_pip_entry_point(tmp_path: Path) -
     """
     venv_bin = tmp_path / "venv" / "bin"
     venv_bin.mkdir(parents=True)
-    pip_entry = venv_bin / "hermes"
+    pip_entry = venv_bin / "hades"
     pip_marker = "#!/usr/bin/env python\n# pip-generated entry point — must not be overwritten\n"
     pip_entry.write_text(pip_marker)
     pip_entry.chmod(pip_entry.stat().st_mode | stat.S_IXUSR)
 
     command_link_dir = tmp_path / "local_bin"
     command_link_dir.mkdir()
-    shim_path = command_link_dir / "hermes"
+    shim_path = command_link_dir / "hades"
     # Reproduce the prior-install state: shim path is a symlink to the
     # pip-generated entry point.
     shim_path.symlink_to(pip_entry)

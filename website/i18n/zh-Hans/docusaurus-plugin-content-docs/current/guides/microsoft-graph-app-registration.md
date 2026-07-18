@@ -15,7 +15,7 @@ Teams 会议流水线使用**仅限应用**（daemon）身份验证从 Microsoft
 4. 管理员同意这些权限
 5. （可选）通过应用程序访问策略将应用限定到特定用户
 
-完成本指南需要**租户管理员权限**（或由管理员代为授予同意）。请记录收集到的值——最终需要填入 `~/.hermes/.env`。
+完成本指南需要**租户管理员权限**（或由管理员代为授予同意）。请记录收集到的值——最终需要填入 `~/.hades/.env`。
 
 ## 前提条件
 
@@ -95,7 +95,7 @@ Microsoft 专门为 Teams 提供了**应用程序访问策略**（Application Ac
 在已安装并连接 MicrosoftTeams 模块的管理员 PowerShell 中（`Connect-MicrosoftTeams`）执行：
 
 ```powershell
-# Create a policy scoped to the Hermes app
+# Create a policy scoped to the Hades app
 New-CsApplicationAccessPolicy `
   -Identity "Hermes-Meeting-Pipeline-Policy" `
   -AppIds "<MSGRAPH_CLIENT_ID>" `
@@ -121,7 +121,7 @@ Test-CsApplicationAccessPolicy -Identity "alice@example.com" -AppId "<MSGRAPH_CL
 
 ## 步骤 5：将凭据写入环境文件
 
-将收集到的三个值填入 `~/.hermes/.env`：
+将收集到的三个值填入 `~/.hades/.env`：
 
 ```bash
 MSGRAPH_TENANT_ID=<directory-tenant-id>
@@ -132,7 +132,7 @@ MSGRAPH_CLIENT_SECRET=<client-secret-value>
 设置文件权限，确保只有你能读取密钥：
 
 ```bash
-chmod 600 ~/.hermes/.env
+chmod 600 ~/.hades/.env
 ```
 
 ## 步骤 6：验证令牌流程
@@ -164,7 +164,7 @@ print(provider.inspect_token_health())
 Azure 客户端密钥有固定的过期时间。在密钥过期前：
 
 1. 在步骤 2 中创建第二个客户端密钥，不要删除第一个。
-2. 用新值更新 `~/.hermes/.env` 中的 `MSGRAPH_CLIENT_SECRET`。
+2. 用新值更新 `~/.hades/.env` 中的 `MSGRAPH_CLIENT_SECRET`。
 3. 重启 gateway 以使新密钥生效：`hermes gateway restart`。
 4. 使用上述冒烟测试进行验证。
 5. 在 Azure 门户中删除旧密钥。

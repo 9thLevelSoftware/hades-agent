@@ -1,14 +1,14 @@
 ---
 sidebar_position: 7
-title: "Use SOUL.md with Hermes"
-description: "How to use SOUL.md to shape Hermes Agent's default voice, what belongs there, and how it differs from AGENTS.md and /personality"
+title: "Use SOUL.md with Hades"
+description: "How to use SOUL.md to shape Hades Agent's default voice, what belongs there, and how it differs from AGENTS.md and /personality"
 ---
 
-# Use SOUL.md with Hermes
+# Use SOUL.md with Hades
 
 `SOUL.md` is the **primary identity** for your Hermes instance. It's the first thing in the system prompt — it defines who the agent is, how it speaks, and what it avoids.
 
-If you want Hermes to feel like the same assistant every time you talk to it — or if you want to replace the Hermes persona entirely with your own — this is the file to use.
+If you want Hermes to feel like the same assistant every time you talk to it — or if you want to replace the Hades persona entirely with your own — this is the file to use.
 
 ## What SOUL.md is for
 
@@ -44,13 +44,13 @@ A good rule:
 Hermes now uses only the global SOUL file for the current instance:
 
 ```text
-~/.hermes/SOUL.md
+~/.hades/SOUL.md
 ```
 
 If you run Hermes with a custom home directory, it becomes:
 
 ```text
-$HERMES_HOME/SOUL.md
+$HADES_HOME/SOUL.md
 ```
 
 ## First-run behavior
@@ -65,7 +65,7 @@ Important:
 
 ## How Hermes uses it
 
-When Hermes starts a session, it reads `SOUL.md` from `HERMES_HOME`, scans it for prompt-injection patterns, truncates it if needed, and uses it as the **agent identity** — slot #1 in the system prompt. This means SOUL.md completely replaces the built-in default identity text.
+When Hermes starts a session, it reads `SOUL.md` from `HADES_HOME`, scans it for prompt-injection patterns, truncates it if needed, and uses it as the **agent identity** — slot #1 in the system prompt. This means SOUL.md completely replaces the built-in default identity text.
 
 If SOUL.md is missing, empty, or cannot be loaded, Hermes falls back to a built-in default identity.
 
@@ -212,13 +212,13 @@ This is the most common mistake.
 ## How to edit it
 
 ```bash
-nano ~/.hermes/SOUL.md
+nano ~/.hades/SOUL.md
 ```
 
 or
 
 ```bash
-vim ~/.hermes/SOUL.md
+vim ~/.hades/SOUL.md
 ```
 
 Then restart Hermes or start a new session.
@@ -228,7 +228,7 @@ Then restart Hermes or start a new session.
 1. Start with the seeded default file
 2. Trim anything that does not feel like the voice you want
 3. Add 4–8 lines that clearly define tone and defaults
-4. Talk to Hermes for a while
+4. Talk to Hades for a while
 5. Adjust based on what still feels off
 
 That iterative approach works better than trying to design the perfect personality in one shot.
@@ -238,7 +238,7 @@ That iterative approach works better than trying to design the perfect personali
 ### I edited SOUL.md but Hermes still sounds the same
 
 Check:
-- you edited `~/.hermes/SOUL.md` or `$HERMES_HOME/SOUL.md`
+- you edited `~/.hades/SOUL.md` or `$HADES_HOME/SOUL.md`
 - not some repo-local `SOUL.md`
 - the file is not empty
 - your session was restarted after the edit

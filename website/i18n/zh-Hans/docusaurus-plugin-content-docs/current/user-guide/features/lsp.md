@@ -78,7 +78,7 @@ agent 对于语法正确但存在语义问题的文件，会看到 ``lint: ok`` 
 | Java | `jdtls` | 手动 |
 
 对于"手动"条目，请通过该语言对应的工具链管理器安装服务器（rustup、ghcup、opam、brew 等）。
-Hermes 会自动检测 PATH 上或 `<HERMES_HOME>/lsp/bin/` 中的二进制文件。
+Hermes 会自动检测 PATH 上或 `<HADES_HOME>/lsp/bin/` 中的二进制文件。
 
 部分服务器需要与 npm 不会自动拉取的对等依赖一同安装。当前的典型情况是
 `typescript-language-server`，它要求 `typescript` SDK 可从同一 `node_modules`
@@ -114,7 +114,7 @@ lsp:
   wait_timeout: 5.0
 
   # 处理缺失服务器二进制文件的策略。
-  #   auto    — 通过 npm/pip/go install 安装到 <HERMES_HOME>/lsp/bin
+  #   auto    — 通过 npm/pip/go install 安装到 <HADES_HOME>/lsp/bin
   #   manual  — 仅使用已在 PATH 上的二进制文件
   install_strategy: auto
 
@@ -142,8 +142,8 @@ lsp:
 
 ## 安装位置
 
-当 `install_strategy: auto` 时，Hermes 将二进制文件安装到 `<HERMES_HOME>/lsp/bin/`。
-NPM 包安装到 `<HERMES_HOME>/lsp/node_modules/`，bin 符号链接位于上一级目录。
+当 `install_strategy: auto` 时，Hermes 将二进制文件安装到 `<HADES_HOME>/lsp/bin/`。
+NPM 包安装到 `<HADES_HOME>/lsp/node_modules/`，bin 符号链接位于上一级目录。
 Go 二进制文件通过 `go install` 安装，`GOBIN` 指向暂存目录。
 
 任何内容都不会安装到 `/usr/local/`、`~/.local/` 或其他共享位置——暂存目录完全由
@@ -181,7 +181,7 @@ lsp:
 
 **`hermes lsp status` 显示某服务器为"missing"**
 
-该二进制文件不在 PATH 上，也不在 `<HERMES_HOME>/lsp/bin/` 中。运行
+该二进制文件不在 PATH 上，也不在 `<HADES_HOME>/lsp/bin/` 中。运行
 `hermes lsp install <server_id>` 尝试自动安装，或通过该语言的常规工具链手动安装。
 
 **`hermes lsp status` 中出现 `Backend warnings` 部分**
@@ -197,11 +197,11 @@ brew install shellcheck     # macOS
 scoop install shellcheck    # Windows
 ```
 
-同样的警告会在服务器启动时记录一次到 `~/.hermes/logs/agent.log`。
+同样的警告会在服务器启动时记录一次到 `~/.hades/logs/agent.log`。
 
 **服务器已启动但从不返回诊断结果**
 
-检查 `~/.hermes/logs/agent.log` 中的 `[agent.lsp.client]` 条目——语言服务器的
+检查 `~/.hades/logs/agent.log` 中的 `[agent.lsp.client]` 条目——语言服务器的
 stderr 输出和协议错误均记录于此。部分服务器（尤其是 rust-analyzer）需要完成
 全项目索引后才会输出单文件诊断；服务器启动后的第一次编辑可能没有诊断结果，
 后续编辑才会获取到。

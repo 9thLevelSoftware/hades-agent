@@ -87,7 +87,7 @@ class TestReasoningCommand:
 
     @pytest.mark.asyncio
     async def test_reasoning_command_reloads_current_state_from_config(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
@@ -110,7 +110,7 @@ class TestReasoningCommand:
 
     @pytest.mark.asyncio
     async def test_handle_reasoning_command_updates_config_and_cache(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text("agent:\n  reasoning_effort: medium\n", encoding="utf-8")
@@ -129,7 +129,7 @@ class TestReasoningCommand:
 
     @pytest.mark.asyncio
     async def test_handle_reasoning_command_defaults_to_session_only(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text("agent:\n  reasoning_effort: medium\n", encoding="utf-8")
@@ -153,7 +153,7 @@ class TestReasoningCommand:
     async def test_handle_reasoning_command_accepts_extended_efforts(
         self, tmp_path, monkeypatch, effort
     ):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
             "agent:\n  reasoning_effort: medium\n", encoding="utf-8"
@@ -173,7 +173,7 @@ class TestReasoningCommand:
 
     @pytest.mark.asyncio
     async def test_reasoning_global_clears_existing_session_override(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text("agent:\n  reasoning_effort: medium\n", encoding="utf-8")
@@ -194,7 +194,7 @@ class TestReasoningCommand:
 
     @pytest.mark.asyncio
     async def test_reasoning_reset_clears_session_override_without_config_write(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text("agent:\n  reasoning_effort: medium\n", encoding="utf-8")
@@ -214,7 +214,7 @@ class TestReasoningCommand:
         assert "cleared" in result
 
     def test_resolve_session_reasoning_prefers_session_override(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text("agent:\n  reasoning_effort: low\n", encoding="utf-8")
 
@@ -228,7 +228,7 @@ class TestReasoningCommand:
         assert runner._resolve_session_reasoning_config(source=source) == {"enabled": True, "effort": "xhigh"}
 
     def test_run_agent_reloads_reasoning_config_per_message(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text("agent:\n  reasoning_effort: low\n", encoding="utf-8")
 
@@ -277,7 +277,7 @@ class TestReasoningCommand:
         assert _CapturingAgent.last_init["reasoning_config"] == {"enabled": True, "effort": "low"}
 
     def test_run_agent_prefers_session_reasoning_override(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text("agent:\n  reasoning_effort: low\n", encoding="utf-8")
 
@@ -327,7 +327,7 @@ class TestReasoningCommand:
         assert _CapturingAgent.last_init["reasoning_config"] == {"enabled": True, "effort": "high"}
 
     def test_run_agent_includes_enabled_mcp_servers_in_gateway_toolsets(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
             "platform_toolsets:\n"
@@ -388,7 +388,7 @@ class TestReasoningCommand:
         assert "web-search-prime" in enabled_toolsets
 
     def test_run_agent_homeassistant_uses_default_platform_toolset(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text("", encoding="utf-8")
 
@@ -440,7 +440,7 @@ class TestLoadShowReasoningCoercion:
     """Regression: display.show_reasoning must be coerced, not bool()'d."""
 
     def _load_with_config(self, tmp_path, monkeypatch, yaml_body: str) -> bool:
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(yaml_body, encoding="utf-8")
         monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)

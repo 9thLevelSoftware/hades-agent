@@ -2,13 +2,13 @@ import os
 import sys
 
 # Stop a ``utils/`` (or ``proxy/``, ``ui/``) package in the launch directory
-# from shadowing Hermes's own top-level modules.  ``hermes_bootstrap`` lives at
+# from shadowing Hades's own top-level modules.  ``hermes_bootstrap`` lives at
 # the repo root next to this package, so importing it is safe before the guard
 # runs (its name won't collide with a user package), and it owns the canonical
 # path-hardening logic shared with the other entry points.
-import hermes_bootstrap
+import hades_bootstrap
 
-hermes_bootstrap.harden_import_path()
+hades_bootstrap.harden_import_path()
 
 import json
 import logging
@@ -35,7 +35,7 @@ def _install_sidecar_publisher() -> None:
     ``/api/pty`` endpoint when a chat tab passes a ``channel`` query param.
     Best-effort: connect failure or runtime drop falls back to stdio-only.
     """
-    url = os.environ.get("HERMES_TUI_SIDECAR_URL")
+    url = os.environ.get("HADES_TUI_SIDECAR_URL")
 
     if not url:
         return
@@ -59,7 +59,7 @@ _DEFAULT_SHUTDOWN_GRACE_S = 1.0
 
 
 def _shutdown_grace_seconds() -> float:
-    raw = (os.environ.get("HERMES_TUI_GATEWAY_SHUTDOWN_GRACE_S") or "").strip()
+    raw = (os.environ.get("HADES_TUI_GATEWAY_SHUTDOWN_GRACE_S") or "").strip()
     if not raw:
         return _DEFAULT_SHUTDOWN_GRACE_S
     try:
@@ -218,13 +218,13 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
     waited on beyond the bound.  No-op when no discovery thread was started.
 
     The bound comes from ``mcp_discovery_timeout`` in config (shared with the
-    CLI path via ``hermes_cli.mcp_startup``); ``timeout`` overrides it.
+    CLI path via ``hades_cli.mcp_startup``); ``timeout`` overrides it.
     """
     thread = _mcp_discovery_thread
     if thread is None or not thread.is_alive():
         return
     try:
-        from hermes_cli.mcp_startup import _resolve_discovery_timeout
+        from hades_cli.mcp_startup import _resolve_discovery_timeout
 
         bound = _resolve_discovery_timeout(timeout)
     except Exception:
@@ -244,7 +244,7 @@ def mcp_discovery_in_flight() -> bool:
     ``hermes --tui`` path spawns ITS thread here (``_mcp_discovery_thread``),
     while the desktop app + dashboard WebSocket sidecar (``tui_gateway/ws.py``)
     and ``hermes dashboard`` spawn theirs via
-    ``hermes_cli.mcp_startup.start_background_mcp_discovery``. The late-refresh
+    ``hades_cli.mcp_startup.start_background_mcp_discovery``. The late-refresh
     scheduler imports this function regardless of surface, so it MUST consult
     both — checking only the entry thread left the desktop/dashboard surfaces
     with no late refresh, so a slow MCP server's tools never surfaced for the
@@ -254,7 +254,7 @@ def mcp_discovery_in_flight() -> bool:
     if thread is not None and thread.is_alive():
         return True
     try:
-        from hermes_cli.mcp_startup import (
+        from hades_cli.mcp_startup import (
             mcp_discovery_in_flight as _startup_in_flight,
         )
 
@@ -272,7 +272,7 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
     the outcome, for the off-critical-path late-refresh waiter.
 
     Joins both discovery-thread owners (see ``mcp_discovery_in_flight``): the
-    entry thread first, then the ``hermes_cli.mcp_startup`` thread used by the
+    entry thread first, then the ``hades_cli.mcp_startup`` thread used by the
     desktop/dashboard surfaces. ``timeout`` bounds EACH join, mirroring the
     pre-#51587 single-owner behavior for the entry thread.
     """
@@ -282,7 +282,7 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
         thread.join(timeout=timeout)
         entry_done = not thread.is_alive()
     try:
-        from hermes_cli.mcp_startup import join_mcp_discovery as _startup_join
+        from hades_cli.mcp_startup import join_mcp_discovery as _startup_join
 
         startup_done = _startup_join(timeout=timeout)
     except Exception:
@@ -314,7 +314,7 @@ def main():
     # thread when there's actually MCP work to do, so the import cost stays
     # off the path entirely for the common case.
     try:
-        from hermes_cli.config import read_raw_config
+        from hades_cli.config import read_raw_config
         _mcp_servers = (read_raw_config() or {}).get("mcp_servers")
         _has_mcp_servers = isinstance(_mcp_servers, dict) and len(_mcp_servers) > 0
     except Exception:
@@ -324,7 +324,7 @@ def main():
     if _has_mcp_servers:
         def _discover_mcp_background() -> None:
             try:
-                from hermes_cli.mcp_startup import (
+                from hades_cli.mcp_startup import (
                     _discover_mcp_tools_without_interactive_oauth,
                 )
 

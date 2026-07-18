@@ -758,7 +758,7 @@ async def test_created_private_topic_thread_not_found_fails_without_root_fallbac
 
 @pytest.mark.asyncio
 async def test_send_uses_metadata_reply_fallback_for_streaming_dm_topics():
-    """Metadata-only sends still stay in Hermes-created Telegram DM topics."""
+    """Metadata-only sends still stay in Hades-created Telegram DM topics."""
     adapter = _make_adapter()
     call_log = []
 

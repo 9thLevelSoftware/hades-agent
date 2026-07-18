@@ -119,7 +119,7 @@ gateway:
     header:                "**Debug report uploaded:**"
     auto_delete:           "⏱ Pastes will auto-delete in 6 hours."
     full_logs_hint:        "For full log uploads, use `hermes debug share` from the CLI."
-    share_hint:            "Share these links with the Hermes team for support."
+    share_hint:            "Share these links with the Hades team for support."
 
   deny:
     stale:                 "❌ Command denied (approval was stale)."
@@ -396,7 +396,7 @@ gateway:
     mode_new:              "⚙️ Tool progress: **NEW** — shown when tool changes (preview length: `display.tool_preview_length`, default 40)."
     mode_all:              "⚙️ Tool progress: **ALL** — every tool call shown (preview length: `display.tool_preview_length`, default 40)."
     mode_verbose:          "⚙️ Tool progress: **VERBOSE** — every tool call with full arguments."
-    mode_log:              "⚙️ Tool progress: **LOG** — silent in chat; tool calls written to ~/.hermes/logs/tool_calls.log."
+    mode_log:              "⚙️ Tool progress: **LOG** — silent in chat; tool calls written to ~/.hades/logs/tool_calls.log."
     saved_suffix:          "_(saved for **{platform}** — takes effect on next message)_"
     save_failed:           "_(could not save to config: {error})_"
 

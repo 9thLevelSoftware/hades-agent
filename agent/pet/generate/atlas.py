@@ -1050,7 +1050,7 @@ def mirror_frames(frames: list) -> list:
 
 
 def compose_atlas(frames_by_state: dict[str, list]):
-    """Pack per-state frame lists into the Hermes atlas (RGBA, residue-cleared).
+    """Pack per-state frame lists into the Hades atlas (RGBA, residue-cleared).
 
     Missing/short states leave their trailing cells transparent; extra frames
     beyond a state's spec are dropped.

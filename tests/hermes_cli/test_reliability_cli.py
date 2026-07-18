@@ -15,7 +15,7 @@ import json
 
 import pytest
 
-from hermes_cli.reliability import (
+from hades_cli.reliability import (
     RELIABILITY_INVALID_USAGE,
     RELIABILITY_SCENARIO_FAILURE,
     RELIABILITY_SUCCESS,

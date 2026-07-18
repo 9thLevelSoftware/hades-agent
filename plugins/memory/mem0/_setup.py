@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from hermes_constants import get_hermes_home
+from hades_constants import get_hades_home
 
 from ._oss_providers import (
     LLM_PROVIDERS,
@@ -26,7 +26,7 @@ from ._oss_providers import (
 
 def _curses_select(title: str, items: list[tuple[str, str]], default: int = 0) -> int:
     """Interactive single-select with arrow keys."""
-    from hermes_cli.curses_ui import curses_radiolist
+    from hades_cli.curses_ui import curses_radiolist
     display_items = [
         f"{label}  {desc}" if desc else label
         for label, desc in items
@@ -306,17 +306,17 @@ def _setup_platform(hermes_home: str, config: dict, flags: dict[str, str]) -> No
     provider_config["host"] = ""
     # The json-file clear above can't help when the host comes from the
     # environment: _load_config() seeds ``host`` from MEM0_HOST, and the
-    # docs tell self-hosted users to put MEM0_HOST in ~/.hermes/.env. Warn
+    # docs tell self-hosted users to put MEM0_HOST in ~/.hades/.env. Warn
     # so the user knows platform mode won't take effect until it's removed.
     if os.environ.get("MEM0_HOST", "").strip():
         print(
             "\n  ⚠ MEM0_HOST is set in your environment "
             f"({os.environ['MEM0_HOST']}). It overrides platform mode — "
-            "remove it from ~/.hermes/.env (or unset it) or Hermes will keep "
+            "remove it from ~/.hades/.env (or unset it) or Hermes will keep "
             "routing to the self-hosted server."
         )
 
-    from hermes_cli.config import save_config
+    from hades_cli.config import save_config
     config["memory"]["provider"] = "mem0"
     save_config(config)
 
@@ -410,7 +410,7 @@ def _setup_selfhosted(hermes_home: str, config: dict, flags: dict[str, str]) -> 
     provider_config["user_id"] = user_id
     provider_config["agent_id"] = agent_id
 
-    from hermes_cli.config import save_config
+    from hades_cli.config import save_config
     config["memory"]["provider"] = "mem0"
     save_config(config)
 
@@ -471,7 +471,7 @@ def _setup_oss(hermes_home: str, config: dict, flags: dict[str, str]) -> None:
 
     _install_provider_deps(llm_id, embedder_id, vector_id)
 
-    from hermes_cli.config import save_config
+    from hades_cli.config import save_config
     config["memory"]["provider"] = "mem0"
     save_config(config)
 
@@ -824,7 +824,7 @@ def _setup_oss_interactive(hermes_home: str, config: dict) -> None:
     if vector_id == "pgvector" and pgvector_config:
         _ensure_pgvector_extension(pgvector_config)
 
-    from hermes_cli.config import save_config
+    from hades_cli.config import save_config
     config["memory"]["provider"] = "mem0"
     save_config(config)
 

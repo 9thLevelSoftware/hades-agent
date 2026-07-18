@@ -1,4 +1,4 @@
-"""Tests for hermes_cli.service_manager — the abstract ServiceManager
+"""Tests for hades_cli.service_manager — the abstract ServiceManager
 protocol, the detect_service_manager() entry point, and the host-side
 adapter wrappers (Systemd / Launchd / Windows).
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_cli.service_manager import (
+from hades_cli.service_manager import (
     LaunchdServiceManager,
     S6ServiceManager,
     ServiceManager,
@@ -78,7 +78,7 @@ def test_detect_service_manager_s6_keys_off_s6_running_not_is_container(
     foreground gateway that fought the supervised one. Detection must key off
     s6 being PID 1 (`_s6_running`) alone."""
     monkeypatch.setattr(
-        "hermes_cli.service_manager._s6_running", lambda: True,
+        "hades_cli.service_manager._s6_running", lambda: True,
     )
     assert detect_service_manager() == "s6"
 
@@ -121,7 +121,7 @@ def _patch_s6_paths(
 def test_s6_running_true_when_comm_and_basedir_match(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from hermes_cli.service_manager import _s6_running
+    from hades_cli.service_manager import _s6_running
 
     _patch_s6_paths(monkeypatch, comm="s6-svscan", basedir_is_dir=True)
     assert _s6_running() is True
@@ -130,7 +130,7 @@ def test_s6_running_true_when_comm_and_basedir_match(
 def test_s6_running_false_when_comm_is_wrong(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from hermes_cli.service_manager import _s6_running
+    from hades_cli.service_manager import _s6_running
 
     # systemd as PID 1, basedir present from some stray s6 install
     _patch_s6_paths(monkeypatch, comm="systemd", basedir_is_dir=True)
@@ -140,7 +140,7 @@ def test_s6_running_false_when_comm_is_wrong(
 def test_s6_running_false_when_basedir_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from hermes_cli.service_manager import _s6_running
+    from hades_cli.service_manager import _s6_running
 
     # The comm matches but the basedir is missing — e.g. an unrelated
     # process happens to be named "s6-svscan"
@@ -157,7 +157,7 @@ def test_s6_running_false_when_comm_unreadable(
     probe must FAIL CLOSED — not raise — when /proc/1/comm can't be
     read.
     """
-    from hermes_cli.service_manager import _s6_running
+    from hades_cli.service_manager import _s6_running
 
     _patch_s6_paths(
         monkeypatch,
@@ -172,7 +172,7 @@ def test_s6_running_handles_missing_proc(
 ) -> None:
     """On macOS / Windows / WSL-without-procfs, /proc/1/comm doesn't
     exist. Must return False, not raise."""
-    from hermes_cli.service_manager import _s6_running
+    from hades_cli.service_manager import _s6_running
 
     _patch_s6_paths(monkeypatch, comm=None, basedir_is_dir=False)
     assert _s6_running() is False
@@ -223,16 +223,16 @@ def test_windows_manager_kind_and_registration_unsupported() -> None:
 def test_systemd_manager_lifecycle_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[str] = []
     monkeypatch.setattr(
-        "hermes_cli.gateway.systemd_start", lambda: called.append("start"),
+        "hades_cli.gateway.systemd_start", lambda: called.append("start"),
     )
     monkeypatch.setattr(
-        "hermes_cli.gateway.systemd_stop", lambda: called.append("stop"),
+        "hades_cli.gateway.systemd_stop", lambda: called.append("stop"),
     )
     monkeypatch.setattr(
-        "hermes_cli.gateway.systemd_restart", lambda: called.append("restart"),
+        "hades_cli.gateway.systemd_restart", lambda: called.append("restart"),
     )
     monkeypatch.setattr(
-        "hermes_cli.gateway._probe_systemd_service_running",
+        "hades_cli.gateway._probe_systemd_service_running",
         lambda *a, **kw: (False, True),
     )
     mgr = SystemdServiceManager()
@@ -246,16 +246,16 @@ def test_systemd_manager_lifecycle_delegates(monkeypatch: pytest.MonkeyPatch) ->
 def test_launchd_manager_lifecycle_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[str] = []
     monkeypatch.setattr(
-        "hermes_cli.gateway.launchd_start", lambda: called.append("start"),
+        "hades_cli.gateway.launchd_start", lambda: called.append("start"),
     )
     monkeypatch.setattr(
-        "hermes_cli.gateway.launchd_stop", lambda: called.append("stop"),
+        "hades_cli.gateway.launchd_stop", lambda: called.append("stop"),
     )
     monkeypatch.setattr(
-        "hermes_cli.gateway.launchd_restart", lambda: called.append("restart"),
+        "hades_cli.gateway.launchd_restart", lambda: called.append("restart"),
     )
     monkeypatch.setattr(
-        "hermes_cli.gateway._probe_launchd_service_running", lambda: False,
+        "hades_cli.gateway._probe_launchd_service_running", lambda: False,
     )
     mgr = LaunchdServiceManager()
     mgr.start("ignored")
@@ -270,7 +270,7 @@ def test_windows_manager_lifecycle_delegates(monkeypatch: pytest.MonkeyPatch) ->
     # Force-import the submodule so monkeypatch's attribute lookup
     # against the `hermes_cli` package succeeds — gateway_windows is
     # imported lazily inside the wrapper and may not yet be loaded.
-    import hermes_cli.gateway_windows  # noqa: F401
+    import hades_cli.gateway_windows  # noqa: F401
 
     class _FakeWindowsModule:
         @staticmethod
@@ -282,9 +282,9 @@ def test_windows_manager_lifecycle_delegates(monkeypatch: pytest.MonkeyPatch) ->
         @staticmethod
         def is_installed() -> bool: return True
 
-    monkeypatch.setattr("hermes_cli.gateway_windows", _FakeWindowsModule)
+    monkeypatch.setattr("hades_cli.gateway_windows", _FakeWindowsModule)
     monkeypatch.setattr(
-        "hermes_cli.gateway.find_gateway_pids",
+        "hades_cli.gateway.find_gateway_pids",
         lambda **kw: [12345],
     )
     mgr = WindowsServiceManager()
@@ -298,15 +298,15 @@ def test_windows_manager_lifecycle_delegates(monkeypatch: pytest.MonkeyPatch) ->
 def test_windows_manager_is_running_false_when_not_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import hermes_cli.gateway_windows  # noqa: F401
+    import hades_cli.gateway_windows  # noqa: F401
 
     class _FakeWindowsModule:
         @staticmethod
         def is_installed() -> bool: return False
 
-    monkeypatch.setattr("hermes_cli.gateway_windows", _FakeWindowsModule)
+    monkeypatch.setattr("hades_cli.gateway_windows", _FakeWindowsModule)
     monkeypatch.setattr(
-        "hermes_cli.gateway.find_gateway_pids",
+        "hades_cli.gateway.find_gateway_pids",
         lambda **kw: [12345],  # PIDs would otherwise vote "running"
     )
     assert WindowsServiceManager().is_running("ignored") is False
@@ -314,7 +314,7 @@ def test_windows_manager_is_running_false_when_not_installed(
 
 def test_windows_manager_install_forwards_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
-    import hermes_cli.gateway_windows  # noqa: F401
+    import hades_cli.gateway_windows  # noqa: F401
 
     class _FakeWindowsModule:
         @staticmethod
@@ -324,7 +324,7 @@ def test_windows_manager_install_forwards_kwargs(monkeypatch: pytest.MonkeyPatch
             captured["start_on_login"] = start_on_login
             captured["elevated_handoff"] = elevated_handoff
 
-    monkeypatch.setattr("hermes_cli.gateway_windows", _FakeWindowsModule)
+    monkeypatch.setattr("hades_cli.gateway_windows", _FakeWindowsModule)
     WindowsServiceManager().install(
         force=True, start_now=True, start_on_login=False, elevated_handoff=True,
     )
@@ -355,7 +355,7 @@ def test_get_service_manager_returns_correct_backend(
     cls: type,
 ) -> None:
     monkeypatch.setattr(
-        "hermes_cli.service_manager.detect_service_manager", lambda: kind,
+        "hades_cli.service_manager.detect_service_manager", lambda: kind,
     )
     assert isinstance(get_service_manager(), cls)
 
@@ -364,7 +364,7 @@ def test_get_service_manager_raises_when_unsupported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "hermes_cli.service_manager.detect_service_manager", lambda: "none",
+        "hades_cli.service_manager.detect_service_manager", lambda: "none",
     )
     with pytest.raises(RuntimeError, match="no supported service manager"):
         get_service_manager()
@@ -376,7 +376,7 @@ def test_get_service_manager_returns_s6_instance(
     """The s6 backend ships in Phase 3 — the factory must return an
     S6ServiceManager when running inside a container."""
     monkeypatch.setattr(
-        "hermes_cli.service_manager.detect_service_manager", lambda: "s6",
+        "hades_cli.service_manager.detect_service_manager", lambda: "s6",
     )
     assert isinstance(get_service_manager(), S6ServiceManager)
 
@@ -440,7 +440,7 @@ def test_seed_supervise_skeleton_creates_expected_layout(tmp_path) -> None:
     """Verifies the dirs + FIFO + modes the helper lays down."""
     import stat
 
-    from hermes_cli.service_manager import _seed_supervise_skeleton
+    from hades_cli.service_manager import _seed_supervise_skeleton
 
     svc_dir = tmp_path / "gateway-foo"
     svc_dir.mkdir()
@@ -482,7 +482,7 @@ def test_seed_supervise_skeleton_handles_log_subservice(tmp_path) -> None:
     """
     import stat
 
-    from hermes_cli.service_manager import _seed_supervise_skeleton
+    from hades_cli.service_manager import _seed_supervise_skeleton
 
     svc_dir = tmp_path / "gateway-foo"
     svc_dir.mkdir()
@@ -505,7 +505,7 @@ def test_seed_supervise_skeleton_handles_log_subservice(tmp_path) -> None:
 
 def test_seed_supervise_skeleton_skips_when_no_log_subservice(tmp_path) -> None:
     """If log/ isn't present, no logger skeleton is created."""
-    from hermes_cli.service_manager import _seed_supervise_skeleton
+    from hades_cli.service_manager import _seed_supervise_skeleton
 
     svc_dir = tmp_path / "gateway-foo"
     svc_dir.mkdir()
@@ -524,7 +524,7 @@ def test_seed_supervise_skeleton_is_idempotent(tmp_path) -> None:
     when a re-register / reconcile happens; double-creation would
     error out. The helper short-circuits on existence.
     """
-    from hermes_cli.service_manager import _seed_supervise_skeleton
+    from hades_cli.service_manager import _seed_supervise_skeleton
 
     svc_dir = tmp_path / "gateway-foo"
     svc_dir.mkdir()
@@ -559,13 +559,13 @@ def test_s6_register_creates_service_dir_and_triggers_scan(
     log_run = svc_dir / "log" / "run"
     assert log_run.is_file()
     log_text = log_run.read_text()
-    # CRITICAL: HERMES_HOME must be a runtime env-var expansion, NOT
+    # CRITICAL: HADES_HOME must be a runtime env-var expansion, NOT
     # a Python-substituted absolute path. Negative-assert the wrong
     # form so future regressions are caught.
-    assert "$HERMES_HOME" in log_text
+    assert "$HADES_HOME" in log_text
     assert "logs/gateways/coder" in log_text
     assert "/opt/data/logs/gateways/coder" not in log_text, (
-        "log_dir was hard-coded; must use ${HERMES_HOME} at run time"
+        "log_dir was hard-coded; must use ${HADES_HOME} at run time"
     )
     # `1` action directive forwards lines to stdout BEFORE the file
     # destination so the supervised gateway's stdout (including the
@@ -606,7 +606,7 @@ def test_s6_register_staging_dir_is_dotfile_hidden_from_svscan(
     assert its basename starts with ``.`` and still lives in the
     scandir as a sibling of the live slot.
     """
-    import hermes_cli.service_manager as sm
+    import hades_cli.service_manager as sm
 
     seen: list[str] = []
     real_seed = sm._seed_supervise_skeleton
@@ -685,13 +685,13 @@ def test_render_run_script_uses_replace_to_take_over_stale_holder() -> None:
 
     Without ``--replace`` a gateway started OUTSIDE s6 (a stray shell
     ``hermes gateway run``, an agent action, the Open WebUI helper) holds
-    the per-HERMES_HOME PID lock; the supervised slot then execs a bare
+    the per-HADES_HOME PID lock; the supervised slot then execs a bare
     ``gateway run``, hits the "Another gateway instance is already
     running" guard, exits non-zero, and s6 restarts it — a restart loop
     that never binds. ``--replace`` makes the supervised gateway reap the
     stale holder and win, so s6 is authoritative for the slot.
 
-    Covers both the default (root HERMES_HOME, no ``-p``) and named-profile
+    Covers both the default (root HADES_HOME, no ``-p``) and named-profile
     render paths.
     """
     default_text = S6ServiceManager._render_run_script("default", {})
@@ -847,7 +847,7 @@ def test_s6_lifecycle_persists_named_profile_desired_state(
     profile_dir = hermes_home / "profiles" / "coder"
     profile_dir.mkdir(parents=True)
     (s6_scandir / "gateway-coder").mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     mgr = S6ServiceManager(scandir=s6_scandir)
     mgr.start("gateway-coder")
@@ -869,7 +869,7 @@ def test_s6_lifecycle_persists_default_profile_desired_state(
     hermes_home = tmp_path / "hermes-home"
     hermes_home.mkdir()
     (s6_scandir / "gateway-default").mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home / "profiles" / "coder"))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home / "profiles" / "coder"))
 
     mgr = S6ServiceManager(scandir=s6_scandir)
     mgr.start("gateway-default")
@@ -889,7 +889,7 @@ def test_lifecycle_raises_gateway_not_registered_for_missing_slot(
     must raise GatewayNotRegisteredError BEFORE invoking s6-svc, so
     the user sees a clear 'no such gateway' message instead of an
     opaque CalledProcessError stacktrace."""
-    from hermes_cli.service_manager import (
+    from hades_cli.service_manager import (
         GatewayNotRegisteredError,
     )
 
@@ -918,7 +918,7 @@ def test_all_lifecycle_methods_check_for_missing_slot(
     method_name: str,
 ) -> None:
     """start/stop/restart all check for missing slots the same way."""
-    from hermes_cli.service_manager import (
+    from hades_cli.service_manager import (
         GatewayNotRegisteredError,
     )
 
@@ -932,7 +932,7 @@ def test_gateway_not_registered_unprefixed_service_name(s6_scandir) -> None:
     Protocol allows arbitrary service names), the error still carries
     that name verbatim as the 'profile' so error messages don't
     accidentally strip user-provided text."""
-    from hermes_cli.service_manager import (
+    from hades_cli.service_manager import (
         GatewayNotRegisteredError,
     )
 
@@ -950,7 +950,7 @@ def test_lifecycle_raises_s6_command_error_on_subprocess_failure(
     CalledProcessError into a named S6CommandError carrying the
     return code and stderr."""
     import subprocess as _sp
-    from hermes_cli.service_manager import S6CommandError
+    from hades_cli.service_manager import S6CommandError
 
     # Pre-create the slot so we reach the s6-svc call.
     (s6_scandir / "gateway-coder").mkdir()
@@ -1116,14 +1116,14 @@ def test_s6_log_run_chowns_gateways_parent(s6_scandir, fake_subprocess_run) -> N
 
     log_text = (s6_scandir / "gateway-coder" / "log" / "run").read_text()
 
-    parent_chown = 'chown hermes:hermes "$HERMES_HOME/logs/gateways"'
+    parent_chown = 'chown hermes:hermes "$HADES_HOME/logs/gateways"'
     assert parent_chown in log_text, (
         "log/run must chown the logs/gateways parent so profiles added "
         f"after a root-context boot can create their leaf dirs. Saw: {log_text!r}"
     )
     # Non-recursive on purpose: sibling profile leaf dirs are each managed
     # by their own log/run; a recursive parent chown would race them.
-    assert 'chown -R hermes:hermes "$HERMES_HOME/logs/gateways"' not in log_text
+    assert 'chown -R hermes:hermes "$HADES_HOME/logs/gateways"' not in log_text
 
     # Ordering: mkdir creates the parent, then the parent chown repairs its
     # ownership, then the leaf chown — all before s6-log execs.

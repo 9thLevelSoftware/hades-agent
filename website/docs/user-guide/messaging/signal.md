@@ -1,7 +1,7 @@
 ---
 sidebar_position: 6
 title: "Signal"
-description: "Set up Hermes Agent as a Signal messenger bot via signal-cli daemon"
+description: "Set up Hades Agent as a Signal messenger bot via signal-cli daemon"
 ---
 
 # Signal Setup
@@ -96,7 +96,7 @@ Select **Signal** from the platform menu. The wizard will:
 
 ### Manual Configuration
 
-Add to `~/.hermes/.env`:
+Add to `~/.hades/.env`:
 
 ```bash
 # Required
@@ -199,7 +199,7 @@ All phone numbers are automatically redacted in logs:
 
 ### Note to Self (Single-Number Setup)
 
-If you run signal-cli as a **linked secondary device** on your own phone number (rather than a separate bot number), you can interact with Hermes through Signal's "Note to Self" feature.
+If you run signal-cli as a **linked secondary device** on your own phone number (rather than a separate bot number), you can interact with Hades through Signal's "Note to Self" feature.
 
 Just send a message to yourself from your phone — signal-cli picks it up and Hermes responds in the same conversation.
 

@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from hermes_cli import projects_db as pdb
+from hades_cli import projects_db as pdb
 
 
 @pytest.fixture
@@ -46,28 +46,28 @@ def test_record_discovered_repos_replace_drops_stale_rows(conn):
 
 
 def test_create_get_list(conn):
-    pid = pdb.create_project(conn, name="Hermes Agent", folders=["/tmp/hermes"])
+    pid = pdb.create_project(conn, name="Hades Agent", folders=["/tmp/hermes"])
     proj = pdb.get_project(conn, pid)
 
     assert proj is not None
-    assert proj.slug == "hermes-agent"
-    assert proj.name == "Hermes Agent"
+    assert proj.slug == "hades-agent"
+    assert proj.name == "Hades Agent"
     # First folder becomes primary.
     assert proj.primary_path == "/tmp/hermes"
     assert [f.path for f in proj.folders] == ["/tmp/hermes"]
     assert proj.folders[0].is_primary is True
 
     # Lookup by slug too.
-    assert pdb.get_project(conn, "hermes-agent").id == pid
+    assert pdb.get_project(conn, "hades-agent").id == pid
     assert len(pdb.list_projects(conn)) == 1
 
 
 def test_slug_collision_disambiguates(conn):
-    pdb.create_project(conn, name="Hermes Agent")
-    pdb.create_project(conn, name="Hermes Agent")
+    pdb.create_project(conn, name="Hades Agent")
+    pdb.create_project(conn, name="Hades Agent")
     slugs = sorted(p.slug for p in pdb.list_projects(conn))
 
-    assert slugs == ["hermes-agent", "hermes-agent-2"]
+    assert slugs == ["hades-agent", "hermes-agent-2"]
 
 
 def test_empty_name_rejected(conn):
@@ -155,7 +155,7 @@ def test_branch_name_for_is_deterministic():
 
 
 def test_per_profile_isolation(tmp_path):
-    # Two distinct DB paths stand in for two profiles' HERMES_HOME.
+    # Two distinct DB paths stand in for two profiles' HADES_HOME.
     a = pdb.connect(db_path=tmp_path / "a" / "projects.db")
     b = pdb.connect(db_path=tmp_path / "b" / "projects.db")
     try:
@@ -169,6 +169,6 @@ def test_per_profile_isolation(tmp_path):
 
 
 def test_db_path_under_hermes_home():
-    # Resolves under HERMES_HOME (set by the autouse isolation fixture).
+    # Resolves under HADES_HOME (set by the autouse isolation fixture).
     assert pdb.projects_db_path().name == "projects.db"
     assert os.path.basename(str(pdb.projects_db_path().parent))  # non-empty parent

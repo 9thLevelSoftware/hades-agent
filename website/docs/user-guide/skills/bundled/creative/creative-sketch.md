@@ -17,7 +17,7 @@ Throwaway HTML mockups: 2-3 design variants to compare.
 | Source | Bundled (installed by default) |
 | Path | `skills/creative/sketch` |
 | Version | `1.0.0` |
-| Author | Hermes Agent (adapted from gsd-build/get-shit-done) |
+| Author | Hades Agent (adapted from gsd-build/get-shit-done) |
 | License | MIT |
 | Platforms | linux, macos, windows |
 | Tags | `sketch`, `mockup`, `design`, `ui`, `prototype`, `html`, `variants`, `exploration`, `wireframe`, `comparison` |
@@ -105,7 +105,7 @@ Each variant is a **single self-contained HTML file**:
 
 Open it in a browser. If it looks broken, fix it before showing the user.
 
-**Verify variants visually — use Hermes' browser tools.** Don't just write HTML and hope it renders; load each variant and look at it:
+**Verify variants visually — use Hades' browser tools.** Don't just write HTML and hope it renders; load each variant and look at it:
 
 ```
 browser_navigate(url="file:///absolute/path/to/sketches/001-calm-editorial/index.html")

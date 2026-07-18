@@ -17,7 +17,7 @@ description: "只读 EVM 客户端：跨 8 条链的钱包、代币、Gas"
 | 来源 | 可选 — 通过 `hermes skills install official/blockchain/evm` 安装 |
 | 路径 | `optional-skills/blockchain/evm` |
 | 版本 | `1.0.0` |
-| 作者 | Mibayy (@Mibayy), youssefea (@youssefea), ethernet8023 (@ethernet8023), Hermes Agent |
+| 作者 | Mibayy (@Mibayy), youssefea (@youssefea), ethernet8023 (@ethernet8023), Hades Agent |
 | 许可证 | MIT |
 | 平台 | linux, macos, windows |
 | 标签 | `EVM`, `Ethereum`, `BNB`, `BSC`, `Base`, `Arbitrum`, `Polygon`, `Optimism`, `Avalanche`, `zkSync`, `Blockchain`, `Crypto`, `Web3`, `DeFi`, `NFT`, `ENS`, `Whale`, `Security` |
@@ -72,14 +72,14 @@ ENS：ensideas.com 公共 API。
 
 覆盖 RPC 端点：`export EVM_RPC_URL=https://your-rpc.com`
 
-辅助脚本路径：`~/.hermes/skills/blockchain/evm/scripts/evm_client.py`
+辅助脚本路径：`~/.hades/skills/blockchain/evm/scripts/evm_client.py`
 
 ---
 
 ## 快速参考
 
 ```
-SCRIPT=~/.hermes/skills/blockchain/evm/scripts/evm_client.py
+SCRIPT=~/.hades/skills/blockchain/evm/scripts/evm_client.py
 
 # 网络与价格
 python3 $SCRIPT stats                            # Ethereum 统计
@@ -125,7 +125,7 @@ python3 $SCRIPT whale --blocks 50 --min-usd 100000 --chain arbitrum
 ### 0. 环境检查
 ```bash
 python3 --version   # 需要 3.8+
-python3 ~/.hermes/skills/blockchain/evm/scripts/evm_client.py stats
+python3 ~/.hades/skills/blockchain/evm/scripts/evm_client.py stats
 ```
 
 ### 1. 钱包投资组合
@@ -220,8 +220,8 @@ python3 $SCRIPT gas --chain polygon
 ## 验证
 ```bash
 # 应输出当前区块、Gas 价格、ETH 价格
-python3 ~/.hermes/skills/blockchain/evm/scripts/evm_client.py stats
+python3 ~/.hades/skills/blockchain/evm/scripts/evm_client.py stats
 
 # 应将 vitalik.eth 解析为 0xd8dA...
-python3 ~/.hermes/skills/blockchain/evm/scripts/evm_client.py ens vitalik.eth
+python3 ~/.hades/skills/blockchain/evm/scripts/evm_client.py ens vitalik.eth
 ```

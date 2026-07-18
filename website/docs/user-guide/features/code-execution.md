@@ -7,7 +7,7 @@ description: "Programmatic Python execution with RPC tool access — collapse mu
 # Code Execution (Programmatic Tool Calling)
 
 The `execute_code` tool runs a Python script in a child process and gives that
-script RPC access to the Hermes tools in the current session. Use it to collapse
+script RPC access to the Hades tools in the current session. Use it to collapse
 loops, filtering, and multi-step workflows into one model turn: intermediate
 results stay in the parent process and only the script's final output returns to
 the model.
@@ -65,7 +65,7 @@ import os
 hits = search_tools("issue tracker read-only lookup", limit=5)
 metadata = describe_tool(hits["results"][0]["name"])
 result = call_tool(metadata["name"], {"limit": 10})
-source = Path(os.environ["HERMES_ARTIFACTS_DIR"]) / "report.json"
+source = Path(os.environ["HADES_ARTIFACTS_DIR"]) / "report.json"
 source.write_text('{"result": "generated"}', encoding="utf-8")
 artifact = save_artifact(str(source), name="report.json", mime_type="application/json")
 print({"result": result, "artifact": artifact})
@@ -120,15 +120,15 @@ interpreter:
 
 | Mode | Working directory | Python interpreter |
 |------|-------------------|--------------------|
-| **`project`** (default) | The session's working directory, matching `terminal()` | Active `VIRTUAL_ENV`/`CONDA_PREFIX` Python, falling back to Hermes's Python |
-| **`strict`** | A temporary staging directory | Hermes's `sys.executable` |
+| **`project`** (default) | The session's working directory, matching `terminal()` | Active `VIRTUAL_ENV`/`CONDA_PREFIX` Python, falling back to Hades's Python |
+| **`strict`** | A temporary staging directory | Hades's `sys.executable` |
 
 `strict` changes staging and interpreter selection; it is not a new permission
 boundary. Both modes retain the same environment scrubbing, tool scope, denylist,
 approval, timeout, and output limits.
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.hades/config.yaml
 code_execution:
   mode: project   # project (default) or strict
 ```
@@ -321,13 +321,13 @@ capabilities through RPC instead of direct provider credentials.
 
 Environment names containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`,
 `PASSWD`, or `AUTH` are excluded. Safe system variables and the operational
-`HERMES_HOME`, `HERMES_PROFILE`, `HERMES_CONFIG`, and `HERMES_ENV` names are
+`HADES_HOME`, `HERMES_PROFILE`, `HERMES_CONFIG`, and `HERMES_ENV` names are
 allowed as required for runtime location. `HERMES_RPC_*`, `TZ`, and `HOME` are
 injected explicitly for the RPC process.
 
 Skill-declared `required_environment_variables` and exact names listed in
 `terminal.env_passthrough` can be passed through for approved skill use cases.
-This does not re-enable Hermes-managed provider credentials automatically.
+This does not re-enable Hades-managed provider credentials automatically.
 
 ## `execute_code` vs `terminal`
 

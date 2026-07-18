@@ -8,7 +8,7 @@ every turn (the desktop "thinking reverts to medium" report).
 
 GLM-5.2 additionally exposes a native ``reasoning_effort`` knob with two
 enabled levels (high / max) on the OpenAI-compatible ``/api/paas/v4``
-endpoint; the Hermes effort scale is collapsed onto those.
+endpoint; the Hades effort scale is collapsed onto those.
 
 These tests pin the profile's wire-shape contract so Z.AI requests stay
 correctly shaped without going live.

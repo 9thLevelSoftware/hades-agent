@@ -332,7 +332,7 @@ effort = clamp_effort(
 )
 ```
 
-Use the same canonical effort order everywhere. Inventory obtains exact per-model generic reasoning support from the Stage 1 `resolve_reasoning_support()` host API, which is backed by the same provider aliases/clamps used for request translation. The selector clamps only inside an `exact=True`, non-empty tuple and the active doctor blocks a target whose configured default/bounds cannot resolve through it. A bare reasoning boolean or unknown custom transport never produces guessed efforts. Provider-specific request translation remains entirely in Hermes.
+Use the same canonical effort order everywhere. Inventory obtains exact per-model generic reasoning support from the Stage 1 `resolve_reasoning_support()` host API, which is backed by the same provider aliases/clamps used for request translation. The selector clamps only inside an `exact=True`, non-empty tuple and the active doctor blocks a target whose configured default/bounds cannot resolve through it. A bare reasoning boolean or unknown custom transport never produces guessed efforts. Provider-specific request translation remains entirely in Hades.
 
 A valid classifier result with confidence below the configured threshold adds
 `(1 - confidence) * low_confidence_penalty` to uncertainty and increases the
@@ -574,7 +574,7 @@ def test_runtime_access_binding_distinguishes_local_backend_identity() -> None:
 
 
 def test_adapter_refuses_unknown_version_without_patching(monkeypatch):
-    monkeypatch.setattr("hermes_cli.__version__", "0.19.0")
+    monkeypatch.setattr("hades_cli.__version__", "0.19.0")
     before = AIAgent.run_conversation
     status = Hermes018Adapter().install(fake_service())
     assert status.state == "unsupported"
@@ -636,7 +636,7 @@ Expected: adapter contract tests fail because projection wrappers are absent.
 
 - [ ] **Step 3: Implement guarded wrappers with originals retained**
 
-Accept exactly `Version(hermes_cli.__version__) == Version("0.18.2")` until Plan 6 commits another reviewed host contract. At this checkpoint, compare exact parameter names/kinds/default semantics for the four wrapped callables before assigning any wrapper. Treat `agent.conversation_loop._sync_failover_system_message(agent, api_messages, active_system_prompt)` as part of the optional fallback capability group. If the fresh/child/access-binding boundary drifts, install none and return `unsupported`; if either current fallback seam drifts, install fresh/child/manual wrappers and report `post_call_failover=False`. In that reduced mode, fresh projection leaves the agent's native `_fallback_chain` empty and retains recorded fallbacks only in the immutable decision/store, so the unchanged native helper returns `False` and cannot execute an unbound target. Task 7 atomically replaces that fallback group with the final direct-fallback and primary-restore binding contracts.
+Accept exactly `Version(hades_cli.__version__) == Version("0.18.2")` until Plan 6 commits another reviewed host contract. At this checkpoint, compare exact parameter names/kinds/default semantics for the four wrapped callables before assigning any wrapper. Treat `agent.conversation_loop._sync_failover_system_message(agent, api_messages, active_system_prompt)` as part of the optional fallback capability group. If the fresh/child/access-binding boundary drifts, install none and return `unsupported`; if either current fallback seam drifts, install fresh/child/manual wrappers and report `post_call_failover=False`. In that reduced mode, fresh projection leaves the agent's native `_fallback_chain` empty and retains recorded fallbacks only in the immutable decision/store, so the unchanged native helper returns `False` and cannot execute an unbound target. Task 7 atomically replaces that fallback group with the final direct-fallback and primary-restore binding contracts.
 
 Registration order is structural config parse → service construction in non-projecting state → adapter preflight/install → `service.set_adapter_status(status)` → observer registration. `prepare_session()` and `prepare_child()` require both configured `active` and a currently healthy critical adapter status. A persisted active config therefore remains readable for doctor/reporting on an unsupported/drifted host but every preparation call bypasses projection; no adapter-health token is stored in YAML or required to construct the service.
 
@@ -898,7 +898,7 @@ Persist child decisions first by `(parent_session_id, parent_turn_id, task_index
 
 Define the delegation harness in this test file around the real
 `delegate_task` and `_build_child_agent`, with fake provider clients only. Reuse the real in-memory distinct pools and fail-first recovery boundary from Task 4. Read
-the schema through Hermes's registered `ToolEntry` before and after adapter
+the schema through Hades's registered `ToolEntry` before and after adapter
 installation. Populate the real durable async rows and reopen the profile DB
 for the recovery assertion.
 
@@ -1031,7 +1031,7 @@ Expected: global fallback leakage or missing effort/epoch assertions fail.
 
 - [ ] **Step 3: Add exact access binding to the direct fallback and restore paths**
 
-Extend the feature-neutral host signatures to `AIAgent._try_activate_fallback(reason=None, runtime_access_binding=None)`, `agent.chat_completion_helpers.try_activate_fallback(agent, reason=None, runtime_access_binding=None)`, `AIAgent._restore_primary_runtime(runtime_access_binding=None)`, and `agent.agent_runtime_helpers.restore_primary_runtime(agent, runtime_access_binding=None)`. Existing callers pass `None` and retain native behavior. A fallback binding applies only to the next chain entry. Immediately after popping that entry—and before the legacy local-skip, provider/model/base-URL dedup, or provider-resolution branches—validate its provider/model/API mode and non-secret access identities against the binding, snapshot the complete runtime/client/Anthropic client/transport cache/credential-pool/access-identity state, and use the binding's private endpoint, credential callable, and exact pool object instead of `resolve_provider_client()` or canonical `load_pool()`. A bound `None` pool deliberately clears rotation. Binding-aware local availability checks use the bound endpoint/runtime, while deduplication and unavailable keys compare the full `public_identity()` against `_runtime_access_identity`; same provider/model/base URL with a different endpoint/auth/pool identity is a real fallback, not a duplicate. The unbound branch retains Hermes's existing local/provider/model/base-URL behavior. If validation or client construction fails, restore the exact object snapshot before attempting native recovery; recursive advancement calls `agent._try_activate_fallback(reason)` without reusing the old binding, allowing the adapter wrapper to resolve the next recorded entry independently.
+Extend the feature-neutral host signatures to `AIAgent._try_activate_fallback(reason=None, runtime_access_binding=None)`, `agent.chat_completion_helpers.try_activate_fallback(agent, reason=None, runtime_access_binding=None)`, `AIAgent._restore_primary_runtime(runtime_access_binding=None)`, and `agent.agent_runtime_helpers.restore_primary_runtime(agent, runtime_access_binding=None)`. Existing callers pass `None` and retain native behavior. A fallback binding applies only to the next chain entry. Immediately after popping that entry—and before the legacy local-skip, provider/model/base-URL dedup, or provider-resolution branches—validate its provider/model/API mode and non-secret access identities against the binding, snapshot the complete runtime/client/Anthropic client/transport cache/credential-pool/access-identity state, and use the binding's private endpoint, credential callable, and exact pool object instead of `resolve_provider_client()` or canonical `load_pool()`. A bound `None` pool deliberately clears rotation. Binding-aware local availability checks use the bound endpoint/runtime, while deduplication and unavailable keys compare the full `public_identity()` against `_runtime_access_identity`; same provider/model/base URL with a different endpoint/auth/pool identity is a real fallback, not a duplicate. The unbound branch retains Hades's existing local/provider/model/base-URL behavior. If validation or client construction fails, restore the exact object snapshot before attempting native recovery; recursive advancement calls `agent._try_activate_fallback(reason)` without reusing the old binding, allowing the adapter wrapper to resolve the next recorded entry independently.
 
 Primary restoration has the same exact-binding rule. The adapter retains the selected primary's `RuntimeAccessBinding` only on the live agent and wraps `_restore_primary_runtime()` so an Auto-stamped agent passes that binding to the original method. The generic helper requires `binding.public_identity()` to equal `_primary_runtime["runtime_access_identity"]`, binds the exact original pool even when the fallback used the same provider/model, rebuilds from the binding, and performs 401/429 reselection only inside that pool. It never canonical-loads a provider pool when a binding is supplied. A failed restore reinstates the complete pre-restore snapshot. Non-Auto restoration with `None` remains byte-for-byte compatible.
 
@@ -1206,7 +1206,7 @@ revision fields are required before runtime Auto opt-in can be offered.
 Internal auxiliary platforms remain excluded.
 
 Build `hermes_harness(surface)` in this test file with real imports and a
-temporary `HERMES_HOME`. Each supported surface uses the actual construction
+temporary `HADES_HOME`. Each supported surface uses the actual construction
 path and a shared local fake provider that records its first request. The TUI
 Desktop case uses the real `tui_gateway` JSON-RPC session path rather than
 calling the agent directly. The TUI, Desktop, and ACP cases intentionally

@@ -16,7 +16,7 @@ recommended starting point.
 
 :::info Free to start
 Photon's shared-line pool is free. No subscription is required to send
-your first iMessage from Hermes — just a phone number we can bind to
+your first iMessage from Hades — just a phone number we can bind to
 your account.
 :::
 
@@ -66,7 +66,7 @@ The setup, in order:
 
 1. **Device login** (`client_id=photon-cli`) — opens
    `https://app.photon.codes/` for approval and stores the bearer token.
-2. **Finds or creates** the `Hermes Agent` project on your account.
+2. **Finds or creates** the `Hades Agent` project on your account.
 3. **Enables Spectrum**, reads the project's Spectrum id, and rotates
    the project secret.
 4. **Registers your phone number** as a Spectrum user — skipped if a
@@ -75,10 +75,10 @@ The setup, in order:
    your agent.
 6. **Runs `npm install`** inside the plugin's sidecar directory.
 
-Runtime credentials are written to `~/.hermes/.env`
+Runtime credentials are written to `~/.hades/.env`
 (`PHOTON_PROJECT_ID` = the Spectrum project id, `PHOTON_PROJECT_SECRET`),
 the same place every other channel keeps its token. Management metadata
-(device token, dashboard project id) lives in `~/.hermes/auth.json` under
+(device token, dashboard project id) lives in `~/.hades/auth.json` under
 `credential_pool.photon` / `credential_pool.photon_project`.
 
 ## Authorizing users
@@ -95,13 +95,13 @@ hermes pairing approve photon <CODE>
 
 Use `hermes pairing list` to see pending codes and approved users.
 
-**Pre-authorize specific numbers** (in `~/.hermes/.env`):
+**Pre-authorize specific numbers** (in `~/.hades/.env`):
 
 ```bash
 PHOTON_ALLOWED_USERS=+15551234567,+15559876543
 ```
 
-**Open access** (dev only, in `~/.hermes/.env`):
+**Open access** (dev only, in `~/.hades/.env`):
 
 ```bash
 PHOTON_ALLOW_ALL_USERS=true
@@ -127,7 +127,7 @@ gateway:
 
 With `require_mention: true`, group-chat messages are ignored unless
 they match a wake-word pattern. The defaults match `Hermes` and
-`@Hermes agent` variants. For a custom agent name, set regex patterns:
+`@Hades agent` variants. For a custom agent name, set regex patterns:
 
 ```yaml
 gateway:

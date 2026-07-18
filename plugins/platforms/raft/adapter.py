@@ -1,7 +1,7 @@
 """Raft channel platform adapter.
 
 Starts a local wake endpoint, spawns ``raft agent bridge`` as a child process,
-and injects content-free wake hints into Hermes' normal gateway session pipeline.
+and injects content-free wake hints into Hades' normal gateway session pipeline.
 Token and port are auto-generated when not provided via env/config.
 The bridge remains responsible for Raft message cursors and body materialization;
 the agent uses the Raft CLI according to the Raft manual.
@@ -785,10 +785,10 @@ def interactive_setup() -> None:
     """Interactive ``hermes gateway setup`` flow for the Raft platform.
 
     Lazy-imports CLI helpers so the plugin stays importable in gateway runtime
-    and test contexts. The flow persists ``RAFT_PROFILE`` to the Hermes env
+    and test contexts. The flow persists ``RAFT_PROFILE`` to the Hades env
     file so the Raft adapter auto-enables after a gateway restart.
     """
-    from hermes_cli.cli_output import (
+    from hades_cli.cli_output import (
         print_header,
         print_info,
         print_success,
@@ -796,7 +796,7 @@ def interactive_setup() -> None:
         prompt,
         prompt_yes_no,
     )
-    from hermes_cli.config import get_env_value, save_env_value
+    from hades_cli.config import get_env_value, save_env_value
 
     print_header("Raft")
     existing_profile = get_env_value("RAFT_PROFILE")
@@ -824,7 +824,7 @@ def interactive_setup() -> None:
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system."""
+    """Plugin entry point — called by the Hades plugin system."""
     ctx.register_platform(
         name="raft",
         label="Raft",

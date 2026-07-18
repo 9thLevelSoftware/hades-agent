@@ -72,7 +72,7 @@ def _isolated_config(tmp_path, monkeypatch):
     and deterministic (no real provider creds / network)."""
     import gateway.run as gateway_run
 
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = tmp_path / ".hades"
     hermes_home.mkdir()
     (hermes_home / "config.yaml").write_text("model:\n  default: gpt-x\n  provider: openrouter\nproviders: {}\n", encoding="utf-8")
     monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
@@ -98,7 +98,7 @@ async def test_text_fallback_offloads_list_authenticated_providers(_isolated_con
         return sentinel
 
     monkeypatch.setattr(
-        "hermes_cli.model_switch.list_authenticated_providers",
+        "hades_cli.model_switch.list_authenticated_providers",
         _fake_list_authenticated_providers,
     )
 
@@ -147,7 +147,7 @@ async def test_picker_path_offloads_list_picker_providers(_isolated_config, monk
         return fake_providers
 
     monkeypatch.setattr(
-        "hermes_cli.model_switch.list_picker_providers",
+        "hades_cli.model_switch.list_picker_providers",
         _fake_list_picker_providers,
     )
 
@@ -179,7 +179,7 @@ async def test_picker_path_requests_moa_presets(_isolated_config, monkeypatch):
                  "models": ["battle", "smart"], "total_models": 2}]
 
     monkeypatch.setattr(
-        "hermes_cli.model_switch.list_picker_providers",
+        "hades_cli.model_switch.list_picker_providers",
         _fake_list_picker_providers,
     )
 

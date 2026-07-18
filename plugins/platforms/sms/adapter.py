@@ -482,7 +482,7 @@ async def _standalone_send(
 def _is_connected(config) -> bool:
     """SMS is connected when Twilio credentials are present. Mirrors the legacy
     _PLATFORM_CONNECTED_CHECKERS[Platform.SMS] = bool(TWILIO_ACCOUNT_SID)."""
-    import hermes_cli.gateway as gateway_mod
+    import hades_cli.gateway as gateway_mod
     return bool((gateway_mod.get_env_value("TWILIO_ACCOUNT_SID") or "").strip())
 
 
@@ -492,7 +492,7 @@ def _build_adapter(config):
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system."""
+    """Plugin entry point — called by the Hades plugin system."""
     ctx.register_platform(
         name="sms",
         label="SMS (Twilio)",

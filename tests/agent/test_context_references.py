@@ -332,9 +332,9 @@ async def test_blocks_sensitive_home_and_hermes_paths(tmp_path: Path, monkeypatc
     from agent.context_references import preprocess_context_references_async
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
 
-    hermes_env = tmp_path / ".hermes" / ".env"
+    hermes_env = tmp_path / ".hades" / ".env"
     hermes_env.parent.mkdir(parents=True)
     hermes_env.write_text("API_KEY=super-secret\n", encoding="utf-8")
 
@@ -362,16 +362,16 @@ async def test_blocks_canonical_read_denylist_credential_stores(tmp_path: Path, 
     The narrow in-module list historically missed the real credential stores
     (provider keys, OAuth tokens, MCP tokens, project-local .env). Because the
     gateway routes untrusted remote message text through reference expansion,
-    a chat peer could otherwise attach `@file:~/.hermes/auth.json` and read the
+    a chat peer could otherwise attach `@file:~/.hades/auth.json` and read the
     operator's keys into context. These must all be refused, with their secret
     bodies kept out of the expanded message.
     """
     from agent.context_references import preprocess_context_references_async
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
 
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = tmp_path / ".hades"
     (hermes_home).mkdir(parents=True)
 
     auth_json = hermes_home / "auth.json"
@@ -421,9 +421,9 @@ async def test_canonical_guard_fails_closed_when_lookup_raises(tmp_path: Path, m
     from agent.context_references import preprocess_context_references_async
 
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
 
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = tmp_path / ".hades"
     hermes_home.mkdir(parents=True)
     auth_json = hermes_home / "auth.json"
     auth_json.write_text('{"openai": "sk-AUTHJSON-SECRET"}\n', encoding="utf-8")

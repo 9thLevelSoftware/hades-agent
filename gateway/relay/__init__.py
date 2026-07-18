@@ -1,4 +1,4 @@
-"""Relay/connector support package for the Hermes gateway.
+"""Relay/connector support package for the Hades gateway.
 
 EXPERIMENTAL. This package implements the gateway side of the "Gateway Gateway"
 relay design: a generic ``RelayAdapter`` plus the wire-serializable
@@ -126,7 +126,7 @@ def relay_connection_auth() -> tuple[Optional[str], Optional[str]]:
     """The (gateway_id, upgrade_secret) this gateway authenticates the WS upgrade with.
 
     Both come from enrollment (``hermes gateway enroll`` writes them to
-    ``~/.hermes/.env``): ``GATEWAY_RELAY_ID`` identifies the enrolled instance,
+    ``~/.hades/.env``): ``GATEWAY_RELAY_ID`` identifies the enrolled instance,
     ``GATEWAY_RELAY_SECRET`` is the per-gateway signing secret. Either absent ->
     ``(None, None)`` and the transport dials unauthenticated (dev/test, or a
     connector that doesn't enforce auth). Checks env first (Docker), then
@@ -473,7 +473,7 @@ def _resolve_relay_identity_token() -> str:
 
     if not token_url:
         # Mode 2 — Nous Portal (default, unchanged behaviour).
-        from hermes_cli.auth import resolve_nous_access_token
+        from hades_cli.auth import resolve_nous_access_token
 
         return resolve_nous_access_token()
 
@@ -521,7 +521,7 @@ def self_provision_relay() -> bool:
     POSTs ``/relay/provision`` asserting its own endpoint + route keys, and sets
     ``GATEWAY_RELAY_ID`` / ``GATEWAY_RELAY_SECRET`` / ``GATEWAY_RELAY_DELIVERY_KEY``
     into ``os.environ`` so the subsequent ``register_relay_adapter()`` picks them
-    up. The creds live ONLY in process memory — never written to ``~/.hermes/.env``.
+    up. The creds live ONLY in process memory — never written to ``~/.hades/.env``.
 
     The trigger is deliberately NOT ``is_managed()``: that means
     "package-manager/NixOS-managed" and is False on a NAS-hosted Fly agent (which

@@ -294,10 +294,10 @@ class TestCheckSensitivePathMacOSBypass:
         assert _check_sensitive_path("/boot/grub/grub.cfg") is not None
 
     def test_approval_state_file_blocked(self):
-        from hermes_constants import get_hermes_home
+        from hades_constants import get_hades_home
         from tools.file_tools import _check_sensitive_path, write_file_tool
 
-        path = get_hermes_home() / "approval_requests.json"
+        path = get_hades_home() / "approval_requests.json"
         assert _check_sensitive_path(str(path)) is not None
         result = json.loads(write_file_tool(str(path), '{"requests": []}'))
         assert "error" in result

@@ -31,7 +31,7 @@ The review found the required seams but a dark default path:
 - `agent/memory_manager.py` already provides `prefetch_all`, `queue_prefetch_all`, fenced context assembly, lifecycle hooks, and a single-worker executor, but `agent_init.py` constructs it only when an external provider is configured.
 - `MemoryProvider` already defines `prefetch`/`queue_prefetch`, `on_memory_write`, and `on_session_switch`; a builtin implementation is missing.
 - `turn_context.py` and `conversation_loop.py` already carry `ext_prefetch_cache` into the API-time user-message copy. This is the cache-safe integration point.
-- `hermes_state.py` has versioned migrations and FTS5/trigram message indexes; no memory-entry or embedding tables exist.
+- `hades_state.py` has versioned migrations and FTS5/trigram message indexes; no memory-entry or embedding tables exist.
 - `tools/session_search_tool.py` composes BM25/FTS results but knows nothing about memory archives; `learning_graph` and `learning_mutations` assume simple memory ids.
 - `agent/auxiliary_client.py` has per-task provider resolution suitable for optional embedding calls, but the live path must remain local/default-off.
 
@@ -53,7 +53,7 @@ The plan skips replacing markdown with a database, copying external memory provi
 - Modify: `agent/memory_manager.py` — builtin provider construction, index-write notification, prefetch result limits.
 - Modify: `agent/agent_init.py` — always construct builtin manager when memory is enabled; preserve external-provider composition limit.
 - Modify: `agent/turn_context.py` and `agent/conversation_loop.py` only for context budget/provenance plumbing.
-- Modify: `hermes_state.py` — memory-entry/embedding derived tables and migrations.
+- Modify: `hades_state.py` — memory-entry/embedding derived tables and migrations.
 - Modify: `tools/session_search_tool.py` — compose memory/archive sources in existing shapes.
 - Modify: `agent/auxiliary_client.py` — optional embedding task configuration if needed.
 - Modify: `agent/prompt_builder.py` — memory guidance for search/open_topic/paging.
@@ -157,7 +157,7 @@ memory:
 - [ ] Step 6: Run memory lifecycle tests under a temporary home and verify no prompt text changes during an active session write.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_builtin_memory_provider.py \
   tests/agent/test_memory_provider.py \
   tests/agent/test_memory_boundary_commit.py \
@@ -257,7 +257,7 @@ def test_builtin_prefetch_enters_ephemeral_memory_context_only(tmp_path):
 - [ ] Step 5: Verify subagents/background review/cron with `skip_memory` do not receive builtin recall.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_memory_prefetch_e2e.py \
   tests/agent/test_memory_provider.py \
   tests/agent/test_memory_skill_scaffolding.py -q
@@ -318,7 +318,7 @@ git commit -m "feat(memory): add topic-file paging"
 ### Task 2.2: Build the rebuildable SQLite memory index
 
 **Files:**
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Modify: `agent/memory_manager.py`
 - Modify: `agent/memory_retrieval.py`
 - Modify: `tools/session_search_tool.py`
@@ -349,7 +349,7 @@ def test_memory_index_rebuilds_from_files_and_archive(tmp_path, monkeypatch):
 - [ ] Step 6: Run index/rebuild/FTS corruption tests with real SQLite.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_memory_index_e2e.py \
   tests/tools/test_session_search_tool.py \
   tests/agent/test_memory_retrieval.py -q
@@ -358,7 +358,7 @@ HERMES_HOME="$(mktemp -d)" python -m pytest \
 - [ ] Step 7: Commit the derived index.
 
 ```bash
-git add hermes_state.py agent/memory_manager.py agent/memory_retrieval.py tools/session_search_tool.py tests/agent/test_memory_index_e2e.py tests/tools/test_session_search_tool.py tests/agent/test_memory_retrieval.py
+git add hades_state.py agent/memory_manager.py agent/memory_retrieval.py tools/session_search_tool.py tests/agent/test_memory_index_e2e.py tests/tools/test_session_search_tool.py tests/agent/test_memory_retrieval.py
 git diff --cached --check
 git commit -m "feat(memory): add rebuildable memory index"
 ```
@@ -369,7 +369,7 @@ git commit -m "feat(memory): add rebuildable memory index"
 
 **Files:**
 - Create: `agent/memory_embeddings.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Modify: `agent/memory_retrieval.py`
 - Modify: `agent/auxiliary_client.py` only for configured task resolution.
 - Modify: `hermes_cli/config.py`
@@ -404,13 +404,13 @@ def test_embedding_failure_returns_bm25_only():
 - [ ] Step 6: Run embedding/index tests with the fake backend and a disabled-backend test.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest tests/agent/test_memory_embeddings.py tests/agent/test_memory_retrieval.py -q
+HADES_HOME="$(mktemp -d)" python -m pytest tests/agent/test_memory_embeddings.py tests/agent/test_memory_retrieval.py -q
 ```
 
 - [ ] Step 7: Commit optional hybrid retrieval.
 
 ```bash
-git add agent/memory_embeddings.py hermes_state.py agent/memory_retrieval.py agent/auxiliary_client.py hermes_cli/config.py tests/agent/test_memory_embeddings.py tests/agent/test_memory_retrieval.py
+git add agent/memory_embeddings.py hades_state.py agent/memory_retrieval.py agent/auxiliary_client.py hermes_cli/config.py tests/agent/test_memory_embeddings.py tests/agent/test_memory_retrieval.py
 git diff --cached --check
 git commit -m "feat(memory): add optional hybrid semantic recall"
 ```
@@ -461,7 +461,7 @@ git commit -m "docs(memory): document paged recall"
 - [ ] Measure prefetch wall time and output budget against configured limits.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/tools/test_memory_tool.py \
   tests/tools/test_memory_tool_schema.py \
   tests/agent/test_builtin_memory_provider.py \

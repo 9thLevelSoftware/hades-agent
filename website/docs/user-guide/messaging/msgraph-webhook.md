@@ -1,7 +1,7 @@
 ---
 sidebar_position: 23
 title: "Microsoft Graph Webhook Listener"
-description: "Receive Microsoft Graph change notifications (meetings, calendar, chat, etc.) in Hermes"
+description: "Receive Microsoft Graph change notifications (meetings, calendar, chat, etc.) in Hades"
 ---
 
 # Microsoft Graph Webhook Listener
@@ -14,11 +14,11 @@ Right now the primary consumer is the Teams meeting summary pipeline: Graph noti
 
 - Microsoft Graph application credentials — [Register a Microsoft Graph Application](/guides/microsoft-graph-app-registration)
 - A **public HTTPS URL** that Microsoft Graph can reach (Graph does not call private endpoints). A dev tunnel works for testing; production needs a real domain with a valid certificate.
-- A strong shared secret to use as the `clientState` value. Generate with `openssl rand -hex 32` and put it in `~/.hermes/.env` as `MSGRAPH_WEBHOOK_CLIENT_STATE`.
+- A strong shared secret to use as the `clientState` value. Generate with `openssl rand -hex 32` and put it in `~/.hades/.env` as `MSGRAPH_WEBHOOK_CLIENT_STATE`.
 
 ## Quick Start
 
-Minimum `~/.hermes/config.yaml`:
+Minimum `~/.hades/config.yaml`:
 
 ```yaml
 platforms:
@@ -32,7 +32,7 @@ platforms:
         - "communications/onlineMeetings"
 ```
 
-Or via env vars in `~/.hermes/.env` (auto-merged on startup):
+Or via env vars in `~/.hades/.env` (auto-merged on startup):
 
 ```bash
 MSGRAPH_WEBHOOK_ENABLED=true
@@ -139,4 +139,4 @@ Status code table:
 
 - [Register a Microsoft Graph Application](/guides/microsoft-graph-app-registration) — Azure app registration prereq
 - [Environment Variables → Microsoft Graph](/reference/environment-variables#microsoft-graph-teams-meetings) — full env var list
-- [Microsoft Teams bot setup](/user-guide/messaging/teams) — the different platform that lets users chat with Hermes in Teams
+- [Microsoft Teams bot setup](/user-guide/messaging/teams) — the different platform that lets users chat with Hades in Teams

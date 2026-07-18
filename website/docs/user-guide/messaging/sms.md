@@ -2,7 +2,7 @@
 sidebar_position: 8
 sidebar_label: "SMS (Twilio)"
 title: "SMS (Twilio)"
-description: "Set up Hermes Agent as an SMS chatbot via Twilio"
+description: "Set up Hades Agent as an SMS chatbot via Twilio"
 ---
 
 # SMS Setup (Twilio)
@@ -20,7 +20,7 @@ The SMS gateway shares credentials with the optional [telephony skill](/referenc
 - **Twilio account** — [Sign up at twilio.com](https://www.twilio.com/try-twilio) (free trial available)
 - **A Twilio phone number** with SMS capability
 - **A publicly accessible server** — Twilio sends webhooks to your server when SMS arrives
-- **aiohttp** — `cd ~/.hermes/hermes-agent && uv pip install -e ".[sms]"`
+- **aiohttp** — `cd ~/.hades/hermes-agent && uv pip install -e ".[sms]"`
 
 ---
 
@@ -44,7 +44,7 @@ Select **SMS (Twilio)** from the platform list. The wizard will prompt for your 
 
 ### Manual setup
 
-Add to `~/.hermes/.env`:
+Add to `~/.hades/.env`:
 
 ```bash
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

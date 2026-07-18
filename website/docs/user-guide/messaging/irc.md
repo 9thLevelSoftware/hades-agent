@@ -15,7 +15,7 @@ IRC is plain text: there is no voice, image, file, thread, reaction, typing, or 
 
 ## Configure Hermes
 
-You can configure IRC two ways — environment variables (for a quick env-only setup) or the `gateway` block in `~/.hermes/gateway-config.yaml`.
+You can configure IRC two ways — environment variables (for a quick env-only setup) or the `gateway` block in `~/.hades/gateway-config.yaml`.
 
 ### Option A — gateway-config.yaml
 
@@ -53,7 +53,7 @@ gateway:
 
 ## Access control
 
-By default, only nicks listed in `allowed_users` (or `IRC_ALLOWED_USERS`) may talk to the bot. Leave the list empty **and** set `IRC_ALLOW_ALL_USERS=true` to let anyone in the channel chat with Hermes — useful for testing, but not recommended on public networks since IRC nicks are not authenticated unless the network enforces NickServ.
+By default, only nicks listed in `allowed_users` (or `IRC_ALLOWED_USERS`) may talk to the bot. Leave the list empty **and** set `IRC_ALLOW_ALL_USERS=true` to let anyone in the channel chat with Hades — useful for testing, but not recommended on public networks since IRC nicks are not authenticated unless the network enforces NickServ.
 
 If your network registers nicks, set `IRC_NICKSERV_PASSWORD` (or `nickserv_password`) so the bot identifies to NickServ on connect and keeps its registered nick.
 

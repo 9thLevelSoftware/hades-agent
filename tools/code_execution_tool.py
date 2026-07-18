@@ -437,7 +437,7 @@ def _dispatch_catalog_action(
             }
         if decision == "approval_required":
             try:
-                from hermes_cli.plugins import has_middleware
+                from hades_cli.plugins import has_middleware
                 has_approval_middleware = has_middleware("tool_execution")
             except Exception:
                 has_approval_middleware = False
@@ -510,7 +510,7 @@ def _dispatch_script_call(
 
         if decision == "approval_required":
             try:
-                from hermes_cli.plugins import has_middleware
+                from hades_cli.plugins import has_middleware
                 has_approval_middleware = has_middleware("tool_execution")
             except Exception:
                 has_approval_middleware = False
@@ -1142,7 +1142,7 @@ _SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
 # runtime location) that repo-root modules a sandbox script imports may read at
 # import time.  None match _SECRET_SUBSTRINGS.
 _HERMES_CHILD_ALLOWED = frozenset({
-    "HERMES_HOME",
+    "HADES_HOME",
     "HERMES_PROFILE",
     "HERMES_CONFIG",
     "HERMES_ENV",
@@ -1726,7 +1726,7 @@ def _connect():
     """
     global _sock
     if _sock is None:
-        endpoint = os.environ["HERMES_RPC_SOCKET"]
+        endpoint = os.environ["HADES_RPC_SOCKET"]
         if endpoint.startswith("tcp://"):
             # tcp://host:port  (host is always 127.0.0.1 in practice — we
             # only bind loopback server-side)
@@ -1745,7 +1745,7 @@ def _call(tool_name, args):
     request = json.dumps({
         "tool": tool_name,
         "args": args,
-        "token": os.environ.get("HERMES_RPC_TOKEN", ""),
+        "token": os.environ.get("HADES_RPC_TOKEN", ""),
         "task_id": _HERMES_RPC_CONTEXT["task_id"],
         "session_id": _HERMES_RPC_CONTEXT["session_id"],
         "enabled_toolsets": _HERMES_RPC_CONTEXT["enabled_toolsets"],
@@ -1780,7 +1780,7 @@ _FILE_TRANSPORT_HEADER = '''\
 import base64
 import json, os, shlex, tempfile, threading, time
 
-_RPC_DIR = os.environ.get("HERMES_RPC_DIR") or os.path.join(tempfile.gettempdir(), "hermes_rpc")
+_RPC_DIR = os.environ.get("HADES_RPC_DIR") or os.path.join(tempfile.gettempdir(), "hermes_rpc")
 _seq = 0
 # `_seq += 1` is not atomic (read-modify-write), so concurrent _call()
 # invocations from multiple threads could allocate the same sequence number
@@ -1808,7 +1808,7 @@ def _call(tool_name, args):
             "tool": tool_name,
             "args": args,
             "seq": seq,
-            "token": os.environ.get("HERMES_RPC_TOKEN", ""),
+            "token": os.environ.get("HADES_RPC_TOKEN", ""),
             "task_id": _HERMES_RPC_CONTEXT["task_id"],
             "session_id": _HERMES_RPC_CONTEXT["session_id"],
             "enabled_toolsets": _HERMES_RPC_CONTEXT["enabled_toolsets"],
@@ -2525,7 +2525,7 @@ def _execute_remote(
             f"HERMES_ARTIFACTS_DIR={shlex.quote(artifact_dir)} "
             f"PYTHONDONTWRITEBYTECODE=1"
         )
-        tz = os.getenv("HERMES_TIMEZONE", "").strip()
+        tz = os.getenv("HADES_TIMEZONE", "").strip()
         if tz:
             env_prefix += f" TZ={shlex.quote(tz)}"
 
@@ -2654,7 +2654,7 @@ import traceback
 
 
 def _connect():
-    endpoint = os.environ["HERMES_KERNEL_SOCKET"]
+    endpoint = os.environ["HADES_KERNEL_SOCKET"]
     if endpoint.startswith("tcp://"):
         host, _, port = endpoint[len("tcp://"):].rpartition(":")
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2680,7 +2680,7 @@ def _new_globals():
 sock = _connect()
 reader = sock.makefile("rb")
 writer = sock.makefile("wb")
-writer.write((json.dumps({"token": os.environ["HERMES_KERNEL_TOKEN"]}) + "\n").encode("utf-8"))
+writer.write((json.dumps({"token": os.environ["HADES_KERNEL_TOKEN"]}) + "\n").encode("utf-8"))
 writer.flush()
 threading.Thread(
     target=_watch_parent,
@@ -2923,15 +2923,15 @@ class ExecutionKernel:
                 "PYTHONUTF8": "1",
             })
             # Only the generated helper module belongs on the kernel import
-            # path.  Exposing the Hermes source tree (or an inherited
+            # path.  Exposing the Hades source tree (or an inherited
             # PYTHONPATH) lets persistent scripts import internal modules and
             # read configuration/secrets outside the execution boundary.
             child_env["PYTHONPATH"] = self._tmpdir
-            tz = os.getenv("HERMES_TIMEZONE", "").strip()
+            tz = os.getenv("HADES_TIMEZONE", "").strip()
             if tz:
                 child_env["TZ"] = tz
             child_env.pop("HERMES_TIMEZONE", None)
-            from hermes_constants import apply_subprocess_home_env
+            from hades_constants import apply_subprocess_home_env
             apply_subprocess_home_env(child_env)
 
             child_python = _resolve_child_python(_get_execution_mode())
@@ -3140,7 +3140,7 @@ class ExecutionKernel:
 
 
 class ExecutionKernelRegistry:
-    """Thread-safe registry scoped by Hermes profile, session, task, and id."""
+    """Thread-safe registry scoped by Hades profile, session, task, and id."""
 
     def __init__(self, *, clock=time.monotonic, idle_ttl=DEFAULT_KERNEL_IDLE_TTL):
         self.clock = clock
@@ -3176,9 +3176,9 @@ class ExecutionKernelRegistry:
     @staticmethod
     def _profile_scope():
         home = os.path.realpath(
-            os.path.abspath(os.path.expanduser(os.getenv("HERMES_HOME") or "~/.hermes"))
+            os.path.abspath(os.path.expanduser(os.getenv("HADES_HOME") or "~/.hades"))
         )
-        profile = os.getenv("HERMES_PROFILE", "default").strip() or "default"
+        profile = os.getenv("HADES_PROFILE", "default").strip() or "default"
         return home, profile
 
     @classmethod
@@ -3406,7 +3406,7 @@ def execute_code(
 ) -> str:
     """
     Run a Python script in a sandboxed child process with RPC access
-    to a subset of Hermes tools.
+    to a subset of Hades tools.
 
     Dispatches to the local (UDS) or remote (file-based RPC) path
     depending on the configured terminal backend.
@@ -3793,12 +3793,12 @@ def execute_code(
         # code reflects the correct wall-clock time.  Only TZ is set —
         # HERMES_TIMEZONE is an internal Hermes setting and must not leak
         # into child processes.
-        _tz_name = os.getenv("HERMES_TIMEZONE", "").strip()
+        _tz_name = os.getenv("HADES_TIMEZONE", "").strip()
         if _tz_name:
             child_env["TZ"] = _tz_name
         child_env.pop("HERMES_TIMEZONE", None)
 
-        from hermes_constants import apply_subprocess_home_env
+        from hades_constants import apply_subprocess_home_env
         apply_subprocess_home_env(child_env)
 
         # Resolve interpreter + CWD based on execute_code mode.
@@ -4123,7 +4123,7 @@ def _load_config() -> dict:
     key cleanly falls back to DEFAULT_EXECUTION_MODE.
     """
     try:
-        from hermes_cli.config import read_raw_config
+        from hades_cli.config import read_raw_config
 
         cfg = read_raw_config().get("code_execution", {})
         return cfg if isinstance(cfg, dict) else {}
@@ -4412,7 +4412,7 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
     if mode == "strict":
         cwd_note = (
             "Scripts run in their own temp dir, not the session's CWD — use absolute paths "
-            "(os.path.expanduser('~/.hermes/.env')) or terminal()/read_file() for user files."
+            "(os.path.expanduser('~/.hades/.env')) or terminal()/read_file() for user files."
         )
     else:
         cwd_note = (

@@ -23,7 +23,7 @@ These tests pin that precedence at every layer that makes the decision:
     ``cmd_chat`` and the Termux fast-TUI path.
   * ``_wants_tui_early(argv)``  — the dependency-free early resolver used by
     mouse-residue suppression and the Termux fast paths, before argparse and
-    ``hermes_cli.config`` are importable.
+    ``hades_cli.config`` are importable.
   * the argument parser   — both ``--cli`` and ``--tui`` parse at the top
     level and under the ``chat`` subcommand and are relaunch-inherited.
 """
@@ -35,7 +35,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_cli import main as m
+from hades_cli import main as m
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +63,7 @@ def _fake_tty(monkeypatch, interactive: bool):
 
 
 def _patch_config(monkeypatch, interface):
-    import hermes_cli.config as cfg
+    import hades_cli.config as cfg
 
     monkeypatch.setattr(
         cfg, "load_config", lambda: {"display": {"interface": interface}}
@@ -109,7 +109,7 @@ class TestResolveUseTui:
         assert m._resolve_use_tui(_args()) is True
 
     def test_load_config_failure_falls_back_to_cli(self, monkeypatch):
-        import hermes_cli.config as cfg
+        import hades_cli.config as cfg
 
         def boom():
             raise RuntimeError("config unreadable")
@@ -148,7 +148,7 @@ class TestWantsTuiEarly:
             (tmp_path / "config.yaml").write_text(
                 f"display:\n  interface: {interface}\n"
             )
-            monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+            monkeypatch.setenv("HADES_HOME", str(tmp_path))
             monkeypatch.setattr(m, "_EARLY_INTERFACE_CACHE", None)
 
         return _make
@@ -189,15 +189,15 @@ class TestWantsTuiEarly:
         assert m._wants_tui_early([]) is False
 
     def test_missing_config_defaults_to_cli(self, tmp_path, monkeypatch):
-        # HERMES_HOME points at an empty dir — no config.yaml.
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        # HADES_HOME points at an empty dir — no config.yaml.
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         monkeypatch.setattr(m, "_EARLY_INTERFACE_CACHE", None)
         assert m._wants_tui_early([]) is False
 
     def test_unreadable_config_defaults_to_cli(self, tmp_path, monkeypatch):
         # Garbage YAML must not crash the hot path; falls back to cli.
         (tmp_path / "config.yaml").write_text("this: : : not valid yaml\n")
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         monkeypatch.setattr(m, "_EARLY_INTERFACE_CACHE", None)
         assert m._wants_tui_early([]) is False
 
@@ -207,7 +207,7 @@ class TestWantsTuiEarly:
 # ---------------------------------------------------------------------------
 class TestParserFlags:
     def _parser(self):
-        from hermes_cli._parser import build_top_level_parser
+        from hades_cli._parser import build_top_level_parser
 
         parser, _subparsers, _chat = build_top_level_parser()
         return parser
@@ -229,7 +229,7 @@ class TestParserFlags:
         assert args.tui is True
 
     def test_cli_and_tui_are_relaunch_inherited(self):
-        from hermes_cli.relaunch import _INHERITED_FLAGS_TABLE
+        from hades_cli.relaunch import _INHERITED_FLAGS_TABLE
 
         inherited = {flag for flag, _takes_value in _INHERITED_FLAGS_TABLE}
         assert "--cli" in inherited
@@ -240,6 +240,6 @@ class TestParserFlags:
 # config default — shipped default preserves classic behavior
 # ---------------------------------------------------------------------------
 def test_default_config_interface_is_cli():
-    from hermes_cli.config import DEFAULT_CONFIG
+    from hades_cli.config import DEFAULT_CONFIG
 
     assert DEFAULT_CONFIG["display"]["interface"] == "cli"

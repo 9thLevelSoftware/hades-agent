@@ -156,7 +156,7 @@ def _make_minimal_migrator(mod, tmp_path, **overrides):
     source.mkdir()
     # Minimal valid OpenClaw layout so the Migrator constructor doesn't choke.
     (source / "openclaw.json").write_text("{}", encoding="utf-8")
-    target = tmp_path / "hermes"
+    target = tmp_path / "hades"
     target.mkdir()
     defaults = dict(
         source_root=source,
@@ -311,7 +311,7 @@ def test_json_mode_emits_structured_report(tmp_path):
         json.dumps({"agents": {"defaults": {"model": "openrouter/anthropic/claude-sonnet-4"}}}),
         encoding="utf-8",
     )
-    target = tmp_path / "hermes"
+    target = tmp_path / "hades"
     target.mkdir()
 
     result = subprocess.run(
@@ -344,7 +344,7 @@ def test_json_mode_redacts_secrets_in_output(tmp_path):
     (source / ".env").write_text(
         "OPENROUTER_API_KEY=sk-or-v1-abcdef1234567890abcdef\n", encoding="utf-8"
     )
-    target = tmp_path / "hermes"
+    target = tmp_path / "hades"
     target.mkdir()
 
     result = subprocess.run(

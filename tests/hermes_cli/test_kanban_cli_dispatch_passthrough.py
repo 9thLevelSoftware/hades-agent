@@ -19,10 +19,10 @@ import pytest
 
 @pytest.fixture()
 def isolated_kanban_home(monkeypatch):
-    """Spin up a fresh HERMES_HOME with a clean kanban DB."""
+    """Spin up a fresh HADES_HOME with a clean kanban DB."""
     test_home = tempfile.mkdtemp(prefix="kanban_cli_passthrough_")
     os.makedirs(os.path.join(test_home, "profiles", "default"), exist_ok=True)
-    monkeypatch.setenv("HERMES_HOME", test_home)
+    monkeypatch.setenv("HADES_HOME", test_home)
     for mod in list(sys.modules.keys()):
         if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
             del sys.modules[mod]
@@ -33,8 +33,8 @@ def test_cli_dispatch_passes_max_in_progress_from_config(isolated_kanban_home, m
     """#33488: hermes kanban dispatch must pass kanban.max_in_progress from
     config to dispatch_once. Without this, the global concurrency cap is
     unreachable from the CLI even though it works from the gateway."""
-    from hermes_cli import kanban as kb_cli
-    from hermes_cli import kanban_db
+    from hades_cli import kanban as kb_cli
+    from hades_cli import kanban_db
 
     # Configure max_in_progress in the loaded config.
     fake_config = {
@@ -46,7 +46,7 @@ def test_cli_dispatch_passes_max_in_progress_from_config(isolated_kanban_home, m
         }
     }
     monkeypatch.setattr(
-        "hermes_cli.config.load_config", lambda: fake_config
+        "hades_cli.config.load_config", lambda: fake_config
     )
 
     captured = {}
@@ -74,11 +74,11 @@ def test_cli_dispatch_passes_max_in_progress_from_config(isolated_kanban_home, m
 def test_cli_max_flag_overrides_config_max_spawn(isolated_kanban_home, monkeypatch):
     """--max on the CLI takes precedence over kanban.max_spawn in config.
     The CLI flag is the explicit operator signal; config is the default."""
-    from hermes_cli import kanban as kb_cli
-    from hermes_cli import kanban_db
+    from hades_cli import kanban as kb_cli
+    from hades_cli import kanban_db
 
     fake_config = {"kanban": {"max_spawn": 10}}
-    monkeypatch.setattr("hermes_cli.config.load_config", lambda: fake_config)
+    monkeypatch.setattr("hades_cli.config.load_config", lambda: fake_config)
 
     captured = {}
     monkeypatch.setattr(
@@ -97,12 +97,12 @@ def test_cli_max_flag_overrides_config_max_spawn(isolated_kanban_home, monkeypat
 def test_cli_invalid_max_in_progress_silently_disables(isolated_kanban_home, monkeypatch):
     """Invalid kanban.max_in_progress values (0, negative, non-int) should
     silently fall through to None — no crash, no surprise behavior."""
-    from hermes_cli import kanban as kb_cli
-    from hermes_cli import kanban_db
+    from hades_cli import kanban as kb_cli
+    from hades_cli import kanban_db
 
     for bad_val in (0, -1, "abc", "1.5"):
         fake_config = {"kanban": {"max_in_progress": bad_val}}
-        monkeypatch.setattr("hermes_cli.config.load_config", lambda: fake_config)
+        monkeypatch.setattr("hades_cli.config.load_config", lambda: fake_config)
         captured = {}
         monkeypatch.setattr(
             kanban_db, "dispatch_once",

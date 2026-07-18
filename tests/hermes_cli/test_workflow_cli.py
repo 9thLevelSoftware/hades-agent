@@ -9,15 +9,15 @@ from pathlib import Path
 
 import pytest
 
-from hermes_cli import workflows as wc
-from hermes_cli import workflows_db as wfdb
+from hades_cli import workflows as wc
+from hades_cli import workflows_db as wfdb
 
 
 @pytest.fixture
 def workflow_home(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     return home
 
@@ -113,8 +113,8 @@ def test_main_workflow_validate_bad_edge_exits_without_traceback(
 ):
     spec_path = _write_workflow(tmp_path / "bad.yaml", bad_target=True)
 
-    from hermes_cli import config as config_mod
-    from hermes_cli import main as main_mod
+    from hades_cli import config as config_mod
+    from hades_cli import main as main_mod
 
     monkeypatch.setattr(sys, "argv", ["hermes", "workflow", "validate", str(spec_path)])
     monkeypatch.setattr(main_mod, "_set_process_title", lambda: None)

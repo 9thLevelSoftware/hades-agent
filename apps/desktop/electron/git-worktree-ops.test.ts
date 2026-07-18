@@ -287,7 +287,7 @@ test('addWorktree: base origin/main does not set up upstream tracking', async ()
       '-c',
       'user.email=hermes@localhost',
       '-c',
-      'user.name=Hermes',
+      'user.name=Hades',
       'commit',
       '--allow-empty',
       '-m',

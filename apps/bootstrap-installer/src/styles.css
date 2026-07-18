@@ -1,7 +1,7 @@
 /*
  * Hermes Setup — defer entirely to the desktop's styles.css.
  *
- * Rather than re-implement the Hermes design system (and inevitably drift
+ * Rather than re-implement the Hades design system (and inevitably drift
  * from it), we import apps/desktop/src/styles.css wholesale. The desktop
  * is the canonical source of truth for fonts, color tokens, button chrome,
  * scrollbars, layout utilities, and animations. Any change to the

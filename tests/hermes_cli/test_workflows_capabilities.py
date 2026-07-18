@@ -2,7 +2,7 @@ import typing
 
 import pytest
 
-from hermes_cli.workflows_capabilities import (
+from hades_cli.workflows_capabilities import (
     DECLARED_NODE_TYPES,
     DECLARED_TRIGGER_TYPES,
     IMPLEMENTED_NODE_TYPES,
@@ -13,7 +13,7 @@ from hermes_cli.workflows_capabilities import (
     require_implemented_primitives,
     workflow_capabilities,
 )
-from hermes_cli.workflows_spec import NodeType, TriggerType, WorkflowSpec
+from hades_cli.workflows_spec import NodeType, TriggerType, WorkflowSpec
 
 
 def test_capabilities_implemented_subset_of_declared():
@@ -99,14 +99,14 @@ def _agent_task_spec(profile: str = "reviewer") -> WorkflowSpec:
 
 
 def test_require_available_profiles_passes_for_existing_profile():
-    from hermes_cli.workflows_capabilities import require_available_profiles
+    from hades_cli.workflows_capabilities import require_available_profiles
 
     spec = _agent_task_spec("reviewer")
     require_available_profiles(spec, {"default", "reviewer"})
 
 
 def test_require_available_profiles_fails_for_missing_profile():
-    from hermes_cli.workflows_capabilities import require_available_profiles
+    from hades_cli.workflows_capabilities import require_available_profiles
 
     spec = _agent_task_spec("ghost")
     with pytest.raises(ValueError, match="workflow_profile_not_found"):
@@ -114,7 +114,7 @@ def test_require_available_profiles_fails_for_missing_profile():
 
 
 def test_profile_availability_errors_lists_all_missing_profiles():
-    from hermes_cli.workflows_capabilities import profile_availability_errors
+    from hades_cli.workflows_capabilities import profile_availability_errors
 
     spec = WorkflowSpec.model_validate(
         {
@@ -149,7 +149,7 @@ def test_profile_availability_errors_lists_all_missing_profiles():
 
 
 def test_require_available_profiles_passes_for_pass_only_spec():
-    from hermes_cli.workflows_capabilities import require_available_profiles
+    from hades_cli.workflows_capabilities import require_available_profiles
 
     spec = WorkflowSpec.model_validate(
         {

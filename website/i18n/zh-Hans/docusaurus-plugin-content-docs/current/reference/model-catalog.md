@@ -61,7 +61,7 @@ https://hermes-agent.nousresearch.com/docs/api/model-catalog.json
 | 网络故障且无缓存 | 静默回退到仓库内置快照 |
 | 清单未通过 schema 校验 | 视为不可达 |
 
-缓存位置：`~/.hermes/cache/model_catalog.json`。
+缓存位置：`~/.hades/cache/model_catalog.json`。
 
 ## 配置
 

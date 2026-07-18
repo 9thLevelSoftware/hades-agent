@@ -1,4 +1,4 @@
-"""Tests for the update check mechanism in hermes_cli.banner."""
+"""Tests for the update check mechanism in hades_cli.banner."""
 
 import json
 import os
@@ -12,25 +12,25 @@ import pytest
 
 def test_version_string_no_v_prefix():
     """__version__ should be bare semver without a 'v' prefix."""
-    from hermes_cli import __version__
+    from hades_cli import __version__
     assert not __version__.startswith("v"), f"__version__ should not start with 'v', got {__version__!r}"
 
 
 def test_check_for_updates_uses_cache(tmp_path, monkeypatch):
     """When cache is fresh, check_for_updates should return cached value without calling git."""
-    from hermes_cli.banner import check_for_updates
-    from hermes_cli import __version__
+    from hades_cli.banner import check_for_updates
+    from hades_cli import __version__
 
     # Create a fake git repo and fresh cache
-    repo_dir = tmp_path / "hermes-agent"
+    repo_dir = tmp_path / "hades-agent"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
 
     cache_file = tmp_path / ".update_check"
     cache_file.write_text(json.dumps({"ts": time.time(), "behind": 3, "ver": __version__}))
 
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    with patch("hermes_cli.banner.subprocess.run") as mock_run:
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
+    with patch("hades_cli.banner.subprocess.run") as mock_run:
         result = check_for_updates()
 
     assert result == 3
@@ -44,7 +44,7 @@ def test_check_for_updates_invalidates_on_version_change(tmp_path, monkeypatch):
     cache's 6h TTL hadn't expired and rev was unchanged (both None), so the stale
     'behind' count survived the upgrade. The version guard forces a recheck.
     """
-    import hermes_cli.banner as banner
+    import hades_cli.banner as banner
 
     # No local git checkout -> the PyPI path is exercised (pip-install class).
     fake_banner = tmp_path / "hermes_cli" / "banner.py"
@@ -58,10 +58,10 @@ def test_check_for_updates_invalidates_on_version_change(tmp_path, monkeypatch):
         json.dumps({"ts": time.time(), "behind": 1, "rev": None, "ver": "0.0.1-old"})
     )
 
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_REVISION", raising=False)
-    with patch("hermes_cli.banner.subprocess.run") as mock_run, \
-         patch("hermes_cli.banner.check_via_pypi", return_value=0) as mock_pypi:
+    with patch("hades_cli.banner.subprocess.run") as mock_run, \
+         patch("hades_cli.banner.check_via_pypi", return_value=0) as mock_pypi:
         result = banner.check_for_updates()
 
     # Stale-version cache rejected -> fresh check ran -> up-to-date result.
@@ -76,9 +76,9 @@ def test_check_for_updates_invalidates_on_version_change(tmp_path, monkeypatch):
 
 def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
     """When cache is expired, check_for_updates should call git fetch."""
-    from hermes_cli.banner import check_for_updates
+    from hades_cli.banner import check_for_updates
 
-    repo_dir = tmp_path / "hermes-agent"
+    repo_dir = tmp_path / "hades-agent"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
 
@@ -88,8 +88,8 @@ def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
 
     mock_result = MagicMock(returncode=0, stdout="5\n")
 
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    with patch("hermes_cli.banner.subprocess.run", return_value=mock_result) as mock_run:
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
+    with patch("hades_cli.banner.subprocess.run", return_value=mock_result) as mock_run:
         result = check_for_updates()
 
     assert result == 5
@@ -99,9 +99,9 @@ def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
 
 def test_check_for_updates_official_ssh_origin_uses_https_probe(tmp_path):
     """Passive update checks must not trigger SSH auth for official installs."""
-    import hermes_cli.banner as banner
+    import hades_cli.banner as banner
 
-    repo_dir = tmp_path / "hermes-agent"
+    repo_dir = tmp_path / "hades-agent"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
 
@@ -110,19 +110,19 @@ def test_check_for_updates_official_ssh_origin_uses_https_probe(tmp_path):
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
         if cmd == ["git", "remote", "get-url", "origin"]:
-            return MagicMock(returncode=0, stdout="git@github.com:NousResearch/hermes-agent.git\n")
+            return MagicMock(returncode=0, stdout="git@github.com:9thLevelSoftware/hades-agent.git\n")
         if cmd == ["git", "rev-parse", "HEAD"]:
             return MagicMock(returncode=0, stdout="local-sha\n")
         if cmd == [
             "git",
             "ls-remote",
-            "https://github.com/NousResearch/hermes-agent.git",
+            "https://github.com/9thLevelSoftware/hades-agent.git",
             "refs/heads/main",
         ]:
             return MagicMock(returncode=0, stdout="upstream-sha\trefs/heads/main\n")
         raise AssertionError(f"unexpected git command: {cmd!r}")
 
-    with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
+    with patch("hades_cli.banner.subprocess.run", side_effect=fake_run):
         result = banner._check_via_local_git(repo_dir)
 
     assert result == 1
@@ -138,9 +138,9 @@ def test_check_via_local_git_shallow_clone_behind_reports_no_count(tmp_path):
     compare tip SHAs and return UPDATE_AVAILABLE_NO_COUNT instead, and must
     never run ``git rev-list --count``.
     """
-    import hermes_cli.banner as banner
+    import hades_cli.banner as banner
 
-    repo_dir = tmp_path / "hermes-agent"
+    repo_dir = tmp_path / "hades-agent"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
 
@@ -149,7 +149,7 @@ def test_check_via_local_git_shallow_clone_behind_reports_no_count(tmp_path):
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
         if cmd == ["git", "remote", "get-url", "origin"]:
-            return MagicMock(returncode=0, stdout="https://github.com/NousResearch/hermes-agent.git\n")
+            return MagicMock(returncode=0, stdout="https://github.com/9thLevelSoftware/hades-agent.git\n")
         if cmd == ["git", "rev-parse", "--is-shallow-repository"]:
             return MagicMock(returncode=0, stdout="true\n")
         if cmd[:2] == ["git", "fetch"]:
@@ -162,7 +162,7 @@ def test_check_via_local_git_shallow_clone_behind_reports_no_count(tmp_path):
             raise AssertionError("shallow path must not count across the boundary")
         raise AssertionError(f"unexpected git command: {cmd!r}")
 
-    with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
+    with patch("hades_cli.banner.subprocess.run", side_effect=fake_run):
         result = banner._check_via_local_git(repo_dir)
 
     assert result == banner.UPDATE_AVAILABLE_NO_COUNT
@@ -172,15 +172,15 @@ def test_check_via_local_git_shallow_clone_behind_reports_no_count(tmp_path):
 
 def test_check_via_local_git_shallow_clone_up_to_date(tmp_path):
     """Shallow clone whose tip matches upstream reports up-to-date (0)."""
-    import hermes_cli.banner as banner
+    import hades_cli.banner as banner
 
-    repo_dir = tmp_path / "hermes-agent"
+    repo_dir = tmp_path / "hades-agent"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
 
     def fake_run(cmd, **kwargs):
         if cmd == ["git", "remote", "get-url", "origin"]:
-            return MagicMock(returncode=0, stdout="https://github.com/NousResearch/hermes-agent.git\n")
+            return MagicMock(returncode=0, stdout="https://github.com/9thLevelSoftware/hades-agent.git\n")
         if cmd == ["git", "rev-parse", "--is-shallow-repository"]:
             return MagicMock(returncode=0, stdout="true\n")
         if cmd[:2] == ["git", "fetch"]:
@@ -191,7 +191,7 @@ def test_check_via_local_git_shallow_clone_up_to_date(tmp_path):
             return MagicMock(returncode=0, stdout="same-sha\n")
         raise AssertionError(f"unexpected git command: {cmd!r}")
 
-    with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
+    with patch("hades_cli.banner.subprocess.run", side_effect=fake_run):
         result = banner._check_via_local_git(repo_dir)
 
     assert result == 0
@@ -199,15 +199,15 @@ def test_check_via_local_git_shallow_clone_up_to_date(tmp_path):
 
 def test_check_via_local_git_full_clone_keeps_exact_count(tmp_path):
     """Full (non-shallow) clones keep the exact rev-list count path."""
-    import hermes_cli.banner as banner
+    import hades_cli.banner as banner
 
-    repo_dir = tmp_path / "hermes-agent"
+    repo_dir = tmp_path / "hades-agent"
     repo_dir.mkdir()
     (repo_dir / ".git").mkdir()
 
     def fake_run(cmd, **kwargs):
         if cmd == ["git", "remote", "get-url", "origin"]:
-            return MagicMock(returncode=0, stdout="https://github.com/NousResearch/hermes-agent.git\n")
+            return MagicMock(returncode=0, stdout="https://github.com/9thLevelSoftware/hades-agent.git\n")
         if cmd == ["git", "rev-parse", "--is-shallow-repository"]:
             return MagicMock(returncode=0, stdout="false\n")
         if cmd[:2] == ["git", "fetch"]:
@@ -216,7 +216,7 @@ def test_check_via_local_git_full_clone_keeps_exact_count(tmp_path):
             return MagicMock(returncode=0, stdout="7\n")
         raise AssertionError(f"unexpected git command: {cmd!r}")
 
-    with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
+    with patch("hades_cli.banner.subprocess.run", side_effect=fake_run):
         result = banner._check_via_local_git(repo_dir)
 
     assert result == 7
@@ -224,7 +224,7 @@ def test_check_via_local_git_full_clone_keeps_exact_count(tmp_path):
 
 def test_check_for_updates_no_git_dir(tmp_path, monkeypatch):
     """Falls back to PyPI check when .git directory doesn't exist anywhere."""
-    import hermes_cli.banner as banner
+    import hades_cli.banner as banner
 
     # Create a fake banner.py so the fallback path also has no .git
     fake_banner = tmp_path / "hermes_cli" / "banner.py"
@@ -232,25 +232,25 @@ def test_check_for_updates_no_git_dir(tmp_path, monkeypatch):
     fake_banner.touch()
 
     monkeypatch.setattr(banner, "__file__", str(fake_banner))
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    with patch("hermes_cli.banner.subprocess.run") as mock_run:
-        with patch("hermes_cli.banner.check_via_pypi", return_value=0):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
+    with patch("hades_cli.banner.subprocess.run") as mock_run:
+        with patch("hades_cli.banner.check_via_pypi", return_value=0):
             result = banner.check_for_updates()
     assert result == 0
     mock_run.assert_not_called()
 
 
 def test_check_for_updates_fallback_to_project_root(tmp_path, monkeypatch):
-    """Dev install: falls back to Path(__file__).parent.parent when HERMES_HOME has no git repo."""
-    import hermes_cli.banner as banner
+    """Dev install: falls back to Path(__file__).parent.parent when HADES_HOME has no git repo."""
+    import hades_cli.banner as banner
 
     project_root = Path(banner.__file__).parent.parent.resolve()
     if not (project_root / ".git").exists():
         pytest.skip("Not running from a git checkout")
 
-    # Point HERMES_HOME at a temp dir with no hermes-agent/.git
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    with patch("hermes_cli.banner.subprocess.run") as mock_run:
+    # Point HADES_HOME at a temp dir with no hermes-agent/.git
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
+    with patch("hades_cli.banner.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="0\n")
         result = banner.check_for_updates()
     # Should have fallen back to project root and run git commands
@@ -269,14 +269,14 @@ def test_check_for_updates_docker_returns_none(tmp_path, monkeypatch):
     must return None (so the > 0 render guards stay false) AND not reach the
     git/pypi probes or write a cache entry.
     """
-    import hermes_cli.banner as banner
+    import hades_cli.banner as banner
 
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     cache_file = tmp_path / ".update_check"
 
-    with patch("hermes_cli.config.detect_install_method", return_value="docker"), \
-         patch("hermes_cli.banner.subprocess.run") as mock_run, \
-         patch("hermes_cli.banner.check_via_pypi") as mock_pypi:
+    with patch("hades_cli.config.detect_install_method", return_value="docker"), \
+         patch("hades_cli.banner.subprocess.run") as mock_run, \
+         patch("hades_cli.banner.check_via_pypi") as mock_pypi:
         result = banner.check_for_updates()
 
     assert result is None
@@ -293,19 +293,19 @@ def test_check_for_updates_non_docker_still_checks(tmp_path, monkeypatch):
     Invariant guarding against the guard firing for non-docker methods — pip
     installs legitimately reach check_via_pypi() and surface a real update.
     """
-    import hermes_cli.banner as banner
+    import hades_cli.banner as banner
 
     # No local git checkout -> the PyPI (pip-install) path is exercised.
     fake_banner = tmp_path / "hermes_cli" / "banner.py"
     fake_banner.parent.mkdir(parents=True, exist_ok=True)
     fake_banner.touch()
     monkeypatch.setattr(banner, "__file__", str(fake_banner))
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_REVISION", raising=False)
 
-    with patch("hermes_cli.config.detect_install_method", return_value="pip"), \
-         patch("hermes_cli.banner.subprocess.run") as mock_run, \
-         patch("hermes_cli.banner.check_via_pypi", return_value=1) as mock_pypi:
+    with patch("hades_cli.config.detect_install_method", return_value="pip"), \
+         patch("hades_cli.banner.subprocess.run") as mock_run, \
+         patch("hades_cli.banner.check_via_pypi", return_value=1) as mock_pypi:
         result = banner.check_for_updates()
 
     assert result == 1
@@ -315,7 +315,7 @@ def test_check_for_updates_non_docker_still_checks(tmp_path, monkeypatch):
 
 def test_prefetch_non_blocking():
     """prefetch_update_check() should return immediately without blocking."""
-    import hermes_cli.banner as banner
+    import hades_cli.banner as banner
 
     # Reset module state
     banner._update_result = None
@@ -336,10 +336,10 @@ def test_prefetch_non_blocking():
 
 def test_invalidate_update_cache_clears_all_profiles(tmp_path):
     """_invalidate_update_cache() should delete .update_check from ALL profiles."""
-    from hermes_cli.main import _invalidate_update_cache
+    from hades_cli.main import _invalidate_update_cache
 
-    # Build a fake ~/.hermes with default + two named profiles
-    default_home = tmp_path / ".hermes"
+    # Build a fake ~/.hades with default + two named profiles
+    default_home = tmp_path / ".hades"
     default_home.mkdir()
     (default_home / ".update_check").write_text('{"ts":1,"behind":50}')
 
@@ -350,7 +350,7 @@ def test_invalidate_update_cache_clears_all_profiles(tmp_path):
         (p / ".update_check").write_text('{"ts":1,"behind":50}')
 
     with patch.object(Path, "home", return_value=tmp_path), \
-         patch.dict(os.environ, {"HERMES_HOME": str(default_home)}):
+         patch.dict(os.environ, {"HADES_HOME": str(default_home)}):
         _invalidate_update_cache()
 
     # All three caches should be gone
@@ -361,14 +361,14 @@ def test_invalidate_update_cache_clears_all_profiles(tmp_path):
 
 def test_invalidate_update_cache_no_profiles_dir(tmp_path):
     """Works fine when no profiles directory exists (single-profile setup)."""
-    from hermes_cli.main import _invalidate_update_cache
+    from hades_cli.main import _invalidate_update_cache
 
-    default_home = tmp_path / ".hermes"
+    default_home = tmp_path / ".hades"
     default_home.mkdir()
     (default_home / ".update_check").write_text('{"ts":1,"behind":5}')
 
     with patch.object(Path, "home", return_value=tmp_path), \
-         patch.dict(os.environ, {"HERMES_HOME": str(default_home)}):
+         patch.dict(os.environ, {"HADES_HOME": str(default_home)}):
         _invalidate_update_cache()
 
     assert not (default_home / ".update_check").exists()

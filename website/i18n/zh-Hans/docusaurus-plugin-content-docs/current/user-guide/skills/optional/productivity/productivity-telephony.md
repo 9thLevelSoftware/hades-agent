@@ -34,7 +34,7 @@ description: "无需修改核心工具即可赋予 Hermes 电话能力"
 此可选 skill 为 Hermes 提供实用的电话能力，同时将电话功能保留在核心工具列表之外。
 
 它附带一个辅助脚本 `scripts/telephony.py`，可以：
-- 将服务商凭据保存到 `~/.hermes/.env`
+- 将服务商凭据保存到 `~/.hades/.env`
 - 搜索并购买 Twilio 电话号码
 - 记住已拥有的号码以供后续会话使用
 - 从已拥有的号码发送 SMS / MMS
@@ -121,7 +121,7 @@ description: "无需修改核心工具即可赋予 Hermes 电话能力"
 
 此 skill 在两个位置持久化电话状态：
 
-### `~/.hermes/.env`
+### `~/.hades/.env`
 用于长期存储的服务商凭据和已拥有号码的 ID，例如：
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
@@ -132,7 +132,7 @@ description: "无需修改核心工具即可赋予 Hermes 电话能力"
 - `VAPI_PHONE_NUMBER_ID`
 - `PHONE_PROVIDER`（AI 外呼服务商：bland 或 vapi）
 
-### `~/.hermes/telephony_state.json`
+### `~/.hades/telephony_state.json`
 用于仅限 skill 使用的、应在会话间保留的状态，例如：
 - 记住的默认 Twilio 号码 / SID
 - 记住的 Vapi 电话号码 ID
@@ -147,7 +147,7 @@ description: "无需修改核心工具即可赋予 Hermes 电话能力"
 安装此 skill 后，按如下方式定位脚本：
 
 ```bash
-SCRIPT="$(find ~/.hermes/skills -path '*/telephony/scripts/telephony.py' -print -quit)"
+SCRIPT="$(find ~/.hades/skills -path '*/telephony/scripts/telephony.py' -print -quit)"
 ```
 
 如果 `SCRIPT` 为空，说明 skill 尚未安装。
@@ -258,7 +258,7 @@ python3 "$SCRIPT" save-twilio AC... auth_token_here
 python3 "$SCRIPT" twilio-search --country US --area-code 702 --limit 10
 ```
 
-3. 购买并保存到 `~/.hermes/.env` 及状态文件：
+3. 购买并保存到 `~/.hades/.env` 及状态文件：
 ```bash
 python3 "$SCRIPT" twilio-buy "+17025551234" --save-env
 ```
@@ -420,7 +420,7 @@ python3 "$SCRIPT" ai-status <call_id> --provider vapi
 
 1. `diagnose` 显示服务商就绪状态和记住的状态
 2. 搜索并购买 Twilio 号码
-3. 将该号码持久化到 `~/.hermes/.env`
+3. 将该号码持久化到 `~/.hades/.env`
 4. 从已拥有的号码发送 SMS
 5. 之后轮询已拥有号码的入站短信
 6. 拨打直接 Twilio 电话

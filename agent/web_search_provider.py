@@ -9,7 +9,7 @@ the active one (selected via ``web.search_backend`` / ``web.extract_backend`` /
 ``web_extract`` tool call.
 
 Providers live in ``<repo>/plugins/web/<name>/`` (built-in, auto-loaded as
-``kind: backend``) or ``~/.hermes/plugins/web/<name>/`` (user, opt-in via
+``kind: backend``) or ``~/.hades/plugins/web/<name>/`` (user, opt-in via
 ``plugins.enabled``).
 
 This ABC is the SINGLE plugin-facing surface for web providers — every
@@ -59,9 +59,9 @@ from typing import Any, Dict, List, Optional
 def get_provider_env(name: str) -> str:
     """Config-aware env lookup for web providers.
 
-    Resolves *name* via :func:`hermes_cli.config.get_env_value` (checks
-    ``os.environ`` first, then ``~/.hermes/.env``) so credentials set
-    through Hermes' config layer are visible even when they were never
+    Resolves *name* via :func:`hades_cli.config.get_env_value` (checks
+    ``os.environ`` first, then ``~/.hades/.env``) so credentials set
+    through Hades' config layer are visible even when they were never
     exported into the process environment — gateway sessions, delegate
     children, and subprocess agent runs (issue #40190). Falls back to a
     bare ``os.getenv`` when the config module is unavailable (stripped
@@ -71,7 +71,7 @@ def get_provider_env(name: str) -> str:
     """
     val: Optional[str] = None
     try:
-        from hermes_cli.config import get_env_value
+        from hades_cli.config import get_env_value
 
         val = get_env_value(name)
     except Exception:  # noqa: BLE001 — config layer optional here

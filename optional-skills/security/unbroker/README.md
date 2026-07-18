@@ -140,7 +140,7 @@ python3 tests/skills/test_unbroker_skill.py                        # dependency-
 - **Least-disclosure and honest reporting.** The skill submits only what a broker requires. "Hidden
   from free search" is never reported as "deleted", and residual exposure (public records, paid-tier
   retention) is disclosed.
-- **PII handling.** Dossiers live under the Hermes home directory (`0600`, optionally
+- **PII handling.** Dossiers live under the Hades home directory (`0600`, optionally
   `age`-encrypted), with opaque ids.
 
 ## Status

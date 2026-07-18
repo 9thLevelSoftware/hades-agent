@@ -21,12 +21,12 @@
 - Never retry an effect whose disposition is unknown. Reconcile it or surface `unknown_effect` for review.
 - The only receipt scorer may emit `verified`. Workflow success or a model assertion alone yields at most `completed_unverified`.
 - Receipts are immutable. Rechecks append linked observations; they never edit a prior receipt.
-- V1 supports one active profile/HERMES_HOME per mission. Reject `agent_task.profile` values that cross the mission's profile boundary.
+- V1 supports one active profile/HADES_HOME per mission. Reject `agent_task.profile` values that cross the mission's profile boundary.
 - First adapters are strictly bounded: file `write_file`/`patch` inside an allowed workspace or disposable worktree; versioned workflow/cron/config mutations; and a delayed outbound-message outbox. No arbitrary shell wrapping, production DB writes, browser form writes, remote Git push, account deletion, or purchases.
 - Local Git support is limited to staging and committing inside a disposable non-main worktree. It never pushes.
 - Network message delivery is irreversible unless the selected platform adapter proves edit/delete compensation. Unknown acknowledgement is not success.
 - Stable settings live in `config.yaml`; durable mission authority and audit decisions live in SQLite. `HERMES_MISSION_ID` is an internal runtime correlation variable, not user configuration.
-- Real-path integration tests use a temporary `HERMES_HOME`, real SQLite connections, real imports, real temp files/Git repositories, and restart by reopening stores or spawning a subprocess. Mock only the final external network boundary and process-kill boundary.
+- Real-path integration tests use a temporary `HADES_HOME`, real SQLite connections, real imports, real temp files/Git repositories, and restart by reopening stores or spawning a subprocess. Mock only the final external network boundary and process-kill boundary.
 - Each task ends with focused tests, relevant regressions, `git diff --check`, and one conventional commit.
 
 ---
@@ -83,7 +83,7 @@ Terminal `verified` is a receipt status and mission verdict produced by the scor
 
 ### Existing files modified
 
-- `hermes_state.py` — declarative tables and SessionDB accessors for transactions, receipts, observations, and outbox.
+- `hades_state.py` — declarative tables and SessionDB accessors for transactions, receipts, observations, and outbox.
 - `hermes_cli/workflows_db.py` — one transaction-aware execution-start helper used by mission creation.
 - `hermes_cli/workflows_capabilities.py` — promote `send_message` only after dispatcher support exists.
 - `hermes_cli/workflows_dispatcher.py` — persist/resume delayed message nodes and project execution terminal state into missions.
@@ -214,7 +214,7 @@ git commit -m "test: preregister mission transaction benchmark"
 
 - [ ] **Step 1: Write RED tests for ownership and atomicity**
 
-Cover these contracts with a real temporary `HERMES_HOME`:
+Cover these contracts with a real temporary `HADES_HOME`:
 
 ```python
 mission, execution = create_mission_and_execution(
@@ -249,7 +249,7 @@ Also prove: failure in `start_execution()` leaves no mission; constraints/author
 uv run --extra dev python -m pytest tests/hermes_cli/test_missions_db.py -q
 ```
 
-Expected: import failure for `hermes_cli.missions_db`.
+Expected: import failure for `hades_cli.missions_db`.
 
 - [ ] **Step 3: Add mission tables and frozen records**
 
@@ -331,7 +331,7 @@ git commit -m "feat: add durable mission aggregate"
 ### Task 2: Add Transaction, Receipt, Observation, and Outbox Storage to SessionDB
 
 **Files:**
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/test_receipts.py`
 - Create: `tests/agent/test_effect_transactions.py`
 - Create: `tests/gateway/test_mission_outbox.py`
@@ -460,7 +460,7 @@ Expected: all pass on new and upgraded databases.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add hermes_state.py tests/agent/test_effect_transactions.py \
+git add hades_state.py tests/agent/test_effect_transactions.py \
   tests/agent/test_receipts.py tests/gateway/test_mission_outbox.py
 git commit -m "feat: persist mission effects and receipts"
 ```
@@ -790,7 +790,7 @@ git add agent/effect_adapters.py cron/jobs.py hermes_cli/config.py \
   tests/hermes_cli/test_workflows_db.py tests/hermes_cli/test_cron.py \
   tests/hermes_cli/test_config.py tests/hermes_cli/test_managed_scope_config.py \
   tests/hermes_cli/test_managed_scope_cli_config.py
-git commit -m "feat: transact versioned Hermes state"
+git commit -m "feat: transact versioned Hades state"
 ```
 
 ---
@@ -1001,8 +1001,8 @@ Assert that `_default_spawn()`:
 - adds `HERMES_MISSION_ID=<id>` only for linked workflow tasks;
 - never accepts a mission id supplied through task body/title/user config;
 - leaves ordinary Kanban workers unchanged;
-- rejects a mission workflow whose agent task assignee resolves to a different profile/HERMES_HOME;
-- preserves `HERMES_HOME`, `TERMINAL_CWD`, board, branch, provider, and toolset behavior.
+- rejects a mission workflow whose agent task assignee resolves to a different profile/HADES_HOME;
+- preserves `HADES_HOME`, `TERMINAL_CWD`, board, branch, provider, and toolset behavior.
 
 - [ ] **Step 2: Run RED**
 
@@ -1222,7 +1222,7 @@ git commit -m "feat: add terminal-first mission control"
 
 - [ ] **Step 1: Write the end-to-end test before documentation**
 
-The test creates a temporary `HERMES_HOME`, a real Git repo + disposable worktree, deploys the fixture workflow, starts a mission through the same function used by `hermes mission start`, and performs all three effects:
+The test creates a temporary `HADES_HOME`, a real Git repo + disposable worktree, deploys the fixture workflow, starts a mission through the same function used by `hermes mission start`, and performs all three effects:
 
 1. worker `write_file`/`patch`, fresh verification evidence, local commit;
 2. versioned Hermes config or workflow state change;

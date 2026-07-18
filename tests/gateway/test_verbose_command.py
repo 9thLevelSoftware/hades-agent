@@ -47,7 +47,7 @@ class TestVerboseCommand:
     @pytest.mark.asyncio
     async def test_disabled_by_default(self, tmp_path, monkeypatch):
         """When tool_progress_command is false, /verbose returns an info message."""
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text("display:\n  tool_progress: all\n", encoding="utf-8")
@@ -63,7 +63,7 @@ class TestVerboseCommand:
     @pytest.mark.asyncio
     async def test_enabled_cycles_mode(self, tmp_path, monkeypatch):
         """When enabled, /verbose cycles tool_progress mode per-platform."""
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
@@ -87,7 +87,7 @@ class TestVerboseCommand:
     @pytest.mark.asyncio
     async def test_quoted_false_keeps_command_disabled(self, tmp_path, monkeypatch):
         """Quoted false must not enable the /verbose gateway command."""
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
@@ -106,7 +106,7 @@ class TestVerboseCommand:
     @pytest.mark.asyncio
     async def test_cycles_through_all_modes(self, tmp_path, monkeypatch):
         """Calling /verbose repeatedly cycles through all tool-progress visibility modes."""
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
@@ -134,7 +134,7 @@ class TestVerboseCommand:
         platform stays final-answer-first by default on mobile inboxes.  The
         first ``/verbose`` invocation therefore cycles ``off → new``.
         """
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
@@ -160,7 +160,7 @@ class TestVerboseCommand:
         default — Telegram = 'off' (tier-1 inbox override), Slack = 'off'
         (quiet Slack default). Both cycle to 'new' on first /verbose.
         """
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         # No global tool_progress → built-in platform defaults apply
@@ -191,7 +191,7 @@ class TestVerboseCommand:
     @pytest.mark.asyncio
     async def test_no_config_file_returns_disabled(self, tmp_path, monkeypatch):
         """When config.yaml doesn't exist, command reports disabled."""
-        hermes_home = tmp_path / "hermes"
+        hermes_home = tmp_path / "hades"
         hermes_home.mkdir()
         # No config.yaml
 
@@ -203,5 +203,5 @@ class TestVerboseCommand:
 
     def test_verbose_is_in_gateway_known_commands(self):
         """The /verbose command is recognized by the gateway dispatch."""
-        from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS
+        from hades_cli.commands import GATEWAY_KNOWN_COMMANDS
         assert "verbose" in GATEWAY_KNOWN_COMMANDS

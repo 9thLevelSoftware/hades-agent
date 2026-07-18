@@ -12,7 +12,7 @@ import asyncio
 import pytest
 from starlette.testclient import TestClient
 
-from hermes_cli import web_server
+from hades_cli import web_server
 
 
 @pytest.fixture()

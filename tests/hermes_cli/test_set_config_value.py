@@ -6,15 +6,15 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes_cli.config import set_config_value, config_command
+from hades_cli.config import set_config_value, config_command
 
 
 @pytest.fixture(autouse=True)
 def _isolated_hermes_home(tmp_path):
-    """Point HERMES_HOME at a temp dir so tests never touch real config."""
+    """Point HADES_HOME at a temp dir so tests never touch real config."""
     env_file = tmp_path / ".env"
     env_file.touch()
-    with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+    with patch.dict(os.environ, {"HADES_HOME": str(tmp_path)}):
         yield tmp_path
 
 
@@ -413,7 +413,7 @@ class TestSecretRedactionInDisplay:
     """`config set`/`config show` must not echo credential values in plaintext."""
 
     def test_redact_config_value_masks_nested_api_key(self):
-        from hermes_cli.config import redact_config_value
+        from hades_cli.config import redact_config_value
         secret = "cfut_SUPERSECRETTOKEN1234567890abcdef"
         model = {"default": "@cf/foo", "provider": "custom", "api_key": secret}
 
@@ -426,7 +426,7 @@ class TestSecretRedactionInDisplay:
         assert out["provider"] == "custom"
 
     def test_redact_config_value_walks_lists(self):
-        from hermes_cli.config import redact_config_value
+        from hades_cli.config import redact_config_value
         secret = "sk-deadbeefdeadbeefdeadbeef"
         cfg = {"custom_providers": [{"name": "p", "api_key": secret}]}
 
@@ -436,7 +436,7 @@ class TestSecretRedactionInDisplay:
         assert out["custom_providers"][0]["name"] == "p"
 
     def test_redact_config_value_ignores_benign_keys(self):
-        from hermes_cli.config import redact_config_value
+        from hades_cli.config import redact_config_value
         cfg = {"token_count": 1234, "secret_santa": "alice", "max_turns": 90}
 
         out = redact_config_value(cfg)

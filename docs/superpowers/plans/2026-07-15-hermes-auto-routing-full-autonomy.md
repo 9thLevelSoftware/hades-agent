@@ -105,7 +105,7 @@ def test_autonomous_transition_requires_preview_hash_and_explicit_ack(run_auto_c
     assert applied.exit_code == 0
 ```
 
-Define `valid_config` and `run_auto_cli` inside the test file using a temporary `HERMES_HOME`; the config starts with `adaptation.mode: conservative`, two approved profiles, finite overhead/experiment ceilings, and explicit plugin-LLM allowlists.
+Define `valid_config` and `run_auto_cli` inside the test file using a temporary `HADES_HOME`; the config starts with `adaptation.mode: conservative`, two approved profiles, finite overhead/experiment ceilings, and explicit plugin-LLM allowlists.
 
 - [ ] **Step 2: Run the focused tests and record RED**
 

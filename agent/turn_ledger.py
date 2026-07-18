@@ -28,7 +28,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 class TurnOutcomeRecord:
     """One row of the per-turn outcome ledger.
 
-    Fields mirror the schema in ``hermes_state.SCHEMA_SQL``'s
+    Fields mirror the schema in ``hades_state.SCHEMA_SQL``'s
     ``turn_outcomes`` table. ``skills_loaded`` is a tuple (not a list) so
     the dataclass stays hashable; the writer serialises it to JSON.
     """

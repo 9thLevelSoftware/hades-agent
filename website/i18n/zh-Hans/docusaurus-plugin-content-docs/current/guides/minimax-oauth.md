@@ -1,12 +1,12 @@
 ---
 sidebar_position: 15
 title: "MiniMax OAuth"
-description: "通过浏览器 OAuth 登录 MiniMax，在 Hermes Agent 中使用 MiniMax-M2.7 模型——无需 API 密钥"
+description: "通过浏览器 OAuth 登录 MiniMax，在 Hades Agent 中使用 MiniMax-M2.7 模型——无需 API 密钥"
 ---
 
 # MiniMax OAuth
 
-Hermes Agent 通过基于浏览器的 OAuth 登录流程支持 **MiniMax**，使用与 [MiniMax 门户](https://www.minimax.io) 相同的凭据。无需 API 密钥或信用卡——登录一次，Hermes 即可自动刷新您的会话。
+Hades Agent 通过基于浏览器的 OAuth 登录流程支持 **MiniMax**，使用与 [MiniMax 门户](https://www.minimax.io) 相同的凭据。无需 API 密钥或信用卡——登录一次，Hermes 即可自动刷新您的会话。
 
 该传输层复用了 `anthropic_messages` 适配器（MiniMax 在 `/anthropic` 路径暴露了一个兼容 Anthropic Messages 的端点），因此所有现有的工具调用、流式传输和上下文功能无需任何适配器改动即可正常使用。
 
@@ -26,7 +26,7 @@ Hermes Agent 通过基于浏览器的 OAuth 登录流程支持 **MiniMax**，使
 ## 前提条件
 
 - Python 3.9+
-- 已安装 Hermes Agent
+- 已安装 Hades Agent
 - 在 [minimax.io](https://www.minimax.io)（全球）或 [minimaxi.com](https://www.minimaxi.com)（中国）注册的 MiniMax 账户
 - 本地机器上可用的浏览器（远程会话请使用 `--no-browser`）
 
@@ -44,7 +44,7 @@ hermes model
 hermes
 ```
 
-首次登录后，凭据将存储在 `~/.hermes/auth.json` 下，并在每次会话前自动刷新。
+首次登录后，凭据将存储在 `~/.hades/auth.json` 下，并在每次会话前自动刷新。
 
 ## 手动登录
 
@@ -61,7 +61,7 @@ hermes auth add minimax-oauth
 ```bash
 hermes auth add minimax-cn --type oauth   # 如果您的中国账户支持 OAuth
 # 或更简单的方式：
-echo 'MINIMAX_CN_API_KEY=your-key' >> ~/.hermes/.env
+echo 'MINIMAX_CN_API_KEY=your-key' >> ~/.hades/.env
 ```
 
 ### 远程/无头会话
@@ -82,7 +82,7 @@ Hermes 针对 MiniMax OAuth 端点实现了 PKCE 设备码流程：
 2. 携带 challenge 向 `{base_url}/oauth/code` 发送 POST 请求，获取 `user_code` 和 `verification_uri`。
 3. 浏览器打开 `verification_uri`。如有提示，输入 `user_code`。
 4. Hermes 轮询 `{base_url}/oauth/token`，直到令牌到达（或超过截止时间）。
-5. 令牌（`access_token`、`refresh_token`、过期时间）以 `minimax-oauth` 为键保存到 `~/.hermes/auth.json`。
+5. 令牌（`access_token`、`refresh_token`、过期时间）以 `minimax-oauth` 为键保存到 `~/.hades/auth.json`。
 
 令牌刷新（标准 OAuth `refresh_token` 授权）在每次会话启动时自动执行，当 access token 距过期不足 60 秒时触发。
 
@@ -121,7 +121,7 @@ hermes config set provider minimax-oauth
 
 ## 配置参考
 
-登录后，`~/.hermes/config.yaml` 将包含类似如下的条目：
+登录后，`~/.hades/config.yaml` 将包含类似如下的条目：
 
 ```yaml
 model:

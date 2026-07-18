@@ -9,8 +9,8 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _isolate_hermes(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
-    (tmp_path / ".hermes").mkdir(exist_ok=True)
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    (tmp_path / ".hades").mkdir(exist_ok=True)
 
 
 def _make_agent(monkeypatch):

@@ -1,15 +1,15 @@
 # Bitwarden Secrets Manager
 
-Pull API keys from [Bitwarden Secrets Manager](https://bitwarden.com/products/secrets-manager/) at process startup instead of storing them in plaintext inside `~/.hermes/.env`. One bootstrap secret (a machine-account access token) replaces N per-provider keys, and rotating a credential becomes a single change in the Bitwarden web app.
+Pull API keys from [Bitwarden Secrets Manager](https://bitwarden.com/products/secrets-manager/) at process startup instead of storing them in plaintext inside `~/.hades/.env`. One bootstrap secret (a machine-account access token) replaces N per-provider keys, and rotating a credential becomes a single change in the Bitwarden web app.
 
 ## How it works
 
 1. You create a **machine account** in Bitwarden Secrets Manager, give it read access to a project, and generate an **access token**.
-2. Hermes stores that single token in `~/.hermes/.env` as `BWS_ACCESS_TOKEN`.
-3. Every time `hermes` (or the gateway, or a cron job) starts, after `~/.hermes/.env` has loaded, Hermes calls `bws secret list <project_id>` and sets the returned keys into `os.environ`.
+2. Hermes stores that single token in `~/.hades/.env` as `BWS_ACCESS_TOKEN`.
+3. Every time `hermes` (or the gateway, or a cron job) starts, after `~/.hades/.env` has loaded, Hermes calls `bws secret list <project_id>` and sets the returned keys into `os.environ`.
 4. By default Hermes **overrides** values already in your environment, so Bitwarden is the source of truth — rotate a key once in the web app and every Hermes process picks it up on next start. Flip `override_existing: false` in config if you want `.env` to win instead.
 
-The `bws` binary is auto-downloaded into `~/.hermes/bin/` on first use — no `apt`, no `brew`, no `sudo`.
+The `bws` binary is auto-downloaded into `~/.hades/bin/` on first use — no `apt`, no `brew`, no `sudo`.
 
 ## Why machine accounts (and why no 2FA prompt)
 
@@ -39,8 +39,8 @@ hermes secrets bitwarden setup
 
 It will:
 
-1. Download and verify `bws v2.0.0` into `~/.hermes/bin/bws`.
-2. Prompt you for the access token (input is hidden). Stored in `~/.hermes/.env` as `BWS_ACCESS_TOKEN`.
+1. Download and verify `bws v2.0.0` into `~/.hades/bin/bws`.
+2. Prompt you for the access token (input is hidden). Stored in `~/.hades/.env` as `BWS_ACCESS_TOKEN`.
 3. Ask which Bitwarden region your machine account belongs to — **US Cloud**, **EU Cloud**, or **self-hosted / custom URL**. Stored in `config.yaml` as `secrets.bitwarden.server_url` and passed to `bws` as `BWS_SERVER_URL`.
 4. List the projects the machine account can see; pick one. Stored in `config.yaml` as `secrets.bitwarden.project_id`.
 5. Test-fetch the project's secrets and show you which env vars will resolve.
@@ -76,7 +76,7 @@ From now on, every `hermes` invocation pulls fresh secrets at startup. You'll se
 
 ## Configuration
 
-Defaults in `~/.hermes/config.yaml`:
+Defaults in `~/.hades/config.yaml`:
 
 ```yaml
 secrets:
@@ -98,7 +98,7 @@ secrets:
 | `server_url` | `""` | Bitwarden region or self-hosted endpoint. Empty = `bws` default (US Cloud, `https://vault.bitwarden.com`). Set to `https://vault.bitwarden.eu` for EU Cloud, or your own URL for self-hosted. Plumbed into the `bws` subprocess as `BWS_SERVER_URL`. |
 | `cache_ttl_seconds` | `300` | How long an in-process fetch result is reused. Set to `0` to disable caching. Cache is per-process; new `hermes` invocations start fresh. |
 | `override_existing` | `true` | When true, Bitwarden values overwrite anything already in env (so rotation in the web app actually takes effect). Flip to `false` if you want `.env` / shell exports to win locally. |
-| `auto_install` | `true` | When true, `bws` is auto-downloaded into `~/.hermes/bin/` on first use. |
+| `auto_install` | `true` | When true, `bws` is auto-downloaded into `~/.hades/bin/` on first use. |
 
 ## Failure modes
 
@@ -122,7 +122,7 @@ Bitwarden never blocks Hermes startup. If anything goes wrong, you'll see a one-
 
 ## When NOT to use this
 
-- **Single-machine personal setups** where `~/.hermes/.env` is fine. You're trading one credential for another and adding a network dependency at startup.
+- **Single-machine personal setups** where `~/.hades/.env` is fine. You're trading one credential for another and adding a network dependency at startup.
 - **Air-gapped environments** that can't reach `api.bitwarden.com`.
 - **CI/CD** where the existing secrets-injection mechanism (GitHub Actions secrets, Vault, etc.) is already set up — pick one path, not two.
 

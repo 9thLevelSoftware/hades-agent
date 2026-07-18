@@ -268,7 +268,7 @@ def build_subscription_state(*, timeout: float = 15.0) -> SubscriptionState:
         return fixture
 
     try:
-        from hermes_cli.nous_billing import (
+        from hades_cli.nous_billing import (
             BillingAuthError,
             BillingError,
             _absolutize_portal_url,
@@ -378,7 +378,7 @@ def dev_fixture_subscription_state() -> Optional[SubscriptionState]:
     Returns ``None`` when the env var is unset/empty (the real portal path runs).
     Throwaway scaffolding — mirrors ``HERMES_DEV_CREDITS_FIXTURE``.
     """
-    name = (os.getenv("HERMES_DEV_SUBSCRIPTION_FIXTURE") or "").strip().lower()
+    name = (os.getenv("HADES_DEV_SUBSCRIPTION_FIXTURE") or "").strip().lower()
     if not name:
         return None
 

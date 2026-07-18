@@ -1,5 +1,5 @@
 """
-Session-scoped context variables for the Hermes gateway.
+Session-scoped context variables for the Hades gateway.
 
 Replaces the previous ``os.environ``-based session state
 (``HERMES_SESSION_PLATFORM``, ``HERMES_SESSION_CHAT_ID``, etc.) with
@@ -10,7 +10,7 @@ Python's ``contextvars.ContextVar``.
 The gateway processes messages concurrently via ``asyncio``.  When two
 messages arrive at the same time the old code did:
 
-    os.environ["HERMES_SESSION_THREAD_ID"] = str(context.source.thread_id)
+    os.environ["HADES_SESSION_THREAD_ID"] = str(context.source.thread_id)
 
 Because ``os.environ`` is *process-global*, Message A's value was
 silently overwritten by Message B before Message A's agent finished
@@ -24,12 +24,12 @@ so concurrent messages never interfere.
 **Backward compatibility**
 
 The public helper ``get_session_env(name, default="")`` mirrors the old
-``os.getenv("HERMES_SESSION_*", ...)`` calls.  Existing tool code only
+``os.getenv("HADES_SESSION_*", ...)`` calls.  Existing tool code only
 needs to replace the import + call site:
 
     # before
     import os
-    platform = os.getenv("HERMES_SESSION_PLATFORM", "")
+    platform = os.getenv("HADES_SESSION_PLATFORM", "")
 
     # after
     from gateway.session_context import get_session_env
@@ -150,7 +150,7 @@ def set_current_session_id(session_id: str) -> None:
     """
     import os
 
-    os.environ["HERMES_SESSION_ID"] = session_id
+    os.environ["HADES_SESSION_ID"] = session_id
     _SESSION_ID.set(session_id)
 
 
@@ -304,7 +304,7 @@ def reset_session_vars() -> None:
 def get_session_env(name: str, default: str = "") -> str:
     """Read a session context variable by its legacy ``HERMES_SESSION_*`` name.
 
-    Drop-in replacement for ``os.getenv("HERMES_SESSION_*", default)``.
+    Drop-in replacement for ``os.getenv("HADES_SESSION_*", default)``.
 
     Resolution order:
     1. Context variable (set by the gateway for concurrency-safe access).
@@ -347,7 +347,7 @@ def declare_stateless_channel() -> None:
     returned within the turn instead of being dispatched to a channel that will
     never deliver them.
 
-    See NousResearch/hermes-agent#53027 and #63142.
+    See 9thLevelSoftware/hades-agent#53027 and #63142.
     """
     _SESSION_ASYNC_DELIVERY.set(False)
 

@@ -1,10 +1,10 @@
-"""Tests for hermes_cli.relaunch — unified self-relaunch utility."""
+"""Tests for hades_cli.relaunch — unified self-relaunch utility."""
 
 import sys
 
 import pytest
 
-from hermes_cli import relaunch as relaunch_mod
+from hades_cli import relaunch as relaunch_mod
 
 
 class TestResolveHermesBin:
@@ -16,7 +16,7 @@ class TestResolveHermesBin:
         assert relaunch_mod.resolve_hermes_bin() == fake
 
     def test_resolves_relative_argv0(self, monkeypatch, tmp_path):
-        fake = tmp_path / "hermes"
+        fake = tmp_path / "hades"
         fake.write_text("#!/bin/sh\n")
         fake.chmod(0o755)
         monkeypatch.setattr(sys, "argv", [str(fake.name)])
@@ -112,7 +112,7 @@ class TestBuildRelaunchArgv:
     def test_falls_back_to_python_module(self, monkeypatch):
         monkeypatch.setattr(relaunch_mod, "resolve_hermes_bin", lambda: None)
         argv = relaunch_mod.build_relaunch_argv(["--resume", "abc"])
-        assert argv == [sys.executable, "-m", "hermes_cli.main", "--resume", "abc"]
+        assert argv == [sys.executable, "-m", "hades_cli.main", "--resume", "abc"]
 
     def test_preserves_inherited_flags(self, monkeypatch):
         monkeypatch.setattr(relaunch_mod, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
@@ -266,7 +266,7 @@ class TestResolveHermesBinWindowsPyGuard:
         because POSIX exec can route through the shebang line."""
         if sys.platform == "win32":
             pytest.skip("POSIX semantics")
-        script = tmp_path / "hermes"
+        script = tmp_path / "hades"
         script.write_text("#!/usr/bin/env python3\n")
         script.chmod(0o755)
         monkeypatch.setattr(relaunch_mod.sys, "argv", [str(script), "chat"])
@@ -275,7 +275,7 @@ class TestResolveHermesBinWindowsPyGuard:
     def test_windows_py_argv0_with_no_hermes_on_path_returns_none(self, monkeypatch, tmp_path):
         """Bulletproof fallback: if argv0 is .py on Windows AND hermes.exe
         isn't on PATH, return None so the caller falls back to
-        python -m hermes_cli.main."""
+        python -m hades_cli.main."""
         script = tmp_path / "main.py"
         script.write_text("# stub")
 

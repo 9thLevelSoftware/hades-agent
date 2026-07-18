@@ -1,12 +1,12 @@
 from cli import HermesCLI
-from hermes_cli.active_sessions import (
+from hades_cli.active_sessions import (
     active_session_registry_snapshot,
     try_acquire_active_session,
 )
 
 
 def test_cli_claim_active_session_respects_global_limit(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     cfg = {"max_concurrent_sessions": 1}
     held, message = try_acquire_active_session(
         session_id="held-session",

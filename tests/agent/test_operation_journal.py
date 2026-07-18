@@ -7,7 +7,7 @@ from dataclasses import FrozenInstanceError, is_dataclass
 import pytest
 
 from agent.operation_journal import OperationJournal, OperationRecord
-from hermes_state import SessionDB
+from hades_state import SessionDB
 
 
 @pytest.fixture()
@@ -575,7 +575,7 @@ def test_database_checks_states_and_effects(db):
 def test_reads_use_closed_database_guard(db):
     journal = _journal(db)
     db.close()
-    from hermes_state import SessionDBClosedError
+    from hades_state import SessionDBClosedError
 
     with pytest.raises(SessionDBClosedError):
         journal.get("missing")

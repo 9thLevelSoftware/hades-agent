@@ -8,7 +8,7 @@ description: "按需加载的知识文档——渐进式披露、agent 管理的
 
 Skills 是 agent 在需要时可以加载的按需知识文档。它们遵循**渐进式披露**（progressive disclosure）模式以最小化 token 用量，并兼容 [agentskills.io](https://agentskills.io/specification) 开放标准。
 
-所有 skills 存放在 **`~/.hermes/skills/`** 中——这是主目录和唯一可信来源。全新安装时，捆绑的 skills 会从仓库复制过来。通过 Hub 安装和 agent 创建的 skills 也存放在此处。agent 可以修改或删除任何 skill。
+所有 skills 存放在 **`~/.hades/skills/`** 中——这是主目录和唯一可信来源。全新安装时，捆绑的 skills 会从仓库复制过来。通过 Hub 安装和 agent 创建的 skills 也存放在此处。agent 可以修改或删除任何 skill。
 
 你也可以让 Hermes 指向**外部 skill 目录**——与本地目录一起扫描的额外文件夹。参见下方的[外部 Skill 目录](#external-skill-directories)。
 
@@ -172,7 +172,7 @@ required_environment_variables:
     required_for: full functionality
 ```
 
-当遇到缺失的值时，Hermes 仅在本地 CLI 中实际加载 skill 时才会安全地请求输入。你可以跳过设置并继续使用该 skill。消息平台不会在聊天中请求密钥——它们会告诉你改用本地的 `hermes setup` 或 `~/.hermes/.env`。
+当遇到缺失的值时，Hermes 仅在本地 CLI 中实际加载 skill 时才会安全地请求输入。你可以跳过设置并继续使用该 skill。消息平台不会在聊天中请求密钥——它们会告诉你改用本地的 `hermes setup` 或 `~/.hades/.env`。
 
 一旦设置，声明的环境变量会**自动传递**到 `execute_code` 和 `terminal` 沙箱——skill 的脚本可以直接使用 `$TENOR_API_KEY`。对于非 skill 的环境变量，使用 `terminal.env_passthrough` 配置选项。详情参见[环境变量传递](/user-guide/security#environment-variable-passthrough)。
 
@@ -197,7 +197,7 @@ metadata:
 ## Skill 目录结构
 
 ```text
-~/.hermes/skills/                  # Single source of truth
+~/.hades/skills/                  # Single source of truth
 ├── mlops/                         # Category directory
 │   ├── axolotl/
 │   │   ├── SKILL.md               # Main instructions (required)
@@ -225,7 +225,7 @@ metadata:
 
 如果你在 Hermes 之外维护 skills——例如，供多个 AI 工具使用的共享 `~/.agents/skills/` 目录——你可以告诉 Hermes 也扫描这些目录。
 
-在 `~/.hermes/config.yaml` 的 `skills` 部分下添加 `external_dirs`：
+在 `~/.hades/config.yaml` 的 `skills` 部分下添加 `external_dirs`：
 
 ```yaml
 skills:
@@ -239,7 +239,7 @@ skills:
 
 ### 工作原理
 
-- **本地创建，就地更新**：新的 agent 创建的 skills 写入 `~/.hermes/skills/`。现有 skills 在找到的位置被修改，包括 `external_dirs` 下的 skills，当 agent 使用 `skill_manage` 操作（如 `patch`、`edit`、`write_file`、`remove_file` 或 `delete`）时。
+- **本地创建，就地更新**：新的 agent 创建的 skills 写入 `~/.hades/skills/`。现有 skills 在找到的位置被修改，包括 `external_dirs` 下的 skills，当 agent 使用 `skill_manage` 操作（如 `patch`、`edit`、`write_file`、`remove_file` 或 `delete`）时。
 - **外部目录不是写保护边界**：如果外部 skill 目录对 Hermes 进程可写，agent 管理的 skill 更新可以修改该目录中的文件。如果共享的外部 skills 必须保持只读，请使用文件系统权限或单独的 profile/toolset 设置。
 - **本地优先**：如果同一 skill 名称同时存在于本地目录和外部目录中，本地版本优先。
 - **完整集成**：外部 skills 出现在系统提示词索引、`skills_list`、`skill_view` 以及 `/skill-name` 斜杠命令中——与本地 skills 无异。
@@ -248,7 +248,7 @@ skills:
 ### 示例
 
 ```text
-~/.hermes/skills/               # Local (primary, read-write)
+~/.hades/skills/               # Local (primary, read-write)
 ├── devops/deploy-k8s/
 │   └── SKILL.md
 └── mlops/axolotl/
@@ -288,7 +288,7 @@ agent 接收到所有三个 skills 加载到一条用户消息中，斜杠命令
 
 ### YAML 模式
 
-捆绑包存放在 **`~/.hermes/skill-bundles/<slug>.yaml`** 中，格式如下：
+捆绑包存放在 **`~/.hades/skill-bundles/<slug>.yaml`** 中，格式如下：
 
 ```yaml
 name: backend-dev
@@ -326,7 +326,7 @@ hermes bundles create backend-dev --skill ... --force
 # 删除捆绑包
 hermes bundles delete backend-dev
 
-# 重新扫描 ~/.hermes/skill-bundles/ 并报告变更
+# 重新扫描 ~/.hades/skill-bundles/ 并报告变更
 hermes bundles reload
 ```
 
@@ -344,9 +344,9 @@ hermes bundles reload
 在以下情况下使用捆绑包：
 - 你总是为某个重复任务配对相同的 skills（`/backend-dev`、`/release-prep`、`/incident-response`）。
 - 你想要比依次输入多个 `/skill` 调用更简洁的心智模型。
-- 你想通过将捆绑包 YAML 提交到共享 dotfiles 仓库并符号链接到 `~/.hermes/skill-bundles/` 来发布团队范围的"任务配置文件"。
+- 你想通过将捆绑包 YAML 提交到共享 dotfiles 仓库并符号链接到 `~/.hades/skill-bundles/` 来发布团队范围的"任务配置文件"。
 
-捆绑包只是一个 YAML 别名——它不会为你安装 skills。Skills 本身必须已经存在（在 `~/.hermes/skills/` 或外部 skill 目录中）。否则捆绑包调用只会跳过缺失的 skills。
+捆绑包只是一个 YAML 别名——它不会为你安装 skills。Skills 本身必须已经存在（在 `~/.hades/skills/` 或外部 skill 目录中）。否则捆绑包调用只会跳过缺失的 skills。
 
 ## Agent 管理的 Skills（skill_manage 工具）
 
@@ -670,7 +670,7 @@ hermes skills install my-org/hermes-skills/deploy-runbook
 
 #### 非默认路径
 
-如果你的 skills 不在 `skills/` 下（当你向现有项目添加 `skills/` 子树时很常见），请编辑 `~/.hermes/.hub/taps.json` 中的 tap 条目：
+如果你的 skills 不在 `skills/` 下（当你向现有项目添加 `skills/` 子树时很常见），请编辑 `~/.hades/.hub/taps.json` 中的 tap 条目：
 
 ```json
 {
@@ -712,18 +712,18 @@ hermes skills tap remove myorg/skills-repo            # remove
 /skills tap remove myorg/skills-repo
 ```
 
-Tap 存储在 `~/.hermes/.hub/taps.json` 中（按需创建）。
+Tap 存储在 `~/.hades/.hub/taps.json` 中（按需创建）。
 
 ## 捆绑 skill 更新（`hermes skills reset`）
 
-Hermes 在仓库的 `skills/` 中附带一组捆绑 skills。在安装时以及每次 `hermes update` 时，同步过程会将这些 skills 复制到 `~/.hermes/skills/` 中，并在 `~/.hermes/skills/.bundled_manifest` 记录一个清单，将每个 skill 名称映射到同步时的内容哈希（**origin hash**）。
+Hermes 在仓库的 `skills/` 中附带一组捆绑 skills。在安装时以及每次 `hermes update` 时，同步过程会将这些 skills 复制到 `~/.hades/skills/` 中，并在 `~/.hades/skills/.bundled_manifest` 记录一个清单，将每个 skill 名称映射到同步时的内容哈希（**origin hash**）。
 
 每次同步时，Hermes 重新计算本地副本的哈希并与 origin hash 比较：
 
 - **未更改** → 可以安全拉取上游变更，复制新的捆绑版本，记录新的 origin hash。
 - **已更改** → 视为**用户修改**并永久跳过，因此你的编辑不会被覆盖。
 
-这种保护机制很好，但有一个棘手的边缘情况。如果你编辑了一个捆绑 skill，后来想通过从 `~/.hermes/hermes-agent/skills/` 复制粘贴来放弃更改并回到捆绑版本，清单仍然保存着上次成功同步时的*旧* origin hash。你新复制粘贴的内容（当前捆绑哈希）与那个过时的 origin hash 不匹配，因此同步继续将其标记为用户修改。
+这种保护机制很好，但有一个棘手的边缘情况。如果你编辑了一个捆绑 skill，后来想通过从 `~/.hades/hermes-agent/skills/` 复制粘贴来放弃更改并回到捆绑版本，清单仍然保存着上次成功同步时的*旧* origin hash。你新复制粘贴的内容（当前捆绑哈希）与那个过时的 origin hash 不匹配，因此同步继续将其标记为用户修改。
 
 `hermes skills reset` 是解决此问题的方法：
 
@@ -748,7 +748,7 @@ hermes skills reset google-workspace --restore --yes
 ```
 
 :::note Profiles
-每个 profile 在其自己的 `HERMES_HOME` 下有自己的 `.bundled_manifest`，因此 `hermes -p coder skills reset <name>` 只影响该 profile。
+每个 profile 在其自己的 `HADES_HOME` 下有自己的 `.bundled_manifest`，因此 `hermes -p coder skills reset <name>` 只影响该 profile。
 :::
 
 ### 斜杠命令（在聊天中）

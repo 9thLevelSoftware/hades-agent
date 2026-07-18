@@ -10,7 +10,7 @@ Mixture of Agents is a virtual model provider. Each named MoA preset appears as 
 
 When you select a MoA preset, the preset's aggregator is the acting model. It is the model that writes the assistant response and emits tool calls. Reference models run first and provide analysis for the aggregator to use.
 
-Use MoA when a hard task benefits from multiple model perspectives but still needs Hermes' normal agent loop: tool calls, follow-up iterations, interrupts, transcript persistence, and the same session context as any other message.
+Use MoA when a hard task benefits from multiple model perspectives but still needs Hades' normal agent loop: tool calls, follow-up iterations, interrupts, transcript persistence, and the same session context as any other message.
 
 ## Select a MoA preset as your model
 
@@ -52,7 +52,7 @@ To **switch** to a MoA preset for the rest of the session, select it from the mo
 For each main model call when provider `moa` is selected, Hermes:
 
 1. resolves the selected preset by name;
-2. runs the configured reference models without tool schemas (they receive only the conversation's user/assistant text — not the Hermes system prompt or tool-call transcript — so reference calls stay cheap and avoid strict-provider rejections);
+2. runs the configured reference models without tool schemas (they receive only the conversation's user/assistant text — not the Hades system prompt or tool-call transcript — so reference calls stay cheap and avoid strict-provider rejections);
 3. appends the reference outputs as private context for the aggregator;
 4. calls the configured aggregator with the normal Hermes tool schema;
 5. treats the aggregator response as the real model response;
@@ -87,7 +87,7 @@ moa:
         model: anthropic/claude-opus-4.8
       # Optional: pin sampling temperatures. When omitted (the default),
       # temperature is NOT sent and each model uses its provider default —
-      # the same behavior as a single-model Hermes agent.
+      # the same behavior as a single-model Hades agent.
       # reference_temperature: 0.6
       # aggregator_temperature: 0.4
       max_tokens: 4096
@@ -137,7 +137,7 @@ Leave it unset (or `0`/blank) to keep the prior uncapped behavior.
 Reference and aggregator slots may also set `reasoning_effort`. Use this when
 you want the same model to contribute at different depths, or when the
 aggregator should think harder than the advisory references. Valid values match
-Hermes' normal reasoning controls: `none`, `minimal`, `low`, `medium`, `high`,
+Hades' normal reasoning controls: `none`, `minimal`, `low`, `medium`, `high`,
 `xhigh`, `max`, and `ultra`.
 
 ```yaml
@@ -191,7 +191,7 @@ Both internal call types cache normally:
 - **Reference models** receive a trimmed, deterministic view of the conversation (system prompt and tool transcript stripped — see the loop above). Because that view is a stable function of the stable history, a reference model's prompt prefix repeats across iterations and caches normally. References are short advisory calls with no tools.
 - **The aggregator** is the acting model. The reference outputs are appended to the *end* of the latest user turn as private guidance. Because that text sits at the tail — below the entire stable prefix (system prompt + prior history) — it does not invalidate any cached prefix: the aggregator gets a cache hit on everything above the injection, and only the freshly appended tail is new. That is exactly how every normal turn behaves, where each new user message is also uncached tail tokens.
 
-So MoA does not sacrifice prompt caching on either call type. Its only real cost is the extra reference calls per iteration — you pay for multiple model perspectives, not for broken caches. The long-lived conversation prefix shared with the rest of Hermes is fully intact.
+So MoA does not sacrifice prompt caching on either call type. Its only real cost is the extra reference calls per iteration — you pay for multiple model perspectives, not for broken caches. The long-lived conversation prefix shared with the rest of Hades is fully intact.
 
 ## Notes
 

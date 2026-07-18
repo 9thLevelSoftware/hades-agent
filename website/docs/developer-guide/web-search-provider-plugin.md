@@ -1,7 +1,7 @@
 ---
 sidebar_position: 12
 title: "Web Search Provider Plugins"
-description: "How to build a web-search/extract/crawl backend plugin for Hermes Agent"
+description: "How to build a web-search/extract/crawl backend plugin for Hades Agent"
 ---
 
 # Building a Web Search Provider Plugin
@@ -17,8 +17,8 @@ Web search is one of several **backend plugins** Hermes supports. The others (wi
 Hermes scans for web-search backends in three places:
 
 1. **Bundled** — `<repo>/plugins/web/<name>/` (auto-loaded with `kind: backend`, always available)
-2. **User** — `~/.hermes/plugins/web/<name>/` (opt-in via `plugins.enabled` or `hermes plugins enable <name>`)
-3. **Pip** — packages declaring a `hermes_agent.plugins` entry point
+2. **User** — `~/.hades/plugins/web/<name>/` (opt-in via `plugins.enabled` or `hermes plugins enable <name>`)
+3. **Pip** — packages declaring a `hades_agent.plugins` entry point
 
 Each plugin's `register(ctx)` function calls `ctx.register_web_search_provider(...)` — that puts the instance into the registry in `agent/web_search_registry.py`. The active provider for each capability is picked by config:
 
@@ -209,7 +209,7 @@ Both `search()` and `extract()` may be `async def` — the dispatcher detects co
 Hermes routes calls to the right provider based on the `supports_*` flags. A common multi-provider setup:
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.hades/config.yaml
 web:
   search_backend: "brave-free"     # search-only, fast, free 2k/mo
   extract_backend: "firecrawl"     # extract + crawl, paid quota
@@ -247,7 +247,7 @@ If your provider wraps a third-party SDK (like DDGS does with the `ddgs` package
 
 ```toml
 # pyproject.toml
-[project.entry-points."hermes_agent.plugins"]
+[project.entry-points."hades_agent.plugins"]
 my-backend-web = "my_backend_web_package"
 ```
 

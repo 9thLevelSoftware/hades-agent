@@ -63,7 +63,7 @@ requires `kanban` in the top-level `toolsets:` list of the profile that owns
 the cron job (there is no `HERMES_KANBAN_TASK` env in a cron session to
 satisfy it otherwise).
 
-Edit that profile's `config.yaml` (default profile: `~/.hermes/config.yaml`):
+Edit that profile's `config.yaml` (default profile: `~/.hades/config.yaml`):
 
 ```yaml
 toolsets: [hermes-cli, kanban]
@@ -131,7 +131,7 @@ Parameters:
 - improvement sources, in priority order:
   1. <e.g. failing or flaky areas in /abs/path/to/target/repo>
   2. <e.g. TODO/FIXME markers under src/>
-  3. <e.g. recent failures in ~/.hermes/cron/output/>
+  3. <e.g. recent failures in ~/.hades/cron/output/>
   4. <e.g. docs that contradict current behavior>
 
 Constraints: <anything off-limits — dirs, files, kinds of change>
@@ -166,7 +166,7 @@ worker's run terminated in `done` or a `review-required:` block — not
 | Open-task cap | review prompt | 3 | Raise only after the loop demonstrably drains. |
 | Per-task runtime | `max_runtime_seconds` on `kanban_create` | unset | Set for known-bounded work; dispatcher SIGTERMs and re-queues on breach. |
 | Worker persistence | `goal_mode=True` on `kanban_create` | off | Judge-driven keep-going until acceptance criteria pass; blocks for review on budget exhaustion. Requires an `auxiliary.goal_judge` model in `config.yaml` — without one the gate is a silent no-op. |
-| Delivery | job `deliver` | — | `local` saves to `~/.hermes/cron/output/` only; any connected platform name delivers there. |
+| Delivery | job `deliver` | — | `local` saves to `~/.hades/cron/output/` only; any connected platform name delivers there. |
 | Reply-to-report (global) | `cron.mirror_delivery` in `config.yaml` | off | Makes every cron delivery a continuable conversation. |
 | Reply-to-report (this job) | `attach_to_session=True` on the `cronjob` tool | off | Per-job override of the global setting. |
 

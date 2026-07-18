@@ -1,6 +1,6 @@
 import re
 
-from hermes_cli.session_export_html import _generate_messages_html
+from hades_cli.session_export_html import _generate_messages_html
 
 
 def test_tool_call_name_is_escaped_in_html_export():

@@ -1,7 +1,7 @@
 ---
 sidebar_position: 12
 title: "Video Generation Provider Plugins"
-description: "How to build a video-generation backend plugin for Hermes Agent"
+description: "How to build a video-generation backend plugin for Hades Agent"
 ---
 
 # Building a Video Generation Provider Plugin
@@ -26,8 +26,8 @@ Edit and extend are intentionally out of scope. Most backends don't support them
 Hermes scans for video-gen backends in three places:
 
 1. **Bundled** — `<repo>/plugins/video_gen/<name>/` (auto-loaded with `kind: backend`)
-2. **User** — `~/.hermes/plugins/video_gen/<name>/` (opt-in via `plugins.enabled`)
-3. **Pip** — packages declaring a `hermes_agent.plugins` entry point
+2. **User** — `~/.hades/plugins/video_gen/<name>/` (opt-in via `plugins.enabled`)
+3. **Pip** — packages declaring a `hades_agent.plugins` entry point
 
 Each plugin's `register(ctx)` function calls `ctx.register_video_gen_provider(...)`. The active provider is picked by `video_gen.provider` in `config.yaml`; `hermes tools` → Video Generation walks users through selection. Unlike `image_generate`, there is no in-tree legacy backend — every provider is a plugin.
 
@@ -224,7 +224,7 @@ Error keys: `success`, `video` (None), `error`, `error_type`, `model`, `prompt`,
 
 ## Where to save artifacts
 
-If your backend returns base64, use `save_b64_video()` to write under `$HERMES_HOME/cache/videos/`. For raw bytes from a follow-up HTTP fetch, use `save_bytes_video()`. Otherwise return the upstream URL directly — the gateway resolves remote URLs on delivery.
+If your backend returns base64, use `save_b64_video()` to write under `$HADES_HOME/cache/videos/`. For raw bytes from a follow-up HTTP fetch, use `save_bytes_video()`. Otherwise return the upstream URL directly — the gateway resolves remote URLs on delivery.
 
 ## Testing
 

@@ -552,7 +552,7 @@ const PLATFORM_INTRO: Record<string, string> = {
   signal:
     'Run a signal-cli REST bridge somewhere reachable, then point Hermes at the URL and the registered phone number.',
   whatsapp:
-    'Start the WhatsApp bridge that ships with Hermes, scan the QR code on first run, then enable the platform.',
+    'Start the WhatsApp bridge that ships with Hades, scan the QR code on first run, then enable the platform.',
   bluebubbles:
     'Run BlueBubbles Server on a Mac with iMessage, expose its API, then point Hermes at the URL with the server password.',
   homeassistant:

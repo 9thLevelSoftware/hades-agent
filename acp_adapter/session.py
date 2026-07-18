@@ -1,6 +1,6 @@
-"""ACP session manager — maps ACP sessions to Hermes AIAgent instances.
+"""ACP session manager — maps ACP sessions to Hades AIAgent instances.
 
-Sessions are persisted to the shared SessionDB (``~/.hermes/state.db``) so they
+Sessions are persisted to the shared SessionDB (``~/.hades/state.db``) so they
 survive process restarts and appear in ``session_search``.  When the editor
 reconnects after idle/restart, the ``load_session`` / ``resume_session`` calls
 find the persisted session in the database and restore the full conversation
@@ -8,7 +8,7 @@ history.
 """
 from __future__ import annotations
 
-from hermes_constants import get_hermes_home
+from hades_constants import get_hades_home
 
 import copy
 import json
@@ -35,7 +35,7 @@ def _translate_acp_cwd(cwd: str) -> str:
     agents, tools, and persisted ACP sessions all agree on the usable workspace.
     Native Linux/macOS keeps the original cwd unchanged.
     """
-    from hermes_constants import translate_cwd_for_wsl_backend
+    from hades_constants import translate_cwd_for_wsl_backend
 
     return translate_cwd_for_wsl_backend(str(cwd))
 
@@ -48,7 +48,7 @@ def _normalize_cwd_for_compare(cwd: str | None) -> str:
 
     # Normalize Windows drive paths into the equivalent WSL mount form so
     # ACP history filters match the same workspace across Windows and WSL.
-    from hermes_constants import windows_path_to_wsl
+    from hades_constants import windows_path_to_wsl
 
     translated = windows_path_to_wsl(expanded)
     if translated is not None:
@@ -132,7 +132,7 @@ def _expand_acp_enabled_toolsets(
 ) -> List[str]:
     """Return ACP toolsets plus explicit MCP server toolsets for this session."""
     expanded: List[str] = []
-    for name in list(toolsets or ["hermes-acp"]):
+    for name in list(toolsets or ["hades-acp"]):
         if name and name not in expanded:
             expanded.append(name)
 
@@ -157,7 +157,7 @@ def _clear_task_cwd(task_id: str) -> None:
 
 @dataclass
 class SessionState:
-    """Tracks per-session state for an ACP-managed Hermes agent."""
+    """Tracks per-session state for an ACP-managed Hades agent."""
 
     session_id: str
     agent: Any  # AIAgent instance
@@ -173,7 +173,7 @@ class SessionState:
 
 
 class SessionManager:
-    """Thread-safe manager for ACP sessions backed by Hermes AIAgent instances.
+    """Thread-safe manager for ACP sessions backed by Hades AIAgent instances.
 
     Sessions are held in-memory for fast access **and** persisted to the
     shared SessionDB so they survive process restarts and are searchable
@@ -187,7 +187,7 @@ class SessionManager:
                            Used by tests. When omitted, a real AIAgent is created
                            using the current Hermes runtime provider configuration.
             db:            Optional SessionDB instance. When omitted, the default
-                           SessionDB (``~/.hermes/state.db``) is lazily created.
+                           SessionDB (``~/.hades/state.db``) is lazily created.
         """
         self._sessions: Dict[str, SessionState] = {}
         self._lock = Lock()
@@ -393,7 +393,7 @@ class SessionManager:
         Returns ``None`` if the DB is unavailable (e.g. import error in a
         minimal test environment).
 
-        Note: we resolve ``HERMES_HOME`` dynamically rather than relying on
+        Note: we resolve ``HADES_HOME`` dynamically rather than relying on
         the module-level ``DEFAULT_DB_PATH`` constant, because that constant
         is evaluated at import time and won't reflect env-var changes made
         later (e.g. by the test fixture ``_isolate_hermes_home``).
@@ -401,8 +401,8 @@ class SessionManager:
         if self._db_instance is not None:
             return self._db_instance
         try:
-            from hermes_state import SessionDB
-            hermes_home = get_hermes_home()
+            from hades_state import SessionDB
+            hermes_home = get_hades_home()
             self._db_instance = SessionDB(db_path=hermes_home / "state.db")
             return self._db_instance
         except Exception:
@@ -538,7 +538,7 @@ class SessionManager:
         # LIVE REPLAY — the loaded list becomes the resumed agent's working
         # conversation. A durable ``user;user`` violation left in state.db would
         # otherwise re-fire the pre-request defensive repair on every request
-        # for the rest of the session (see hermes_state.get_messages_as_conversation).
+        # for the rest of the session (see hades_state.get_messages_as_conversation).
         try:
             history = db.get_messages_as_conversation(
                 session_id, repair_alternation=True
@@ -601,8 +601,8 @@ class SessionManager:
             return self._agent_factory()
 
         from run_agent import AIAgent
-        from hermes_cli.config import load_config
-        from hermes_cli.runtime_provider import resolve_runtime_provider
+        from hades_cli.config import load_config
+        from hades_cli.runtime_provider import resolve_runtime_provider
 
         config = load_config()
         model_cfg = config.get("model")
@@ -623,7 +623,7 @@ class SessionManager:
         kwargs = {
             "platform": "acp",
             "enabled_toolsets": _expand_acp_enabled_toolsets(
-                ["hermes-acp"],
+                ["hades-acp"],
                 mcp_server_names=configured_mcp_servers,
             ),
             "quiet_mode": True,
@@ -651,7 +651,7 @@ class SessionManager:
         agent = AIAgent(**kwargs)
         # Codex app-server sessions are spawned lazily on the first turn. Stamp
         # the ACP workspace onto the agent so the Codex runtime starts from the
-        # editor/session cwd instead of the Hermes daemon's process cwd.
+        # editor/session cwd instead of the Hades daemon's process cwd.
         agent.session_cwd = cwd
         # ACP stdio transport requires stdout to remain protocol-only JSON-RPC.
         # Route any incidental human-readable agent output to stderr instead.

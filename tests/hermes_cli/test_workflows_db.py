@@ -3,9 +3,9 @@ import sqlite3
 
 import pytest
 
-from hermes_cli import workflows_db as wfdb
-from hermes_cli import workflows_dispatcher
-from hermes_cli.workflows_spec import WorkflowSpec
+from hades_cli import workflows_db as wfdb
+from hades_cli import workflows_dispatcher
+from hades_cli.workflows_spec import WorkflowSpec
 
 
 def _demo_spec(*, version: int = 1) -> WorkflowSpec:
@@ -40,9 +40,9 @@ def _required_manual_spec(*, version: int = 1) -> WorkflowSpec:
 
 
 def test_init_db_creates_tables(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     wfdb.init_db()
     with wfdb.connect() as conn:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -64,7 +64,7 @@ def test_init_db_creates_tables(tmp_path, monkeypatch):
 
 
 def test_input_feed_enqueue_evaluates_and_claims_ready_items(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "intake_demo",
@@ -98,7 +98,7 @@ def test_input_feed_enqueue_evaluates_and_claims_ready_items(tmp_path, monkeypat
 
 
 def test_input_feed_materializes_static_input_and_schema_defaults(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "defaults_demo",
@@ -134,7 +134,7 @@ def test_input_feed_materializes_static_input_and_schema_defaults(tmp_path, monk
 
 
 def test_input_feed_dedupe_is_a_database_invariant(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -162,7 +162,7 @@ def test_input_feed_dedupe_is_a_database_invariant(tmp_path, monkeypatch):
 
 
 def test_update_input_item_reports_dedupe_conflict_without_returning_other_item(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "dedupe_update_demo",
@@ -189,7 +189,7 @@ def test_update_input_item_reports_dedupe_conflict_without_returning_other_item(
 
 
 def test_sync_terminal_input_items_marks_blocked_executions_terminal(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -210,7 +210,7 @@ def test_sync_terminal_input_items_marks_blocked_executions_terminal(tmp_path, m
 
 
 def test_claim_next_ready_input_item_requires_write_transaction(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         with pytest.raises(RuntimeError, match="write_txn"):
@@ -218,7 +218,7 @@ def test_claim_next_ready_input_item_requires_write_transaction(tmp_path, monkey
 
 
 def test_update_input_item_rejects_running_items(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -236,7 +236,7 @@ def test_update_input_item_rejects_running_items(tmp_path, monkeypatch):
 
 
 def test_update_input_item_rejects_terminal_items(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -253,7 +253,7 @@ def test_update_input_item_rejects_terminal_items(tmp_path, monkeypatch):
 
 
 def test_set_input_feed_status_rejects_unknown_status(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -295,7 +295,7 @@ def test_init_db_migrates_old_node_runs_kanban_task_id(tmp_path):
 
 
 def test_deploy_definition_and_get_latest(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     spec = _demo_spec(version=1)
     latest = _demo_spec(version=2)
     wfdb.init_db()
@@ -308,21 +308,21 @@ def test_deploy_definition_and_get_latest(tmp_path, monkeypatch):
 
 
 def test_connect_uses_wal_fallback_before_foreign_keys(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     calls = []
 
     def fake_apply_wal(conn, *, db_label="state.db"):
         calls.append((db_label, conn.execute("PRAGMA foreign_keys").fetchone()[0]))
         return "wal"
 
-    monkeypatch.setattr("hermes_state.apply_wal_with_fallback", fake_apply_wal)
+    monkeypatch.setattr("hades_state.apply_wal_with_fallback", fake_apply_wal)
     with wfdb.connect() as conn:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert calls == [("workflows.db", 0)]
 
 
 def test_start_execution_persists_input_context(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "demo", "name": "Demo", "version": 1,
@@ -352,7 +352,7 @@ def test_start_manual_execution_rejects_invalid_trigger_input_before_insert(
     input_data,
     message,
 ):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _required_manual_spec(), created_by="test")
@@ -364,7 +364,7 @@ def test_start_manual_execution_rejects_invalid_trigger_input_before_insert(
 
 
 def test_start_manual_execution_rejects_false_ready_when_before_insert(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "manual_ready",
@@ -387,7 +387,7 @@ def test_start_manual_execution_rejects_false_ready_when_before_insert(tmp_path,
 
 
 def test_start_manual_execution_materializes_static_input_and_defaults(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "manual_defaults",
@@ -410,7 +410,7 @@ def test_start_manual_execution_materializes_static_input_and_defaults(tmp_path,
 
 
 def test_list_definitions_and_append_event(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     spec = WorkflowSpec.model_validate({
         "id": "demo", "name": "Demo", "version": 1,
         "triggers": [{"type": "manual", "id": "manual"}],
@@ -433,7 +433,7 @@ def test_list_definitions_and_append_event(tmp_path, monkeypatch):
 
 
 def test_public_writers_compose_inside_write_txn(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         with wfdb.write_txn(conn):
@@ -446,7 +446,7 @@ def test_public_writers_compose_inside_write_txn(tmp_path, monkeypatch):
 
 
 def test_append_event_rejects_missing_node_run_id(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(), created_by="test")
@@ -456,7 +456,7 @@ def test_append_event_rejects_missing_node_run_id(tmp_path, monkeypatch):
 
 
 def test_append_event_rejects_node_run_from_other_execution(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(), created_by="test")
@@ -475,7 +475,7 @@ def test_append_event_rejects_node_run_from_other_execution(tmp_path, monkeypatc
 
 
 def test_missing_definition_and_execution_raise_keyerror(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         with pytest.raises(KeyError, match="workflow definition not found"):
@@ -487,7 +487,7 @@ def test_missing_definition_and_execution_raise_keyerror(tmp_path, monkeypatch):
 
 
 def test_deploy_same_version_different_checksum_requires_bump(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     changed = _demo_spec(version=1).model_copy(update={"name": "Demo Changed"})
     with wfdb.connect() as conn:
@@ -497,7 +497,7 @@ def test_deploy_same_version_different_checksum_requires_bump(tmp_path, monkeypa
 
 
 def test_deploy_auto_bump_redeploys_as_next_version(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     changed = _demo_spec(version=1).model_copy(update={"name": "Demo Changed"})
     with wfdb.connect() as conn:
@@ -514,7 +514,7 @@ def test_deploy_auto_bump_redeploys_as_next_version(tmp_path, monkeypatch):
 
 
 def test_disabled_definition_blocks_new_runs(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     disabled = _demo_spec(version=1).model_copy(update={"enabled": False})
     with wfdb.connect() as conn:
@@ -525,7 +525,7 @@ def test_disabled_definition_blocks_new_runs(tmp_path, monkeypatch):
 
 
 def test_set_definition_enabled_toggles_runs_and_schedules(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "sched_demo", "name": "Sched Demo", "version": 1,
@@ -559,7 +559,7 @@ def test_set_definition_enabled_toggles_runs_and_schedules(tmp_path, monkeypatch
 
 
 def test_cancel_terminalizes_inflight_node_runs(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(), created_by="test")
@@ -597,7 +597,7 @@ def test_cancel_terminalizes_inflight_node_runs(tmp_path, monkeypatch):
 
 
 def test_list_executions_newest_first_with_limit(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(), created_by="test")
@@ -616,7 +616,7 @@ def test_list_executions_newest_first_with_limit(tmp_path, monkeypatch):
 
 
 def test_list_events_returns_timeline_and_raises_on_unknown(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(), created_by="test")
@@ -637,7 +637,7 @@ def test_list_events_returns_timeline_and_raises_on_unknown(tmp_path, monkeypatc
 
 
 def test_save_draft_round_trips_spec_and_overwrites_existing(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = _demo_spec(version=1)
     with wfdb.connect() as conn:
@@ -654,7 +654,7 @@ def test_save_draft_round_trips_spec_and_overwrites_existing(tmp_path, monkeypat
 
 
 def test_delete_draft_returns_true_when_present_and_false_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = _demo_spec(version=1)
     with wfdb.connect() as conn:
@@ -665,7 +665,7 @@ def test_delete_draft_returns_true_when_present_and_false_when_missing(tmp_path,
 
 
 def test_draft_publish_is_immutable_and_conflict_checked(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = _demo_spec().model_copy(update={"version": 1})
     with wfdb.connect() as conn:
@@ -685,7 +685,7 @@ def test_draft_publish_is_immutable_and_conflict_checked(tmp_path, monkeypatch):
 
 
 def test_draft_publish_stale_expected_version_raises_conflict(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
@@ -699,7 +699,7 @@ def test_draft_publish_stale_expected_version_raises_conflict(tmp_path, monkeypa
 
 
 def test_publish_draft_clears_draft_after_successful_publish(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = _demo_spec(version=1)
     with wfdb.connect() as conn:
@@ -709,7 +709,7 @@ def test_publish_draft_clears_draft_after_successful_publish(tmp_path, monkeypat
 
 
 def test_publish_draft_rolls_back_definition_when_conflict(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
@@ -732,7 +732,7 @@ def test_publish_draft_rolls_back_definition_when_conflict(tmp_path, monkeypatch
 
 
 def test_set_workflow_archived_hides_definition_from_summary_by_default(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
@@ -745,7 +745,7 @@ def test_set_workflow_archived_hides_definition_from_summary_by_default(tmp_path
 
 
 def test_list_workflow_summaries_exposes_draft_archive_and_exec_status(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "demo", "name": "Demo", "version": 1,
@@ -776,7 +776,7 @@ def test_list_workflow_summaries_exposes_draft_archive_and_exec_status(tmp_path,
 
 
 def test_delete_definition_without_history_succeeds_and_removes_row(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
@@ -785,7 +785,7 @@ def test_delete_definition_without_history_succeeds_and_removes_row(tmp_path, mo
 
 
 def test_delete_definition_with_history_raises_conflict_unless_purge(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
@@ -799,7 +799,7 @@ def test_delete_definition_with_history_raises_conflict_unless_purge(tmp_path, m
 
 
 def test_open_feed_pause_resume_close_lifecycle(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -823,7 +823,7 @@ def test_open_feed_pause_resume_close_lifecycle(tmp_path, monkeypatch):
 
 
 def test_closed_feed_is_terminal_and_rejects_writes(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -836,7 +836,7 @@ def test_closed_feed_is_terminal_and_rejects_writes(tmp_path, monkeypatch):
 
 
 def test_paused_feed_rejects_item_writes(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -847,7 +847,7 @@ def test_paused_feed_rejects_item_writes(tmp_path, monkeypatch):
 
 
 def test_paused_feed_rejects_item_updates(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -859,7 +859,7 @@ def test_paused_feed_rejects_item_updates(tmp_path, monkeypatch):
 
 
 def test_set_input_feed_status_idempotent_noop_returns_feed(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -881,7 +881,7 @@ def _second_spec(*, version: int = 1) -> WorkflowSpec:
 
 
 def test_list_executions_filters_by_status(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(), created_by="test")
@@ -903,7 +903,7 @@ def test_list_executions_filters_by_status(tmp_path, monkeypatch):
 
 
 def test_list_executions_filters_by_version(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
@@ -921,7 +921,7 @@ def test_list_executions_filters_by_version(tmp_path, monkeypatch):
 
 
 def test_list_executions_filters_by_trigger_id(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "multi", "name": "Multi", "version": 1,
@@ -942,7 +942,7 @@ def test_list_executions_filters_by_trigger_id(tmp_path, monkeypatch):
 
 
 def test_list_executions_before_cursor_pages_newest_first(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(), created_by="test")
@@ -957,7 +957,7 @@ def test_list_executions_before_cursor_pages_newest_first(tmp_path, monkeypatch)
 
 
 def test_list_executions_combined_filters(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
@@ -974,7 +974,7 @@ def test_list_executions_combined_filters(tmp_path, monkeypatch):
 
 
 def test_get_execution_detail_returns_execution_node_runs_and_events(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _demo_spec(), created_by="test")

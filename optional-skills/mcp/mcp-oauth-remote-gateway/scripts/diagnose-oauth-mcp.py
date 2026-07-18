@@ -19,7 +19,7 @@ Branches printed at the end:
 Usage:
   python3 diagnose-oauth-mcp.py <server_name> [--mcp-url URL] [--token-endpoint URL] [--write]
 
-  <server_name> matches the files in $HERMES_HOME/mcp-tokens/<server>.json etc.
+  <server_name> matches the files in $HADES_HOME/mcp-tokens/<server>.json etc.
   If --mcp-url / --token-endpoint are omitted, they're read from the token's
   `resource` field and the AS .well-known metadata respectively.
 
@@ -31,12 +31,12 @@ UA = "python-httpx/0.27"  # CF blocks default urllib UA on many providers
 
 
 def _hermes_home():
-    # Prefer Hermes' own resolver (profile-safe); fall back to env then ~/.hermes.
+    # Prefer Hades' own resolver (profile-safe); fall back to env then ~/.hades.
     try:
-        from hermes_constants import get_hermes_home
-        return str(get_hermes_home())
+        from hades_constants import get_hades_home
+        return str(get_hades_home())
     except Exception:
-        return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        return os.environ.get("HADES_HOME") or os.path.expanduser("~/.hades")
 
 
 def _tokens_dir():

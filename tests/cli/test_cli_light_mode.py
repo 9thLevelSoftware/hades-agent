@@ -32,38 +32,38 @@ class TestLightModeDetection:
     def test_hermes_light_env_false_forces_dark(self, cli_mod, monkeypatch):
         monkeypatch.setenv("HERMES_LIGHT", "0")
         # Also blank out other signals so nothing else flips it light.
-        monkeypatch.delenv("HERMES_TUI_LIGHT", raising=False)
-        monkeypatch.delenv("HERMES_TUI_THEME", raising=False)
-        monkeypatch.delenv("HERMES_TUI_BACKGROUND", raising=False)
+        monkeypatch.delenv("HADES_TUI_LIGHT", raising=False)
+        monkeypatch.delenv("HADES_TUI_THEME", raising=False)
+        monkeypatch.delenv("HADES_TUI_BACKGROUND", raising=False)
         monkeypatch.delenv("COLORFGBG", raising=False)
         assert cli_mod._detect_light_mode() is False
 
     def test_theme_hint_light(self, cli_mod, monkeypatch):
         monkeypatch.delenv("HERMES_LIGHT", raising=False)
-        monkeypatch.delenv("HERMES_TUI_LIGHT", raising=False)
-        monkeypatch.setenv("HERMES_TUI_THEME", "light")
+        monkeypatch.delenv("HADES_TUI_LIGHT", raising=False)
+        monkeypatch.setenv("HADES_TUI_THEME", "light")
         assert cli_mod._detect_light_mode() is True
 
     def test_background_hex_hint_light(self, cli_mod, monkeypatch):
         monkeypatch.delenv("HERMES_LIGHT", raising=False)
-        monkeypatch.delenv("HERMES_TUI_LIGHT", raising=False)
-        monkeypatch.delenv("HERMES_TUI_THEME", raising=False)
-        monkeypatch.setenv("HERMES_TUI_BACKGROUND", "#FFFFFF")
+        monkeypatch.delenv("HADES_TUI_LIGHT", raising=False)
+        monkeypatch.delenv("HADES_TUI_THEME", raising=False)
+        monkeypatch.setenv("HADES_TUI_BACKGROUND", "#FFFFFF")
         assert cli_mod._detect_light_mode() is True
 
     def test_background_hex_hint_dark(self, cli_mod, monkeypatch):
         monkeypatch.delenv("HERMES_LIGHT", raising=False)
-        monkeypatch.delenv("HERMES_TUI_LIGHT", raising=False)
-        monkeypatch.delenv("HERMES_TUI_THEME", raising=False)
-        monkeypatch.setenv("HERMES_TUI_BACKGROUND", "#1a1a2e")
+        monkeypatch.delenv("HADES_TUI_LIGHT", raising=False)
+        monkeypatch.delenv("HADES_TUI_THEME", raising=False)
+        monkeypatch.setenv("HADES_TUI_BACKGROUND", "#1a1a2e")
         monkeypatch.delenv("COLORFGBG", raising=False)
         assert cli_mod._detect_light_mode() is False
 
     def test_colorfgbg_light_bg_slot(self, cli_mod, monkeypatch):
         monkeypatch.delenv("HERMES_LIGHT", raising=False)
-        monkeypatch.delenv("HERMES_TUI_LIGHT", raising=False)
-        monkeypatch.delenv("HERMES_TUI_THEME", raising=False)
-        monkeypatch.delenv("HERMES_TUI_BACKGROUND", raising=False)
+        monkeypatch.delenv("HADES_TUI_LIGHT", raising=False)
+        monkeypatch.delenv("HADES_TUI_THEME", raising=False)
+        monkeypatch.delenv("HADES_TUI_BACKGROUND", raising=False)
         monkeypatch.setenv("COLORFGBG", "0;15")  # bg slot 15 = light
         assert cli_mod._detect_light_mode() is True
 
@@ -140,14 +140,14 @@ class TestSkinConfigHook:
     """
 
     def test_hook_installed(self, cli_mod):
-        from hermes_cli.skin_engine import SkinConfig
+        from hades_cli.skin_engine import SkinConfig
 
         assert getattr(SkinConfig, "_hermes_light_mode_hook_installed", False) is True
 
     def test_hook_is_idempotent(self, cli_mod):
         # Calling the installer twice must not double-wrap (the marker
         # attribute is the guard).
-        from hermes_cli.skin_engine import SkinConfig
+        from hades_cli.skin_engine import SkinConfig
 
         before = SkinConfig.get_color
         cli_mod._install_skin_light_mode_hook()
@@ -157,7 +157,7 @@ class TestSkinConfigHook:
     def test_skin_color_remaps_through_wrapper_in_light_mode(
         self, cli_mod, monkeypatch
     ):
-        from hermes_cli.skin_engine import SkinConfig
+        from hades_cli.skin_engine import SkinConfig
 
         cli_mod._LIGHT_MODE_CACHE = True
         skin = SkinConfig(
@@ -169,7 +169,7 @@ class TestSkinConfigHook:
         assert skin.get_color("response_border") == "#9A6B00"
 
     def test_skin_color_passthrough_in_dark_mode(self, cli_mod, monkeypatch):
-        from hermes_cli.skin_engine import SkinConfig
+        from hades_cli.skin_engine import SkinConfig
 
         cli_mod._LIGHT_MODE_CACHE = False
         skin = SkinConfig(name="test", colors={"banner_text": "#FFF8DC"})

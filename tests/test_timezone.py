@@ -17,18 +17,18 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-import hermes_time
+import hades_time
 
 
 def _reset_hermes_time_cache():
     """Reset the hermes_time module cache (replacement for removed reset_cache)."""
-    hermes_time._cached_tz = None
-    hermes_time._cached_tz_name = None
-    hermes_time._cache_resolved = False
+    hades_time._cached_tz = None
+    hades_time._cached_tz_name = None
+    hades_time._cache_resolved = False
 
 
 # =========================================================================
-# hermes_time.now() — core helper
+# hades_time.now() — core helper
 # =========================================================================
 
 class TestHermesTimeNow:
@@ -43,8 +43,8 @@ class TestHermesTimeNow:
 
     def test_valid_timezone_applies(self):
         """With a valid IANA timezone, now() returns time in that zone."""
-        os.environ["HERMES_TIMEZONE"] = "Asia/Kolkata"
-        result = hermes_time.now()
+        os.environ["HADES_TIMEZONE"] = "Asia/Kolkata"
+        result = hades_time.now()
         assert result.tzinfo is not None
         # IST is UTC+5:30
         offset = result.utcoffset()
@@ -52,14 +52,14 @@ class TestHermesTimeNow:
 
     def test_utc_timezone(self):
         """UTC timezone works."""
-        os.environ["HERMES_TIMEZONE"] = "UTC"
-        result = hermes_time.now()
+        os.environ["HADES_TIMEZONE"] = "UTC"
+        result = hades_time.now()
         assert result.utcoffset() == timedelta(0)
 
     def test_us_eastern(self):
         """US/Eastern timezone works (DST-aware zone)."""
-        os.environ["HERMES_TIMEZONE"] = "America/New_York"
-        result = hermes_time.now()
+        os.environ["HADES_TIMEZONE"] = "America/New_York"
+        result = hades_time.now()
         assert result.tzinfo is not None
         # Offset is -5h or -4h depending on DST
         offset_hours = result.utcoffset().total_seconds() / 3600
@@ -67,9 +67,9 @@ class TestHermesTimeNow:
 
     def test_invalid_timezone_falls_back(self, caplog):
         """Invalid timezone logs warning and falls back to server-local."""
-        os.environ["HERMES_TIMEZONE"] = "Mars/Olympus_Mons"
+        os.environ["HADES_TIMEZONE"] = "Mars/Olympus_Mons"
         with caplog.at_level(logging.WARNING, logger="hermes_time"):
-            result = hermes_time.now()
+            result = hades_time.now()
         assert result.tzinfo is not None  # Still tz-aware (server-local)
         assert "Invalid timezone" in caplog.text
         assert "Mars/Olympus_Mons" in caplog.text
@@ -77,13 +77,13 @@ class TestHermesTimeNow:
     def test_empty_timezone_uses_local(self):
         """No timezone configured → server-local time (still tz-aware)."""
         os.environ.pop("HERMES_TIMEZONE", None)
-        result = hermes_time.now()
+        result = hades_time.now()
         assert result.tzinfo is not None
 
     def test_format_unchanged(self):
         """Timestamp formatting matches original strftime pattern."""
-        os.environ["HERMES_TIMEZONE"] = "Asia/Kolkata"
-        result = hermes_time.now()
+        os.environ["HADES_TIMEZONE"] = "Asia/Kolkata"
+        result = hades_time.now()
         formatted = result.strftime("%A, %B %d, %Y %I:%M %p")
         # Should produce something like "Monday, March 03, 2026 05:30 PM"
         assert len(formatted) > 10
@@ -92,14 +92,14 @@ class TestHermesTimeNow:
 
     def test_cache_invalidation(self):
         """Changing env var + reset_cache picks up new timezone."""
-        os.environ["HERMES_TIMEZONE"] = "UTC"
+        os.environ["HADES_TIMEZONE"] = "UTC"
         _reset_hermes_time_cache()
-        r1 = hermes_time.now()
+        r1 = hades_time.now()
         assert r1.utcoffset() == timedelta(0)
 
-        os.environ["HERMES_TIMEZONE"] = "Asia/Kolkata"
+        os.environ["HADES_TIMEZONE"] = "Asia/Kolkata"
         _reset_hermes_time_cache()
-        r2 = hermes_time.now()
+        r2 = hades_time.now()
         assert r2.utcoffset() == timedelta(hours=5, minutes=30)
 
 
@@ -114,19 +114,19 @@ class TestGetTimezone:
         os.environ.pop("HERMES_TIMEZONE", None)
 
     def test_returns_zoneinfo_for_valid(self):
-        os.environ["HERMES_TIMEZONE"] = "Europe/London"
-        tz = hermes_time.get_timezone()
+        os.environ["HADES_TIMEZONE"] = "Europe/London"
+        tz = hades_time.get_timezone()
         assert isinstance(tz, ZoneInfo)
         assert str(tz) == "Europe/London"
 
     def test_returns_none_for_empty(self):
         os.environ.pop("HERMES_TIMEZONE", None)
-        tz = hermes_time.get_timezone()
+        tz = hades_time.get_timezone()
         assert tz is None
 
     def test_returns_none_for_invalid(self):
-        os.environ["HERMES_TIMEZONE"] = "Not/A/Timezone"
-        tz = hermes_time.get_timezone()
+        os.environ["HADES_TIMEZONE"] = "Not/A/Timezone"
+        tz = hades_time.get_timezone()
         assert tz is None
 
 
@@ -166,7 +166,7 @@ class TestCodeExecutionTZ:
         (each execute_code spawns a real Python subprocess ~3s).
         """
         import json as _json
-        os.environ["HERMES_TIMEZONE"] = "Asia/Kolkata"
+        os.environ["HADES_TIMEZONE"] = "Asia/Kolkata"
 
         # One subprocess, three things checked:
         #   1) TZ is injected as "Asia/Kolkata"
@@ -174,7 +174,7 @@ class TestCodeExecutionTZ:
         probe = (
             'import os; '
             'print("TZ=" + os.environ.get("TZ", "NOT_SET")); '
-            'print("HERMES_TIMEZONE=" + os.environ.get("HERMES_TIMEZONE", "NOT_SET"))'
+            'print("HERMES_TIMEZONE=" + os.environ.get("HADES_TIMEZONE", "NOT_SET"))'
         )
         with patch("model_tools.handle_function_call", side_effect=self._mock_handle):
             result = _json.loads(self._execute_code(
@@ -219,7 +219,7 @@ class TestCronTimezone:
 
     def test_parse_schedule_duration_uses_tz_aware_now(self):
         """parse_schedule('30m') should produce a tz-aware run_at."""
-        os.environ["HERMES_TIMEZONE"] = "Asia/Kolkata"
+        os.environ["HADES_TIMEZONE"] = "Asia/Kolkata"
         from cron.jobs import parse_schedule
         result = parse_schedule("30m")
         run_at = datetime.fromisoformat(result["run_at"])
@@ -228,7 +228,7 @@ class TestCronTimezone:
 
     def test_compute_next_run_tz_aware(self):
         """compute_next_run returns tz-aware timestamps."""
-        os.environ["HERMES_TIMEZONE"] = "Asia/Kolkata"
+        os.environ["HADES_TIMEZONE"] = "Asia/Kolkata"
         from cron.jobs import compute_next_run
         schedule = {"kind": "interval", "minutes": 60}
         result = compute_next_run(schedule)
@@ -242,7 +242,7 @@ class TestCronTimezone:
         monkeypatch.setattr(jobs_module, "JOBS_FILE", tmp_path / "cron" / "jobs.json")
         monkeypatch.setattr(jobs_module, "OUTPUT_DIR", tmp_path / "cron" / "output")
 
-        os.environ["HERMES_TIMEZONE"] = "Asia/Kolkata"
+        os.environ["HADES_TIMEZONE"] = "Asia/Kolkata"
         _reset_hermes_time_cache()
 
         # Create a job with a NAIVE past timestamp (simulating pre-tz data)
@@ -267,7 +267,7 @@ class TestCronTimezone:
         """
         from cron.jobs import _ensure_aware
 
-        os.environ["HERMES_TIMEZONE"] = "Asia/Kolkata"
+        os.environ["HADES_TIMEZONE"] = "Asia/Kolkata"
         _reset_hermes_time_cache()
 
         # Create a naive datetime — will be interpreted as system-local time
@@ -288,24 +288,24 @@ class TestCronTimezone:
         )
 
     def test_ensure_aware_normalizes_aware_to_hermes_tz(self):
-        """Already-aware datetimes should be normalized to Hermes tz."""
+        """Already-aware datetimes should be normalized to Hades tz."""
         from cron.jobs import _ensure_aware
 
-        os.environ["HERMES_TIMEZONE"] = "Asia/Kolkata"
+        os.environ["HADES_TIMEZONE"] = "Asia/Kolkata"
         _reset_hermes_time_cache()
 
         # Create an aware datetime in UTC
         utc_dt = datetime(2026, 3, 11, 15, 0, 0, tzinfo=timezone.utc)
         result = _ensure_aware(utc_dt)
 
-        # Must be in Hermes tz (Kolkata) but same absolute instant
+        # Must be in Hades tz (Kolkata) but same absolute instant
         kolkata = ZoneInfo("Asia/Kolkata")
         assert result.utctimetuple()[:5] == (2026, 3, 11, 15, 0)
         expected_local = utc_dt.astimezone(kolkata)
         assert result == expected_local
 
     def test_ensure_aware_due_job_not_skipped_when_system_ahead(self, tmp_path, monkeypatch):
-        """Reproduce the actual bug: system tz ahead of Hermes tz caused
+        """Reproduce the actual bug: system tz ahead of Hades tz caused
         overdue jobs to appear as not-yet-due.
 
         Scenario: system is Asia/Kolkata (UTC+5:30), Hermes is UTC.
@@ -317,7 +317,7 @@ class TestCronTimezone:
         monkeypatch.setattr(jobs_module, "JOBS_FILE", tmp_path / "cron" / "jobs.json")
         monkeypatch.setattr(jobs_module, "OUTPUT_DIR", tmp_path / "cron" / "output")
 
-        os.environ["HERMES_TIMEZONE"] = "UTC"
+        os.environ["HADES_TIMEZONE"] = "UTC"
         _reset_hermes_time_cache()
 
         from cron.jobs import create_job, load_jobs, save_jobs, get_due_jobs
@@ -348,7 +348,7 @@ class TestCronTimezone:
         # Use a Hermes timezone far behind UTC so that the numeric wall time
         # of the naive timestamp exceeds _hermes_now's wall time — this would
         # have caused a false "not due" with the old replace(tzinfo=...) approach.
-        os.environ["HERMES_TIMEZONE"] = "Pacific/Midway"  # UTC-11
+        os.environ["HADES_TIMEZONE"] = "Pacific/Midway"  # UTC-11
         _reset_hermes_time_cache()
 
         from cron.jobs import create_job, load_jobs, save_jobs, get_due_jobs
@@ -362,7 +362,7 @@ class TestCronTimezone:
 
         due = get_due_jobs()
         assert len(due) == 1, (
-            "Naive past timestamp should be due regardless of Hermes timezone"
+            "Naive past timestamp should be due regardless of Hades timezone"
         )
 
     def test_create_job_stores_tz_aware_timestamps(self, tmp_path, monkeypatch):
@@ -372,7 +372,7 @@ class TestCronTimezone:
         monkeypatch.setattr(jobs_module, "JOBS_FILE", tmp_path / "cron" / "jobs.json")
         monkeypatch.setattr(jobs_module, "OUTPUT_DIR", tmp_path / "cron" / "output")
 
-        os.environ["HERMES_TIMEZONE"] = "US/Eastern"
+        os.environ["HADES_TIMEZONE"] = "US/Eastern"
         _reset_hermes_time_cache()
 
         from cron.jobs import create_job

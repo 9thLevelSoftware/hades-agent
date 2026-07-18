@@ -43,8 +43,8 @@ class TestHandleFunctionCall:
     def test_tool_hooks_receive_session_and_tool_call_ids(self):
         with (
             patch("model_tools.registry.dispatch", return_value='{"ok":true}'),
-            patch("hermes_cli.plugins.has_hook", return_value=True),
-            patch("hermes_cli.plugins.invoke_hook") as mock_invoke_hook,
+            patch("hades_cli.plugins.has_hook", return_value=True),
+            patch("hades_cli.plugins.invoke_hook") as mock_invoke_hook,
         ):
             result = handle_function_call(
                 "web_search",
@@ -131,8 +131,8 @@ class TestHandleFunctionCall:
         """
         with (
             patch("model_tools.registry.dispatch", return_value='{"ok":true}'),
-            patch("hermes_cli.plugins.has_hook", return_value=True),
-            patch("hermes_cli.plugins.invoke_hook") as mock_invoke_hook,
+            patch("hades_cli.plugins.has_hook", return_value=True),
+            patch("hades_cli.plugins.invoke_hook") as mock_invoke_hook,
         ):
             handle_function_call("web_search", {"q": "test"}, task_id="t1")
 
@@ -161,8 +161,8 @@ class TestHandleFunctionCall:
         """
         with (
             patch("model_tools.registry.dispatch", return_value='{"ok":true}'),
-            patch("hermes_cli.plugins.has_hook", return_value=False),
-            patch("hermes_cli.plugins.invoke_hook") as mock_invoke_hook,
+            patch("hades_cli.plugins.has_hook", return_value=False),
+            patch("hades_cli.plugins.invoke_hook") as mock_invoke_hook,
         ):
             result = handle_function_call("web_search", {"q": "test"}, task_id="t1")
 
@@ -198,14 +198,14 @@ class TestHandleFunctionCall:
             (),
             {"_middleware": {"tool_request": [fake_invoke_middleware], "tool_execution": [execution_middleware]}},
         )()
-        monkeypatch.setattr("hermes_cli.plugins.invoke_middleware", fake_invoke_middleware)
-        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+        monkeypatch.setattr("hades_cli.plugins.invoke_middleware", fake_invoke_middleware)
+        monkeypatch.setattr("hades_cli.plugins.get_plugin_manager", lambda: manager)
         hook_calls = []
         monkeypatch.setattr(
-            "hermes_cli.plugins.invoke_hook",
+            "hades_cli.plugins.invoke_hook",
             lambda hook_name, **kwargs: hook_calls.append((hook_name, kwargs)) or [],
         )
-        monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
+        monkeypatch.setattr("hades_cli.plugins.has_hook", lambda name: True)
         monkeypatch.setattr("model_tools.registry.dispatch", fake_dispatch)
 
         result = json.loads(
@@ -247,7 +247,7 @@ class TestHandleFunctionCall:
 
     def test_no_execution_middleware_does_not_hash_arguments(self, monkeypatch):
         manager = type("Manager", (), {"_middleware": {"tool_execution": []}})()
-        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+        monkeypatch.setattr("hades_cli.plugins.get_plugin_manager", lambda: manager)
         monkeypatch.setattr(
             registry,
             "operation_key",
@@ -310,8 +310,8 @@ class TestPreToolCallBlocking:
             dispatch_called = True
             raise AssertionError("dispatch should not run when blocked")
 
-        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
-        monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
+        monkeypatch.setattr("hades_cli.plugins.invoke_hook", fake_invoke_hook)
+        monkeypatch.setattr("hades_cli.plugins.has_hook", lambda name: True)
         monkeypatch.setattr("model_tools.registry.dispatch", fake_dispatch)
 
         result = json.loads(handle_function_call("read_file", {"path": "test.txt"}, task_id="t1"))
@@ -331,7 +331,7 @@ class TestPreToolCallBlocking:
                 return [{"action": "block", "message": "Blocked"}]
             return []
 
-        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
+        monkeypatch.setattr("hades_cli.plugins.invoke_hook", fake_invoke_hook)
         monkeypatch.setattr("model_tools.registry.dispatch",
                             lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not run")))
         monkeypatch.setattr("tools.file_tools.notify_other_tool_call",
@@ -352,7 +352,7 @@ class TestPreToolCallBlocking:
                 ]
             return []
 
-        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
+        monkeypatch.setattr("hades_cli.plugins.invoke_hook", fake_invoke_hook)
         monkeypatch.setattr("model_tools.registry.dispatch",
                             lambda *a, **kw: json.dumps({"ok": True}))
 
@@ -374,8 +374,8 @@ class TestPreToolCallBlocking:
             hook_calls.append(hook_name)
             return []
 
-        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
-        monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
+        monkeypatch.setattr("hades_cli.plugins.invoke_hook", fake_invoke_hook)
+        monkeypatch.setattr("hades_cli.plugins.has_hook", lambda name: True)
         monkeypatch.setattr("model_tools.registry.dispatch",
                             lambda *a, **kw: json.dumps({"ok": True}))
 
@@ -405,7 +405,7 @@ class TestPreToolCallBlocking:
         did before the fix (observer plugins were seeing every tool
         execution logged twice).
         """
-        from hermes_cli.plugins import get_pre_tool_call_block_message
+        from hades_cli.plugins import get_pre_tool_call_block_message
 
         hook_calls = []
 
@@ -413,7 +413,7 @@ class TestPreToolCallBlocking:
             hook_calls.append(hook_name)
             return []
 
-        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
+        monkeypatch.setattr("hades_cli.plugins.invoke_hook", fake_invoke_hook)
         monkeypatch.setattr("model_tools.registry.dispatch",
                             lambda *a, **kw: json.dumps({"ok": True}))
 
@@ -592,12 +592,12 @@ class TestDisabledToolsetsPlatformBundle:
     def test_disabling_bundle_removes_platform_tools_but_keeps_core(self):
         """Disabling hermes-discord (when enabled) removes discord/discord_admin
         from the resolved delta but keeps core tools — via bundle_non_core_tools."""
-        from toolsets import bundle_non_core_tools, _HERMES_CORE_TOOLS
+        from toolsets import bundle_non_core_tools, _HADES_CORE_TOOLS
 
         delta = bundle_non_core_tools("hermes-yuanbao")
         # The delta is the bundle's platform-specific tools, NOT core.
         assert "yb_send_dm" in delta
-        assert not (delta & set(_HERMES_CORE_TOOLS)), "core tools must not be in the removal delta"
+        assert not (delta & set(_HADES_CORE_TOOLS)), "core tools must not be in the removal delta"
 
     def test_bundle_non_core_tools_unknown_falls_back(self):
         """An unknown/garbage bundle name falls back to full resolution (best effort)."""

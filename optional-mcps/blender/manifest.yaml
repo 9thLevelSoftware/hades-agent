@@ -11,7 +11,7 @@ source: https://github.com/ahujasid/blender-mcp
 #   1. This stdio server (uvx blender-mcp), which Hermes launches.
 #   2. An addon (addon.py) running inside Blender that opens a local command
 #      socket on 127.0.0.1:9876. The stdio server relays to it.
-# There is nothing to git-clone on the Hermes side — uvx resolves the package —
+# There is nothing to git-clone on the Hades side — uvx resolves the package —
 # so no install block. The in-Blender addon setup is covered in post_install.
 #
 # Why not Blender's official MCP (blender.org/lab): it requires Blender 5.1+

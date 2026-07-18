@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from hermes_state import SessionDB
+from hades_state import SessionDB
 
 
 def _process_start_time(pid: int) -> Optional[int]:

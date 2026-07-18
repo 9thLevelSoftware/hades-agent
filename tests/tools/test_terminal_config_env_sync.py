@@ -19,7 +19,7 @@ for ``docker_run_as_host_user`` (gateway and CLI maps) and once for
 This test guards against future drift by extracting all three maps via source
 inspection and asserting they all bridge the same set of writable
 ``terminal.*`` keys.  Source inspection (rather than importing the live
-dicts) keeps the test independent of the user's ~/.hermes/config.yaml and
+dicts) keeps the test independent of the user's ~/.hades/config.yaml and
 mirrors the pattern used in tests/hermes_cli/test_config_drift.py.
 """
 
@@ -96,7 +96,7 @@ def _save_config_env_sync_keys() -> set[str]:
     source of truth that the config-set path uses, rather than a string
     literal that the consolidation removed.
     """
-    from hermes_cli import config as hc_config
+    from hades_cli import config as hc_config
     # set_config_value bridges every TERMINAL_CONFIG_ENV_MAP key except
     # terminal.cwd (see the ``key != "terminal.cwd"`` guard in
     # set_config_value); mirror that exclusion here.

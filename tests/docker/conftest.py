@@ -19,7 +19,7 @@ from collections.abc import Iterator
 
 import pytest
 
-IMAGE_TAG = os.environ.get("HERMES_TEST_IMAGE", "hermes-agent-harness:latest")
+IMAGE_TAG = os.environ.get("HADES_TEST_IMAGE", "hermes-agent-harness:latest")
 
 
 def _docker_available() -> bool:
@@ -55,7 +55,7 @@ def built_image() -> str:
     Override with ``HERMES_TEST_IMAGE`` env var to point at a pre-built
     image (faster local iteration).
     """
-    if os.environ.get("HERMES_TEST_IMAGE"):
+    if os.environ.get("HADES_TEST_IMAGE"):
         return IMAGE_TAG
     repo_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", ".."),

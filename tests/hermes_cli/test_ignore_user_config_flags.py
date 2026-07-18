@@ -4,7 +4,7 @@ Ported from openai/codex#18646 (`feat: add --ignore-user-config and --ignore-rul
 Codex's flags fully isolate a run from user-level config and exec-policy .rules
 files. In Hermes the equivalent isolation is:
 
-* ``--ignore-user-config`` → skip ``~/.hermes/config.yaml`` in ``load_cli_config()``
+* ``--ignore-user-config`` → skip ``~/.hades/config.yaml`` in ``load_cli_config()``
   (credentials in ``.env`` are still loaded).
 * ``--ignore-rules`` → skip AGENTS.md / SOUL.md / .cursorrules auto-injection
   and persistent memory (maps to ``AIAgent(skip_context_files=True,
@@ -135,7 +135,7 @@ class TestIgnoreRulesEnvGate:
         obj = object.__new__(cli.HermesCLI)
         # Replicate the exact logic from cli.py HermesCLI.__init__:
         ignore_rules = False  # constructor default
-        obj.ignore_rules = ignore_rules or os.environ.get("HERMES_IGNORE_RULES") == "1"
+        obj.ignore_rules = ignore_rules or os.environ.get("HADES_IGNORE_RULES") == "1"
 
         assert obj.ignore_rules is True
 
@@ -144,7 +144,7 @@ class TestIgnoreRulesEnvGate:
         import cli
         obj = object.__new__(cli.HermesCLI)
         ignore_rules = True  # constructor argument
-        obj.ignore_rules = ignore_rules or os.environ.get("HERMES_IGNORE_RULES") == "1"
+        obj.ignore_rules = ignore_rules or os.environ.get("HADES_IGNORE_RULES") == "1"
         assert obj.ignore_rules is True
 
     def test_neither_flag_nor_env_leaves_rules_enabled(self, monkeypatch):
@@ -152,7 +152,7 @@ class TestIgnoreRulesEnvGate:
         import cli
         obj = object.__new__(cli.HermesCLI)
         ignore_rules = False
-        obj.ignore_rules = ignore_rules or os.environ.get("HERMES_IGNORE_RULES") == "1"
+        obj.ignore_rules = ignore_rules or os.environ.get("HADES_IGNORE_RULES") == "1"
         assert obj.ignore_rules is False
 
 
@@ -165,9 +165,9 @@ class TestCmdChatWiring:
     def _simulate_cmd_chat_env_setup(self, args):
         """Replicate the exact snippet from cmd_chat in main.py."""
         if getattr(args, "ignore_user_config", False):
-            os.environ["HERMES_IGNORE_USER_CONFIG"] = "1"
+            os.environ["HADES_IGNORE_USER_CONFIG"] = "1"
         if getattr(args, "ignore_rules", False):
-            os.environ["HERMES_IGNORE_RULES"] = "1"
+            os.environ["HADES_IGNORE_RULES"] = "1"
 
     def test_both_flags_set_both_env_vars(self, monkeypatch):
         monkeypatch.delenv("HERMES_IGNORE_USER_CONFIG", raising=False)
@@ -179,8 +179,8 @@ class TestCmdChatWiring:
 
         self._simulate_cmd_chat_env_setup(FakeArgs())
 
-        assert os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1"
-        assert os.environ.get("HERMES_IGNORE_RULES") == "1"
+        assert os.environ.get("HADES_IGNORE_USER_CONFIG") == "1"
+        assert os.environ.get("HADES_IGNORE_RULES") == "1"
 
     def test_only_ignore_user_config(self, monkeypatch):
         monkeypatch.delenv("HERMES_IGNORE_USER_CONFIG", raising=False)
@@ -192,7 +192,7 @@ class TestCmdChatWiring:
 
         self._simulate_cmd_chat_env_setup(FakeArgs())
 
-        assert os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1"
+        assert os.environ.get("HADES_IGNORE_USER_CONFIG") == "1"
         assert "HERMES_IGNORE_RULES" not in os.environ
 
     def test_flags_absent_sets_nothing(self, monkeypatch):
@@ -231,7 +231,7 @@ class TestArgparseFlagsRegistered:
 
     def test_main_py_registers_both_flags(self):
         """E2E: the real hermes parser accepts both flags."""
-        from hermes_cli._parser import build_top_level_parser
+        from hades_cli._parser import build_top_level_parser
 
         parser, _subparsers, chat_parser = build_top_level_parser()
 
@@ -244,7 +244,7 @@ class TestArgparseFlagsRegistered:
 
         # And the cmd_chat env-var wiring must be present
         import inspect
-        import hermes_cli.main as hm
+        import hades_cli.main as hm
         src = inspect.getsource(hm)
         assert "HERMES_IGNORE_USER_CONFIG" in src
         assert "HERMES_IGNORE_RULES" in src

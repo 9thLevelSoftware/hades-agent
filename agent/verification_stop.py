@@ -116,15 +116,15 @@ def _session_is_messaging_surface() -> bool:
         from gateway.session_context import get_session_env
 
         platform = (
-            os.getenv("HERMES_PLATFORM")
+            os.getenv("HADES_PLATFORM")
             or get_session_env("HERMES_SESSION_PLATFORM", "")
         )
         source = get_session_env("HERMES_SESSION_SOURCE", "")
     except Exception:
-        platform = os.getenv("HERMES_PLATFORM", "") or os.environ.get(
+        platform = os.getenv("HADES_PLATFORM", "") or os.environ.get(
             "HERMES_SESSION_PLATFORM", ""
         )
-        source = os.environ.get("HERMES_SESSION_SOURCE", "")
+        source = os.environ.get("HADES_SESSION_SOURCE", "")
     for identity in (platform, source):
         identity = str(identity or "").strip().lower()
         if identity and identity not in _NON_MESSAGING_SESSION_SURFACES:
@@ -144,12 +144,12 @@ def verify_on_stop_enabled(config: dict[str, Any] | None = None) -> bool:
     bool forces the behavior in either direction. A missing or unrecognized
     value falls back to the surface-aware ``"auto"`` default.
     """
-    env = os.environ.get("HERMES_VERIFY_ON_STOP")
+    env = os.environ.get("HADES_VERIFY_ON_STOP")
     if env is not None:
         return env.strip().lower() not in {"0", "false", "no", "off"}
     if config is None:
         try:
-            from hermes_cli.config import load_config
+            from hades_cli.config import load_config
 
             config = load_config()
         except Exception:

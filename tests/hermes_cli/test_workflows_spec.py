@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from hermes_cli.workflows_spec import EdgeSpec, WorkflowSpec, validate_graph
+from hades_cli.workflows_spec import EdgeSpec, WorkflowSpec, validate_graph
 
 
 def _minimal_spec():
@@ -520,7 +520,7 @@ def test_webhook_and_kanban_event_triggers_validate():
 
 
 def test_unknown_workflow_field_rejected_with_suggestion():
-    from hermes_cli.workflows_spec import reject_unknown_spec_fields
+    from hades_cli.workflows_spec import reject_unknown_spec_fields
 
     raw = _minimal_spec()
     raw["verion"] = 2
@@ -530,7 +530,7 @@ def test_unknown_workflow_field_rejected_with_suggestion():
 
 
 def test_unknown_node_field_typo_rejected_with_location():
-    from hermes_cli.workflows_spec import unknown_spec_field_errors
+    from hades_cli.workflows_spec import unknown_spec_field_errors
 
     raw = _minimal_spec()
     raw["nodes"]["start"]["result_contarct"] = {"ok": "boolean"}
@@ -543,7 +543,7 @@ def test_unknown_node_field_typo_rejected_with_location():
 
 
 def test_unknown_trigger_edge_retry_and_workspace_fields_rejected():
-    from hermes_cli.workflows_spec import unknown_spec_field_errors
+    from hades_cli.workflows_spec import unknown_spec_field_errors
 
     raw = _minimal_spec()
     raw["triggers"][0]["cronn"] = "0 9 * * *"
@@ -561,7 +561,7 @@ def test_unknown_trigger_edge_retry_and_workspace_fields_rejected():
 
 
 def test_known_fields_aliases_and_descriptions_pass_strict_check():
-    from hermes_cli.workflows_spec import unknown_spec_field_errors
+    from hades_cli.workflows_spec import unknown_spec_field_errors
 
     raw = {
         "id": "strict_ok",
@@ -629,7 +629,7 @@ def test_trigger_input_schema_and_intake_metadata_validate_and_dump():
 
 
 def test_unknown_trigger_input_schema_and_intake_fields_rejected():
-    from hermes_cli.workflows_spec import unknown_spec_field_errors
+    from hades_cli.workflows_spec import unknown_spec_field_errors
 
     raw = _minimal_spec()
     raw["triggers"][0]["input_schema"] = {"brief": {"kind": "text", "lable": "Brief"}}
@@ -665,7 +665,7 @@ def test_unsupported_batch_or_document_intake_is_rejected_by_graph_validation():
 
 
 def test_load_spec_from_object_strict_ingestion():
-    from hermes_cli.workflows_spec import load_spec_from_object
+    from hades_cli.workflows_spec import load_spec_from_object
 
     with pytest.raises(ValueError, match="workflow spec must be an object"):
         load_spec_from_object("not a mapping")

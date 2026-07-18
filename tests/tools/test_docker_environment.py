@@ -315,7 +315,7 @@ def test_init_env_args_uses_hermes_dotenv_for_empty_shell_env(monkeypatch):
 
     Regression: the disk fallback used to fire only on `value is None`, so a
     present-but-empty `MY_SECRET=""` skipped it and was forwarded as `-e
-    MY_SECRET=`, clobbering the correct value sitting in ~/.hermes/.env.
+    MY_SECRET=`, clobbering the correct value sitting in ~/.hades/.env.
     """
     env = _make_execute_only_env(["MY_SECRET"])
 
@@ -616,7 +616,7 @@ def test_run_command_tags_task_and_profile_labels(monkeypatch):
     """task_id and the active profile name are surfaced as labels so future
     cross-process reuse logic can filter to a specific (task, profile) pair
     without parsing container names. Profile resolution uses the helper that
-    returns ``"default"`` for the root Hermes home."""
+    returns ``"default"`` for the root Hades home."""
     monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
     monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "research-bot")
     calls = _mock_subprocess_run(monkeypatch)
@@ -676,7 +676,7 @@ def test_labels_attribute_populated_after_init(monkeypatch):
     env = _make_dummy_env(task_id="abc")
 
     assert env._labels == {
-        "hermes-agent": "1",
+        "hades-agent": "1",
         "hermes-task-id": "abc",
         "hermes-profile": "default",
     }

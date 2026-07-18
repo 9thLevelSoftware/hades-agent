@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermes_cli.config import (
+from hades_cli.config import (
     get_container_exec_info,
 )
 
@@ -23,10 +23,10 @@ from hermes_cli.config import (
 
 @pytest.fixture
 def container_env(tmp_path, monkeypatch):
-    """Set up a fake HERMES_HOME with .container-mode file."""
-    hermes_home = tmp_path / ".hermes"
+    """Set up a fake HADES_HOME with .container-mode file."""
+    hermes_home = tmp_path / ".hades"
     hermes_home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
     monkeypatch.delenv("HERMES_DEV", raising=False)
 
     container_mode = hermes_home / ".container-mode"
@@ -42,19 +42,19 @@ def container_env(tmp_path, monkeypatch):
 
 def test_get_container_exec_info_returns_metadata(container_env):
     """Reads .container-mode and returns all fields including exec_user."""
-    with patch("hermes_constants.is_container", return_value=False):
+    with patch("hades_constants.is_container", return_value=False):
         info = get_container_exec_info()
 
     assert info is not None
     assert info["backend"] == "podman"
-    assert info["container_name"] == "hermes-agent"
+    assert info["container_name"] == "hades-agent"
     assert info["exec_user"] == "hermes"
     assert info["hermes_bin"] == "/data/current-package/bin/hermes"
 
 
 def test_get_container_exec_info_none_inside_container(container_env):
     """Returns None when we're already inside a container."""
-    with patch("hermes_constants.is_container", return_value=True):
+    with patch("hades_constants.is_container", return_value=True):
         info = get_container_exec_info()
 
     assert info is None
@@ -62,12 +62,12 @@ def test_get_container_exec_info_none_inside_container(container_env):
 
 def test_get_container_exec_info_none_without_file(tmp_path, monkeypatch):
     """Returns None when .container-mode doesn't exist (native mode)."""
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = tmp_path / ".hades"
     hermes_home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
     monkeypatch.delenv("HERMES_DEV", raising=False)
 
-    with patch("hermes_constants.is_container", return_value=False):
+    with patch("hades_constants.is_container", return_value=False):
         info = get_container_exec_info()
 
     assert info is None
@@ -77,7 +77,7 @@ def test_get_container_exec_info_skipped_when_hermes_dev(container_env, monkeypa
     """Returns None when HERMES_DEV=1 is set (dev mode bypass)."""
     monkeypatch.setenv("HERMES_DEV", "1")
 
-    with patch("hermes_constants.is_container", return_value=False):
+    with patch("hades_constants.is_container", return_value=False):
         info = get_container_exec_info()
 
     assert info is None
@@ -87,7 +87,7 @@ def test_get_container_exec_info_not_skipped_when_hermes_dev_zero(container_env,
     """HERMES_DEV=0 does NOT trigger bypass — only '1' does."""
     monkeypatch.setenv("HERMES_DEV", "0")
 
-    with patch("hermes_constants.is_container", return_value=False):
+    with patch("hades_constants.is_container", return_value=False):
         info = get_container_exec_info()
 
     assert info is not None
@@ -98,21 +98,21 @@ def test_get_container_exec_info_defaults():
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        hermes_home = Path(tmpdir) / ".hermes"
+        hermes_home = Path(tmpdir) / ".hades"
         hermes_home.mkdir()
         (hermes_home / ".container-mode").write_text(
             "# minimal file with no keys\n"
         )
 
-        with patch("hermes_constants.is_container", return_value=False), \
-             patch.dict(get_container_exec_info.__globals__, {"get_hermes_home": lambda: hermes_home}), \
+        with patch("hades_constants.is_container", return_value=False), \
+             patch.dict(get_container_exec_info.__globals__, {"get_hades_home": lambda: hermes_home}), \
              patch.dict(os.environ, {}, clear=False):
             os.environ.pop("HERMES_DEV", None)
             info = get_container_exec_info()
 
         assert info is not None
         assert info["backend"] == "docker"
-        assert info["container_name"] == "hermes-agent"
+        assert info["container_name"] == "hades-agent"
         assert info["exec_user"] == "hermes"
         assert info["hermes_bin"] == "/data/current-package/bin/hermes"
 
@@ -123,21 +123,21 @@ def test_get_container_exec_info_docker_backend(container_env):
         "backend=docker\n"
         "container_name=hermes-custom\n"
         "exec_user=myuser\n"
-        "hermes_bin=/opt/hermes/bin/hermes\n"
+        "hermes_bin=/opt/hades/bin/hermes\n"
     )
 
-    with patch("hermes_constants.is_container", return_value=False):
+    with patch("hades_constants.is_container", return_value=False):
         info = get_container_exec_info()
 
     assert info["backend"] == "docker"
     assert info["container_name"] == "hermes-custom"
     assert info["exec_user"] == "myuser"
-    assert info["hermes_bin"] == "/opt/hermes/bin/hermes"
+    assert info["hermes_bin"] == "/opt/hades/bin/hermes"
 
 
 def test_get_container_exec_info_crashes_on_permission_error(container_env):
     """PermissionError propagates instead of being silently swallowed."""
-    with patch("hermes_constants.is_container", return_value=False), \
+    with patch("hades_constants.is_container", return_value=False), \
          patch("builtins.open", side_effect=PermissionError("permission denied")):
         with pytest.raises(PermissionError):
             get_container_exec_info()
@@ -152,7 +152,7 @@ def test_get_container_exec_info_crashes_on_permission_error(container_env):
 def docker_container_info():
     return {
         "backend": "docker",
-        "container_name": "hermes-agent",
+        "container_name": "hades-agent",
         "exec_user": "hermes",
         "hermes_bin": "/data/current-package/bin/hermes",
     }
@@ -162,7 +162,7 @@ def docker_container_info():
 def podman_container_info():
     return {
         "backend": "podman",
-        "container_name": "hermes-agent",
+        "container_name": "hades-agent",
         "exec_user": "hermes",
         "hermes_bin": "/data/current-package/bin/hermes",
     }
@@ -171,7 +171,7 @@ def podman_container_info():
 def test_exec_in_container_calls_execvp(docker_container_info):
     """Verifies os.execvp is called with correct args: runtime, tty flags,
     user, env vars, container name, binary, and CLI args."""
-    from hermes_cli.main import _exec_in_container
+    from hades_cli.main import _exec_in_container
 
     with patch("shutil.which", return_value="/usr/bin/docker"), \
          patch("subprocess.run") as mock_run, \
@@ -195,14 +195,14 @@ def test_exec_in_container_calls_execvp(docker_container_info):
     e_values = [cmd[i + 1] for i in e_indices]
     assert "TERM=xterm-256color" in e_values
     assert "LANG=en_US.UTF-8" in e_values
-    assert "hermes-agent" in cmd
+    assert "hades-agent" in cmd
     assert "/data/current-package/bin/hermes" in cmd
     assert "chat" in cmd
 
 
 def test_exec_in_container_non_tty_uses_i_only(docker_container_info):
     """Non-TTY mode uses -i instead of -it."""
-    from hermes_cli.main import _exec_in_container
+    from hades_cli.main import _exec_in_container
 
     with patch("shutil.which", return_value="/usr/bin/docker"), \
          patch("subprocess.run") as mock_run, \
@@ -220,7 +220,7 @@ def test_exec_in_container_non_tty_uses_i_only(docker_container_info):
 
 def test_exec_in_container_no_runtime_hard_fails(podman_container_info):
     """Hard fails when runtime not found (no fallback)."""
-    from hermes_cli.main import _exec_in_container
+    from hades_cli.main import _exec_in_container
 
     with patch("shutil.which", return_value=None), \
          patch("subprocess.run") as mock_run, \
@@ -236,7 +236,7 @@ def test_exec_in_container_no_runtime_hard_fails(podman_container_info):
 def test_exec_in_container_sudo_probe_sets_prefix(podman_container_info):
     """When first probe fails and sudo probe succeeds, execvp is called
     with sudo -n prefix."""
-    from hermes_cli.main import _exec_in_container
+    from hades_cli.main import _exec_in_container
 
     def which_side_effect(name):
         if name == "podman":
@@ -268,7 +268,7 @@ def test_exec_in_container_sudo_probe_sets_prefix(podman_container_info):
 def test_exec_in_container_probe_timeout_prints_message(docker_container_info):
     """TimeoutExpired from probe produces a human-readable error, not a
     raw traceback."""
-    from hermes_cli.main import _exec_in_container
+    from hades_cli.main import _exec_in_container
 
     with patch("shutil.which", return_value="/usr/bin/docker"), \
          patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
@@ -284,7 +284,7 @@ def test_exec_in_container_probe_timeout_prints_message(docker_container_info):
 def test_exec_in_container_container_not_running_no_sudo(docker_container_info):
     """When runtime exists but container not found and no sudo available,
     prints helpful error about root containers."""
-    from hermes_cli.main import _exec_in_container
+    from hades_cli.main import _exec_in_container
 
     def which_side_effect(name):
         if name == "docker":

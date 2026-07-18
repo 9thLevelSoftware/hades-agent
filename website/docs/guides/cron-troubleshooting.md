@@ -59,15 +59,15 @@ Delivery targets are case-sensitive and require the correct platform to be confi
 
 | Target | Requires |
 |--------|----------|
-| `telegram` | `TELEGRAM_BOT_TOKEN` in `~/.hermes/.env` |
-| `discord` | `DISCORD_BOT_TOKEN` in `~/.hermes/.env` |
-| `slack` | `SLACK_BOT_TOKEN` in `~/.hermes/.env` |
+| `telegram` | `TELEGRAM_BOT_TOKEN` in `~/.hades/.env` |
+| `discord` | `DISCORD_BOT_TOKEN` in `~/.hades/.env` |
+| `slack` | `SLACK_BOT_TOKEN` in `~/.hades/.env` |
 | `whatsapp` | WhatsApp gateway configured |
 | `signal` | Signal gateway configured |
 | `matrix` | Matrix homeserver configured |
 | `email` | SMTP configured in `config.yaml` |
 | `sms` | SMS provider configured |
-| `local` | Write access to `~/.hermes/cron/output/` |
+| `local` | Write access to `~/.hades/cron/output/` |
 | `origin` | Delivers to the chat where the job was created |
 
 Other supported platforms include `mattermost`, `homeassistant`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`, and `webhook`. You can also target a specific chat with `platform:chat_id` syntax (e.g., `telegram:-1001234567890`).
@@ -138,16 +138,16 @@ In this example, `context-skill` loads before `target-skill`.
 If a job ran and failed, you may see error context in:
 
 1. The chat where the job delivers (if delivery succeeded)
-2. `~/.hermes/logs/agent.log` for scheduler messages (or `errors.log` for warnings)
+2. `~/.hades/logs/agent.log` for scheduler messages (or `errors.log` for warnings)
 3. The job's `last_run` metadata via `hermes cron list`
 
 ### Check 2: Common error patterns
 
 **"No such file or directory" for scripts**
-The `script` path must be an absolute path (or relative to the Hermes config directory). Verify:
+The `script` path must be an absolute path (or relative to the Hades config directory). Verify:
 ```bash
-ls ~/.hermes/scripts/your-script.py   # Must exist
-hermes cron edit <job_id> --script ~/.hermes/scripts/your-script.py
+ls ~/.hades/scripts/your-script.py   # Must exist
+hermes cron edit <job_id> --script ~/.hades/scripts/your-script.py
 ```
 
 **"Skill not found" at job execution**
@@ -171,11 +171,11 @@ ps aux | grep hermes
 
 ### Check 4: Permissions on jobs.json
 
-Jobs are stored in `~/.hermes/cron/jobs.json`. If this file is not readable/writable by your user, the scheduler will fail silently:
+Jobs are stored in `~/.hades/cron/jobs.json`. If this file is not readable/writable by your user, the scheduler will fail silently:
 
 ```bash
-ls -la ~/.hermes/cron/jobs.json
-chmod 600 ~/.hermes/cron/jobs.json   # Your user should own it
+ls -la ~/.hades/cron/jobs.json
+chmod 600 ~/.hades/cron/jobs.json   # Your user should own it
 ```
 
 ---
@@ -213,8 +213,8 @@ hermes skills list                  # Verify installed skills
 If you've worked through this guide and the issue persists:
 
 1. Run the job with `hermes cron run <job_id>` (fires on next gateway tick) and watch for errors in the chat output
-2. Check `~/.hermes/logs/agent.log` for scheduler messages and `~/.hermes/logs/errors.log` for warnings
-3. Open an issue at [github.com/NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) with:
+2. Check `~/.hades/logs/agent.log` for scheduler messages and `~/.hades/logs/errors.log` for warnings
+3. Open an issue at [github.com/9thLevelSoftware/hades-agent](https://github.com/9thLevelSoftware/hades-agent) with:
    - The job ID and schedule
    - The delivery target
    - What you expected vs. what happened

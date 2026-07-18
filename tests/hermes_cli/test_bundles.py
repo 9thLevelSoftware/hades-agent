@@ -4,7 +4,7 @@ import argparse
 
 import pytest
 
-from hermes_cli.bundles import (
+from hades_cli.bundles import (
     bundles_command,
     register_cli,
 )

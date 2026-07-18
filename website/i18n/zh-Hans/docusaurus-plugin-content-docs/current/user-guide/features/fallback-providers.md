@@ -7,7 +7,7 @@ sidebar_position: 8
 
 # 备用提供商
 
-Hermes Agent 具备三层弹性机制，在提供商出现问题时保持会话正常运行：
+Hades Agent 具备三层弹性机制，在提供商出现问题时保持会话正常运行：
 
 1. **[凭据池](./credential-pools.md)** — 在*同一*提供商的多个 API 密钥之间轮换（优先尝试）
 2. **主模型备用** — 当主模型失败时，自动切换到*不同*的提供商:模型
@@ -29,7 +29,7 @@ hermes fallback
 
 `hermes fallback` 复用 `hermes model` 的提供商选择器——相同的提供商列表、相同的凭据提示、相同的验证流程。使用子命令 `add`、`list`（别名 `ls`）、`remove`（别名 `rm`）和 `clear` 来管理备用链。更改会持久化到 `config.yaml` 顶层的 `fallback_providers:` 列表中。
 
-如果你更倾向于直接编辑 YAML，可在 `~/.hermes/config.yaml` 中添加 `fallback_model` 部分：
+如果你更倾向于直接编辑 YAML，可在 `~/.hades/config.yaml` 中添加 `fallback_model` 部分：
 
 ```yaml
 fallback_model:

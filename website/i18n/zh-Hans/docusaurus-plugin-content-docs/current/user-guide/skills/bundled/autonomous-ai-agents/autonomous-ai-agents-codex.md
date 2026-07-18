@@ -17,7 +17,7 @@ description: "将编码任务委托给 OpenAI Codex CLI（功能开发、PR）"
 | 来源 | 内置（默认安装） |
 | 路径 | `skills/autonomous-ai-agents/codex` |
 | 版本 | `1.0.0` |
-| 作者 | Hermes Agent |
+| 作者 | Hades Agent |
 | 许可证 | MIT |
 | 平台 | linux, macos, windows |
 | 标签 | `Coding-Agent`, `Codex`, `OpenAI`, `Code-Review`, `Refactoring` |
@@ -49,7 +49,7 @@ description: "将编码任务委托给 OpenAI Codex CLI（功能开发、PR）"
 - **必须在 git 仓库内运行** — Codex 拒绝在 git 仓库外运行
 - 终端调用中使用 `pty=true` — Codex 是一个交互式终端应用
 
-对于 Hermes 本身，`model.provider: openai-codex` 会在执行 `hermes auth add openai-codex` 后使用 `~/.hermes/auth.json` 中 Hermes 管理的 Codex OAuth。对于独立的 Codex CLI，有效的 CLI OAuth 会话可能存储在 `~/.codex/auth.json` 中；不要仅凭缺少 `OPENAI_API_KEY` 就认为 Codex 认证缺失。
+对于 Hermes 本身，`model.provider: openai-codex` 会在执行 `hermes auth add openai-codex` 后使用 `~/.hades/auth.json` 中 Hermes 管理的 Codex OAuth。对于独立的 Codex CLI，有效的 CLI OAuth 会话可能存储在 `~/.codex/auth.json` 中；不要仅凭缺少 `OPENAI_API_KEY` 就认为 Codex 认证缺失。
 
 ## 单次任务
 

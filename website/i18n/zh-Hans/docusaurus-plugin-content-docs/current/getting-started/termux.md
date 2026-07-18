@@ -1,19 +1,19 @@
 ---
 sidebar_position: 3
 title: "Android / Termux"
-description: "通过 Termux 在 Android 手机上直接运行 Hermes Agent"
+description: "通过 Termux 在 Android 手机上直接运行 Hades Agent"
 ---
 
 # 在 Android 上通过 Termux 运行 Hermes
 
-这是在 Android 手机上通过 [Termux](https://termux.dev/) 直接运行 Hermes Agent 的已验证路径。
+这是在 Android 手机上通过 [Termux](https://termux.dev/) 直接运行 Hades Agent 的已验证路径。
 
 它为你提供手机上可用的本地 CLI，以及目前已知可在 Android 上干净安装的核心扩展功能。
 
 ## 已验证路径支持哪些功能？
 
 已验证的 Termux 安装包含：
-- Hermes CLI
+- Hades CLI
 - cron 支持
 - PTY（伪终端）/后台终端支持
 - Telegram gateway 支持（手动 / 尽力而为的后台运行）
@@ -80,7 +80,7 @@ pkg install -y git python clang rust make pkg-config libffi openssl nodejs ripgr
 ### 2. 克隆 Hermes
 
 ```bash
-git clone https://github.com/NousResearch/hermes-agent.git
+git clone https://github.com/9thLevelSoftware/hades-agent.git
 cd hermes-agent
 ```
 
@@ -138,7 +138,7 @@ hermes
 hermes model
 ```
 
-或直接在 `~/.hermes/.env` 中设置密钥。
+或直接在 `~/.hades/.env` 中设置密钥。
 
 ### 稍后重新运行完整的交互式设置向导
 

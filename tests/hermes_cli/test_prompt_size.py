@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_cli.prompt_size import (
+from hades_cli.prompt_size import (
     _SKILLS_BLOCK_RE,
     _build_inspection_agent,
     compute_prompt_breakdown,
@@ -34,9 +34,9 @@ def _seed_skill(hermes_home, name, description):
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = tmp_path / ".hades"
     hermes_home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
     monkeypatch.chdir(tmp_path)  # avoid picking up the repo's AGENTS.md
     return hermes_home
 
@@ -91,9 +91,9 @@ def test_inspection_agent_uses_resolved_platform_toolsets(monkeypatch):
         "run_agent",
         SimpleNamespace(AIAgent=FakeAIAgent),
     )
-    monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
+    monkeypatch.setattr("hades_cli.config.load_config", lambda: cfg)
     monkeypatch.setattr(
-        "hermes_cli.tools_config._get_platform_tools",
+        "hades_cli.tools_config._get_platform_tools",
         lambda passed_cfg, platform: {"terminal", "file"},
     )
 
@@ -107,8 +107,8 @@ def test_inspection_agent_uses_resolved_platform_toolsets(monkeypatch):
 
 def test_blank_slate_prompt_size_counts_only_minimal_tools(isolated_home):
     """Blank Slate prompt-size should report file + terminal schemas only."""
-    from hermes_cli.config import save_config
-    from hermes_cli.setup import (
+    from hades_cli.config import save_config
+    from hades_cli.setup import (
         _blank_slate_minimal_toolsets,
         _blank_slate_minimize_config,
     )

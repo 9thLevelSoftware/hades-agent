@@ -33,7 +33,7 @@ from agent.reliability_fakes import (
     RateLimitResponse,
     ScenarioRow,
 )
-from hermes_state import SessionDB
+from hades_state import SessionDB
 
 
 # ── helpers ──────────────────────────────────────────────────────────────

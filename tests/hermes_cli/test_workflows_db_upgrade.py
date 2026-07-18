@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from hermes_cli import workflows_db as wfdb
+from hades_cli import workflows_db as wfdb
 
 
 # ── old-schema fixture (pre-drafts, pre-archived) ────────────────────────────
@@ -173,9 +173,9 @@ def _create_old_schema_db(db_path: str) -> tuple[int, int, str]:
 
 @pytest.fixture
 def old_db(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(__import__("pathlib").Path, "home", lambda: tmp_path)
     db_path = str(home / "workflows.db")
     def_count, exec_count, feed_id = _create_old_schema_db(db_path)

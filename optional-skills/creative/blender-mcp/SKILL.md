@@ -3,14 +3,14 @@ name: blender-mcp
 description: Drive Blender via the catalog blender MCP, with bpy recipes.
 version: 2.1.0
 requires: Blender 3.0+ desktop instance (headless via xvfb-run)
-author: alireza78a + kshitijk4poor + Hermes Agent
+author: alireza78a + kshitijk4poor + Hades Agent
 tags: [blender, 3d, animation, modeling, bpy, mcp]
 platforms: [linux, macos, windows]
 ---
 
 # Blender MCP Skill
 
-Companion skill for the `blender` entry in the Hermes MCP catalog. The MCP
+Companion skill for the `blender` entry in the Hades MCP catalog. The MCP
 server provides the connection to Blender; this skill teaches the bpy idioms
 and pitfalls for driving it well. It does not cover Blender UI workflows —
 everything here goes through the MCP tools against a live Blender session.

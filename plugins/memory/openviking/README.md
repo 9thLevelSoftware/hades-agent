@@ -15,13 +15,13 @@ hermes memory setup    # select "openviking"
 ```
 
 The setup can link to an existing `~/.openviking/ovcli.conf`, copy its current
-connection values into Hermes, or create a minimal `ovcli.conf` when one does
+connection values into Hades, or create a minimal `ovcli.conf` when one does
 not exist.
 
 Or manually:
 ```bash
 hermes config set memory.provider openviking
-echo "OPENVIKING_ENDPOINT=http://localhost:1933" >> ~/.hermes/.env
+echo "OPENVIKING_ENDPOINT=http://localhost:1933" >> ~/.hades/.env
 ```
 
 ## Config

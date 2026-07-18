@@ -53,7 +53,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
-from hermes_constants import get_hermes_home
+from hades_constants import get_hades_home
 from tools.daemon_pool import DaemonThreadPoolExecutor
 from tools.thread_context import propagate_context_to_thread
 
@@ -110,13 +110,13 @@ _STATUS_MAP = {
 def _open_journal():
     if _journal_override_enabled:
         return _journal_override
-    profile = str(get_hermes_home())
+    profile = str(get_hades_home())
     with _journal_lock:
         if profile in _journal_cache:
             return _journal_cache[profile]
         try:
             from agent.operation_journal import OperationJournal
-            from hermes_state import SessionDB
+            from hades_state import SessionDB
 
             journal = OperationJournal(SessionDB())
         except Exception as exc:
@@ -246,7 +246,7 @@ def restore_unacknowledged_delegations(queue, put_fn) -> int:
 
 
 def _db_path():
-    return get_hermes_home() / "state.db"
+    return get_hades_home() / "state.db"
 
 
 def _connect() -> sqlite3.Connection:
@@ -556,19 +556,19 @@ def get_durable_delegation(delegation_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _records_path():
-    from hermes_constants import get_hermes_home
+    from hades_constants import get_hades_home
 
-    return get_hermes_home() / "delegations.json"
+    return get_hades_home() / "delegations.json"
 
 
 def _pid_alive(pid: Any, process_start_time: Any = None) -> bool:
-    from hermes_cli.active_sessions import _pid_alive as _active_session_pid_alive
+    from hades_cli.active_sessions import _pid_alive as _active_session_pid_alive
 
     return _active_session_pid_alive(pid, process_start_time)
 
 
 def _current_process_start_time() -> Optional[float]:
-    from hermes_cli.active_sessions import _process_start_time
+    from hades_cli.active_sessions import _process_start_time
 
     return _process_start_time(os.getpid())
 
@@ -601,7 +601,7 @@ def _persist_records_locked(
     home = home or str(_records_path().parent)
     path = Path(home) / "delegations.json"
     try:
-        from hermes_cli.active_sessions import _FileLock
+        from hades_cli.active_sessions import _FileLock
 
         with _FileLock(Path(home) / "delegations.lock"):
             merged = _read_persisted_records(path)
@@ -649,7 +649,7 @@ def _persist_records_locked(
 
 def _reserve_record_locked(record: Dict[str, Any], max_running: int) -> str:
     """Atomically recheck profile capacity and persist one running record."""
-    from hermes_cli.active_sessions import _FileLock
+    from hades_cli.active_sessions import _FileLock
     from utils import atomic_json_write
 
     home = str(record["_home"])
@@ -923,7 +923,7 @@ def dispatch_async_delegation(
 
     try:
         # Propagate the dispatching profile so the detached child resolves
-        # get_hermes_home() under the right profile.
+        # get_hades_home() under the right profile.
         executor.submit(propagate_context_to_thread(_worker))
     except Exception as exc:  # pragma: no cover — pool submit failure is rare
         with _records_lock:

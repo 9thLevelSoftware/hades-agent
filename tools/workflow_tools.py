@@ -9,15 +9,15 @@ from typing import Any
 
 import yaml
 
-from hermes_cli import workflows_assistant, workflows_db as wfdb
-from hermes_cli import workflows_dispatcher
-from hermes_cli.config import load_config
-from hermes_cli.workflows_capabilities import (
+from hades_cli import workflows_assistant, workflows_db as wfdb
+from hades_cli import workflows_dispatcher
+from hades_cli.config import load_config
+from hades_cli.workflows_capabilities import (
     require_available_profiles,
     require_implemented_primitives,
 )
-from hermes_cli.workflows_redaction import redact_sensitive
-from hermes_cli.workflows_spec import (
+from hades_cli.workflows_redaction import redact_sensitive
+from hades_cli.workflows_spec import (
     WorkflowSpec,
     reject_unknown_spec_fields,
     validate_graph,
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 def _check_workflow_mode() -> bool:
-    if os.environ.get("HERMES_WORKFLOW_CONTEXT"):
+    if os.environ.get("HADES_WORKFLOW_CONTEXT"):
         return True
     try:
         cfg = load_config()
@@ -104,7 +104,7 @@ def _spec_from_object(value: Any) -> WorkflowSpec:
     spec = WorkflowSpec.model_validate(value)
     validate_graph(spec)
     require_implemented_primitives(spec)
-    from hermes_cli import profiles as profiles_mod
+    from hades_cli import profiles as profiles_mod
     available = {p.name for p in profiles_mod.list_profiles()}
     require_available_profiles(spec, available)
     return spec

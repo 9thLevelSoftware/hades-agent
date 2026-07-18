@@ -14,8 +14,8 @@ import json
 
 import pytest
 
-import hermes_cli.auth as auth
-from hermes_cli.auth import AuthError, _refresh_codex_auth_tokens, resolve_codex_runtime_credentials
+import hades_cli.auth as auth
+from hades_cli.auth import AuthError, _refresh_codex_auth_tokens, resolve_codex_runtime_credentials
 
 STALE = {"access_token": "stale-access", "refresh_token": "stale-refresh"}
 
@@ -45,7 +45,7 @@ def test_self_heals_on_stale_refresh_token(monkeypatch):
 
     assert out["access_token"] == "fresh-access"
     assert out["refresh_token"] == "fresh-refresh"
-    # the recovered token was persisted to the Hermes auth store
+    # the recovered token was persisted to the Hades auth store
     assert saved["access_token"] == "fresh-access"
 
 
@@ -148,7 +148,7 @@ def test_reraises_when_imported_token_lacks_refresh_token(monkeypatch):
 
 def test_self_heals_missing_singleton_access_token_from_codex_cli(tmp_path, monkeypatch):
     """Exact cron failure path: Hermes auth has refresh_token but missing access_token."""
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     codex_home = tmp_path / "codex"
     hermes_home.mkdir()
     codex_home.mkdir()
@@ -168,7 +168,7 @@ def test_self_heals_missing_singleton_access_token_from_codex_cli(tmp_path, monk
             "refresh_token": "fresh-refresh",
         },
     }))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     resolved = resolve_codex_runtime_credentials()
@@ -183,7 +183,7 @@ def test_self_heals_missing_singleton_access_token_from_codex_cli(tmp_path, monk
 
 def test_missing_singleton_access_token_reraises_when_codex_cli_half_token(tmp_path, monkeypatch):
     """Missing access_token must not be masked by a malformed Codex CLI import."""
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     codex_home = tmp_path / "codex"
     hermes_home.mkdir()
     codex_home.mkdir()
@@ -199,7 +199,7 @@ def test_missing_singleton_access_token_reraises_when_codex_cli_half_token(tmp_p
     (codex_home / "auth.json").write_text(json.dumps({
         "tokens": {"access_token": "fresh-only"},
     }))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     with pytest.raises(AuthError) as ei:

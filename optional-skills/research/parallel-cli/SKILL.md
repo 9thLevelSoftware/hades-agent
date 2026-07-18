@@ -2,7 +2,7 @@
 name: parallel-cli
 description: Optional vendor skill for Parallel CLI — agent-native web search, extraction, deep research, enrichment, FindAll, and monitoring. Prefer JSON output and non-interactive flows.
 version: 1.1.0
-author: Hermes Agent
+author: Hades Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
@@ -19,7 +19,7 @@ This is an optional third-party workflow, not a Hermes core capability.
 
 Important expectations:
 - Parallel is a paid service with a free tier, not a fully free local tool.
-- It overlaps with Hermes native `web_search` / `web_extract`, so do not prefer it by default for ordinary lookups.
+- It overlaps with Hades native `web_search` / `web_extract`, so do not prefer it by default for ordinary lookups.
 - Prefer this skill when the user mentions Parallel specifically or needs capabilities like Parallel's enrichment, FindAll, or monitor workflows.
 
 `parallel-cli` is designed for agents:

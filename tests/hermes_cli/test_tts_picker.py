@@ -12,7 +12,7 @@ import pytest
 
 from agent import tts_registry
 from agent.tts_provider import TTSProvider
-from hermes_cli import tools_config
+from hades_cli import tools_config
 
 
 class _FakeTTSProvider(TTSProvider):

@@ -33,7 +33,7 @@ cron 子系统提供定时任务执行能力——从简单的单次延迟到带
 
 ## 任务存储
 
-任务存储在 `~/.hermes/cron/jobs.json` 中，采用原子写入语义（先写入临时文件，再重命名）。每条任务记录包含：
+任务存储在 `~/.hades/cron/jobs.json` 中，采用原子写入语义（先写入临时文件，再重命名）。每条任务记录包含：
 
 ```json
 {
@@ -135,7 +135,7 @@ cron 任务可通过 `skills` 字段附加一个或多个技能。执行时：
 任务还可通过 `script` 字段附加 Python 脚本。该脚本在每次 agent 轮次*之前*运行，其 stdout 作为上下文注入到 prompt 中。这支持数据采集和变更检测模式：
 
 ```python
-# ~/.hermes/scripts/check_competitors.py
+# ~/.hades/scripts/check_competitors.py
 import requests, json
 # 获取竞争对手发布说明，与上次运行结果进行差异比对
 # 将摘要打印到 stdout——agent 进行分析并报告
@@ -168,7 +168,7 @@ Cron 任务结果可投递到任何受支持的平台。
 | 目标 | 语法 | 示例 |
 |--------|--------|---------|
 | 来源聊天 | `origin` | 投递到创建该任务的聊天 |
-| 本地文件 | `local` | 保存到 `~/.hermes/cron/output/` |
+| 本地文件 | `local` | 保存到 `~/.hades/cron/output/` |
 | Telegram | `telegram`、`telegram:<chat_id>`、`telegram:<chat_id>:<thread_id>`、`telegram:@username` | `telegram:-1001234567890:17585` |
 | Discord | `discord`、`discord:#channel`、`discord:<channel_id>`、`discord:<channel_id>:<thread_id>` | `discord:#engineering` |
 | Slack | `slack`、`slack:#channel`、`slack:<channel_id>`、`slack:<channel_id>:<thread_ts>` | `slack:#engineering` |

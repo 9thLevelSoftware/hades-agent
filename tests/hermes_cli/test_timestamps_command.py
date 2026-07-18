@@ -14,7 +14,7 @@ from datetime import datetime
 
 import yaml
 
-from hermes_cli.cli_commands_mixin import CLICommandsMixin
+from hades_cli.cli_commands_mixin import CLICommandsMixin
 
 
 class _Stub(CLICommandsMixin):
@@ -23,10 +23,10 @@ class _Stub(CLICommandsMixin):
 
 
 def _seed(tmp_path, monkeypatch, value=False):
-    hh = tmp_path / ".hermes"
+    hh = tmp_path / ".hades"
     hh.mkdir()
     (hh / "config.yaml").write_text(f"display:\n  timestamps: {str(value).lower()}\n")
-    monkeypatch.setenv("HERMES_HOME", str(hh))
+    monkeypatch.setenv("HADES_HOME", str(hh))
     import cli
 
     monkeypatch.setattr(cli, "_hermes_home", hh, raising=False)

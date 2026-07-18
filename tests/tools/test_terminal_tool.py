@@ -233,7 +233,7 @@ def test_get_env_config_ignores_bad_docker_json_for_ssh_backend(monkeypatch):
 
 
 def test_get_env_config_preserves_ssh_tilde_cwd(monkeypatch):
-    """SSH cwd '~' is expanded by the remote shell, not the Hermes host."""
+    """SSH cwd '~' is expanded by the remote shell, not the Hades host."""
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
     monkeypatch.setenv("TERMINAL_CWD", "~")
     monkeypatch.setenv("HOME", "/opt/data")

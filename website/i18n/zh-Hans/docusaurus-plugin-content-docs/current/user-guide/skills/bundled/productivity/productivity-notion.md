@@ -41,7 +41,7 @@ Notion API + ntn CLI：页面、数据库、Markdown、Workers。
 
 1. 在 https://notion.so/my-integrations 创建集成
 2. 复制 API 密钥（以 `ntn_` 或 `secret_` 开头）
-3. 存储到 `~/.hermes/.env`：
+3. 存储到 `~/.hades/.env`：
    ```
    NOTION_API_KEY=ntn_your_key_here
    ```
@@ -65,7 +65,7 @@ export NOTION_API_TOKEN=$NOTION_API_KEY      # ntn 读取 NOTION_API_TOKEN
 export NOTION_KEYRING=0                       # 不尝试使用系统密钥链
 ```
 
-将上述 export 添加到你的 shell 配置文件（或 `~/.hermes/.env`），使每个会话都能继承这些变量。
+将上述 export 添加到你的 shell 配置文件（或 `~/.hades/.env`），使每个会话都能继承这些变量。
 
 ### 3. 运行时选择路径
 
@@ -297,7 +297,7 @@ curl -s -X PATCH "https://api.notion.com/v1/blocks/{page_id}/children" \
   -H "Content-Type: application/json" \
   -d '{
     "children": [
-      {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"text": {"content": "Hello from Hermes!"}}]}}
+      {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"text": {"content": "Hello from Hades!"}}]}}
     ]
   }'
 ```

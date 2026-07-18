@@ -2,7 +2,7 @@
 sidebar_position: 8
 sidebar_label: "SMS (Twilio)"
 title: "SMS (Twilio)"
-description: "通过 Twilio 将 Hermes Agent 设置为 SMS 聊天机器人"
+description: "通过 Twilio 将 Hades Agent 设置为 SMS 聊天机器人"
 ---
 
 # SMS 设置（Twilio）
@@ -20,7 +20,7 @@ SMS gateway（网关）与可选的 [telephony skill](/reference/skills-catalog)
 - **Twilio 账户** — [在 twilio.com 注册](https://www.twilio.com/try-twilio)（提供免费试用）
 - **具备 SMS 功能的 Twilio 电话号码**
 - **可公开访问的服务器** — Twilio 在收到 SMS 时会向你的服务器发送 webhook
-- **aiohttp** — `cd ~/.hermes/hermes-agent && uv pip install -e ".[sms]"`
+- **aiohttp** — `cd ~/.hades/hermes-agent && uv pip install -e ".[sms]"`
 
 ---
 
@@ -44,7 +44,7 @@ hermes gateway setup
 
 ### 手动设置
 
-在 `~/.hermes/.env` 中添加：
+在 `~/.hades/.env` 中添加：
 
 ```bash
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

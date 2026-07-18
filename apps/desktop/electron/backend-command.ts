@@ -24,7 +24,7 @@ export function serveBackendArgs(profile?: string) {
 /**
  * Rewrite a resolved backend argv from `serve` to the legacy
  * `dashboard --no-open` form, preserving every other argument (incl. a leading
- * `-m hermes_cli.main` and any `--profile <name>`). Returns a copy; if there is
+ * `-m hades_cli.main` and any `--profile <name>`). Returns a copy; if there is
  * no `serve` token the argv is returned unchanged.
  */
 export function dashboardFallbackArgs(args) {

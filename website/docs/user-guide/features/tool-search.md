@@ -10,17 +10,17 @@ session, their JSON schemas can consume a substantial fraction of the
 context window on every turn — even when only a few of them are relevant
 to what the user actually asked for.
 
-**Tool Search** is Hermes' automatic progressive-disclosure layer for that
+**Tool Search** is Hades' automatic progressive-disclosure layer for that
 problem. In its default `auto` mode, MCP and plugin tools are replaced in the
 model-visible tools array by three bridge tools when their schemas are large
 enough, and the model loads each specific tool's schema on demand.
 
-:::info Built-in Hermes tools never defer
-The tools that make up Hermes' core capability set (`terminal`,
+:::info Built-in Hades tools never defer
+The tools that make up Hades' core capability set (`terminal`,
 `read_file`, `write_file`, `patch`, `search_files`, `todo`, `memory`,
 `browser_*`, `web_search`, `web_extract`, `clarify`, `execute_code`,
 `delegate_task`, `session_search`, and the rest of
-`_HERMES_CORE_TOOLS`) are *always* loaded directly. Only MCP tools and
+`_HADES_CORE_TOOLS`) are *always* loaded directly. Only MCP tools and
 non-core plugin tools are eligible for deferral.
 :::
 

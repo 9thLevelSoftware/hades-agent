@@ -52,7 +52,7 @@ async def test_hermes_provider_forwards_asend_values(tmp_path, monkeypatch):
 
     assert _HERMES_PROVIDER_CLS is not None, "SDK OAuth types must be available"
 
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     reset_manager_for_tests()
 
     # Seed a valid-looking token so the SDK's _initialize loads something and
@@ -82,7 +82,7 @@ async def test_hermes_provider_forwards_asend_values(tmp_path, monkeypatch):
 
     metadata = OAuthClientMetadata(
         redirect_uris=[AnyUrl("http://127.0.0.1:12345/callback")],
-        client_name="Hermes Agent",
+        client_name="Hades Agent",
     )
     provider = _HERMES_PROVIDER_CLS(
         server_name="srv",
@@ -134,7 +134,7 @@ async def test_hermes_provider_forwards_401_triggers_refresh(tmp_path, monkeypat
 
     assert _HERMES_PROVIDER_CLS is not None
 
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     reset_manager_for_tests()
 
     storage = HermesTokenStorage("srv")
@@ -158,7 +158,7 @@ async def test_hermes_provider_forwards_401_triggers_refresh(tmp_path, monkeypat
 
     metadata = OAuthClientMetadata(
         redirect_uris=[AnyUrl("http://127.0.0.1:12345/callback")],
-        client_name="Hermes Agent",
+        client_name="Hades Agent",
     )
     provider = _HERMES_PROVIDER_CLS(
         server_name="srv",

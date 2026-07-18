@@ -81,7 +81,7 @@ DEDUP_WINDOW_SECONDS = 300
 DEDUP_MAX_SIZE = 1000
 RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
 STREAM_TIMEOUT_SECONDS = 90  # ntfy keepalive default is 55s; give margin
-_ECHO_TAG = "hermes-agent"  # tag added to outgoing messages for echo-loop prevention
+_ECHO_TAG = "hades-agent"  # tag added to outgoing messages for echo-loop prevention
 
 
 def _build_auth_header(token: str) -> Dict[str, str]:
@@ -553,7 +553,7 @@ async def _standalone_send(
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system at startup."""
+    """Plugin entry point — called by the Hades plugin system at startup."""
     ctx.register_platform(
         name="ntfy",
         label="ntfy",

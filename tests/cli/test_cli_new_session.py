@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermes_state import SessionDB
+from hades_state import SessionDB
 from tools.todo_tool import TodoStore
 
 
@@ -261,13 +261,13 @@ def test_new_command_rotates_hermes_session_id_env_and_context(tmp_path):
 
     cli = _prepare_cli_with_active_session(tmp_path)
     old_session_id = cli.session_id
-    os.environ["HERMES_SESSION_ID"] = old_session_id
+    os.environ["HADES_SESSION_ID"] = old_session_id
     _VAR_MAP["HERMES_SESSION_ID"].set(old_session_id)
 
     cli.process_command("/new")
 
     assert cli.session_id != old_session_id
-    assert os.environ["HERMES_SESSION_ID"] == cli.session_id
+    assert os.environ["HADES_SESSION_ID"] == cli.session_id
     assert get_session_env("HERMES_SESSION_ID") == cli.session_id
 
 

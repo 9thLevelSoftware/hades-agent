@@ -13,8 +13,8 @@ import time
 
 
 def main():
-    tid = os.environ["HERMES_KANBAN_TASK"]
-    workspace = os.environ.get("HERMES_KANBAN_WORKSPACE", "")
+    tid = os.environ["HADES_KANBAN_TASK"]
+    workspace = os.environ.get("HADES_KANBAN_WORKSPACE", "")
 
     # Announce via CLI (goes through real argparse + init_db + etc)
     subprocess.run(

@@ -12,7 +12,7 @@
 
 ## 1. Decision
 
-Build Hermes's equivalent of an `Auto` model selector as an opt-in plugin in this fork. The feature makes semantic routing decisions at the two cache-safe boundaries in scope:
+Build Hades's equivalent of an `Auto` model selector as an opt-in plugin in this fork. The feature makes semantic routing decisions at the two cache-safe boundaries in scope:
 
 1. before the first model call of a fresh session; and
 2. before constructing each delegated child agent.
@@ -61,7 +61,7 @@ The desired product experience has two modes:
 ### 3.1 Product goals
 
 1. Select an appropriate runtime for fresh sessions and delegated children without breaking Hermes prompt caching.
-2. Support arbitrary configured providers, subscription access paths, custom providers, and installed local models through Hermes's canonical runtime resolution.
+2. Support arbitrary configured providers, subscription access paths, custom providers, and installed local models through Hades's canonical runtime resolution.
 3. Let users define one or more non-exclusive named profiles such as `fast`, `coding`, `vision`, or `deep` without forcing every task onto a one-dimensional ladder.
 4. Select provider, model, and reasoning effort as one explainable decision.
 5. Make setup conversational and evidence-backed without adding a permanent model-facing management tool.
@@ -92,9 +92,9 @@ The design preserves these load-bearing Hermes properties:
 
 - **Prompt-cache stability:** Auto never semantically reroutes an active route epoch. An explicit manual model switch or recorded provider failover is a visible cache-reset boundary, not an ordinary Auto decision.
 - **Narrow model-tool surface:** no new core model tool and no routing fields in `delegate_task`.
-- **Canonical provider behavior:** runtime identity, credentials, API mode, provider profiles, credential pools, fallbacks, and reasoning translation remain Hermes responsibilities.
+- **Canonical provider behavior:** runtime identity, credentials, API mode, provider profiles, credential pools, fallbacks, and reasoning translation remain Hades responsibilities.
 - **Strict message semantics:** the router injects no synthetic chat turns and does not mutate history.
-- **Behavioral configuration:** user-facing settings live under the plugin's entry in `config.yaml`; secrets remain in Hermes credential stores.
+- **Behavioral configuration:** user-facing settings live under the plugin's entry in `config.yaml`; secrets remain in Hades credential stores.
 - **Local-first evidence:** no outbound telemetry or usage attribution is introduced.
 
 ### 4.2 Explicit non-goals
@@ -122,7 +122,7 @@ The initial design does not include:
 
 - every child is an isolated `AIAgent`;
 - child creation already projects provider runtime, credentials, API mode, reasoning, budgets, tools, progress, and cost accounting;
-- configured delegation provider/model overrides resolve through Hermes's runtime provider machinery;
+- configured delegation provider/model overrides resolve through Hades's runtime provider machinery;
 - asynchronous delegation has durable operations, recovery, delivery, cancellation, and lifecycle handling; and
 - delegation and gateway/TUI paths have substantial focused tests.
 
@@ -155,7 +155,7 @@ MoA solves a different problem: it gathers multiple model perspectives and synth
 
 ### 5.6 Commercial Auto behavior
 
-GitHub documents Auto model selection as combining task optimization with model health and availability, and states that routing occurs at natural cache boundaries rather than switching arbitrarily inside a session. Cursor describes Auto as choosing a suitable reliable model and reacting to demand or degraded performance. These products support the high-level direction, but their smaller and more controlled model pools do not solve Hermes's provider and configuration problem.
+GitHub documents Auto model selection as combining task optimization with model health and availability, and states that routing occurs at natural cache boundaries rather than switching arbitrarily inside a session. Cursor describes Auto as choosing a suitable reliable model and reacting to demand or degraded performance. These products support the high-level direction, but their smaller and more controlled model pools do not solve Hades's provider and configuration problem.
 
 ## 6. Architectural overview
 
@@ -185,9 +185,9 @@ Adapters expose Hermes runtime/inventory facades. They make new semantic routing
 - fresh-session initialization before the stable prompt/client's first call; and
 - delegated-child runtime resolution before each child is constructed.
 
-They project a `RoutingDecision` into Hermes runtime fields and then return control to Hermes. A separate compatibility wrapper may observe an existing Hermes runtime-failover transition solely to consume the decision's already-recorded fallback target, apply that target's reasoning policy, and record a cache-reset epoch. It does not classify or choose a new semantic profile at failure time.
+They project a `RoutingDecision` into Hades runtime fields and then return control to Hades. A separate compatibility wrapper may observe an existing Hermes runtime-failover transition solely to consume the decision's already-recorded fallback target, apply that target's reasoning policy, and record a cache-reset epoch. It does not classify or choose a new semantic profile at failure time.
 
-Adapters do not implement provider clients, credential rotation, or provider-specific reasoning translation. Auto-routed sessions do not implicitly append Hermes's global fallback list: the recorded profile fallback chain is authoritative after policy validation. When Auto is bypassed, Hermes's original fallback behavior remains unchanged.
+Adapters do not implement provider clients, credential rotation, or provider-specific reasoning translation. Auto-routed sessions do not implicitly append Hades's global fallback list: the recorded profile fallback chain is authoritative after policy validation. When Auto is bypassed, Hades's original fallback behavior remains unchanged.
 
 Adapters are versioned, idempotent, feature-probed, and signature-guarded. A future native Hermes hook can become another adapter without changing the routing core.
 
@@ -255,7 +255,7 @@ No core Hermes file should need a feature-specific branch. If plugin load order 
 
 ### 8.1 Source-of-truth split
 
-`~/.hermes/config.yaml` contains:
+`~/.hades/config.yaml` contains:
 
 - plugin enablement;
 - routing scopes;
@@ -278,7 +278,7 @@ The plugin database contains:
 
 The user-owned YAML is not rewritten for every adaptive update. The overlay is the runtime's learned revision and can be inspected, exported, frozen, rolled back, or materialized through the CLI.
 
-This feature does not overload Hermes's existing `model.provider: auto` value, which means provider/credential auto-detection. Auto routing is enabled only through the plugin configuration, and finalized route targets use canonical resolved provider identities.
+This feature does not overload Hades's existing `model.provider: auto` value, which means provider/credential auto-detection. Auto routing is enabled only through the plugin configuration, and finalized route targets use canonical resolved provider identities.
 
 ### 8.2 Illustrative schema
 
@@ -382,8 +382,8 @@ plugins:
 - Objective weights are normalized and must form a complete declared policy; omitted dimensions are explicit zeroes rather than hidden defaults.
 - Routing/classifier/evaluator overhead and experiment spend are accounted separately from the selected task runtime so adaptation cannot hide its own cost inside task estimates.
 - Before an autonomous classifier, evaluator, probe, or experiment call, the plugin reserves a conservative worst-case estimate from the applicable overhead budget and reconciles actual usage afterward. Calls with unknown/unbounded price cannot run autonomously.
-- Selection-time task estimates are not a substitute for Hermes's ongoing session/iteration budgets; a fresh session may outlive any estimate made from its first prompt.
-- Estimated task cost/latency ceilings are hard eligibility gates over the information available before selection, not guarantees about an unbounded agent loop. Enforceable total execution caps remain Hermes budget/deadline responsibilities and must be configured separately when required.
+- Selection-time task estimates are not a substitute for Hades's ongoing session/iteration budgets; a fresh session may outlive any estimate made from its first prompt.
+- Estimated task cost/latency ceilings are hard eligibility gates over the information available before selection, not guarantees about an unbounded agent loop. Enforceable total execution caps remain Hades budget/deadline responsibilities and must be configured separately when required.
 - An empty `allowed_licenses` list means no additional user license allowlist, not that every local model is denied. Explicit deny rules and backend/model license metadata still apply.
 - Local candidates must still satisfy `require_open_weights` and hardware compatibility; the optional license allowlist can narrow that set further.
 - Per-profile limits may tighten global policy but cannot loosen it.
@@ -399,7 +399,7 @@ plugins:
 
 ## 9. Core domain records
 
-The routing core uses stable records independent of Hermes private classes.
+The routing core uses stable records independent of Hades private classes.
 
 ### 9.1 `RuntimeKey`
 
@@ -490,7 +490,7 @@ Contains:
 
 The selector follows this order:
 
-1. If activation is `off` or the scope is disabled, do nothing. In `shadow`, compute and record the remaining decision but never project it into Hermes.
+1. If activation is `off` or the scope is disabled, do nothing. In `shadow`, compute and record the remaining decision but never project it into Hades.
 2. If the session/task has an explicit manual runtime pin, do nothing.
 3. If resuming, reapply the recorded route without classification.
 4. Extract deterministic facts and apply configured rules.
@@ -500,7 +500,7 @@ The selector follows this order:
 8. Filter hard capabilities and immutable policy before assigning scores.
 9. Match and score eligible profiles and targets.
 10. Select reasoning effort and clamp it to the target's approved range.
-11. Resolve the complete runtime through Hermes's canonical resolver.
+11. Resolve the complete runtime through Hades's canonical resolver.
 12. On pre-call resolution failure, try the profile fallback chain, then the decision's validated full-runtime `safe_default` snapshot; post-call provider failures follow the recorded failover contract in section 10.7.
 13. Persist the explanation before allowing the provider call.
 
@@ -544,7 +544,7 @@ The score calculation must be deterministic for a fixed decision input and revis
 
 ### 10.4 Reasoning effort
 
-Each target has an independent reasoning default and bounds. Task complexity, quality sensitivity, and learned target/effort evidence may move effort within those bounds. Hermes's central reasoning resolver remains responsible for per-model overrides, supported-value normalization, provider translation, and request projection. The plugin revalidates the final effective generic effort after per-model override/normalization and clamps or rejects it against both target and global policy bounds before provider translation.
+Each target has an independent reasoning default and bounds. Task complexity, quality sensitivity, and learned target/effort evidence may move effort within those bounds. Hades's central reasoning resolver remains responsible for per-model overrides, supported-value normalization, provider translation, and request projection. The plugin revalidates the final effective generic effort after per-model override/normalization and clamps or rejects it against both target and global policy bounds before provider translation.
 
 Unsupported reasoning configurations make a target ineligible or clamp to a validated supported value according to explicit policy; they do not emit provider-specific request bodies from the plugin.
 
@@ -558,13 +558,13 @@ A manual model switch marks a manual override. Auto does not switch it back. A r
 
 Each delegated task's goal and structured task metadata are assessed independently immediately before child construction. Batches may therefore contain different internal runtime decisions. The parent agent sees no new parameters and cannot nominate a provider/model through the tool schema.
 
-The adapter projects the chosen runtime, reasoning, exact credential pool, and fallbacks into the existing child construction path before the child client exists. The first request and later credential recovery therefore use one access path. Budgets, tool scope, session isolation, background execution, recovery, cost accounting, and lifecycle hooks remain Hermes responsibilities.
+The adapter projects the chosen runtime, reasoning, exact credential pool, and fallbacks into the existing child construction path before the child client exists. The first request and later credential recovery therefore use one access path. Budgets, tool scope, session isolation, background execution, recovery, cost accounting, and lifecycle hooks remain Hades responsibilities.
 
 Before a durable/background child launch, the decision, adaptive revision, and canary assignment are committed against the operation ID and task index. Recovery reuses that exact record and never reclassifies or assigns a new experiment. If its target is unavailable, recovery may use only the recorded fallback chain.
 
 ### 10.7 Recorded runtime failover
 
-For an Auto-routed scope, the selected profile's fallback chain replaces the semantic portion of Hermes's global fallback list. Existing global entries are not appended implicitly because an unvalidated entry could bypass eligibility, policy, or per-target reasoning. During setup, the advisor may offer to import eligible global fallback entries into profiles after full validation. When Auto is bypassed, normal Hermes fallback configuration remains untouched.
+For an Auto-routed scope, the selected profile's fallback chain replaces the semantic portion of Hades's global fallback list. Existing global entries are not appended implicitly because an unvalidated entry could bypass eligibility, policy, or per-target reasoning. During setup, the advisor may offer to import eligible global fallback entries into profiles after full validation. When Auto is bypassed, normal Hermes fallback configuration remains untouched.
 
 Fallbacks known to be unavailable before the first provider call are skipped without cache impact. A provider failure after calls have begun does not trigger a new classification or profile score. A compatibility wrapper consumes the next recorded fallback tuple, validates it again, applies its provider/model/reasoning/exact credential-pool settings, and records a new cache epoch. Credential recovery after that transition remains inside the fallback's recorded pool. If Hermes restores the semantic primary on a later turn, restoration rebinds the primary's exact original access path even when primary and fallback share a provider/model; subsequent credential recovery remains inside the primary pool. This is an exceptional availability transition equivalent to an explicit model reset, so cache reuse from the prior runtime is not claimed.
 
@@ -588,7 +588,7 @@ Verification uses these ordered evidence sources:
 3. a successfully executed runtime identity within its verification TTL; and
 4. installed local backend/model inspection plus a compatibility probe.
 
-If a provider exposes no reliable model list, credentials and Hermes's general model catalog do not make every model eligible. Non-billable listing/health probes may run automatically. A paid or quota-consuming completion verification is never an advisor/routing/optimizer side effect: even when `allow_paid_access_probes` is enabled, the user must run the exact-runtime preview/apply command with an unchanged precondition hash and explicit billable acknowledgement after a conservative cost/quota reservation succeeds.
+If a provider exposes no reliable model list, credentials and Hades's general model catalog do not make every model eligible. Non-billable listing/health probes may run automatically. A paid or quota-consuming completion verification is never an advisor/routing/optimizer side effect: even when `allow_paid_access_probes` is enabled, the user must run the exact-runtime preview/apply command with an unchanged precondition hash and explicit billable acknowledgement after a conservative cost/quota reservation succeeds.
 
 Temporary conditions such as circuit-breaker cooldown, exhausted credentials, or unavailable local backend remove a runtime from current selection without deleting its historical evidence.
 
@@ -631,7 +631,7 @@ Subscription runtimes may have quota-based rather than token-based effective cos
 
 ## 13. Conversational advisor and CLI
 
-The plugin registers a native CLI namespace through Hermes's public plugin CLI interface. The accompanying skill instructs Hermes to conduct the interview and use the CLI for validation and atomic changes, keeping management out of the permanent model-tool schema.
+The plugin registers a native CLI namespace through Hades's public plugin CLI interface. The accompanying skill instructs Hermes to conduct the interview and use the CLI for validation and atomic changes, keeping management out of the permanent model-tool schema.
 
 ### 13.1 Setup/edit flow
 
@@ -774,10 +774,10 @@ The system distinguishes an invalid configuration from an unavailable optional s
 ## 17. Security and privacy
 
 - The plugin is opt-in.
-- Model/provider overrides for classifier and evaluator calls pass through Hermes's plugin-LLM trust gate.
+- Model/provider overrides for classifier and evaluator calls pass through Hades's plugin-LLM trust gate.
 - The plugin-LLM allowlist is immutable to the learner. Wildcards require an explicit setup-time grant.
 - Routed task targets still pass through the router policy and Hermes runtime resolution; the plugin does not read secrets.
-- API keys, OAuth tokens, and credential-pool contents remain in Hermes stores and are never copied into plugin config or SQLite.
+- API keys, OAuth tokens, and credential-pool contents remain in Hades stores and are never copied into plugin config or SQLite.
 - Config changes use a preview, lock, precondition hash, atomic replacement, and backup.
 - Decision/evidence storage excludes raw prompts, raw responses, secrets, and credential material by default.
 - Logs use stable runtime identities and redacted errors.
@@ -834,7 +834,7 @@ Generate candidate inventories, profiles, evidence, and mutations and prove:
 
 ### 19.3 Hermes integration tests
 
-Use a temporary `HERMES_HOME`, real Hermes imports, and fake provider endpoints to exercise:
+Use a temporary `HADES_HOME`, real Hermes imports, and fake provider endpoints to exercise:
 
 - plugin enable/load and trust configuration;
 - fresh-session selection before the first call;
@@ -962,7 +962,7 @@ Direct integration would provide cleaner call sites but create broader merge/reb
 
 ### 22.3 Fixed complexity tiers
 
-Simple tiers are easy to explain but cannot represent capability-specific profiles or task-dependent model strengths across Hermes's provider diversity.
+Simple tiers are easy to explain but cannot represent capability-specific profiles or task-dependent model strengths across Hades's provider diversity.
 
 ### 22.4 Classifier chooses the model/profile directly
 
@@ -1002,10 +1002,10 @@ These questions do not reopen the approved boundaries: no mid-session routing, n
 ## 24. References
 
 - [Reference routing plugin: `b3nw/hermes-delegate-routing`](https://github.com/b3nw/hermes-delegate-routing)
-- [Hermes smart-routing prototype commit `57177544f`](https://github.com/NousResearch/hermes-agent/commit/57177544ff2dfe7114bd09e0233c5e39d634099f)
-- [Hermes per-task routing proposal #36790](https://github.com/NousResearch/hermes-agent/pull/36790)
-- [Hermes plugin routing-hook proposal #40143](https://github.com/NousResearch/hermes-agent/pull/40143)
-- [Hermes child-routing hook proposal #56329](https://github.com/NousResearch/hermes-agent/pull/56329)
+- [Hermes smart-routing prototype commit `57177544f`](https://github.com/9thLevelSoftware/hades-agent/commit/57177544ff2dfe7114bd09e0233c5e39d634099f)
+- [Hermes per-task routing proposal #36790](https://github.com/9thLevelSoftware/hades-agent/pull/36790)
+- [Hermes plugin routing-hook proposal #40143](https://github.com/9thLevelSoftware/hades-agent/pull/40143)
+- [Hermes child-routing hook proposal #56329](https://github.com/9thLevelSoftware/hades-agent/pull/56329)
 - [GitHub Copilot Auto model selection](https://docs.github.com/en/copilot/concepts/models/auto-model-selection)
 - [GitHub Copilot supported models](https://docs.github.com/en/copilot/reference/ai-models/supported-models)
 - [Cursor model configuration and Auto](https://docs.cursor.com/settings/models)

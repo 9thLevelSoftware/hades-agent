@@ -8,7 +8,7 @@ sidebar_position: 9
 
 :::tip
 添加平台有两种方式：
-- **Plugin**（推荐用于社区/第三方）：将 plugin 目录放入 `~/.hermes/plugins/` — 无需修改任何核心代码。参见下方 [Plugin 路径](#plugin-path-recommended)。
+- **Plugin**（推荐用于社区/第三方）：将 plugin 目录放入 `~/.hades/plugins/` — 无需修改任何核心代码。参见下方 [Plugin 路径](#plugin-path-recommended)。
 - **内置**：需修改代码、配置和文档共 20+ 个文件。参见下方 [内置清单](#step-by-step-checklist)。
 :::
 
@@ -33,7 +33,7 @@ sidebar_position: 9
 Plugin 系统允许你在不修改任何 Hermes 核心代码的情况下添加平台适配器。你的 plugin 是一个包含两个文件的目录：
 
 ```
-~/.hermes/plugins/my-platform/
+~/.hades/plugins/my-platform/
   plugin.yaml      # Plugin 元数据
   adapter.py       # 适配器类 + register() 入口点
 ```
@@ -198,7 +198,7 @@ gateway:
 
 ## 环境变量驱动的自动配置
 
-大多数用户通过将环境变量写入 `~/.hermes/.env` 来配置平台，而不是编辑 `config.yaml`。`env_enablement_fn` hook 允许你的 plugin 在适配器构建**之前**读取这些环境变量，使 `hermes gateway status`、`get_connected_platforms()` 和 cron 投递无需实例化平台 SDK 即可看到正确状态。
+大多数用户通过将环境变量写入 `~/.hades/.env` 来配置平台，而不是编辑 `config.yaml`。`env_enablement_fn` hook 允许你的 plugin 在适配器构建**之前**读取这些环境变量，使 `hermes gateway status`、`get_connected_platforms()` 和 cron 投递无需实例化平台 SDK 即可看到正确状态。
 
 ```python
 def _env_enablement() -> dict | None:
@@ -333,7 +333,7 @@ label: My Platform
 kind: platform
 version: 1.0.0
 description: >
-  My Platform gateway adapter for Hermes Agent.
+  My Platform gateway adapter for Hades Agent.
 author: Your Name
 requires_env:
   - name: MY_PLATFORM_TOKEN
@@ -567,8 +567,8 @@ await self.handle_message(event)
 
 ### 8. Toolset
 
-1. **`toolsets.py`** — 添加带 `_HERMES_CORE_TOOLS` 的 `"hermes-newplat"` toolset 定义
-2. **`toolsets.py`** — 将 `"hermes-newplat"` 添加到 `"hermes-gateway"` 的 includes 列表
+1. **`toolsets.py`** — 添加带 `_HADES_CORE_TOOLS` 的 `"hermes-newplat"` toolset 定义
+2. **`toolsets.py`** — 将 `"hermes-newplat"` 添加到 `"hades-gateway"` 的 includes 列表
 
 ### 9. 可选：平台提示
 

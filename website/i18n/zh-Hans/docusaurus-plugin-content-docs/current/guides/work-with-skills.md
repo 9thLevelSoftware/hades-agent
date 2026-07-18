@@ -101,7 +101,7 @@ hermes skills install https://sharethis.chat/SKILL.md
 ```
 
 安装过程：
-1. skill 目录被复制到 `~/.hermes/skills/`
+1. skill 目录被复制到 `~/.hades/skills/`
 2. 出现在 `skills_list` 输出中
 3. 成为可用的斜杠命令
 
@@ -174,12 +174,12 @@ Skills 只是带有 YAML frontmatter 的 Markdown 文件，创建一个不超过
 ### 1. 创建目录
 
 ```bash
-mkdir -p ~/.hermes/skills/my-category/my-skill
+mkdir -p ~/.hades/skills/my-category/my-skill
 ```
 
 ### 2. 编写 SKILL.md
 
-```markdown title="~/.hermes/skills/my-category/my-skill/SKILL.md"
+```markdown title="~/.hades/skills/my-category/my-skill/SKILL.md"
 ---
 name: my-skill
 description: Brief description of what this skill does
@@ -238,7 +238,7 @@ For API details, load the reference: `skill_view("my-skill", "references/api-doc
 hermes chat -q "/my-skill help me with the thing"
 ```
 
-Skill 会自动出现——无需注册。放入 `~/.hermes/skills/` 即可立即生效。
+Skill 会自动出现——无需注册。放入 `~/.hades/skills/` 即可立即生效。
 
 :::info
 Agent 也可以使用 `skill_manage` 自行创建和更新 skills。解决复杂问题后，Hermes 可能会主动提议将该方法保存为 skill，以便下次使用。
@@ -281,7 +281,7 @@ hermes skills
 
 **让 agent 创建 skills。** 完成复杂的多步骤任务后，Hermes 通常会主动提议将该方法保存为 skill。接受它——这些由 agent 编写的 skills 会捕捉到完整的工作流程，包括过程中发现的各种坑。
 
-**使用分类目录。** 将 skills 整理到子目录中（`~/.hermes/skills/devops/`、`~/.hermes/skills/research/` 等），保持列表整洁，并帮助 agent 更快找到相关 skills。
+**使用分类目录。** 将 skills 整理到子目录中（`~/.hades/skills/devops/`、`~/.hades/skills/research/` 等），保持列表整洁，并帮助 agent 更快找到相关 skills。
 
 **及时更新过时的 skills。** 如果使用某个 skill 时遇到它未覆盖的问题，告诉 Hermes 用你学到的内容更新该 skill。不维护的 skills 会成为负担。
 

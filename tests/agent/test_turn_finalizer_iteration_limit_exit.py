@@ -116,7 +116,7 @@ def _finalize(
 
 def test_pending_verify_response_is_preserved_for_cron_delivery(monkeypatch):
     """A held-back verification response survives last-turn exhaustion."""
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = _LimitAgent()
     report = "complete cron report body"
 
@@ -133,7 +133,7 @@ def test_pending_verify_response_is_preserved_for_cron_delivery(monkeypatch):
 
 
 def test_pending_pre_verify_response_is_preserved_on_budget_exhaustion(monkeypatch):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = _LimitAgent()
     report = "budget exhausted but complete"
 
@@ -150,7 +150,7 @@ def test_pending_pre_verify_response_is_preserved_on_budget_exhaustion(monkeypat
 
 
 def test_empty_pending_verification_response_uses_summary_fallback(monkeypatch):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = _LimitAgent()
 
     result = _finalize(
@@ -166,7 +166,7 @@ def test_empty_pending_verification_response_uses_summary_fallback(monkeypatch):
 
 
 def test_short_generated_summary_keeps_abnormal_turn_explainer(monkeypatch):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = _LimitAgent(completion_explainer=True)
     agent._handle_max_iterations = lambda *_args: "The"
 
@@ -176,7 +176,7 @@ def test_short_generated_summary_keeps_abnormal_turn_explainer(monkeypatch):
 
 
 def test_short_preserved_verification_response_is_not_rewritten(monkeypatch):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = _LimitAgent(completion_explainer=True)
 
     result = _finalize(
@@ -190,7 +190,7 @@ def test_short_preserved_verification_response_is_not_rewritten(monkeypatch):
 
 
 def test_text_response_exit_not_rewritten_at_iteration_limit(monkeypatch):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = _LimitAgent(budget_remaining=5)
     exit_reason = "text_response(finish_reason=stop)"
 
@@ -216,7 +216,7 @@ def test_text_response_exit_not_rewritten_at_iteration_limit(monkeypatch):
     ],
 )
 def test_unrelated_non_success_response_is_not_reclassified(monkeypatch, exit_reason):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = _LimitAgent()
 
     result = _finalize(
@@ -241,7 +241,7 @@ def test_unrelated_non_success_response_is_not_reclassified(monkeypatch, exit_re
 def test_pending_response_does_not_mask_later_terminal_exit(
     monkeypatch, exit_reason, interrupted, failed
 ):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = _LimitAgent()
 
     result = finalize_turn(
@@ -283,7 +283,7 @@ def test_pending_response_does_not_mask_later_terminal_exit(
 def test_non_empty_response_cannot_make_terminal_non_success_completed(
     monkeypatch, exit_reason, failed, interrupted, expected_outcome
 ):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     agent = _LimitAgent(budget_remaining=59)
 
     result = finalize_turn(
@@ -307,12 +307,12 @@ def test_non_empty_response_cannot_make_terminal_non_success_completed(
 
 
 def test_pending_response_records_kanban_timeout(monkeypatch):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task-123")
     record = MagicMock(name="record_task_failure")
     conn = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: conn)
-    monkeypatch.setattr("hermes_cli.kanban_db._record_task_failure", record)
+    monkeypatch.setattr("hades_cli.kanban_db.connect", lambda: conn)
+    monkeypatch.setattr("hades_cli.kanban_db._record_task_failure", record)
     agent = _LimitAgent()
 
     result = _finalize(

@@ -178,7 +178,7 @@ def test_unpinned_npx_is_rejected_at_spawn():
     assert result.ok is False
 ```
 
-- [ ] Step 2: Implement profile `~/.hermes/.mcp/lock.json` with atomic writes, per-server entries, lockfile schema version, and content/manifest hash. Reuse HubLockFile locking/serialization pattern but do not share skill paths.
+- [ ] Step 2: Implement profile `~/.hades/.mcp/lock.json` with atomic writes, per-server entries, lockfile schema version, and content/manifest hash. Reuse HubLockFile locking/serialization pattern but do not share skill paths.
 
 - [ ] Step 3: At approved install, resolve floating git refs to commit SHA, package args to exact version where package manager can report it, and compute manifest/source hash. Store the command/source as normalized redacted data.
 
@@ -189,7 +189,7 @@ def test_unpinned_npx_is_rejected_at_spawn():
 - [ ] Step 6: Run lock/config/security tests and commit.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/tools/test_mcp_lockfile.py \
   tests/hermes_cli/test_mcp_config.py \
   tests/hermes_cli/test_mcp_security.py \
@@ -330,7 +330,7 @@ python -m pytest \
 - [ ] Add profile isolation and concurrent refresh tests.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/tools/test_mcp_lockfile.py \
   tests/tools/test_mcp_trust.py \
   tests/tools/test_mcp_acquisition.py \

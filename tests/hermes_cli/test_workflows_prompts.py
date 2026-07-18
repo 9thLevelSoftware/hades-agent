@@ -1,4 +1,4 @@
-from hermes_cli.workflows_prompts import render_agent_prompt
+from hades_cli.workflows_prompts import render_agent_prompt
 
 
 def test_render_agent_prompt_wraps_interpolated_values_as_untrusted_and_redacts_secrets():

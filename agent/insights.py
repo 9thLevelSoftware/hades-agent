@@ -1,11 +1,11 @@
 """
-Session Insights Engine for Hermes Agent.
+Session Insights Engine for Hades Agent.
 
 Analyzes historical session data from the SQLite state database to produce
 comprehensive usage insights — token consumption, cost estimates, tool usage
 patterns, activity trends, model/platform breakdowns, and session metrics.
 
-Inspired by Claude Code's /insights command, adapted for Hermes Agent's
+Inspired by Claude Code's /insights command, adapted for Hades Agent's
 multi-platform architecture with additional cost estimation and platform
 breakdown capabilities.
 
@@ -95,7 +95,7 @@ class InsightsEngine:
         Initialize with a SessionDB instance.
 
         Args:
-            db: A SessionDB instance (from hermes_state.py)
+            db: A SessionDB instance (from hades_state.py)
         """
         self.db = db
         self._conn = db._conn

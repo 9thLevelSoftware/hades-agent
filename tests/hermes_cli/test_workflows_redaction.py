@@ -1,4 +1,4 @@
-from hermes_cli.workflows_redaction import redact_sensitive
+from hades_cli.workflows_redaction import redact_sensitive
 
 
 def test_redact_sensitive_recurses_through_dicts_and_lists() -> None:

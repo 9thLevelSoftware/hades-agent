@@ -1,13 +1,13 @@
 ---
 title: "Windows (WSL2) 指南"
-description: "通过 WSL2 在 Windows 上运行 Hermes Agent —— 安装配置、Windows 与 Linux 之间的文件系统访问、网络设置及常见问题"
+description: "通过 WSL2 在 Windows 上运行 Hades Agent —— 安装配置、Windows 与 Linux 之间的文件系统访问、网络设置及常见问题"
 sidebar_label: "Windows (WSL2)"
 sidebar_position: 2
 ---
 
 # Windows (WSL2) 指南
 
-Hermes Agent 现已同时支持原生 Windows 和 WSL2。本页介绍 WSL2 路径；如需原生 PowerShell 安装方式，请参阅专属的 **[Windows（原生）指南](./windows-native.md)**。
+Hades Agent 现已同时支持原生 Windows 和 WSL2。本页介绍 WSL2 路径；如需原生 PowerShell 安装方式，请参阅专属的 **[Windows（原生）指南](./windows-native.md)**。
 
 **何时选择 WSL2 而非原生：**
 - 你想使用 dashboard 内嵌终端（`/chat` 标签页）—— 该面板需要 POSIX PTY（伪终端），仅 WSL2 支持。
@@ -34,7 +34,7 @@ WSL2 在轻量级虚拟机中运行真实的 Linux 内核，因此其中的 Herm
 
 WSL2 的实际影响：
 
-- Hermes CLI、gateway、会话、内存、技能和工具运行时均位于 Linux 虚拟机内部。
+- Hades CLI、gateway、会话、内存、技能和工具运行时均位于 Linux 虚拟机内部。
 - Windows 程序（浏览器、原生应用、带登录 profile 的 Chrome）位于虚拟机外部。
 - 每次需要两者通信时 —— 共享文件、打开 URL、控制 Chrome、访问本地模型服务器、将 Hermes gateway 暴露给手机 —— 都需要跨越一道边界。这些边界正是本指南要讲的内容。
 
@@ -124,7 +124,7 @@ hermes
 
 **经验法则：将所有 Linux 相关内容保留在 Linux 文件系统内。**
 
-- 你的 Hermes 安装目录（`~/.hermes/`）—— Linux 侧。安装程序已自动处理。
+- 你的 Hermes 安装目录（`~/.hades/`）—— Linux 侧。安装程序已自动处理。
 - 你在 WSL 中开发的 git 仓库 —— Linux 侧（`~/code/...`、`~/projects/...`）。
 - 你的模型、数据集、venv —— Linux 侧。
 

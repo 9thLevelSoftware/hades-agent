@@ -8,7 +8,7 @@ Rebuild only the Workflows page content into a complete canvas-first visual work
 
 ## Constraints
 
-- Retain the Hermes global dashboard sidebar; do not recreate the mockup’s application rail.
+- Retain the Hades global dashboard sidebar; do not recreate the mockup’s application rail.
 - Use the already-installed `@xyflow/react` for canvas interactions and HTML5 drag-and-drop. Do not add another graph, drag-and-drop, or component framework.
 - Preserve prompt-first creation: raw YAML/JSON is an advanced escape hatch, never the primary path.
 - Keep existing backend workflow definitions, triggers, nodes, execution history, validation, and deploy behavior.

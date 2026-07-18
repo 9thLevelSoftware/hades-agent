@@ -39,7 +39,7 @@ Hermes 使用两类模型槽位：
 
 在过滤框中输入提供商名称、slug 或模型 ID 进行筛选。
 
-选择模型后点击 **Switch**，Hermes 会将其写入 `~/.hermes/config.yaml` 的 `model` 部分。**此操作仅对新会话生效** — 已打开的聊天标签页将继续使用启动时的模型。如需在当前聊天中热切换，请在聊天内使用 `/model` 斜杠命令。
+选择模型后点击 **Switch**，Hermes 会将其写入 `~/.hades/config.yaml` 的 `model` 部分。**此操作仅对新会话生效** — 已打开的聊天标签页将继续使用启动时的模型。如需在当前聊天中热切换，请在聊天内使用 `/model` 斜杠命令。
 
 ## 设置辅助模型
 
@@ -85,7 +85,7 @@ Hermes 使用两类模型槽位：
 
 ## 写入 `config.yaml` 的内容
 
-通过仪表板保存时，Hermes 写入 `~/.hermes/config.yaml`：
+通过仪表板保存时，Hermes 写入 `~/.hades/config.yaml`：
 
 **主模型：**
 ```yaml
@@ -169,7 +169,7 @@ Hermes 仅列出具有有效凭据的提供商。检查侧边栏中的 **Keys** 
 为常用模型定义短名称，然后在 CLI 或任意消息平台中使用 `/model <alias>`：
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.hades/config.yaml
 model_aliases:
   fav:
     model: claude-sonnet-4.6
@@ -194,13 +194,13 @@ hermes config set model.aliases.grok x-ai/grok-4
 hermes model            # 交互式提供商 + 模型选择器（切换默认值的标准方式）
 ```
 
-`hermes model` 引导你选择提供商、完成认证（OAuth 流程会打开浏览器；API key 提供商会提示输入密钥），然后从该提供商的精选目录中选择具体模型。选择结果写入 `~/.hermes/config.yaml` 的 `model.provider` 和 `model.model` 字段。
+`hermes model` 引导你选择提供商、完成认证（OAuth 流程会打开浏览器；API key 提供商会提示输入密钥），然后从该提供商的精选目录中选择具体模型。选择结果写入 `~/.hades/config.yaml` 的 `model.provider` 和 `model.model` 字段。
 
 如需在不启动选择器的情况下列出提供商/模型，请使用仪表板或下方的 REST 端点。查看 CLI 当前实际使用的配置：`hermes config get model` 和 `hermes status`。
 
 ### 直接编辑配置文件
 
-编辑 `~/.hermes/config.yaml` 后重启相关服务。完整 schema 请见[配置参考](./configuration.md)。
+编辑 `~/.hades/config.yaml` 后重启相关服务。完整 schema 请见[配置参考](./configuration.md)。
 
 ### REST API
 

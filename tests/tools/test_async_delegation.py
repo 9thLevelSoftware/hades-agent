@@ -184,7 +184,7 @@ def test_pid_probe_reuses_cross_platform_active_session_helper(monkeypatch):
         seen["args"] = (pid, process_start_time)
         return True
 
-    monkeypatch.setattr("hermes_cli.active_sessions._pid_alive", safe_probe)
+    monkeypatch.setattr("hades_cli.active_sessions._pid_alive", safe_probe)
 
     assert ad._pid_alive(12345, 678.9) is True
     assert seen["args"] == (12345, 678.9)
@@ -573,7 +573,7 @@ def test_completed_records_pruned_to_cap():
 
 def test_completion_is_persisted_and_delivery_can_be_acknowledged(tmp_path, monkeypatch):
     """A finished child remains pending on disk until its queue consumer acks it."""
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     dispatched = ad.dispatch_async_delegation(
         goal="durable", context="ctx", toolsets=["terminal"], role="leaf",
         model="m", session_key="owner", parent_session_id="parent",
@@ -599,7 +599,7 @@ def test_completion_is_persisted_and_delivery_can_be_acknowledged(tmp_path, monk
 def test_real_process_restart_restores_owned_completion_once(tmp_path):
     """Real-import E2E: a fresh interpreter restores a prior process's result."""
     repo = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    env = {**os.environ, "HERMES_HOME": str(tmp_path), "PYTHONPATH": repo}
+    env = {**os.environ, "HADES_HOME": str(tmp_path), "PYTHONPATH": repo}
     producer = r'''
 import time
 from tools import async_delegation as ad
@@ -651,7 +651,7 @@ assert ad.mark_completion_delivered({delegation_id!r})
 
 
 def test_submit_failure_removes_durable_running_record(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
 
     class _BrokenExecutor:
         def submit(self, *_args, **_kwargs):
@@ -669,7 +669,7 @@ def test_submit_failure_removes_durable_running_record(tmp_path, monkeypatch):
 
 
 def test_pending_retention_prunes_delivered_before_undelivered(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     monkeypatch.setattr(ad, "_MAX_RETAINED_COMPLETED", 2)
     for index, delivery_state in enumerate(("pending", "delivered", "pending")):
         delegation_id = f"deleg_{index}"
@@ -700,7 +700,7 @@ def test_pending_retention_prunes_delivered_before_undelivered(tmp_path, monkeyp
 
 
 def test_recover_marks_abandoned_running_record_unknown(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     record = {
         "delegation_id": "deleg_abandoned",
         "session_key": "owner",
@@ -725,7 +725,7 @@ def test_recover_marks_abandoned_running_record_unknown(tmp_path, monkeypatch):
 
 
 def test_durable_delivery_claim_is_exclusive_and_retryable(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     record = {
         "delegation_id": "deleg_claim", "session_key": "owner",
         "origin_ui_session_id": "", "parent_session_id": None,
@@ -856,7 +856,7 @@ def test_delegate_task_persistence_rejection_releases_unstarted_child(monkeypatc
     monkeypatch.setattr(dt, "_build_child_agent", build_child)
     monkeypatch.setattr(dt, "_run_single_child", run_child)
     monkeypatch.setattr(dt, "_resolve_delegation_credentials", lambda *a, **k: creds)
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", stop_hook)
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", stop_hook)
     monkeypatch.setattr(
         ad,
         "dispatch_async_delegation_batch",
@@ -1289,7 +1289,7 @@ from unittest.mock import MagicMock as _MM_t8, patch as _patch_t8
 import pytest as _pytest_t8
 
 from agent.operation_journal import OperationJournal as _OpJournal_t8
-from hermes_state import SessionDB as _SessionDB_t8
+from hades_state import SessionDB as _SessionDB_t8
 
 
 @_pytest_t8.fixture()
@@ -1945,13 +1945,13 @@ def test_cli_ack_is_scoped_to_consumed_delegation():
 def test_operation_journal_cache_is_scoped_to_profile(monkeypatch):
     class FakeDB:
         def __init__(self):
-            self.home = str(ad.get_hermes_home())
+            self.home = str(ad.get_hades_home())
 
-    monkeypatch.setattr("hermes_state.SessionDB", FakeDB)
+    monkeypatch.setattr("hades_state.SessionDB", FakeDB)
     ad._set_journal_for_tests(None)
-    monkeypatch.setenv("HERMES_HOME", "/tmp/hermes-profile-a")
+    monkeypatch.setenv("HADES_HOME", "/tmp/hermes-profile-a")
     first = ad._open_journal()
-    monkeypatch.setenv("HERMES_HOME", "/tmp/hermes-profile-b")
+    monkeypatch.setenv("HADES_HOME", "/tmp/hermes-profile-b")
     second = ad._open_journal()
 
     assert first is not second

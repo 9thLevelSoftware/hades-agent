@@ -64,9 +64,9 @@ def test_set_session_env_sets_contextvars(monkeypatch):
     assert get_session_env("HERMES_SESSION_THREAD_ID") == "17585"
 
     # os.environ should NOT be touched
-    assert os.getenv("HERMES_SESSION_PLATFORM") is None
-    assert os.getenv("HERMES_SESSION_SOURCE") is None
-    assert os.getenv("HERMES_SESSION_THREAD_ID") is None
+    assert os.getenv("HADES_SESSION_PLATFORM") is None
+    assert os.getenv("HADES_SESSION_SOURCE") is None
+    assert os.getenv("HADES_SESSION_THREAD_ID") is None
 
     # Clean up
     runner._clear_session_env(tokens)

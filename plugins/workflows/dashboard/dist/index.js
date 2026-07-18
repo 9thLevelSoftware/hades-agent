@@ -2028,7 +2028,7 @@
 		function errorMessage(err) {
 			return formatApiError(err);
 		}
-		const PRIVACY_NOTE = "Workflow inputs and outputs are stored locally in Hermes workflow/Kanban history. Do not paste secrets; common secret-looking keys are redacted in dashboard views.";
+		const PRIVACY_NOTE = "Workflow inputs and outputs are stored locally in Hades workflow/Kanban history. Do not paste secrets; common secret-looking keys are redacted in dashboard views.";
 		function asArray(value) {
 			return Array.isArray(value) ? value : [];
 		}

@@ -34,7 +34,7 @@ from agent.prompt_builder import (
     PLATFORM_HINTS,
     WSL_ENVIRONMENT_HINT,
 )
-from hermes_cli.nous_subscription import NousFeatureState, NousSubscriptionFeatures
+from hades_cli.nous_subscription import NousFeatureState, NousSubscriptionFeatures
 
 
 # =========================================================================
@@ -136,7 +136,7 @@ class TestTruncateContent:
         def default_load_config():
             return {}
 
-        monkeypatch.setattr("hermes_cli.config.load_config", default_load_config)
+        monkeypatch.setattr("hades_cli.config.load_config", default_load_config)
 
     def test_context_file_max_chars_default_matches_upstream_limit(self):
         assert CONTEXT_FILE_MAX_CHARS == 20_000
@@ -170,7 +170,7 @@ class TestTruncateContent:
         def fake_load_config():
             return {"context_file_max_chars": 120}
 
-        monkeypatch.setattr("hermes_cli.config.load_config", fake_load_config)
+        monkeypatch.setattr("hades_cli.config.load_config", fake_load_config)
         content = "HEAD" + "x" * 160 + "TAIL"
 
         result = _truncate_content(content, "config.md")
@@ -185,7 +185,7 @@ class TestTruncateContent:
         def fake_load_config():
             return {"context_file_max_chars": 120}
 
-        monkeypatch.setattr("hermes_cli.config.load_config", fake_load_config)
+        monkeypatch.setattr("hades_cli.config.load_config", fake_load_config)
         content = "x" * 180
 
         result = _truncate_content(content, "explicit.md", max_chars=200)
@@ -196,7 +196,7 @@ class TestTruncateContent:
         def fake_load_config():
             return {"context_file_max_chars": 120}
 
-        monkeypatch.setattr("hermes_cli.config.load_config", fake_load_config)
+        monkeypatch.setattr("hades_cli.config.load_config", fake_load_config)
 
         _truncate_content("x" * 180, "warning.md")
 
@@ -213,7 +213,7 @@ class TestTruncateContent:
         def fake_load_config():
             return {"context_file_max_chars": 120}
 
-        monkeypatch.setattr("hermes_cli.config.load_config", fake_load_config)
+        monkeypatch.setattr("hades_cli.config.load_config", fake_load_config)
 
         # Generate a warning in a fresh child context, then assert it did NOT
         # leak into the parent context's accumulator.
@@ -241,7 +241,7 @@ class TestDynamicContextFileCap:
     @pytest.fixture(autouse=True)
     def _no_explicit_config(self, monkeypatch):
         # No explicit context_file_max_chars → dynamic path is eligible.
-        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
+        monkeypatch.setattr("hades_cli.config.load_config", lambda: {})
 
     def test_dynamic_floor_for_small_window(self):
         # A small context window never drops below the historical 20K floor.
@@ -270,7 +270,7 @@ class TestDynamicContextFileCap:
     def test_explicit_config_beats_dynamic(self, monkeypatch):
         # An explicit value always wins, even when a big window is available.
         monkeypatch.setattr(
-            "hermes_cli.config.load_config",
+            "hades_cli.config.load_config",
             lambda: {"context_file_max_chars": 1_000},
         )
         assert _get_context_file_max_chars(200_000) == 1_000
@@ -409,12 +409,12 @@ class TestBuildSkillsSystemPrompt:
         clear_skills_system_prompt_cache(clear_snapshot=True)
 
     def test_empty_when_no_skills_dir(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         result = build_skills_system_prompt()
         assert result == ""
 
     def test_builds_index_with_skills(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skills_dir = tmp_path / "skills" / "coding" / "python-debug"
         skills_dir.mkdir(parents=True)
         (skills_dir / "SKILL.md").write_text(
@@ -426,7 +426,7 @@ class TestBuildSkillsSystemPrompt:
         assert "available_skills" in result
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         cat_dir = tmp_path / "skills" / "tools"
         for subdir in ["search", "search"]:
             d = cat_dir / subdir
@@ -444,7 +444,7 @@ class TestBuildSkillsSystemPrompt:
         (agent-created skills are the model's project memory, and models
         don't rediscover them via skills_list once the index goes quiet).
         """
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         for cat, name in (("social-media", "tweet-stuff"), ("github", "pr-review")):
             d = tmp_path / "skills" / cat / name
             d.mkdir(parents=True)
@@ -467,7 +467,7 @@ class TestBuildSkillsSystemPrompt:
     def test_compact_categories_demote_nested_and_miss_cache_separately(
         self, monkeypatch, tmp_path
     ):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         d = tmp_path / "skills" / "social-media" / "twitter" / "thread-writer"
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(
@@ -486,7 +486,7 @@ class TestBuildSkillsSystemPrompt:
 
     def test_excludes_incompatible_platform_skills(self, monkeypatch, tmp_path):
         """Skills with platforms: [macos] should not appear on Linux."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skills_dir = tmp_path / "skills" / "apple"
         skills_dir.mkdir(parents=True)
 
@@ -515,7 +515,7 @@ class TestBuildSkillsSystemPrompt:
 
     def test_includes_matching_platform_skills(self, monkeypatch, tmp_path):
         """Skills with platforms: [macos] should appear on macOS."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skills_dir = tmp_path / "skills" / "apple"
         mac_skill = skills_dir / "imessage"
         mac_skill.mkdir(parents=True)
@@ -534,7 +534,7 @@ class TestBuildSkillsSystemPrompt:
 
     def test_excludes_disabled_skills(self, monkeypatch, tmp_path):
         """Skills in the user's disabled list should not appear in the system prompt."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skills_dir = tmp_path / "skills" / "tools"
         skills_dir.mkdir(parents=True)
 
@@ -562,7 +562,7 @@ class TestBuildSkillsSystemPrompt:
         assert "old-tool" not in result
 
     def test_rebuilds_prompt_when_disabled_skills_change(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skill_dir = tmp_path / "skills" / "tools" / "cached-skill"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -580,7 +580,7 @@ class TestBuildSkillsSystemPrompt:
         assert "cached-skill" not in second
 
     def test_includes_setup_needed_skills(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         monkeypatch.delenv("MISSING_API_KEY_XYZ", raising=False)
         skills_dir = tmp_path / "skills" / "media"
 
@@ -603,7 +603,7 @@ class TestBuildSkillsSystemPrompt:
 
     def test_includes_skills_with_met_prerequisites(self, monkeypatch, tmp_path):
         """Skills with satisfied prerequisites should appear normally."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         monkeypatch.setenv("MY_API_KEY", "test_value")
         skills_dir = tmp_path / "skills" / "media"
 
@@ -620,7 +620,7 @@ class TestBuildSkillsSystemPrompt:
     def test_non_local_backend_keeps_skill_visible_without_probe(
         self, monkeypatch, tmp_path
     ):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         monkeypatch.setenv("TERMINAL_ENV", "docker")
         monkeypatch.delenv("BACKEND_ONLY_KEY", raising=False)
         skills_dir = tmp_path / "skills" / "media"
@@ -640,7 +640,7 @@ class TestBuildNousSubscriptionPrompt:
     def test_includes_active_subscription_features(self, monkeypatch):
         monkeypatch.setattr("tools.tool_backend_helpers.managed_nous_tools_enabled", lambda: True)
         monkeypatch.setattr(
-            "hermes_cli.nous_subscription.get_nous_subscription_features",
+            "hades_cli.nous_subscription.get_nous_subscription_features",
             lambda config=None: NousSubscriptionFeatures(
                 subscribed=True,
                 nous_auth_present=True,
@@ -666,7 +666,7 @@ class TestBuildNousSubscriptionPrompt:
     def test_non_subscriber_prompt_includes_relevant_upgrade_guidance(self, monkeypatch):
         monkeypatch.setattr("tools.tool_backend_helpers.managed_nous_tools_enabled", lambda: True)
         monkeypatch.setattr(
-            "hermes_cli.nous_subscription.get_nous_subscription_features",
+            "hades_cli.nous_subscription.get_nous_subscription_features",
             lambda config=None: NousSubscriptionFeatures(
                 subscribed=False,
                 nous_auth_present=False,
@@ -710,7 +710,7 @@ class TestBuildContextFilesPrompt:
         with patch("pathlib.Path.home", return_value=fake_home):
             result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Project Context" in result
-        assert "Hermes Agent" in result
+        assert "Hades Agent" in result
 
     def test_loads_agents_md(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("Use Ruff for linting.")
@@ -762,7 +762,7 @@ class TestBuildContextFilesPrompt:
         assert "type hints" in result
 
     def test_loads_soul_md_from_hermes_home_only(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path / "hermes_home"))
         hermes_home = tmp_path / "hermes_home"
         hermes_home.mkdir()
         (hermes_home / "SOUL.md").write_text("Be concise and friendly.", encoding="utf-8")
@@ -772,7 +772,7 @@ class TestBuildContextFilesPrompt:
         assert "cwd soul should be ignored" not in result
 
     def test_soul_md_has_no_wrapper_text(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path / "hermes_home"))
         hermes_home = tmp_path / "hermes_home"
         hermes_home.mkdir()
         (hermes_home / "SOUL.md").write_text("Be concise and friendly.", encoding="utf-8")
@@ -782,7 +782,7 @@ class TestBuildContextFilesPrompt:
         assert "## SOUL.md" not in result
 
     def test_empty_soul_md_adds_nothing(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path / "hermes_home"))
         hermes_home = tmp_path / "hermes_home"
         hermes_home.mkdir()
         (hermes_home / "SOUL.md").write_text("\n\n", encoding="utf-8")
@@ -1379,7 +1379,7 @@ class TestEnvironmentHints:
         monkeypatch.delenv("TERMINAL_ENV", raising=False)
         monkeypatch.setenv("HERMES_ENVIRONMENT_HINT", "ENV-WINS")
         monkeypatch.setattr(
-            "hermes_cli.config.load_config",
+            "hades_cli.config.load_config",
             lambda: {"agent": {"environment_hint": "CONFIG-VALUE"}},
         )
         _pb._clear_backend_probe_cache()
@@ -1394,7 +1394,7 @@ class TestEnvironmentHints:
         monkeypatch.delenv("TERMINAL_ENV", raising=False)
         monkeypatch.delenv("HERMES_ENVIRONMENT_HINT", raising=False)
         monkeypatch.setattr(
-            "hermes_cli.config.load_config",
+            "hades_cli.config.load_config",
             lambda: {"agent": {"environment_hint": "CONFIG-VALUE"}},
         )
         _pb._clear_backend_probe_cache()
@@ -1407,7 +1407,7 @@ class TestEnvironmentHints:
         monkeypatch.setattr(_pb, "is_wsl", lambda: False)
         monkeypatch.delenv("TERMINAL_ENV", raising=False)
         monkeypatch.delenv("HERMES_ENVIRONMENT_HINT", raising=False)
-        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"agent": {}})
+        monkeypatch.setattr("hades_cli.config.load_config", lambda: {"agent": {}})
         _pb._clear_backend_probe_cache()
         result = _pb.build_environment_hints()
         assert "Host:" in result
@@ -1478,7 +1478,7 @@ class TestBuildSkillsSystemPromptConditional:
         clear_skills_system_prompt_cache(clear_snapshot=True)
 
     def test_fallback_skill_hidden_when_primary_available(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skill_dir = tmp_path / "skills" / "search" / "duckduckgo"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -1491,7 +1491,7 @@ class TestBuildSkillsSystemPromptConditional:
         assert "duckduckgo" not in result
 
     def test_fallback_skill_shown_when_primary_unavailable(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skill_dir = tmp_path / "skills" / "search" / "duckduckgo"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -1504,7 +1504,7 @@ class TestBuildSkillsSystemPromptConditional:
         assert "duckduckgo" in result
 
     def test_requires_skill_hidden_when_toolset_missing(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skill_dir = tmp_path / "skills" / "iot" / "openhue"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -1517,7 +1517,7 @@ class TestBuildSkillsSystemPromptConditional:
         assert "openhue" not in result
 
     def test_requires_skill_shown_when_toolset_available(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skill_dir = tmp_path / "skills" / "iot" / "openhue"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -1530,7 +1530,7 @@ class TestBuildSkillsSystemPromptConditional:
         assert "openhue" in result
 
     def test_unconditional_skill_always_shown(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skill_dir = tmp_path / "skills" / "general" / "notes"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -1544,7 +1544,7 @@ class TestBuildSkillsSystemPromptConditional:
 
     def test_no_args_shows_all_skills(self, monkeypatch, tmp_path):
         """Backward compat: calling with no args shows everything."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skill_dir = tmp_path / "skills" / "search" / "duckduckgo"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -1555,7 +1555,7 @@ class TestBuildSkillsSystemPromptConditional:
 
     def test_null_metadata_does_not_crash(self, monkeypatch, tmp_path):
         """Regression: metadata key present but null should not AttributeError."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skill_dir = tmp_path / "skills" / "general" / "safe-skill"
         skill_dir.mkdir(parents=True)
         # YAML `metadata:` with no value parses as {"metadata": None}
@@ -1570,7 +1570,7 @@ class TestBuildSkillsSystemPromptConditional:
 
     def test_null_hermes_under_metadata_does_not_crash(self, monkeypatch, tmp_path):
         """Regression: metadata.hermes present but null should not crash."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         skill_dir = tmp_path / "skills" / "general" / "nested-null"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -1705,7 +1705,7 @@ class TestUtilityRankingConfig:
     """Config defaults for skills.utility_ranking exist."""
 
     def test_default_config_has_utility_ranking_keys(self):
-        from hermes_cli.config import DEFAULT_CONFIG
+        from hades_cli.config import DEFAULT_CONFIG
         assert "utility_ranking" in DEFAULT_CONFIG["skills"]
         ur = DEFAULT_CONFIG["skills"]["utility_ranking"]
         assert ur["enabled"] is False
@@ -1732,7 +1732,7 @@ class TestUtilityRankedSkillIndex:
 
     def test_utility_ranking_disabled_preserves_alphabetical(self, monkeypatch, tmp_path):
         """With ranking disabled (default), order is alphabetical within category."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         sd = tmp_path / "skills"
         self._make_skill(sd, "tools", "aaa-first", "First skill")
         self._make_skill(sd, "tools", "zzz-last", "Last skill")
@@ -1743,7 +1743,7 @@ class TestUtilityRankedSkillIndex:
 
     def test_utility_ranking_reorders_eligible_skills(self, monkeypatch, tmp_path):
         """Eligible skills with high utility rank above those with low utility."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         # Enable utility ranking via config
         (tmp_path / "config.yaml").write_text(
             "skills:\n  utility_ranking:\n    enabled: true\n    min_samples: 5\n    utility_weight: 0.7\n"
@@ -1777,7 +1777,7 @@ class TestUtilityRankedSkillIndex:
 
     def test_below_min_samples_preserves_existing_order(self, monkeypatch, tmp_path):
         """Skills below min_samples keep alphabetical order even when ranking is on."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         # Enable utility ranking via config
         (tmp_path / "config.yaml").write_text(
             "skills:\n  utility_ranking:\n    enabled: true\n    min_samples: 5\n    utility_weight: 0.7\n"
@@ -1808,7 +1808,7 @@ class TestUtilityRankedSkillIndex:
         become eligible for ranking — even though the sidecar's hardcoded
         MIN_UTILITY_SAMPLES is 5.
         """
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         # min_samples: 3 means 3 samples is enough
         (tmp_path / "config.yaml").write_text(
             "skills:\n  utility_ranking:\n    enabled: true\n    min_samples: 3\n    utility_weight: 0.7\n"
@@ -1859,7 +1859,7 @@ class TestUtilityRankedSkillIndex:
     def test_skill_index_utility_order_is_snapshot_stable(self, monkeypatch, tmp_path):
         """Ordering is session-stable: calling again with different sidecar data
         returns the cached result until the snapshot is cleared."""
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
         # Enable utility ranking via config
         (tmp_path / "config.yaml").write_text(
             "skills:\n  utility_ranking:\n    enabled: true\n    min_samples: 5\n    utility_weight: 0.7\n"

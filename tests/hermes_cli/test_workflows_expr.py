@@ -1,6 +1,6 @@
 import pytest
 
-from hermes_cli.workflows_expr import eval_condition, resolve_path
+from hades_cli.workflows_expr import eval_condition, resolve_path
 
 
 def test_resolve_path_nested_dict_and_list():

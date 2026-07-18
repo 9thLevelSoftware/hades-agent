@@ -17,7 +17,7 @@ Karpathy 的 LLM Wiki：构建/查询互联 Markdown 知识库。
 | 来源 | 内置（默认安装） |
 | 路径 | `skills/research/llm-wiki` |
 | 版本 | `2.1.0` |
-| 作者 | Hermes Agent |
+| 作者 | Hades Agent |
 | 许可证 | MIT |
 | 平台 | linux, macos, windows |
 | 标签 | `wiki`, `knowledge-base`, `research`, `notes`, `markdown`, `rag-alternative` |
@@ -49,7 +49,7 @@ Karpathy 的 LLM Wiki：构建/查询互联 Markdown 知识库。
 
 ## Wiki 位置
 
-**位置：** 通过 `WIKI_PATH` 环境变量设置（例如在 `~/.hermes/.env` 中）。
+**位置：** 通过 `WIKI_PATH` 环境变量设置（例如在 `~/.hades/.env` 中）。
 
 未设置时，默认为 `~/wiki`。
 

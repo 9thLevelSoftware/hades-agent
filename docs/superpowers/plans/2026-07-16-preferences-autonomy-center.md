@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - The system prompt, cached prefix, effective tool-definition snapshot, provider, and model remain byte-stable for a conversation. Authority changes affect deterministic execution only and never rewrite messages, reload tools, or inject a synthetic user turn.
-- Profiles are independent islands. Every config, database, lock, recovery journal, benchmark result, and audit query resolves from `get_hermes_home()`; there is no live default-profile inheritance. Copying rules occurs only through the existing explicit profile clone/export/import workflows.
+- Profiles are independent islands. Every config, database, lock, recovery journal, benchmark result, and audit query resolves from `get_hades_home()`; there is no live default-profile inheritance. Copying rules occurs only through the existing explicit profile clone/export/import workflows.
 - Stable non-secret settings and confirmed persistent assertions live under `autonomy:` in `config.yaml`. Credentials remain in `.env` or secret providers. Runtime rules and audit/evidence live in profile-local SQLite.
 - Inferred or learned material is always `learned_suggestion` plus `awaiting_confirmation`; it never participates in an allow decision until an explicit user confirmation creates a new user assertion or temporary mandate.
 - Decisions are deterministic `allow`, `ask`, or `deny`. Conflict order is deny over ask over allow; missing or unknown high-risk dimensions never become wildcard matches; required pre-action evidence must be present before allow.
@@ -19,7 +19,7 @@
 - Item #15 owns source-to-sink information-flow propagation. This item owns user authority/preferences and consumes data labels; it does not invent a second data-flow engine.
 - Item #2 imports the canonical `AuthorityProvider`, `StoredAuthorityProvider`, `AuthorityDecision`, and `authorize_effect()` from `agent.autonomy`. Its `agent/effects/authority.py` is an effect-specific adapter plus exact transaction-approval binding, not a second authority schema or store.
 - No new model-visible core tool, Desktop parity, live commerce, outbound telemetry, profile inheritance, or mutable system-prompt state is introduced. Delivery is Footprint Ladder rung 1/2: existing runtime seams plus CLI/skill and native TUI controls.
-- Every state/security/config/runtime change receives real-path tests against a temporary `HERMES_HOME`; mocks are limited to clocks, user prompt callbacks, and external effect/network boundaries.
+- Every state/security/config/runtime change receives real-path tests against a temporary `HADES_HOME`; mocks are limited to clocks, user prompt callbacks, and external effect/network boundaries.
 - User-visible claims use exact language: `allow` is current authority, not proof of completion; `verified`, `completed_unverified`, `unknown_effect`, `reversible`, `compensatable`, and `irreversible` retain the portfolio and transaction definitions.
 - The 90-day gate is the pre-registered 50-case corpus: zero contract violations, 100% conservative conflict handling, at least 20% fewer redundant prompts when correct authority is already explicit, and successful explain/edit coverage for every effective rule.
 
@@ -148,7 +148,7 @@ The implementation extends these existing seams:
 - `hermes_cli/middleware.py::run_tool_execution_middleware()` already receives tool name, final downstream arguments, operation metadata, stable operation-key factory, task/session/tool-call/turn IDs, and a single-use terminal callback.
 - `tools/approval.py::request_tool_approval()` already supplies exact argument identity, requester/channel binding, expiry, pending persistence, CLI/gateway/TUI prompts, and replay rejection. Hardline blocks execute before its recoverable gate.
 - `tools/clarify_tool.py` and `tools/clarify_gateway.py` already provide the model's bounded, high-value clarification transport; autonomy returns a structured question/choices but does not add another prompt protocol.
-- `hermes_state.py::SessionDB._execute_write()` already provides bounded `BEGIN IMMEDIATE` retry and profile-local `state.db` access. Additive tables do not require a `SCHEMA_VERSION` bump.
+- `hades_state.py::SessionDB._execute_write()` already provides bounded `BEGIN IMMEDIATE` retry and profile-local `state.db` access. Additive tables do not require a `SCHEMA_VERSION` bump.
 - `hermes_cli/config.py` already resolves profile-local `config.yaml`, preserves explicit paths/default stripping, rejects managed keys, and writes atomically. Autonomy adds an exact-hash guarded section update rather than raw YAML replacement.
 - `hermes_cli/profiles.py` explicitly implements isolated profile homes and copy-at-creation cloning; no evaluation path may call `_get_default_hermes_home()`.
 - `agent/secret_scope.py` is the fail-closed credential boundary for multiplexed profiles. Autonomy receives only the `credential` label and hashes, never scoped secret values.
@@ -181,7 +181,7 @@ The implementation extends these existing seams:
 
 ### Existing production files modified
 
-- `hermes_state.py` — additive autonomy tables and `SessionDB.autonomy` facade property.
+- `hades_state.py` — additive autonomy tables and `SessionDB.autonomy` facade property.
 - `hermes_cli/config.py` — `autonomy` defaults and guarded section mutation helper.
 - `tools/registry.py` — optional non-model `authority_context_fn` metadata and defensive resolver.
 - `tools/file_tools.py`, `tools/send_message_tool.py`, `tools/terminal_tool.py` — concrete context resolvers for the first proof actions.
@@ -329,7 +329,7 @@ git commit -m "test: preregister autonomy contract proof"
 **Files:**
 - Create: `agent/autonomy/canonical.py`
 - Create: `agent/autonomy/store.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/autonomy/test_store.py`
 - Modify: `tests/agent/autonomy/test_models.py`
 
@@ -478,7 +478,7 @@ Expected: PASS; reopen/replay/concurrency preserve one consumption and no sensit
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/autonomy/canonical.py agent/autonomy/store.py hermes_state.py tests/agent/autonomy/test_store.py tests/agent/autonomy/test_models.py
+git add agent/autonomy/canonical.py agent/autonomy/store.py hades_state.py tests/agent/autonomy/test_store.py tests/agent/autonomy/test_models.py
 git commit -m "feat: persist versioned autonomy authority"
 ```
 
@@ -497,7 +497,7 @@ git commit -m "feat: persist versioned autonomy authority"
 **Interfaces:**
 - Produces `compile_contract(config, runtime_rules, *, profile_id, now_ms) -> AutonomyContract`.
 - Produces `preview_config_change(change) -> ConfigChangePreview`, `apply_config_change(preview, expected_contract_hash) -> AppliedConfigChange`, and `recover_config_apply()`.
-- Consumes config `autonomy.stable_rules`, Task 2 store, `get_hermes_home()`, existing atomic YAML write/readability/managed-scope checks.
+- Consumes config `autonomy.stable_rules`, Task 2 store, `get_hades_home()`, existing atomic YAML write/readability/managed-scope checks.
 
 - [ ] **Step 1: Write RED layer, crash, CAS, and profile-isolation tests**
 
@@ -555,7 +555,7 @@ Only `user_assertion` rules are valid in `stable_rules`. Reject credentials, sec
 
 - [ ] **Step 4: Implement guarded section apply and recovery**
 
-Use `get_hermes_home()/autonomy.config.lock` with a bounded portable `fcntl`/`msvcrt` exclusive lock and `get_hermes_home()/autonomy-apply.pending.json` as a content-free recovery journal. Preview returns before/after raw config hashes, before/after contract hashes, exact normalized rule diff, and expiry warnings. Apply requires the exact before contract hash, re-reads config under the lock, checks managed scope, writes/fsyncs the pending journal, atomically replaces YAML through the existing guarded writer, materializes/verifies the contract, marks the journal complete, then removes it. Recovery completes materialization when YAML equals the after hash or restores the verified backup when it equals neither hash. Until recovery succeeds, enforce-mode mutations fail closed with `incomplete_authority_apply`.
+Use `get_hades_home()/autonomy.config.lock` with a bounded portable `fcntl`/`msvcrt` exclusive lock and `get_hades_home()/autonomy-apply.pending.json` as a content-free recovery journal. Preview returns before/after raw config hashes, before/after contract hashes, exact normalized rule diff, and expiry warnings. Apply requires the exact before contract hash, re-reads config under the lock, checks managed scope, writes/fsyncs the pending journal, atomically replaces YAML through the existing guarded writer, materializes/verifies the contract, marks the journal complete, then removes it. Recovery completes materialization when YAML equals the after hash or restores the verified backup when it equals neither hash. Until recovery succeeds, enforce-mode mutations fail closed with `incomplete_authority_apply`.
 
 - [ ] **Step 5: Run GREEN**
 
@@ -707,7 +707,7 @@ def authorize_effect(
     )
 ```
 
-`StoredAuthorityProvider` resolves only the active `HERMES_HOME`, validates/recompiles on source fingerprint change, checks pending apply recovery, and reloads immediately on every commit/compensate call. `evaluate(..., consume=True)` uses one short store transaction for replay check, current version, decision insert, mandate consumption, and cost reservation; it holds no transaction across a user prompt, handler, model, or network call.
+`StoredAuthorityProvider` resolves only the active `HADES_HOME`, validates/recompiles on source fingerprint change, checks pending apply recovery, and reloads immediately on every commit/compensate call. `evaluate(..., consume=True)` uses one short store transaction for replay check, current version, decision insert, mandate consumption, and cost reservation; it holds no transaction across a user prompt, handler, model, or network call.
 
 `propose_suggestion()` accepts finite rule fields plus provenance and confidence, forces `source=learned_suggestion/state=awaiting_confirmation`, and rejects self-confirmation. `confirm_suggestion()` requires actor kind `user`, creates a new ID/provenance event, and either returns a stable config preview or creates an expiring/consumable mandate. It never mutates the suggestion into authority in place.
 
@@ -861,7 +861,7 @@ def test_suggestion_accept_is_explicit_and_destination_is_required(cli):
 
 Run: `scripts/run_tests.sh tests/hermes_cli/test_autonomy.py -q`
 
-Expected: FAIL importing `hermes_cli.autonomy`.
+Expected: FAIL importing `hades_cli.autonomy`.
 
 - [ ] **Step 3: Implement the exact command grammar**
 
@@ -919,7 +919,7 @@ git commit -m "feat: add autonomy center cli controls"
 
 **Interfaces:**
 - Produces JSON-RPC `autonomy.exec` with `{argv: string[], session_id?: string}` and structured `AutonomyExecResponse`.
-- Consumes `hermes_cli.autonomy.run_argv(..., output_mode="structured")`, existing approval/clarify overlays, transcript panel/page/sys renderers, and stale-session guards.
+- Consumes `hades_cli.autonomy.run_argv(..., output_mode="structured")`, existing approval/clarify overlays, transcript panel/page/sys renderers, and stale-session guards.
 
 - [ ] **Step 1: Write RED RPC and native-route tests**
 
@@ -1069,7 +1069,7 @@ git commit -m "feat: add dashboard autonomy center"
 
 - [ ] **Step 1: Write real-path E2E scenarios**
 
-Use a temporary `HERMES_HOME`, real `SessionDB`, real config reads/writes, real registry imports, real middleware, and a fake terminal effect callback only at the outward-effect boundary. Cover:
+Use a temporary `HADES_HOME`, real `SessionDB`, real config reads/writes, real registry imports, real middleware, and a fake terminal effect callback only at the outward-effect boundary. Cover:
 
 1. stable allow removes a recoverable prompt for an exact workspace canary but not another path;
 2. suggestion at confidence 1,000,000 cannot allow; explicit confirmation creates a new rule/version;
@@ -1123,7 +1123,7 @@ Expected: PASS; all attacks fail closed, restarts converge, profiles isolate, an
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/autonomy hermes_state.py hermes_cli/config.py hermes_cli/middleware.py tools/approval.py tools/registry.py tests/agent/autonomy tests/tools/test_approval.py tests/hermes_cli/test_profiles.py
+git add agent/autonomy hades_state.py hermes_cli/config.py hermes_cli/middleware.py tools/approval.py tools/registry.py tests/agent/autonomy tests/tools/test_approval.py tests/hermes_cli/test_profiles.py
 git commit -m "test: prove autonomy safety and recovery"
 ```
 
@@ -1263,7 +1263,7 @@ git commit -m "docs: ship autonomy center proof and operations"
 | Explain/edit every rule | CLI/TUI/Dashboard routes plus benchmark recompile/re-evaluate denominator at 100% |
 | Zero violations across 50 tasks | Frozen seven-stratum corpus and non-aggregatable safety floor |
 | Cache/alternation invariants | Independent hashes across turns, role/history checks, registry schema identity |
-| Profile/secret/privacy safety | Temporary `HERMES_HOME`, secret-scope attacks, redacted audit/export/output, no cross-profile state |
+| Profile/secret/privacy safety | Temporary `HADES_HOME`, secret-scope attacks, redacted audit/export/output, no cross-profile state |
 | Primary/secondary surfaces | CLI/classic slash and native Ink TUI primary; Dashboard secondary; no Desktop files/dependency |
 | Narrow-waist delivery | Existing registry/middleware/approval/state/config seams; CLI+skill; no core model tool |
 

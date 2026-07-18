@@ -4,13 +4,13 @@ sidebar_position: 3
 
 # Profile 分发：共享完整 Agent
 
-**Profile 分发**将一个完整的 Hermes agent——个性、技能、cron 任务、MCP 连接、配置——打包为一个 git 仓库。任何有权访问该仓库的人都可以用一条命令安装整个 agent，就地更新，并保持自己的记忆、会话和 API 密钥不受影响。
+**Profile 分发**将一个完整的 Hades agent——个性、技能、cron 任务、MCP 连接、配置——打包为一个 git 仓库。任何有权访问该仓库的人都可以用一条命令安装整个 agent，就地更新，并保持自己的记忆、会话和 API 密钥不受影响。
 
 如果说 [profile](./profiles.md) 是本地 agent，那么分发就是让该 agent 可共享的形式。
 
 ## 这意味着什么
 
-在分发功能出现之前，共享一个 Hermes agent 意味着要发送：
+在分发功能出现之前，共享一个 Hades agent 意味着要发送：
 
 1. 你的 SOUL.md
 2. 需要安装的技能列表
@@ -84,14 +84,14 @@ hermes profile install github.com/you/my-research-agent --alias
 ```bash
 hermes profile create research-bot
 research-bot setup                    # configure model, API keys
-# Edit ~/.hermes/profiles/research-bot/SOUL.md
+# Edit ~/.hades/profiles/research-bot/SOUL.md
 # Install skills, wire up MCP servers, schedule cron jobs, etc.
 research-bot chat                     # dogfood until it feels right
 ```
 
 ### 第二步——添加 `distribution.yaml`
 
-创建 `~/.hermes/profiles/research-bot/distribution.yaml`：
+创建 `~/.hades/profiles/research-bot/distribution.yaml`：
 
 ```yaml
 name: research-bot
@@ -119,7 +119,7 @@ env_requires:
 ### 第三步——推送到 git 仓库
 
 ```bash
-cd ~/.hermes/profiles/research-bot
+cd ~/.hades/profiles/research-bot
 git init
 git add .
 git commit -m "v1.0.0"
@@ -204,7 +204,7 @@ hermes profile install github.com/you/research-bot --alias
 2. 读取 `distribution.yaml`，显示 manifest（名称、版本、描述、作者、所需环境变量）。
 3. 对照你的 shell 环境和目标 profile 现有的 `.env` 检查每个必需的环境变量，标记为 `✓ set` 或 `needs setting`，让你清楚需要配置哪些内容。
 4. 请求确认。传入 `-y` / `--yes` 可跳过。
-5. 将分发所有的文件复制到 `~/.hermes/profiles/research-bot/`（或 manifest 中 `name` 解析到的位置）。
+5. 将分发所有的文件复制到 `~/.hades/profiles/research-bot/`（或 manifest 中 `name` 解析到的位置）。
 6. 写入 `.env.EXAMPLE`，其中所需密钥以注释形式列出——复制为 `.env` 并填入。
 7. 使用 `--alias` 时，创建一个 wrapper，使你可以直接运行 `research-bot chat`。
 
@@ -263,7 +263,7 @@ OPENAI_API_KEY=
 复制它：
 
 ```bash
-cp ~/.hermes/profiles/research-bot/.env.EXAMPLE ~/.hermes/profiles/research-bot/.env
+cp ~/.hades/profiles/research-bot/.env.EXAMPLE ~/.hades/profiles/research-bot/.env
 # Edit .env, paste your real keys
 ```
 
@@ -327,7 +327,7 @@ hermes profile delete research-bot
 
 ```
 Profile: research-bot
-Path:    ~/.hermes/profiles/research-bot
+Path:    ~/.hades/profiles/research-bot
 Model:   claude-opus-4 (anthropic)
 Skills:  12
 Distribution: research-bot@1.0.0
@@ -352,7 +352,7 @@ Type 'research-bot' to confirm:
 
 ```bash
 # 笔记本
-cd ~/.hermes/profiles/research-bot
+cd ~/.hades/profiles/research-bot
 git init && git add . && git commit -m "initial"
 git remote add origin git@github.com:you/research-bot.git
 git push -u origin main
@@ -370,7 +370,7 @@ hermes profile install github.com/you/research-bot --alias
 
 ```bash
 # 工程负责人
-cd ~/.hermes/profiles/pr-reviewer
+cd ~/.hades/profiles/pr-reviewer
 # ... build and tune ...
 git init && git add . && git commit -m "v1.0 PR reviewer"
 git tag v1.0.0
@@ -390,7 +390,7 @@ pr-reviewer chat
 
 ```bash
 # 你
-cd ~/.hermes/profiles/polymarket-trader
+cd ~/.hades/profiles/polymarket-trader
 # 在仓库根目录写一个完整的 README.md——GitHub 会在仓库页面展示它
 git init && git add . && git commit -m "v1.0"
 git tag v1.0.0
@@ -475,7 +475,7 @@ git ls-remote --tags https://github.com/you/research-bot | tail -5
 默认的更新行为已经做到这一点：`config.yaml` 会被保留。为了安全起见，将本地调整写入分发不拥有的文件：
 
 ```yaml
-# ~/.hermes/profiles/research-bot/local/my-overrides.yaml
+# ~/.hades/profiles/research-bot/local/my-overrides.yaml
 # (distribution never touches local/)
 ```
 
@@ -500,7 +500,7 @@ hermes profile update research-bot --force-config --yes
 # 在 GitHub 上 fork 仓库，然后安装你的 fork
 hermes profile install github.com/yourname/forked-research-bot --alias
 
-# 在 ~/.hermes/profiles/forked-research-bot/ 中本地迭代
+# 在 ~/.hades/profiles/forked-research-bot/ 中本地迭代
 # 编辑 SOUL.md，提交，推送到你的 fork
 # 上游变更：用常规方式合并到你的 fork
 ```
@@ -511,11 +511,11 @@ hermes profile install github.com/yourname/forked-research-bot --alias
 
 ```bash
 # 从本地目录安装（无需 git push）
-hermes profile install ~/.hermes/profiles/research-bot --name research-bot-test --alias
+hermes profile install ~/.hades/profiles/research-bot --name research-bot-test --alias
 
 # 调整、删除、重新安装，直到满意
 hermes profile delete research-bot-test --yes
-hermes profile install ~/.hermes/profiles/research-bot --name research-bot-test
+hermes profile install ~/.hades/profiles/research-bot --name research-bot-test
 ```
 
 ---

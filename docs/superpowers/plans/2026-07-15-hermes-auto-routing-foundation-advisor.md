@@ -23,7 +23,7 @@
 - No automatic model download or paid access probe, outbound telemetry, analytics identifier, or task content in catalog requests. A paid access check may occur only through the explicit `verify-runtime` preview/apply flow while `policy.allow_paid_access_probes` is true; it is never an advisor, routing, or optimizer side effect.
 - YAML/control-plane CLI operations preview by default and require `--apply --expected-config-sha SHA256_FROM_PREVIEW` under a cross-process lock with backup and atomic replacement. The inventory-state-only but billable/quota-consuming `verify-runtime` operation requires its own `--apply --expect-hash PREVIEW_HASH --ack-billable` precondition. Non-billable `inventory --refresh` and catalog refresh are labeled `append_only_observation`: they may append deduplicated content-free observations transactionally without preview, but cannot change authority, activation, an active revision, or a projected route.
 - The explicit-load advisor skill is `auto-routing:auto-routing`; no model-visible core tool or plugin slash-command injection is added.
-- Real-path tests use temporary `HERMES_HOME`; mocks stop at live network/provider boundaries.
+- Real-path tests use temporary `HADES_HOME`; mocks stop at live network/provider boundaries.
 - Each task finishes with focused tests, relevant regressions, `git diff --check`, and one conventional commit.
 
 ---
@@ -304,7 +304,7 @@ def register(ctx) -> None:
 The skill must instruct Hermes to run `hermes auto-routing inventory --json`, interview only during setup/edit, require all four objectives, call `plan`, show `preview`, and run `setup --apply` only after explicit approval. It must state that runtime routing is silent and that unverified/local-uninstalled candidates are not recommendations.
 
 Create `tests/plugins/auto_routing/conftest.py` with these shared, deterministic
-fixtures: `isolated_home` sets `HERMES_HOME` to `tmp_path / "profile"` and clears
+fixtures: `isolated_home` sets `HADES_HOME` to `tmp_path / "profile"` and clears
 Hermes path/config caches; `mutable_clock` exposes `now()`, `today()`, and
 `advance(seconds=...)`; `plugin_context` is a real `PluginContext`-compatible
 recorder for CLI commands, skills, tools, middleware, and hooks;
@@ -522,7 +522,7 @@ git commit -m "feat: validate auto routing authority"
 - Create: `tests/plugins/auto_routing/test_config_io.py`
 
 **Interfaces:**
-- Consumes: `parse_config()`, `hermes_constants.get_config_path()`, `require_readable_config_before_write()`, and `utils.atomic_roundtrip_yaml_update()`.
+- Consumes: `parse_config()`, `hades_constants.get_config_path()`, `require_readable_config_before_write()`, and `utils.atomic_roundtrip_yaml_update()`.
 - Produces: `preview_update(proposal, path=None) -> ConfigPreview` and `apply_update(proposal, expected_precondition_sha256, path=None) -> AppliedConfig`.
 
 - [ ] **Step 1: Write failing preservation/conflict/backup tests**
@@ -558,7 +558,7 @@ def test_apply_preserves_unrelated_yaml_and_requires_exact_hash(config_path, val
 
 
 def test_managed_plugin_subtree_fails_closed(config_path, valid_subtree, monkeypatch):
-    monkeypatch.setattr("hermes_cli.managed_scope.managed_config_keys", lambda: {"plugins.entries.auto-routing.policy"})
+    monkeypatch.setattr("hades_cli.managed_scope.managed_config_keys", lambda: {"plugins.entries.auto-routing.policy"})
     with pytest.raises(ManagedConfigError):
         preview_update(valid_subtree, path=config_path)
 ```
@@ -614,7 +614,7 @@ git commit -m "feat: apply auto routing config atomically"
 - Create: `tests/plugins/auto_routing/test_profile_isolation.py`
 
 **Interfaces:**
-- Consumes: `get_hermes_home()`, `hermes_state.apply_wal_with_fallback()`, and `hermes_cli.sqlite_util.add_column_if_missing()`.
+- Consumes: `get_hades_home()`, `hades_state.apply_wal_with_fallback()`, and `hades_cli.sqlite_util.add_column_if_missing()`.
 - Produces: `RoutingStore`, `connect()`, `init_db()`, authority/catalog/inventory snapshot writers, immutable revision readers, and `reserve_budget()/reconcile_budget()`.
 
 - [ ] **Step 1: Write failing real-SQLite tests**
@@ -736,7 +736,7 @@ def publish_revision(
 the checksum. `test_budget_ledger.py` owns atomic reservation/reconciliation
 cases and defines `store` from the shared `isolated_home` plus
 `mutable_clock`; `test_storage_concurrency.py` opens independent connections and proves
-bounded lock behavior; `test_profile_isolation.py` switches `HERMES_HOME`
+bounded lock behavior; `test_profile_isolation.py` switches `HADES_HOME`
 between two roots and proves neither database observes the other's rows.
 
 - [ ] **Step 4: Run GREEN and reopen/migration tests**
@@ -1019,7 +1019,7 @@ The Hermes 0.18 adapter must:
 8. retain a non-secret, addressable `resolver_name`, credential-pool identity, and local-backend identity for each observation; call `resolve_runtime_provider(requested=observation.resolver_name, target_model=model)` only during validation/projection/explicit verification, canonicalize the returned provider/source/base-URL hash/API mode/pool/local-backend identity, and require it to equal the requested full `RuntimeKey`; and
 9. return a `ResolvedRuntime` whose secret/callable credentials remain memory-only and are excluded from `repr()`/serialization.
 
-Create `REASONING_SUPPORT_CONTRACT_VERSION = 1`, frozen `ReasoningSupport(efforts, provider_aliases, provenance, exact)`, and content-free `resolve_reasoning_support(*, provider: str, model: str, api_mode: str, metadata: Mapping[str, Any] | None = None) -> ReasoningSupport` in Hermes core. Retain provider-scoped models.dev `reasoning_options`; combine them only with authenticated GitHub catalog efforts, LM Studio allowed options, and the exact effort aliases/clamps already used by Hermes Codex/chat-completions/Anthropic translators. A bare `supports_reasoning=True` never invents levels. Unknown or non-controllable support returns `exact=False, efforts=()`. The adapter stores this record on each observation; Stage 2 active doctor rejects a configured target unless its default/minimum/maximum resolve through an exact non-empty tuple. Provider-specific wire translation remains in Hermes.
+Create `REASONING_SUPPORT_CONTRACT_VERSION = 1`, frozen `ReasoningSupport(efforts, provider_aliases, provenance, exact)`, and content-free `resolve_reasoning_support(*, provider: str, model: str, api_mode: str, metadata: Mapping[str, Any] | None = None) -> ReasoningSupport` in Hades core. Retain provider-scoped models.dev `reasoning_options`; combine them only with authenticated GitHub catalog efforts, LM Studio allowed options, and the exact effort aliases/clamps already used by Hades Codex/chat-completions/Anthropic translators. A bare `supports_reasoning=True` never invents levels. Unknown or non-controllable support returns `exact=False, efforts=()`. The adapter stores this record on each observation; Stage 2 active doctor rejects a configured target unless its default/minimum/maximum resolve through an exact non-empty tuple. Provider-specific wire translation remains in Hades.
 
 Treat each addressable credential pool as one `credential_pool_identity` under its `auth_identity`; rotating secret members inside that pool do not become separate runtimes. If two configured paths cannot be reconstructed/addressed independently, mark both `ineligible` with `ambiguous_access_path` rather than collapsing them. Custom endpoints use a named configured runtime plus a non-reversible endpoint identity hash; never pass a stored raw endpoint or credential from plugin state back into the resolver.
 

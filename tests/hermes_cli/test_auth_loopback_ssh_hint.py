@@ -15,7 +15,7 @@ import contextlib
 import socket
 
 
-from hermes_cli import auth as auth_mod
+from hades_cli import auth as auth_mod
 
 
 def _cap(fn):

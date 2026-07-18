@@ -236,7 +236,7 @@ Editor Preferences > General > Model Context Protocol:
 | Property | Default | Notes |
 |---|---|---|
 | Auto Start Server | `false` | Turn on for frictionless sessions |
-| Server Port Number | `8000` | Change on conflict; mirror in Hermes config url |
+| Server Port Number | `8000` | Change on conflict; mirror in Hades config url |
 | Server URL Path | `/mcp` | Same |
 | Enable Tool Search | `true` | Keep on (see above) |
 
@@ -247,7 +247,7 @@ Console commands (editor console, backtick):
 | `ModelContextProtocol.StartServer [port]` | Start server (optional port override) |
 | `ModelContextProtocol.StopServer` | Stop server, close all sessions |
 | `ModelContextProtocol.RefreshTools` | Re-poll toolset providers — run after authoring/hot-reload/Game-Feature activation |
-| `ModelContextProtocol.GenerateClientConfig <Client\|All>` | Write client config files (ClaudeCode/Cursor/VSCode/Gemini/Codex) — NOT used for Hermes |
+| `ModelContextProtocol.GenerateClientConfig <Client\|All>` | Write client config files (ClaudeCode/Cursor/VSCode/Gemini/Codex) — NOT used for Hades |
 
 Command-line flags for launching the editor pre-configured:
 `-ModelContextProtocolStartServer` (force start regardless of preference),
@@ -328,7 +328,7 @@ Conventions that matter (they generate the schema the agent sees):
   `print()`/stdout go to the UE log, not back over MCP.
 
 After authoring: `ModelContextProtocol.RefreshTools` in the editor console,
-then re-`list_toolsets` from Hermes. Users on Claude Code can scaffold with
+then re-`list_toolsets` from Hades. Users on Claude Code can scaffold with
 the `create-toolset` skill from Epic's `unreal-mcp` plugin pack; the
 conventions above still apply.
 

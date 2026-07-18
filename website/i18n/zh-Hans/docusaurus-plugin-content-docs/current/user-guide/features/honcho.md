@@ -39,13 +39,13 @@ hermes memory setup    # 从 provider 列表中选择 "honcho"
 或手动配置：
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.hades/config.yaml
 memory:
   provider: honcho
 ```
 
 ```bash
-echo 'HONCHO_API_KEY=***' >> ~/.hermes/.env
+echo 'HONCHO_API_KEY=***' >> ~/.hades/.env
 ```
 
 在 [honcho.dev](https://honcho.dev) 获取 API key。
@@ -104,7 +104,7 @@ echo 'HONCHO_API_KEY=***' >> ~/.hermes/.env
 
 ## 配置选项
 
-Honcho 在 `~/.honcho/config.json`（全局）或 `$HERMES_HOME/honcho.json`（profile 本地）中配置。设置向导会自动处理。
+Honcho 在 `~/.honcho/config.json`（全局）或 `$HADES_HOME/honcho.json`（profile 本地）中配置。设置向导会自动处理。
 
 ### 完整配置参考
 

@@ -1,4 +1,4 @@
-"""Thin Spotify Web API helper used by Hermes native tools."""
+"""Thin Spotify Web API helper used by Hades native tools."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from hermes_cli.auth import (
+from hades_cli.auth import (
     AuthError,
     resolve_spotify_runtime_credentials,
 )

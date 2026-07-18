@@ -1,7 +1,7 @@
 """Tests for config.yaml structure validation (validate_config_structure)."""
 
 
-from hermes_cli.config import _KNOWN_ROOT_KEYS, validate_config_structure, ConfigIssue
+from hades_cli.config import _KNOWN_ROOT_KEYS, validate_config_structure, ConfigIssue
 
 
 class TestCustomProvidersValidation:
@@ -253,7 +253,7 @@ class TestCodeExecutionValidation:
         assert any("code_execution must be a mapping" in issue.message for issue in issues)
 
     def test_nested_code_execution_defaults_match_plan_contract(self):
-        from hermes_cli.config import DEFAULT_CONFIG
+        from hades_cli.config import DEFAULT_CONFIG
 
         section = DEFAULT_CONFIG["code_execution"]
         assert section["sessions"] == {

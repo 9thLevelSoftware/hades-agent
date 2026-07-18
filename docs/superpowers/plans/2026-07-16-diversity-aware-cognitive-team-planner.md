@@ -23,7 +23,7 @@
 - Preserve strict message-role alternation. Planner, mailbox, and completion records are local state/activity events, not synthetic mid-loop user messages; existing async completion delivery may create a new turn only when its owner session is idle.
 - Add no model-visible core tool and do not change `delegate_task`, Kanban tool, or MoA JSON schemas. Primary controls are `hermes team ...`, `/team ...`, and native Ink RPC/rendering.
 - Keep stable behavior under `team_planner:` in profile-local `config.yaml`. Credentials remain in secret stores or `.env`; no new user-facing `HERMES_*` variable is introduced.
-- Profiles remain independent islands. All planner state, router evidence, receipts, artifacts, and Kanban boards resolve from the active `HERMES_HOME`; cross-profile plans fail before persistence.
+- Profiles remain independent islands. All planner state, router evidence, receipts, artifacts, and Kanban boards resolve from the active `HADES_HOME`; cross-profile plans fail before persistence.
 - One agent is the default topology until measured marginal verification value exceeds measured coordination cost. V1 may run at most two cognitive agents for the adaptive arm; an independent deterministic receipt scorer is not counted as a cognitive agent.
 - A team is diverse only when routed units have different `RuntimeKey.stable_id()` values and a fresh, sufficiently sampled capability-vector distance. Provider/model strings, roles, personas, temperatures, and prompt variations alone are not evidence.
 - Hard authority, privacy, residency, modality, capability, provider availability, dollar, wall-clock, and reasoning constraints filter before topology scoring and cannot be weakened by the planner.
@@ -32,7 +32,7 @@
 - Item #1 mission events and existing Kanban tasks/links/runs/comments remain runtime sources of truth. Planner revisions are immutable intent/projection records, not another workflow engine, retry queue, worker state machine, or mailbox.
 - Shared context is bounded, typed, provenance-bearing, and compiled only for a newly created child. It contains deliverable/evidence references and redacted summaries, not another worker's hidden reasoning or mutable transcript.
 - Existing `IterationBudget`, session cost rollup, delegation concurrency/depth caps, async delegation operation journal, active-subagent registry, `/stop`, and `subagent.interrupt` remain authoritative. The planner reserves from them; it never maintains competing counters.
-- Real-path E2E tests use a temporary `HERMES_HOME`, real imports, real SQLite databases, real Kanban graph operations, real temp Git/files, fresh object graphs or subprocess restarts, and item #12 artifact hashing. Mock only provider/network completions, monotonic clock/randomness, and process termination.
+- Real-path E2E tests use a temporary `HADES_HOME`, real imports, real SQLite databases, real Kanban graph operations, real temp Git/files, fresh object graphs or subprocess restarts, and item #12 artifact hashing. Mock only provider/network completions, monotonic clock/randomness, and process termination.
 - Run Python tests only through `scripts/run_tests.sh`. Each task starts with a focused failing behavior test, records RED, adds the smallest complete implementation, records GREEN and relevant regressions, runs `git diff --check`, and ends in exactly one conventional commit.
 
 ---
@@ -40,7 +40,7 @@
 ## Current Code Map
 
 - `tools/delegate_tool.py:138-208,804-1037,1053-1460,1788-2387,2411-3084` owns live child registration/interruption, child construction, progress, provider/model overrides, parallel execution, result shaping, cost rollup, summary budgets, and background dispatch. It remains the only in-process delegate executor.
-- `tools/async_delegation.py:110-1340` and `hermes_state.py:904-926` own durable background dispatch/completion identity, operation-journal recovery, delivery claim/acknowledgement, the shared completion queue, and `/agents` status. This is the planner's asynchronous mailbox lifecycle; no second completion queue is added.
+- `tools/async_delegation.py:110-1340` and `hades_state.py:904-926` own durable background dispatch/completion identity, operation-journal recovery, delivery claim/acknowledgement, the shared completion queue, and `/agents` status. This is the planner's asynchronous mailbox lifecycle; no second completion queue is added.
 - `agent/iteration_budget.py:17-57` owns thread-safe per-agent iteration use/refund. `session_estimated_cost_usd` and child cost rollup in `tools/delegate_tool.py:2174-2300,2786-2841` remain cost truth.
 - `agent/moa_loop.py:264-785` owns parallel reference calls, per-runtime resolution/accounting, context shaping, and aggregator synthesis. It remains an explicit `/moa` mode; the team planner may reuse its pure correlation/accounting helpers after extraction but does not route through a virtual `provider="moa"` or duplicate its prompt loop.
 - `hermes_cli/kanban_db.py:839-1099,1107-1284,2405-2935,3940-4220,5240-5462,5945-7825,8090-8585` owns durable tasks, links, runs, comments, artifacts, assignments, provider/model projections, dispatch/recovery, and bounded worker context.
@@ -1216,7 +1216,7 @@ git commit -m "feat: inspect cognitive team plans in dashboard"
 
 - [ ] **Step 1: Write RED E2E and adversarial cases**
 
-Create a temporary `HERMES_HOME`, real mission DB, Kanban board, SessionDB, receipts store, temp Git repo/artifacts, fake provider completion boundary, and subprocess restart. Parameterize crashes at `after_route_persist`, `after_revision_insert`, `after_first_task_projection`, `after_child_result`, `after_receipt_insert`, and `before_active_revision_cas`. Include stale receipt evidence, forged receipt IDs, prompt injection in handoff comments, route identity mismatch, provider loss, budget exhaustion, duplicate completion replay, dependency cycles, self-verification, correlated collusion, malicious artifact paths/symlink swaps, cross-profile IDs, and concurrent replan races.
+Create a temporary `HADES_HOME`, real mission DB, Kanban board, SessionDB, receipts store, temp Git repo/artifacts, fake provider completion boundary, and subprocess restart. Parameterize crashes at `after_route_persist`, `after_revision_insert`, `after_first_task_projection`, `after_child_result`, `after_receipt_insert`, and `before_active_revision_cas`. Include stale receipt evidence, forged receipt IDs, prompt injection in handoff comments, route identity mismatch, provider loss, budget exhaustion, duplicate completion replay, dependency cycles, self-verification, correlated collusion, malicious artifact paths/symlink swaps, cross-profile IDs, and concurrent replan races.
 
 ```python
 def test_real_path_recovery_never_duplicates_or_false_verifies(team_e2e, fault_point):

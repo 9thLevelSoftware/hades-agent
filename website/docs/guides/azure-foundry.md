@@ -1,12 +1,12 @@
 ---
 sidebar_position: 15
 title: "Microsoft Foundry"
-description: "Use Hermes Agent with Microsoft Foundry — OpenAI-style and Anthropic-style endpoints, auto-detection of transport and deployed models"
+description: "Use Hades Agent with Microsoft Foundry — OpenAI-style and Anthropic-style endpoints, auto-detection of transport and deployed models"
 ---
 
 # Microsoft Foundry
 
-Hermes Agent's `azure-foundry` provider supports Microsoft Foundry (formerly Azure AI Foundry) and Azure OpenAI. A single Foundry resource can host models with two different wire formats:
+Hades Agent's `azure-foundry` provider supports Microsoft Foundry (formerly Azure AI Foundry) and Azure OpenAI. A single Foundry resource can host models with two different wire formats:
 
 - **OpenAI-style** — `POST /v1/chat/completions` on endpoints like `https://<resource>.openai.azure.com/openai/v1`. Used for GPT-4.x, GPT-5.x, Llama, Mistral, and most open-weight models.
 - **Anthropic-style** — `POST /v1/messages` on endpoints like `https://<resource>.services.ai.azure.com/anthropic`. Used when Microsoft Foundry serves Claude models via the Anthropic Messages API format.
@@ -41,7 +41,7 @@ The wizard will:
 3. **Probe Anthropic Messages shape** — fallback for endpoints that do not expose `/models` but do accept the Anthropic Messages format.
 4. **Fall back to manual entry** — private/gated endpoints that reject every probe still work; you pick the API mode and type a deployment name by hand.
 
-Context length for the chosen model is resolved via Hermes' standard metadata chain (`models.dev`, provider metadata, and hardcoded family fallbacks) and stored in `config.yaml` so the model can size its own context window correctly.
+Context length for the chosen model is resolved via Hades' standard metadata chain (`models.dev`, provider metadata, and hardcoded family fallbacks) and stored in `config.yaml` so the model can size its own context window correctly.
 
 ## Microsoft Entra ID (keyless, RBAC) — recommended
 
@@ -98,7 +98,7 @@ hermes model
 
 The wizard runs a bounded preflight probe (10 s timeout). On failure it offers to "save anyway, validate later" — useful when configuring on a machine that doesn't yet have credentials but will at runtime (e.g. preparing config for a managed-identity deployment).
 
-`azure-identity` is installed automatically on first use via Hermes' lazy-install path. To pre-install:
+`azure-identity` is installed automatically on first use via Hades' lazy-install path. To pre-install:
 
 ```bash
 pip install azure-identity
@@ -122,9 +122,9 @@ Hermes only manages one Entra-specific knob in `config.yaml`:
 
 - **`scope`** — the OAuth resource scope. Defaults to Microsoft's documented inference scope (`https://ai.azure.com/.default`). Override only if your resource was provisioned against a non-standard audience.
 
-Everything else (tenant, service principal secret, federated token file, sovereign cloud authority, broker preferences) is read by `azure-identity` directly from the standard `AZURE_*` environment variables — see the [credential resolution order](#credential-resolution-order) below. Set those in `~/.hermes/.env` or your deployment environment, exactly as Microsoft's SDK reference describes.
+Everything else (tenant, service principal secret, federated token file, sovereign cloud authority, broker preferences) is read by `azure-identity` directly from the standard `AZURE_*` environment variables — see the [credential resolution order](#credential-resolution-order) below. Set those in `~/.hades/.env` or your deployment environment, exactly as Microsoft's SDK reference describes.
 
-No secrets land in `~/.hermes/.env` for Entra mode — `azure-identity` caches tokens in-process (and where available, in your OS keychain / `~/.IdentityService`).
+No secrets land in `~/.hades/.env` for Entra mode — `azure-identity` caches tokens in-process (and where available, in your OS keychain / `~/.IdentityService`).
 
 ### Credential resolution order
 
@@ -205,7 +205,7 @@ model:
   context_length: 400000             # auto-detected
 ```
 
-And in `~/.hermes/.env`:
+And in `~/.hades/.env`:
 
 ```
 AZURE_FOUNDRY_API_KEY=<your-azure-key>
@@ -261,7 +261,7 @@ model:
   default: claude-sonnet-4-6
 ```
 
-With `AZURE_ANTHROPIC_KEY` set in `~/.hermes/.env`. Hermes detects `azure.com` in the base URL and short-circuits around the Claude Code OAuth token chain so the Azure key is used directly with `x-api-key` auth.
+With `AZURE_ANTHROPIC_KEY` set in `~/.hades/.env`. Hermes detects `azure.com` in the base URL and short-circuits around the Claude Code OAuth token chain so the Azure key is used directly with `x-api-key` auth.
 
 `key_env` is the canonical snake_case field name; `api_key_env` (and the camelCase `keyEnv` / `apiKeyEnv`) are accepted as aliases. If both `key_env` and `AZURE_ANTHROPIC_KEY`/`ANTHROPIC_API_KEY` are set, the `key_env`-named env var wins.
 

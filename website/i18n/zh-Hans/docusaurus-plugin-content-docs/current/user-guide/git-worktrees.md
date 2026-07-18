@@ -2,12 +2,12 @@
 sidebar_position: 3
 sidebar_label: "Git Worktrees"
 title: "Git Worktrees"
-description: "使用 git worktrees 和隔离检出在同一仓库中安全运行多个 Hermes agent"
+description: "使用 git worktrees 和隔离检出在同一仓库中安全运行多个 Hades agent"
 ---
 
 # Git Worktrees
 
-Hermes Agent 常用于大型、长期维护的仓库。当你需要：
+Hades Agent 常用于大型、长期维护的仓库。当你需要：
 
 - 在同一项目中**并行运行多个 agent**，或
 - 将实验性重构与主分支隔离，
@@ -122,7 +122,7 @@ git worktree remove ../repo-feature
 
 - `git worktree remove` 在 worktree 存在未提交变更时会拒绝移除，除非强制执行。
 - 移除 worktree **不会**自动删除分支；可使用常规 `git branch` 命令决定是否删除分支。
-- `~/.hermes/checkpoints/` 下的 Hermes checkpoint 数据在移除 worktree 时不会自动清理，但通常体积很小。
+- `~/.hades/checkpoints/` 下的 Hermes checkpoint 数据在移除 worktree 时不会自动清理，但通常体积很小。
 
 ## 最佳实践
 

@@ -1,10 +1,10 @@
 import json
 from pathlib import Path
 
-from hermes_cli import kanban_db as kb
-from hermes_cli import workflows_db as wfdb
-from hermes_cli import workflows_dispatcher
-from hermes_cli.workflows_spec import WorkflowSpec
+from hades_cli import kanban_db as kb
+from hades_cli import workflows_db as wfdb
+from hades_cli import workflows_dispatcher
+from hades_cli.workflows_spec import WorkflowSpec
 
 
 def _approval_workflow() -> WorkflowSpec:
@@ -72,9 +72,9 @@ def _workflow_events(exec_id: str) -> list[dict]:
 
 
 def test_workflow_kanban_completion_routes_approved_path_e2e(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -167,9 +167,9 @@ def test_workflow_kanban_completion_routes_approved_path_e2e(tmp_path, monkeypat
 
 
 def test_workflow_kanban_completion_routes_rejected_default_path_e2e(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()

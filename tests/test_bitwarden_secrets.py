@@ -41,13 +41,13 @@ def _reset_caches():
 @pytest.fixture
 def hermes_home(tmp_path, monkeypatch):
     """Point Hermes at an isolated home directory."""
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    # Some modules cache get_hermes_home; clear if needed.
-    import hermes_constants
+    monkeypatch.setenv("HADES_HOME", str(home))
+    # Some modules cache get_hades_home; clear if needed.
+    import hades_constants
     if hasattr(hermes_constants, "_HERMES_HOME_CACHE"):
-        hermes_constants._HERMES_HOME_CACHE = None  # type: ignore[attr-defined]
+        hades_constants._HERMES_HOME_CACHE = None  # type: ignore[attr-defined]
     return home
 
 
@@ -611,18 +611,18 @@ def test_apply_swallows_fetch_errors(monkeypatch, tmp_path):
 
 def test_env_loader_skips_when_disabled(tmp_path, monkeypatch):
     """No config.yaml present → no BSM call, no crash."""
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-    from hermes_cli.env_loader import _apply_external_secret_sources
+    from hades_cli.env_loader import _apply_external_secret_sources
     # Should be a no-op (returns None).
     assert _apply_external_secret_sources(home) is None
 
 
 def test_env_loader_calls_bsm_when_enabled(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     (home / "config.yaml").write_text(
         "secrets:\n"
@@ -634,7 +634,7 @@ def test_env_loader_calls_bsm_when_enabled(tmp_path, monkeypatch):
         "    override_existing: false\n"
         "    auto_install: false\n"
     )
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setenv("BWS_ACCESS_TOKEN", "0.t")
     monkeypatch.delenv("MY_BSM_KEY", raising=False)
 
@@ -657,7 +657,7 @@ def test_env_loader_calls_bsm_when_enabled(tmp_path, monkeypatch):
 
     reg_module._reset_registry_for_tests()
 
-    from hermes_cli.env_loader import _apply_external_secret_sources
+    from hades_cli.env_loader import _apply_external_secret_sources
     _apply_external_secret_sources(home)
 
     assert called["n"] == 1
@@ -671,7 +671,7 @@ def test_env_loader_calls_bsm_when_enabled(tmp_path, monkeypatch):
 
 def test_disk_cache_written_after_first_fetch(monkeypatch, tmp_path):
     """First fetch hits bws AND writes a 0600 file under hermes_home/cache/."""
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     fake_binary = tmp_path / "bws"
     fake_binary.write_text("")
@@ -707,7 +707,7 @@ def test_disk_cache_written_after_first_fetch(monkeypatch, tmp_path):
 
 def test_disk_cache_short_circuits_bws_when_fresh(monkeypatch, tmp_path):
     """Second fetch (different process simulation) skips bws entirely."""
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     fake_binary = tmp_path / "bws"
     fake_binary.write_text("")
@@ -741,7 +741,7 @@ def test_disk_cache_short_circuits_bws_when_fresh(monkeypatch, tmp_path):
 
 def test_disk_cache_expires_with_ttl(monkeypatch, tmp_path):
     """Stale disk cache (older than ttl) triggers a refetch."""
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     fake_binary = tmp_path / "bws"
     fake_binary.write_text("")
@@ -778,7 +778,7 @@ def test_disk_cache_expires_with_ttl(monkeypatch, tmp_path):
 
 def test_disk_cache_key_mismatch_triggers_refetch(monkeypatch, tmp_path):
     """Disk cache entry written by a different token/project is ignored."""
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     fake_binary = tmp_path / "bws"
     fake_binary.write_text("")
@@ -812,7 +812,7 @@ def test_disk_cache_key_mismatch_triggers_refetch(monkeypatch, tmp_path):
 
 def test_disk_cache_use_cache_false_skips_disk(monkeypatch, tmp_path):
     """use_cache=False must skip BOTH in-process and disk caches."""
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     fake_binary = tmp_path / "bws"
     fake_binary.write_text("")
@@ -843,7 +843,7 @@ def test_disk_cache_use_cache_false_skips_disk(monkeypatch, tmp_path):
 
 def test_disk_cache_corrupt_file_falls_through(monkeypatch, tmp_path):
     """A garbage cache file must NOT crash startup — we refetch."""
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     fake_binary = tmp_path / "bws"
     fake_binary.write_text("")
@@ -872,7 +872,7 @@ def test_disk_cache_corrupt_file_falls_through(monkeypatch, tmp_path):
 
 def test_reset_cache_for_tests_deletes_disk_file(tmp_path):
     """_reset_cache_for_tests(home_path) must also clean disk."""
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     cache_path = bw._disk_cache_path(home)
     cache_path.parent.mkdir(parents=True, exist_ok=True)

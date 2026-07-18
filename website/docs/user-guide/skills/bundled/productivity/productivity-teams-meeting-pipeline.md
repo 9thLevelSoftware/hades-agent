@@ -1,14 +1,14 @@
 ---
 title: "Teams Meeting Pipeline"
 sidebar_label: "Teams Meeting Pipeline"
-description: "Operate the Teams meeting summary pipeline via Hermes CLI — summarize meetings, inspect pipeline status, replay jobs, manage Microsoft Graph subscriptions"
+description: "Operate the Teams meeting summary pipeline via Hades CLI — summarize meetings, inspect pipeline status, replay jobs, manage Microsoft Graph subscriptions"
 ---
 
 {/* This page is auto-generated from the skill's SKILL.md by website/scripts/generate-skill-docs.py. Edit the source SKILL.md, not this page. */}
 
 # Teams Meeting Pipeline
 
-Operate the Teams meeting summary pipeline via Hermes CLI — summarize meetings, inspect pipeline status, replay jobs, manage Microsoft Graph subscriptions.
+Operate the Teams meeting summary pipeline via Hades CLI — summarize meetings, inspect pipeline status, replay jobs, manage Microsoft Graph subscriptions.
 
 ## Skill metadata
 
@@ -17,7 +17,7 @@ Operate the Teams meeting summary pipeline via Hermes CLI — summarize meetings
 | Source | Bundled (installed by default) |
 | Path | `skills/productivity/teams-meeting-pipeline` |
 | Version | `1.1.0` |
-| Author | Hermes Agent + Teknium |
+| Author | Hades Agent + Teknium |
 | License | MIT |
 | Tags | `Teams`, `Microsoft Graph`, `Meetings`, `Productivity`, `Operations` |
 
@@ -50,7 +50,7 @@ Multilingual trigger examples (not exhaustive):
 
 ## Prerequisites
 
-Before using the pipeline, verify these are set in `${HERMES_HOME:-~/.hermes}/.env`:
+Before using the pipeline, verify these are set in `${HADES_HOME:-~/.hades}/.env`:
 
 ```bash
 MSGRAPH_TENANT_ID=...

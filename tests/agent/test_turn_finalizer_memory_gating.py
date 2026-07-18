@@ -112,7 +112,7 @@ def _finalize(
 def test_non_verified_outcomes_do_not_sync_and_only_failure_signals_review(
     monkeypatch, outcome, verification_status, kwargs, reviews
 ):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_k: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_k: [])
     agent = _FinalizerAgent(verification_status)
 
     result = _finalize(agent, **kwargs)
@@ -124,7 +124,7 @@ def test_non_verified_outcomes_do_not_sync_and_only_failure_signals_review(
 
 
 def test_verified_turn_syncs_and_spawns_review(monkeypatch):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_k: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_k: [])
     agent = _FinalizerAgent("passed")
 
     result = _finalize(agent)
@@ -136,7 +136,7 @@ def test_verified_turn_syncs_and_spawns_review(monkeypatch):
 
 
 def test_completed_unverified_no_tool_turn_syncs_without_background_review(monkeypatch):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_k: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_k: [])
     agent = _FinalizerAgent("unverified")
 
     result = _finalize(agent)
@@ -148,7 +148,7 @@ def test_completed_unverified_no_tool_turn_syncs_without_background_review(monke
 
 
 def test_completed_unverified_tool_turn_does_not_sync(monkeypatch):
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_k: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *_a, **_k: [])
     agent = _FinalizerAgent("unverified")
     messages = [
         {"role": "user", "content": "do it"},

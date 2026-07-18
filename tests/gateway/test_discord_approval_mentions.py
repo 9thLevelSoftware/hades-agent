@@ -104,8 +104,8 @@ def test_yaml_config_seeds_websocket_health_with_primary_precedence(monkeypatch)
         },
     )
 
-    assert os.environ["HERMES_DISCORD_LIVENESS_INTERVAL_SECONDS"] == "11"
-    assert os.environ["HERMES_DISCORD_LIVENESS_FAILURE_THRESHOLD"] == "2"
+    assert os.environ["HADES_DISCORD_LIVENESS_INTERVAL_SECONDS"] == "11"
+    assert os.environ["HADES_DISCORD_LIVENESS_FAILURE_THRESHOLD"] == "2"
     assert seeded == {
         "websocket_liveness_interval_seconds": 11,
         "websocket_liveness_failure_threshold": 2,
@@ -132,5 +132,5 @@ def test_yaml_config_bridges_nested_discord_extra_websocket_health(monkeypatch):
         }},
     )
 
-    assert os.environ["HERMES_DISCORD_LIVENESS_INTERVAL_SECONDS"] == "13"
-    assert os.environ["HERMES_DISCORD_LIVENESS_FAILURE_THRESHOLD"] == "4"
+    assert os.environ["HADES_DISCORD_LIVENESS_INTERVAL_SECONDS"] == "13"
+    assert os.environ["HADES_DISCORD_LIVENESS_FAILURE_THRESHOLD"] == "4"

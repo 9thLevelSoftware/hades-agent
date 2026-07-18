@@ -12,7 +12,7 @@ Methods under test (SessionDB):
 - release_session_lease(session_id, owner_id) -> bool
 - reconcile_expired_session_leases(now=None) -> int
 
-Fake-clock pattern (monkeypatch hermes_state.time.time) — no real sleeps.
+Fake-clock pattern (monkeypatch hades_state.time.time) — no real sleeps.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ import time
 
 import pytest
 
-import hermes_state
-from hermes_state import SessionDB
+import hades_state
+from hades_state import SessionDB
 
 
 @pytest.fixture()
@@ -45,7 +45,7 @@ def clock(monkeypatch):
     def _fake_time():
         return state["now"]
 
-    monkeypatch.setattr(hermes_state.time, "time", _fake_time)
+    monkeypatch.setattr(hades_state.time, "time", _fake_time)
 
     def set_time(value: float) -> None:
         state["now"] = float(value)
@@ -282,7 +282,7 @@ class TestReconcileExpiredSessionLeases:
     def test_now_defaults_to_time_time(self, db, clock, monkeypatch):
         db.create_session("s1", "cli")
         db.claim_session_lease("s1", "owner-a", ttl_seconds=60.0)
-        clock(1_000_000.0 + 120.0)  # also advances the hermes_state.time patch
+        clock(1_000_000.0 + 120.0)  # also advances the hades_state.time patch
 
         n = db.reconcile_expired_session_leases()  # no `now=` argument
         assert n == 1

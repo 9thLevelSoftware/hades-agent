@@ -128,7 +128,7 @@ print(json.dumps(report, indent=2))
 
 ## 执行模式
 
-`execute_code` 有两种执行模式，通过 `~/.hermes/config.yaml` 中的 `code_execution.mode` 控制：
+`execute_code` 有两种执行模式，通过 `~/.hades/config.yaml` 中的 `code_execution.mode` 控制：
 
 | 模式 | 工作目录 | Python 解释器 |
 |------|----------|---------------|
@@ -140,7 +140,7 @@ print(json.dumps(report, indent=2))
 **何时切换至 `strict` 模式：** 当你需要最大可复现性时——希望无论用户激活哪个 venv，每次会话都使用相同的解释器，并且希望脚本与项目目录隔离（避免通过相对路径意外读取项目文件）。
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.hades/config.yaml
 code_execution:
   mode: project   # or "strict"
 ```
@@ -167,7 +167,7 @@ code_execution:
 所有限制均可通过 `config.yaml` 配置：
 
 ```yaml
-# In ~/.hermes/config.yaml
+# In ~/.hades/config.yaml
 code_execution:
   mode: project      # project (default) | strict
   timeout: 300       # Max seconds per script (default: 300)

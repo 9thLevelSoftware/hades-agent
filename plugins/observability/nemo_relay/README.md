@@ -4,12 +4,12 @@ Optional Hermes observability plugin that maps Hermes observer hooks to
 NeMo Relay scopes, LLM spans, tool spans, marks, ATOF, and ATIF.
 
 NeMo Relay is NVIDIA's runtime layer for agent execution boundaries. It does
-not replace Hermes Agent's planner, tools, memory, model provider routing, or
+not replace Hades Agent's planner, tools, memory, model provider routing, or
 CLI UX. Instead, this plugin lets Hermes emit NeMo Relay lifecycle events for
 the work Hermes already owns: sessions, turns, provider/API calls, tool calls,
 approval prompts, and delegated subagents.
 
-With this plugin enabled, Hermes Agent can:
+With this plugin enabled, Hades Agent can:
 
 - Preserve Hermes execution as NeMo Relay scopes, LLM spans, tool spans, and
   mark events.
@@ -44,26 +44,26 @@ hermes plugins enable observability/nemo_relay
 The `HERMES_NEMO_RELAY_*` environment variables below only configure an
 already-enabled plugin. They do not enable plugin discovery by themselves.
 
-For isolated test homes, enable the plugin in the same `HERMES_HOME` that the
+For isolated test homes, enable the plugin in the same `HADES_HOME` that the
 agent run will use:
 
 ```bash
-env HERMES_HOME=/tmp/hermes-nemo-relay-test \
+env HADES_HOME=/tmp/hermes-nemo-relay-test \
   hermes plugins enable observability/nemo_relay
 ```
 
 Runs started with `--ignore_user_config` skip the enabled-plugin state from
-`HERMES_HOME`, so local E2E tests should omit that flag unless the test harness
+`HADES_HOME`, so local E2E tests should omit that flag unless the test harness
 loads `observability/nemo_relay` explicitly another way.
 
-`HERMES_HOME` is the Hermes profile/config home used by both
+`HADES_HOME` is the Hades profile/config home used by both
 `hermes plugins enable ...` and the later `hermes chat ...` run. If unset,
-Hermes uses the user's default home, usually `~/.hermes`. For isolated smoke
+Hermes uses the user's default home, usually `~/.hades`. For isolated smoke
 tests, choose any writable temporary directory and use the same value for every
 command in that test:
 
 ```bash
-export HERMES_HOME=/tmp/hermes-nemo-relay-test
+export HADES_HOME=/tmp/hermes-nemo-relay-test
 hermes plugins enable observability/nemo_relay
 hermes chat --query 'Reply exactly ok' --provider custom --model qwen3.6:35b
 ```
@@ -158,7 +158,7 @@ mode = "overwrite"
 enabled = true
 output_directory = ".nemo-relay/atif"
 filename_template = "trajectory-{session_id}.json"
-agent_name = "Hermes Agent"
+agent_name = "Hades Agent"
 agent_version = "local"
 ```
 
@@ -193,7 +193,7 @@ observational while still wrapping the real execution boundary.
 ### Dynamic Plugins
 
 Hermes feature-detects the dynamic-plugin activation API available in NeMo Relay
-0.6 and later. Configure native or worker plugins with Hermes-owned
+0.6 and later. Configure native or worker plugins with Hades-owned
 `[[dynamic_plugins]]` entries that match the Python binding's activation-spec
 fields:
 
@@ -260,10 +260,10 @@ OpenAI-compatible API.
 ```bash
 pip install "nemo-relay>=0.5,<1.0"
 
-export HERMES_HOME=/tmp/hermes-nemo-relay-docs/hermes-home
-mkdir -p "$HERMES_HOME"
+export HADES_HOME=/tmp/hermes-nemo-relay-docs/hermes-home
+mkdir -p "$HADES_HOME"
 
-cat > "$HERMES_HOME/config.yaml" <<'YAML'
+cat > "$HADES_HOME/config.yaml" <<'YAML'
 model:
   provider: custom
   default: qwen3.6:35b
@@ -296,7 +296,7 @@ export HERMES_NEMO_RELAY_ATOF_MODE=overwrite
 export HERMES_NEMO_RELAY_ATIF_ENABLED=1
 export HERMES_NEMO_RELAY_ATIF_OUTPUT_DIRECTORY=/tmp/hermes-nemo-relay-docs/subagent/atif
 export HERMES_NEMO_RELAY_ATIF_FILENAME_TEMPLATE='nested-subagent-atif-{session_id}.json'
-export HERMES_NEMO_RELAY_ATIF_AGENT_NAME='Hermes Agent E2E'
+export HERMES_NEMO_RELAY_ATIF_AGENT_NAME='Hades Agent E2E'
 export HERMES_NEMO_RELAY_ATIF_AGENT_VERSION=docs-example
 export HERMES_NEMO_RELAY_ATIF_SUBAGENT_EXPORT_MODE=all
 
@@ -332,7 +332,7 @@ Sanitized ATIF excerpt:
 {
   "schema_version": "ATIF-v1.7",
   "session_id": "docs-parent-session",
-  "agent": {"name": "Hermes Agent E2E", "version": "docs-example", "model_name": "qwen3.6:35b"},
+  "agent": {"name": "Hades Agent E2E", "version": "docs-example", "model_name": "qwen3.6:35b"},
   "steps": [
     {
       "source": "agent",
@@ -382,7 +382,7 @@ export HERMES_NEMO_RELAY_ATOF_MODE=overwrite
 export HERMES_NEMO_RELAY_ATIF_ENABLED=1
 export HERMES_NEMO_RELAY_ATIF_OUTPUT_DIRECTORY=/tmp/hermes-nemo-relay-docs/parallel/atif
 export HERMES_NEMO_RELAY_ATIF_FILENAME_TEMPLATE='parallel-tools-atif-{session_id}.json'
-export HERMES_NEMO_RELAY_ATIF_AGENT_NAME='Hermes Agent E2E'
+export HERMES_NEMO_RELAY_ATIF_AGENT_NAME='Hades Agent E2E'
 export HERMES_NEMO_RELAY_ATIF_AGENT_VERSION=docs-example
 
 hermes chat \
@@ -418,7 +418,7 @@ Sanitized ATIF excerpt:
 {
   "schema_version": "ATIF-v1.7",
   "session_id": "docs-parallel-session",
-  "agent": {"name": "Hermes Agent E2E", "version": "docs-example", "model_name": "qwen3.6:35b"},
+  "agent": {"name": "Hades Agent E2E", "version": "docs-example", "model_name": "qwen3.6:35b"},
   "steps": [
     {
       "source": "agent",
@@ -473,7 +473,7 @@ enabled = true
 mode = "observe_only"
 ```
 
-Enable it for Hermes:
+Enable it for Hades:
 
 ```bash
 export HERMES_NEMO_RELAY_PLUGINS_TOML=/tmp/hermes-middleware-test/plugins.toml
@@ -508,10 +508,10 @@ supports `[components.config.tool_parallelism]`, as provided by the supported
 0.x release range beginning with 0.5.
 
 ```bash
-export HERMES_HOME=/tmp/hermes-middleware-test/hermes-home
-mkdir -p "$HERMES_HOME" /tmp/hermes-middleware-test/nemo-relay
+export HADES_HOME=/tmp/hermes-middleware-test/hermes-home
+mkdir -p "$HADES_HOME" /tmp/hermes-middleware-test/nemo-relay
 
-cat > "$HERMES_HOME/config.yaml" <<'YAML'
+cat > "$HADES_HOME/config.yaml" <<'YAML'
 model:
   provider: custom
   default: qwen3.6:35b

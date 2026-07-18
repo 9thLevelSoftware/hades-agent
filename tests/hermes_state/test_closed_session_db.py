@@ -1,7 +1,7 @@
 """Tests for explicit bounded closed-handle behaviour on SessionDB.
 
 When a ``SessionDB`` has been ``close()``d, subsequent reads and writes
-must raise :class:`hermes_state.SessionDBClosedError` (a ``RuntimeError``)
+must raise :class:`hades_state.SessionDBClosedError` (a ``RuntimeError``)
 instead of a raw ``sqlite3.ProgrammingError`` from a closed handle. The
 agent then disables its own ``_session_db`` reference on the first such
 failure so the rest of the run degrades cleanly.
@@ -16,8 +16,8 @@ import sqlite3
 
 import pytest
 
-import hermes_state
-from hermes_state import SessionDB, SessionDBClosedError
+import hades_state
+from hades_state import SessionDB, SessionDBClosedError
 
 
 @pytest.fixture()

@@ -6,7 +6,7 @@
 
 **Architecture:** Create `tools/policy.py` with a compiled `PolicyEngine`. It evaluates a normalized operation against rule layers and returns a decision plus provenance. Register one built-in policy middleware at the existing `run_tool_execution_middleware` chain. The engine calls the existing `_run_approval_gate`/`request_tool_approval` only for `ask`; hardline patterns and sensitive-path checks remain independent floors. Project rules can narrow by default; project allows require an explicit global trust grant. All modes and grants are session-scoped through the existing approval session key and durable grant store.
 
-**Tech Stack:** Python/YAML config, `ToolRegistry` metadata, existing approval normalization/dangerous-command variants, plugin middleware context, file safety, MCP schema/annotation conversion, atomic JSON writes, CLI slash commands, gateway RPC/TUI approval surfaces, and current `HERMES_HOME` profile stores.
+**Tech Stack:** Python/YAML config, `ToolRegistry` metadata, existing approval normalization/dangerous-command variants, plugin middleware context, file safety, MCP schema/annotation conversion, atomic JSON writes, CLI slash commands, gateway RPC/TUI approval surfaces, and current `HADES_HOME` profile stores.
 
 ## Global Constraints
 
@@ -119,7 +119,7 @@ permissions:
       decision: ask
 ```
 
-Global rules are stored in config. Project rules use the same shape under `<project>/.hermes/permissions.yaml`. Scoped grants use `~/.hermes/permission_grants.json` with `{rule, scope, cwd, backend, session_key, expires_at, project_digest, granted_by, created_at}`. Raw command/path arguments are never persisted; only normalized matcher and operation key/policy identity are stored.
+Global rules are stored in config. Project rules use the same shape under `<project>/.hermes/permissions.yaml`. Scoped grants use `~/.hades/permission_grants.json` with `{rule, scope, cwd, backend, session_key, expires_at, project_digest, granted_by, created_at}`. Raw command/path arguments are never persisted; only normalized matcher and operation key/policy identity are stored.
 
 ## Task 1: Implement Rule Matching and Precedence
 
@@ -308,7 +308,7 @@ The loader must resolve the grant path under the active profile home and reject 
 - [ ] Step 7: Run grant/policy tests under concurrent two-process writes to the same temporary file.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest tests/tools/test_permission_grants.py tests/tools/test_policy.py -q
+HADES_HOME="$(mktemp -d)" python -m pytest tests/tools/test_permission_grants.py tests/tools/test_policy.py -q
 ```
 
 - [ ] Step 8: Commit modes and persistence.
@@ -479,7 +479,7 @@ git commit -m "feat(permissions): add reviewable permissions surface"
 - [ ] Generate shell obfuscation variants with the existing approval test helper; assert hardline commands never become allow.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/tools/test_policy.py \
   tests/tools/test_permission_grants.py \
   tests/tools/test_approval.py \

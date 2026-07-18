@@ -17,12 +17,12 @@
 - Grants are explicit, digest-bound, profile-bound, attenuable, revocable, expiring, use-bounded, and no broader than both the manifest declaration and the parent/item #6 authority decision. Update permission drift always requires a new grant; scan/signature continuity never carries authority across a changed manifest or content digest.
 - WASI components are the preferred high-isolation runtime only when the package declares a compatible component ABI and a configured adapter can satisfy it. Python and MCP packages use sandbox adapters with OS/container/process/network/filesystem/secret/model mediation; compatibility fallback may reduce availability, never isolation.
 - Stable non-secret policy lives under `capability_exchange:` in profile-local `config.yaml`. Publisher keys, signing credentials, OAuth tokens, API keys, and secret values remain in secret providers or `.env`; manifests and audit rows contain secret references only.
-- Profiles remain independent islands. Package objects, locks, grants, quarantine, rollback generations, receipts, and audit resolve from `get_hermes_home()` and cannot be reused across profiles merely because bytes match.
+- Profiles remain independent islands. Package objects, locks, grants, quarantine, rollback generations, receipts, and audit resolve from `get_hades_home()` and cannot be reused across profiles merely because bytes match.
 - Third-party products and vendor integrations do not enter the core tree. They remain standalone plugin repositories or MCP servers; core contains only generic contracts, adapters, CLI workflow, and benchmark fixtures.
 - This is Footprint Ladder rung 2: one CLI/package-manager workflow and bundled skill instructions over existing terminal/file facilities. Runtime providers are standalone plugins; acquired capabilities remain skills, standalone plugins, or MCP edges. No new model-visible core tool or toolset is added.
 - Promotion never mutates a live conversation's system prompt, cached prefix, effective tool-definition snapshot, provider, or model. A changed skill catalog, plugin hooks, MCP tools, or package generation takes effect only in a new conversation/process cache lineage; old conversations retain their pinned generation or receive a deterministic unavailable result.
 - Strict message-role alternation remains valid. Capability state is sidecar/runtime metadata; it never rewrites past messages, inserts a synthetic user message mid-loop, or mutates history outside existing compression.
-- Every state, security, resolution, sandbox, secret, subprocess, and remote-I/O change receives real-path E2E coverage against a temporary `HERMES_HOME`; mocks are limited to external registries, transparency/TUF services, OAuth endpoints, OS-specific sandbox engines unavailable in CI, and deterministic crash points.
+- Every state, security, resolution, sandbox, secret, subprocess, and remote-I/O change receives real-path E2E coverage against a temporary `HADES_HOME`; mocks are limited to external registries, transparency/TUF services, OAuth endpoints, OS-specific sandbox engines unavailable in CI, and deterministic crash points.
 - Audit, receipts, logs, CLI/TUI output, and benchmark reports contain package/grant/authority/flow/operation identities and hashes, never raw credentials, secret-bearing URLs, environment values, file bodies, MCP payload bodies, or model prompts.
 - User-visible outcomes use item #12's exact statuses: `verified`, `completed_unverified`, `failed`, `blocked`, and `unknown_effect`. Package installation or signing cannot mint `verified`; an independent end-state scorer must prove the requested package/lifecycle state.
 - No outbound telemetry is introduced. Reports remain local and publish denominator, exclusions, Wilson intervals, p50/p95 latency, cost per verified success, safety slices, recovery burden, and stop conditions separately.
@@ -249,7 +249,7 @@ Crash recovery distinguishes `failed` before effects, `blocked` by policy, and `
 - `tools/approval.py:1560-2021` binds approvals to normalized arguments/requester/channel/expiry and consumes exact pending approvals. Item #6 capability-grant issuance uses this identity rather than a parallel prompt queue.
 - `tools/environments/base.py`, `tools/environments/local.py`, `tools/environments/docker.py`, `tools/environments/singularity.py`, `tools/environments/modal.py`, and `tools/environments/daytona.py` provide process backends. Capability runtimes wrap these backends with declared mounts, egress, environment, and process policy; local execution is never presented as high isolation.
 - `hermes_cli/middleware.py`, item #15's final effective-argument gate, and `model_tools.py::handle_function_call()` remain the last in-process effect boundary. Capability enforcement composes with them and never lets plugin argument rewrites broaden a grant.
-- `hermes_state.py` supplies profile-local SQLite/WAL and bounded `BEGIN IMMEDIATE` writes. Additive capability tables and lazy facades use this existing connection discipline.
+- `hades_state.py` supplies profile-local SQLite/WAL and bounded `BEGIN IMMEDIATE` writes. Additive capability tables and lazy facades use this existing connection discipline.
 - `tui_gateway/server.py:14370-14430` already serves structured skill operations, and `ui-tui/src/app/slash/commands/ops.ts` owns native operational commands. Add one `capability.exec` route rather than shelling out.
 - `hermes_cli/web_server.py` and `web/src/App.tsx` provide profile-scoped Dashboard APIs/routes. Dashboard remains inspection-only; `apps/desktop/` is untouched.
 
@@ -275,7 +275,7 @@ Crash recovery distinguishes `failed` before effects, `blocked` by policy, and `
 
 ### Existing production files modified
 
-- `hermes_state.py` — additive capability/grant tables and lazy `SessionDB.capabilities`/`SessionDB.capability_grants` facades.
+- `hades_state.py` — additive capability/grant tables and lazy `SessionDB.capabilities`/`SessionDB.capability_grants` facades.
 - `hermes_cli/config.py` — safe `capability_exchange` defaults and validation.
 - `tools/skills_guard.py`, `tools/skills_hub.py`, `hermes_cli/skills_hub.py` — full canonical digest and managed-skill adapter/delegation.
 - `hermes_cli/plugins.py`, `hermes_cli/plugins_cmd.py` — active-generation resolution, pre-import grant gate, managed lifecycle delegation, and unmanaged labeling.
@@ -451,7 +451,7 @@ git commit -m "feat: define capability package contracts"
 
 **Files:**
 - Create: `agent/capabilities/store.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/capabilities/test_store.py`
 
 **Interfaces:**
@@ -487,7 +487,7 @@ CREATE TABLE IF NOT EXISTS capability_audit (... UNIQUE(event_id));
 CREATE TABLE IF NOT EXISTS capability_objects (... PRIMARY KEY(content_digest));
 ```
 
-Object bytes live under `<HERMES_HOME>/capabilities/objects/sha256/<hex>` and are written temp-file + fsync + atomic rename before the database references them. Quarantine lives under `<HERMES_HOME>/capabilities/quarantine/<operation_key>`. `compare_and_swap_active()` writes active generation, lock, grant-snapshot hash, lifecycle event, and audit event in one `BEGIN IMMEDIATE`; replay returns the original result. Recovery completes provably durable projections, deletes unreferenced temp objects, and marks unprovable external effects `unknown_effect` without retry.
+Object bytes live under `<HADES_HOME>/capabilities/objects/sha256/<hex>` and are written temp-file + fsync + atomic rename before the database references them. Quarantine lives under `<HADES_HOME>/capabilities/quarantine/<operation_key>`. `compare_and_swap_active()` writes active generation, lock, grant-snapshot hash, lifecycle event, and audit event in one `BEGIN IMMEDIATE`; replay returns the original result. Recovery completes provably durable projections, deletes unreferenced temp objects, and marks unprovable external effects `unknown_effect` without retry.
 
 - [ ] **Step 4: Run the store and schema tests and verify GREEN**
 
@@ -498,7 +498,7 @@ Expected: PASS for clean creation, restart, concurrent CAS, replay, corrupted lo
 - [ ] **Step 5: Commit**
 
 ```bash
-git add agent/capabilities/store.py hermes_state.py tests/agent/capabilities/test_store.py
+git add agent/capabilities/store.py hades_state.py tests/agent/capabilities/test_store.py
 git commit -m "feat: persist capability generations and locks"
 ```
 
@@ -571,7 +571,7 @@ git commit -m "feat: verify capability provenance and content"
 - Create: `agent/autonomy/capability_grants.py`
 - Modify: `agent/autonomy/__init__.py`
 - Modify: `agent/capabilities/__init__.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/capabilities/test_grants.py`
 
 **Interfaces:**
@@ -621,7 +621,7 @@ Expected: PASS for issue, attenuation, expiry, single-use replay, revocation, cr
 - [ ] **Step 5: Commit**
 
 ```bash
-git add agent/autonomy/capability_grants.py agent/autonomy/__init__.py agent/capabilities/__init__.py hermes_state.py tests/agent/capabilities/test_grants.py
+git add agent/autonomy/capability_grants.py agent/autonomy/__init__.py agent/capabilities/__init__.py hades_state.py tests/agent/capabilities/test_grants.py
 git commit -m "feat: add authority-owned capability grants"
 ```
 
@@ -898,7 +898,7 @@ git commit -m "feat: add capability package manager cli"
 - Modify: `ui-tui/src/__tests__/slashParity.test.ts`
 
 **Interfaces:**
-- Consumes `hermes_cli.capabilities.run_argv(..., output="json")`.
+- Consumes `hades_cli.capabilities.run_argv(..., output="json")`.
 - Produces JSON-RPC `capability.exec` with `{argv: string[], session_id?: string}` and native list/detail/diff/confirmation/result views.
 
 - [ ] **Step 1: Write failing RPC and Ink route tests**
@@ -1056,7 +1056,7 @@ git commit -m "feat: inspect capabilities in dashboard"
 - Modify: `tests/tools/test_plugin_capability_adapter.py`
 
 **Interfaces:**
-- Consumes the real CLI/service/store/loaders with temporary `HERMES_HOME` and injected external verifier/registry/sandbox boundaries.
+- Consumes the real CLI/service/store/loaders with temporary `HADES_HOME` and injected external verifier/registry/sandbox boundaries.
 - Produces no production interface; this is the release invariant gate.
 
 - [ ] **Step 1: Write failing real-path invariant tests**
@@ -1218,7 +1218,7 @@ git commit -m "docs: publish safe capability exchange contract"
 | Undeclared filesystem/network/process/credential/model/data fail | Tasks 5, 12, and all 20 frozen isolation cases |
 | Permission-increase update and package+grant rollback | Tasks 6 and 13 exact v1/v2 proof |
 | Crash/replay/supply-chain/confused-deputy/staleness/revocation | Tasks 3, 4, 6, 12, and frozen `SUP`/`RST` strata |
-| Temporary `HERMES_HOME` real-path E2E | Tasks 12 and 13 real config/SQLite/files/imports/processes |
+| Temporary `HADES_HOME` real-path E2E | Tasks 12 and 13 real config/SQLite/files/imports/processes |
 | CLI/Ink primary, Dashboard secondary, no Desktop | Tasks 8, 9, 11, 14 |
 | No core model tool; cache/schema/provider/model/role stable | Tasks 7, 8, 12, and final schema/hash assertions |
 | Rung 2 core footprint; runtimes/capabilities at edges | Global constraints, Tasks 3, 5, 8, and author docs |

@@ -258,7 +258,7 @@ git commit -m "feat(context): account for native edit fallback"
 - Modify: `agent/anthropic_adapter.py`
 - Modify: `agent/conversation_compression.py`
 - Modify: `agent/context_engine.py`
-- Modify: `hermes_state.py` only if provider-state persistence is necessary; prefer session runtime state.
+- Modify: `hades_state.py` only if provider-state persistence is necessary; prefer session runtime state.
 - Test: `tests/agent/test_anthropic_context_management.py`
 
 - [ ] Step 1: Add fixtures for a response with `stop_reason="compaction"` and an opaque `compaction` content block. Assert canonical local messages are unchanged and runtime state captures the block.
@@ -286,7 +286,7 @@ python -m pytest tests/agent/test_anthropic_context_management.py tests/agent/te
 - [ ] Step 6: Commit Anthropic compact support.
 
 ```bash
-git add agent/transports/anthropic.py agent/anthropic_adapter.py agent/conversation_compression.py agent/context_engine.py hermes_state.py tests/agent/test_anthropic_context_management.py
+git add agent/transports/anthropic.py agent/anthropic_adapter.py agent/conversation_compression.py agent/context_engine.py hades_state.py tests/agent/test_anthropic_context_management.py
  git diff --cached --check
 git commit -m "feat(context): support Anthropic compaction blocks"
 ```
@@ -353,7 +353,7 @@ git commit -m "feat(context): support Responses compaction items"
 - [ ] Run a native 400/schema failure and assert one fallback, disabled capability, and no retry loop.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_provider_context_policy.py \
   tests/agent/test_anthropic_context_management.py \
   tests/agent/test_anthropic_thinking_block_order.py \

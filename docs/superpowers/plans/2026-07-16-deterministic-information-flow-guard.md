@@ -18,14 +18,14 @@
 - Explicit flows are enforced. Opaque model reasoning is conservatively tainted by the union of the exact model inputs. Arbitrary-process implicit flows, covert channels, complete semantic noninterference, and semantic reconstruction of hidden reasoning are not claimed.
 - Unknown confidentiality, integrity, provenance, source, sink, purpose, adapter metadata, final arguments, or audit durability fails closed for mutating or cross-boundary sinks in `enforce` mode. Read-only local inspection may continue only when its resolver proves there is no outward or persistence sink.
 - Stable non-secret policy and label rules live under `information_flow:` in profile-local `config.yaml`. Runtime grants, provenance summaries, decisions, consumption, and audit live in profile-local `state.db`. Credentials remain in `.env` or secret providers.
-- Profiles remain independent islands. Every key, label rule, grant, provenance node, decision, audit query, benchmark artifact, and recovery lock resolves through `get_hermes_home()`; no live default-profile inheritance or cross-profile grant reuse is permitted.
+- Profiles remain independent islands. Every key, label rule, grant, provenance node, decision, audit query, benchmark artifact, and recovery lock resolves through `get_hades_home()`; no live default-profile inheritance or cross-profile grant reuse is permitted.
 - Audit, logs, receipts, CLI/TUI output, exceptions, and benchmark results contain only opaque identities, canonical hashes, label summaries, decision codes, and bounded reasons. They never contain raw secrets, message/file bodies, URLs with secret query values, typed browser text, cookies, environment values, screenshots, memory bodies, or raw recipient identifiers.
 - Existing `agent.secret_scope`, subprocess credential stripping, redaction, threat scanning, SSRF/private-page guards, hardline terminal blocks, approval identity, plugin override policy, MCP auth, and computer-use hard blocks remain stronger point defenses. Redaction is not declassification unless it returns a validated `SanitizationProof` for exact removed fingerprints.
 - The system prompt, cached prefix, effective model tool-definition snapshot, primary provider, and primary model remain byte-stable for a conversation. IFC state is sidecar/context-local metadata and never appears in model schemas, rewrites past messages, reloads tools, or inserts a synthetic user message.
 - Existing provider fallback cannot drop labels. The same model-input flow snapshot is rechecked against the fallback provider sink; if the sink is not permitted, fallback blocks or starts a separately authorized new conversation through the existing owner surface.
 - Strict role alternation and compression-only history mutation remain intact. Compression and summarization outputs conservatively inherit all input provenance unless a separately validated extractor implements the adapter protocol and produces a proof.
 - Built-in generic source/sink resolvers extend existing code at Footprint Ladder rung 1. Operator controls are rung 2 CLI + skill + native Ink. Third-party policy packs and service-specific label resolvers ship as standalone plugins or MCP-side mappings; no new model-visible core tool or toolset is added.
-- Real-path tests use temporary `HERMES_HOME`, real imports, real SQLite, real config, real tool registry/middleware, real local files, a real local HTTP fixture/browser lane, real memory and gateway normalization, and real transaction restart. Mock only the final external network/provider/process boundary and deterministic crash points.
+- Real-path tests use temporary `HADES_HOME`, real imports, real SQLite, real config, real tool registry/middleware, real local files, a real local HTTP fixture/browser lane, real memory and gateway normalization, and real transaction restart. Mock only the final external network/provider/process boundary and deterministic crash points.
 - The proof denominator is exactly 250 cases: 200 adversarial plus 50 benign. Pass requires zero critical canary leaks, complete audit for every block and declassification, false blocking below 10% across all 50 benign cases, and below 2% on the preregistered 25-case common non-sensitive slice. Critical cases are never averaged with benign cases.
 
 ---
@@ -248,7 +248,7 @@ Pass thresholds:
 
 ### Existing production files modified
 
-- `hermes_state.py` — additive IFC tables and lazy `SessionDB.information_flow` facade.
+- `hades_state.py` — additive IFC tables and lazy `SessionDB.information_flow` facade.
 - `hermes_cli/config.py` — `information_flow` defaults and guarded policy-section reads/writes.
 - `tools/registry.py` — internal `flow_adapter_id` metadata and defensive resolver lookup; serialized model schemas remain identical.
 - `hermes_cli/middleware.py`, `model_tools.py`, `agent/agent_runtime_helpers.py` — final effective-argument security closure for registry and agent-level tools.
@@ -446,7 +446,7 @@ git commit -m "feat: define information flow contracts"
 
 **Files:**
 - Create: `agent/information_flow/store.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/information_flow/test_store.py`
 - Modify: `tests/test_hermes_state.py`
 
@@ -496,7 +496,7 @@ Expected: PASS across reopen/concurrency/replay, with one decision/grant consump
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/information_flow/store.py hermes_state.py tests/agent/information_flow/test_store.py tests/test_hermes_state.py
+git add agent/information_flow/store.py hades_state.py tests/agent/information_flow/test_store.py tests/test_hermes_state.py
 git commit -m "feat: persist information flow audit"
 ```
 
@@ -1027,7 +1027,7 @@ git commit -m "feat: add information flow controls"
 
 - [ ] **Step 1: Write the real-path E2E matrix**
 
-Use temp `HERMES_HOME`, real `SessionDB`, real config, real registry discovery, real file/symlink operations, real local browser/HTTP fixture, real gateway `MessageEvent`/`DeliveryRouter`, real built-in memory, real transaction reopen, and fake only the final remote send/provider/process. Cover:
+Use temp `HADES_HOME`, real `SessionDB`, real config, real registry discovery, real file/symlink operations, real local browser/HTTP fixture, real gateway `MessageEvent`/`DeliveryRouter`, real built-in memory, real transaction reopen, and fake only the final remote send/provider/process. Cover:
 
 1. hostile local web page attempts credential read → encoded terminal POST;
 2. inbound group message attempts memory recall → different-channel send;
@@ -1154,7 +1154,7 @@ Expected: exits 0 only with zero critical leaks/grant misuse, 100% block/declass
 
 The user guide documents the layman outcome, labels/integrity, sources/sinks/purposes, off/shadow/enforce, policy explain/test, declassification preview/apply/revoke, audit/doctor, CLI/Ink workflow, profile isolation, stale/crash behavior, false-block diagnosis, and local benchmark. State plainly that arbitrary-process implicit/covert flows and complete semantic noninterference are unsupported; opaque model output uses conservative union.
 
-The adapter guide defines every model/protocol method, trusted identity rules, result/source/sink/derivation mapping, unknown behavior, sanitizer proof, plugin ownership, service gating, memory/provider/MCP/browser/gateway examples, transaction/Action Fabric continuity, ReceiptStore claims, redaction rules, and required temp-`HERMES_HOME` real-path tests. Its complete sample is a standalone synthetic service plugin, not an in-tree vendor integration.
+The adapter guide defines every model/protocol method, trusted identity rules, result/source/sink/derivation mapping, unknown behavior, sanitizer proof, plugin ownership, service gating, memory/provider/MCP/browser/gateway examples, transaction/Action Fabric continuity, ReceiptStore claims, redaction rules, and required temp-`HADES_HOME` real-path tests. Its complete sample is a standalone synthetic service plugin, not an in-tree vendor integration.
 
 - [ ] **Step 6: Define rollout and stop rules**
 

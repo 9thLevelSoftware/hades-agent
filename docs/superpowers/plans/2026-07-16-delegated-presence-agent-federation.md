@@ -21,7 +21,7 @@
 - Federation is explicit opt-in and incubation-only. Stable non-secret settings live under `federation:` in profile-local `config.yaml`; OAuth tokens, client secrets, private keys, and mTLS key passwords remain in secret providers or `.env`.
 - A2A v1 support ships only as a standalone plugin or standalone service at Footprint Ladder rung 4/5. No A2A SDK, vendor implementation, Agent Card catalog, third-party product, permanent core model tool, or new model-visible schema enters the core repository.
 - Widen `PluginContext` with `register_delegation_provider()` only because the implementation has the built-in local provider and the external proof provider as concrete consumers. Do not add protocol-specific methods to the generic interface.
-- Profiles and tenants are independent. Every mandate, auth handle, task, event cursor, callback nonce, artifact, receipt, and audit row resolves from `get_hermes_home()` and an exact tenant identity. Cross-profile or cross-tenant IDs return not-found without revealing existence.
+- Profiles and tenants are independent. Every mandate, auth handle, task, event cursor, callback nonce, artifact, receipt, and audit row resolves from `get_hades_home()` and an exact tenant identity. Cross-profile or cross-tenant IDs return not-found without revealing existence.
 - Remote task submission is an external effect journaled before dispatch with an idempotency key. An ambiguous timeout becomes `unknown_effect`; never resubmit until read-only reconciliation proves no task exists.
 - Cancellation is best effort unless the provider returns authenticated terminal cancellation. Expiry blocks new/resume/fetch/effect work, requests cancellation, and reports residual remote uncertainty; it does not claim the remote process stopped.
 - Callback destinations are exact HTTPS origins/paths or a profile-local polling channel. Redirects never broaden callback scope. Signed callback events still require nonce, task, mandate, tenant, sequence, freshness, and replay checks.
@@ -30,7 +30,7 @@
 - Streaming events and polling results pass through the same durable sequence/hash/replay validation. Event gaps trigger read-only reconciliation; they never silently advance terminal state.
 - The system prompt, cached prefix, effective model tool definitions, primary provider, and primary model remain byte-stable for a conversation. Federation state stays in sidecar/SQLite and appears through CLI/TUI, not prompt mutation; strict role alternation and compression-only history mutation remain intact.
 - Provider install/update or registration changes become available only in a new conversation/process cache lineage. Existing conversations retain their pinned provider/tool snapshot.
-- Real-path E2E tests use a temporary `HERMES_HOME`, real imports, SQLite/WAL, local TLS/HTTP servers, real artifact files/hashes, real CLI parsers, real provider loading, fresh processes, and deterministic crash hooks. Mock only external IdP signing, external A2A implementations in focused tests, unavailable OS certificate stores, and process termination.
+- Real-path E2E tests use a temporary `HADES_HOME`, real imports, SQLite/WAL, local TLS/HTTP servers, real artifact files/hashes, real CLI parsers, real provider loading, fresh processes, and deterministic crash hooks. Mock only external IdP signing, external A2A implementations in focused tests, unavailable OS certificate stores, and process termination.
 - No outbound telemetry is added. Incubation evidence is local, opt-in, redacted, and cannot mine private conversations/logs. Promotion requires at least three distinct repeated real user workflows, each intentionally delegated at least three times across at least two weeks with local verified receipts.
 - The frozen technical proof denominator is exactly 60 cases: 12 interoperability, 12 lifecycle, 20 security, 8 crash/replay, and 8 benign/conformance. Pass requires both independent A2A implementations to complete scheduling negotiation and artifact handoff, zero scope/tenant/replay/SSRF violations, zero false `verified`, 60/60 audit chains, and 8/8 benign successes.
 
@@ -259,7 +259,7 @@ Remote submission/cancel may be idempotent only when the negotiated provider pro
 
 ### Existing production files modified
 
-- `hermes_state.py` — additive federation tables and lazy facade.
+- `hades_state.py` — additive federation tables and lazy facade.
 - `hermes_cli/config.py` — `federation` stable settings/default-off validation.
 - `hermes_cli/plugins.py` — generic `PluginContext.register_delegation_provider()` and attribution; no A2A import.
 - `tools/delegate_tool.py` — internal local-provider adapter hooks while preserving model schema/behavior.
@@ -419,7 +419,7 @@ git commit -m "feat: define federation provider contracts"
 
 **Files:**
 - Create: `agent/federation/store.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/federation/test_store.py`
 
 **Interfaces:**
@@ -465,7 +465,7 @@ Expected: PASS for clean migration, restart, CAS, event gaps, callback replay, p
 - [ ] **Step 5: Commit**
 
 ```bash
-git add agent/federation/store.py hermes_state.py tests/agent/federation/test_store.py
+git add agent/federation/store.py hades_state.py tests/agent/federation/test_store.py
 git commit -m "feat: persist federation lifecycle state"
 ```
 
@@ -675,7 +675,7 @@ Expected: FAIL because federated intake is absent.
 
 - [ ] **Step 3: Implement bounded streaming quarantine and local hashing**
 
-Download to `<HERMES_HOME>/federation/quarantine/<task>/<artifact>` using no-follow exclusive creation, streaming byte/count limits, exact media/name checks, redirect/connect SSRF validation, and local SHA-256. Archives remain opaque unless the mandate explicitly requests extraction; extraction rejects links/devices/traversal and applies per-file/total limits. Register only locally hashed bytes. Remote descriptors/signatures remain provenance evidence, not truth.
+Download to `<HADES_HOME>/federation/quarantine/<task>/<artifact>` using no-follow exclusive creation, streaming byte/count limits, exact media/name checks, redirect/connect SSRF validation, and local SHA-256. Archives remain opaque unless the mandate explicitly requests extraction; extraction rejects links/devices/traversal and applies per-file/total limits. Register only locally hashed bytes. Remote descriptors/signatures remain provenance evidence, not truth.
 
 - [ ] **Step 4: Run artifact/catalog tests and verify GREEN**
 
@@ -943,7 +943,7 @@ Expected: FAIL until all real stores/transports/loaders/recovery paths are wired
 
 - [ ] **Step 3: Exercise the complete real path**
 
-Use temp `HERMES_HOME`, real config/.env canaries, SQLite/WAL, plugin entry-point loading, local TLS card/task/callback servers, DNS/redirect safety resolver, OAuth device/code callbacks, generated mTLS certificates, real artifact files/catalog hashes, operation journal, mission projection, CLI and fresh subprocess restarts. Inject all eight `RST` crashes and malicious callbacks/cards/scopes. Hash system prompt, effective tools, provider, and model before/after every turn; assert no history mutation or same-role adjacency. Provider activation is visible only in a new conversation/process.
+Use temp `HADES_HOME`, real config/.env canaries, SQLite/WAL, plugin entry-point loading, local TLS card/task/callback servers, DNS/redirect safety resolver, OAuth device/code callbacks, generated mTLS certificates, real artifact files/catalog hashes, operation journal, mission projection, CLI and fresh subprocess restarts. Inject all eight `RST` crashes and malicious callbacks/cards/scopes. Hash system prompt, effective tools, provider, and model before/after every turn; assert no history mutation or same-role adjacency. Provider activation is visible only in a new conversation/process.
 
 - [ ] **Step 4: Run real-path E2E tests and verify GREEN**
 

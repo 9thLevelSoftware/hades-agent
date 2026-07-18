@@ -13,19 +13,19 @@ import yaml
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from hermes_cli import inventory as inventory_mod
-from hermes_cli import profiles as profiles_mod
-from hermes_cli import workflows_assistant
-from hermes_cli import workflows_db as wfdb
-from hermes_cli import workflows_dispatcher
-from hermes_cli.config import load_config
-from hermes_cli.workflows_capabilities import (
+from hades_cli import inventory as inventory_mod
+from hades_cli import profiles as profiles_mod
+from hades_cli import workflows_assistant
+from hades_cli import workflows_db as wfdb
+from hades_cli import workflows_dispatcher
+from hades_cli.config import load_config
+from hades_cli.workflows_capabilities import (
     require_available_profiles,
     require_implemented_primitives,
     workflow_capabilities,
 )
-from hermes_cli.workflows_redaction import redact_sensitive
-from hermes_cli.workflows_spec import (
+from hades_cli.workflows_redaction import redact_sensitive
+from hades_cli.workflows_spec import (
     WorkflowSpec,
     reject_unknown_spec_fields,
     validate_graph,

@@ -95,7 +95,7 @@ import { renderInspector } from "./inspector.js";
     workflow_assistant_validation_error: "Revise the request, use a template, or switch to Advanced YAML.",
   };
 
-  const PRIVACY_NOTE = "Workflow inputs and outputs are stored locally in Hermes workflow/Kanban history. Do not paste secrets; common secret-looking keys are redacted in dashboard views.";
+  const PRIVACY_NOTE = "Workflow inputs and outputs are stored locally in Hades workflow/Kanban history. Do not paste secrets; common secret-looking keys are redacted in dashboard views.";
   const INTAKE_SCOPE_NOTE = "Phase 1 supports scalar manual and continuous input items. Batch splitting and document uploads are not supported in this release.";
 
   function asArray(value) {

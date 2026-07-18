@@ -16,17 +16,17 @@ import pytest
 
 @pytest.fixture()
 def isolated_kanban_home(monkeypatch):
-    """Spin up a fresh HERMES_HOME with a clean kanban DB."""
+    """Spin up a fresh HADES_HOME with a clean kanban DB."""
     test_home = tempfile.mkdtemp(prefix="kanban_default_assignee_test_")
-    monkeypatch.setenv("HERMES_HOME", test_home)
-    # Force-reimport so the fresh HERMES_HOME is picked up.
+    monkeypatch.setenv("HADES_HOME", test_home)
+    # Force-reimport so the fresh HADES_HOME is picked up.
     for mod in list(sys.modules.keys()):
         if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
             del sys.modules[mod]
-    from hermes_cli import kanban_db
+    from hades_cli import kanban_db
     yield kanban_db, test_home
     # Cleanup is best-effort; tempfile dir survives but pytest isolation
-    # gives each test its own monkeypatched HERMES_HOME so no cross-test
+    # gives each test its own monkeypatched HADES_HOME so no cross-test
     # contamination.
 
 
@@ -148,7 +148,7 @@ def test_dispatch_result_has_auto_assigned_default_field():
     """Schema-level invariant: DispatchResult exposes the
     auto_assigned_default field so CLI / dashboard / gateway can surface
     the new routing decisions."""
-    from hermes_cli.kanban_db import DispatchResult
+    from hades_cli.kanban_db import DispatchResult
     r = DispatchResult()
     assert hasattr(r, "auto_assigned_default")
     assert r.auto_assigned_default == []

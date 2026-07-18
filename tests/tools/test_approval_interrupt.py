@@ -48,8 +48,8 @@ class TestApprovalInterrupt:
                       "HERMES_SESSION_KEY")
         }
         os.environ.pop("HERMES_YOLO_MODE", None)
-        os.environ["HERMES_GATEWAY_SESSION"] = "1"
-        os.environ["HERMES_SESSION_KEY"] = self.SESSION_KEY
+        os.environ["HADES_GATEWAY_SESSION"] = "1"
+        os.environ["HADES_SESSION_KEY"] = self.SESSION_KEY
 
     def teardown_method(self):
         from tools.interrupt import set_interrupt

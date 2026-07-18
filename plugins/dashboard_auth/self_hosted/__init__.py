@@ -10,7 +10,7 @@ self-hosted identity provider:
     Authentik · Keycloak · Zitadel · Authelia · Auth0 · Okta · Google · …
 
 It is a pure drop-in plugin: it implements the five
-:class:`~hermes_cli.dashboard_auth.DashboardAuthProvider` methods and touches
+:class:`~hades_cli.dashboard_auth.DashboardAuthProvider` methods and touches
 nothing in core auth/runtime/login. The HTTP round trip, cookies, CSRF
 ``state`` check and ``redirect_uri`` reconstruction are all owned by
 ``hermes_cli/dashboard_auth/routes.py``; this provider only:
@@ -22,7 +22,7 @@ nothing in core auth/runtime/login. The HTTP round trip, cookies, CSRF
   4. verifies the **ID token** (RS256/ES256) against the discovered
      ``jwks_uri`` with ``iss`` / ``aud`` pinned to the configured issuer /
      client id, and maps standard OIDC claims (``sub``, ``email``, ``name``)
-     onto a :class:`~hermes_cli.dashboard_auth.Session`.
+     onto a :class:`~hades_cli.dashboard_auth.Session`.
 
 Why the ID token (not the access token)? OIDC guarantees the ID token is a
 signed JWT carrying identity claims — that is its entire purpose. The access
@@ -57,7 +57,7 @@ same precedence convention as the ``nous`` plugin)::
           client_id: hermes-dashboard                              # required
           scopes: "openid profile email"                           # optional
           # client_secret: set ONLY for a confidential client. It is a
-          # credential — prefer the env var / ~/.hermes/.env over config.yaml.
+          # credential — prefer the env var / ~/.hades/.env over config.yaml.
 
     # Environment overrides (Docker/Fly secret injection)
     HERMES_DASHBOARD_OIDC_ISSUER
@@ -87,7 +87,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from hermes_cli.dashboard_auth import (
+from hades_cli.dashboard_auth import (
     DashboardAuthProvider,
     InvalidCodeError,
     LoginStart,
@@ -750,7 +750,7 @@ def _load_config_oauth_section() -> dict:
     to ``{}`` so callers can rely on ``.get(...)``.
     """
     try:
-        from hermes_cli.config import cfg_get, load_config
+        from hades_cli.config import cfg_get, load_config
 
         cfg = load_config()
     except Exception as exc:  # noqa: BLE001 — broad catch is intentional
@@ -813,7 +813,7 @@ def register(ctx) -> None:
         or _DEFAULT_SCOPES
     )
     # Optional — set only for a confidential client. A credential, so the
-    # canonical home is the env var / ~/.hermes/.env; config.yaml is supported
+    # canonical home is the env var / ~/.hades/.env; config.yaml is supported
     # for precedence symmetry. Empty ⇒ public client (unchanged behaviour).
     client_secret = _resolve_setting(
         "HERMES_DASHBOARD_OIDC_CLIENT_SECRET", oidc_cfg.get("client_secret")

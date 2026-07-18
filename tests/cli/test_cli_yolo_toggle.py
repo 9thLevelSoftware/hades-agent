@@ -1,7 +1,7 @@
 """Regression tests for the CLI ``/yolo`` in-chat toggle.
 
 Pre-fix bug (issue #33925): ``cli.HermesCLI._toggle_yolo`` mutated only
-``os.environ["HERMES_YOLO_MODE"]``. That env var is captured once at
+``os.environ["HADES_YOLO_MODE"]``. That env var is captured once at
 module-import time into ``tools.approval._YOLO_MODE_FROZEN`` (security
 hardening: stops prompt-injected skills from flipping the bypass mid-run),
 so the post-startup toggle was a silent no-op. ``/yolo`` advertised "YOLO ON"
@@ -94,7 +94,7 @@ class TestToggleYoloIsSessionScoped:
         with patch("cli._cprint"):
             HermesCLI._toggle_yolo(stand_in)
 
-        assert os.environ.get("HERMES_YOLO_MODE") is None
+        assert os.environ.get("HADES_YOLO_MODE") is None
 
     def test_toggle_yolo_falls_back_to_default_when_session_id_missing(self):
         """An edge case during CLI bootstrap: a ``/yolo`` triggered before the

@@ -56,7 +56,7 @@ def _synthetic_worker_script() -> str:
                 time.sleep(0.05)
             except Exception:
                 pass
-            if os.environ.get("HERMES_KANBAN_TASK"):
+            if os.environ.get("HADES_KANBAN_TASK"):
                 try:
                     if hasattr(signal, "SIGALRM"):
                         signal.signal(signal.SIGALRM, lambda *_: os._exit(0))

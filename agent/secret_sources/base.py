@@ -3,7 +3,7 @@
 A *secret source* resolves credentials from an external secret manager
 (Bitwarden Secrets Manager, 1Password, an OS keystore, a user script, ...)
 into environment-variable-shaped values at process startup, AFTER
-``~/.hermes/.env`` has loaded and BEFORE the rest of Hermes reads
+``~/.hades/.env`` has loaded and BEFORE the rest of Hades reads
 ``os.environ``.
 
 Scope of the contract (deliberate, please do not widen):
@@ -13,7 +13,7 @@ Scope of the contract (deliberate, please do not widen):
   mid-session secret API.  If a future need for rotation/refresh appears
   it will arrive as a versioned optional hook — do not bolt it on.
 * **Startup-time, synchronous.**  ``fetch()`` is called once per process
-  (per HERMES_HOME) by the orchestrator in
+  (per HADES_HOME) by the orchestrator in
   :mod:`agent.secret_sources.registry`, which enforces a wall-clock
   timeout around it.  Sources must not spawn background refreshers.
 * **Never raises, never prompts.**  ``fetch()`` returns a
@@ -146,7 +146,7 @@ class SecretSource(ABC):
 
         ``cfg`` is the source's raw config section (``secrets.<name>``)
         from config.yaml — treat every field defensively, the section
-        may be malformed.  ``home_path`` is the resolved HERMES_HOME.
+        may be malformed.  ``home_path`` is the resolved HADES_HOME.
         """
 
     # -- optional hooks (defaults are correct for most sources) ------------
@@ -199,7 +199,7 @@ class SecretSource(ABC):
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # ANSI CSI/OSC escape sequences — helper-CLI stderr often carries color
-# codes that must not reach Hermes' own startup output.
+# codes that must not reach Hades' own startup output.
 _ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?)")
 
 
@@ -231,7 +231,7 @@ def run_secret_cli(
       — never a copy of the full post-dotenv ``os.environ``, which by
       this point holds every credential Hermes knows about.
     * ``NO_COLOR=1`` is set and stderr/stdout are ANSI-scrubbed so
-      helper diagnostics can't smuggle escape sequences into Hermes
+      helper diagnostics can't smuggle escape sequences into Hades
       output.
     * stdin is ``/dev/null`` so a helper that decides to prompt fails
       fast instead of hanging startup.

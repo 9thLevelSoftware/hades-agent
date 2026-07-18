@@ -1,4 +1,4 @@
-# Streaming LLM Response Support for Hermes Agent
+# Streaming LLM Response Support for Hades Agent
 
 ## Overview
 
@@ -266,7 +266,7 @@ try:
 except Exception:
     pass
 # Env var override
-if os.getenv("HERMES_STREAMING_ENABLED", "").lower() in ("true", "1", "yes"):
+if os.getenv("HADES_STREAMING_ENABLED", "").lower() in ("true", "1", "yes"):
     _streaming_enabled = True
 ```
 

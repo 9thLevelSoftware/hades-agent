@@ -7,7 +7,7 @@ vi.mock('../lib/memory.js', () => ({
 }))
 
 // @hermes/ink is dynamically imported only on the dump path; stub the eviction.
-vi.mock('@hermes/ink', () => ({ evictInkCaches: vi.fn() }))
+vi.mock('@hades/ink', () => ({ evictInkCaches: vi.fn() }))
 
 import { startMemoryMonitor } from '../lib/memoryMonitor.js'
 

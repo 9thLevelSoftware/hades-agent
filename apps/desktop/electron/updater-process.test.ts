@@ -19,7 +19,7 @@ test('spawnUpdaterProcess hides the updater console and detaches the child on Wi
   const result = spawnUpdaterProcess(
     'hermes-setup.exe',
     ['--update', '--branch', 'main'],
-    { cwd: 'C:\\Hermes', detached: true, stdio: 'ignore' },
+    { cwd: 'C:\\Hades', detached: true, stdio: 'ignore' },
     {
       isWindows: true,
       spawnProcess: (command, args, options) => {
@@ -36,7 +36,7 @@ test('spawnUpdaterProcess hides the updater console and detaches the child on Wi
     {
       args: ['--update', '--branch', 'main'],
       command: 'hermes-setup.exe',
-      options: { cwd: 'C:\\Hermes', detached: true, stdio: 'ignore', windowsHide: true }
+      options: { cwd: 'C:\\Hades', detached: true, stdio: 'ignore', windowsHide: true }
     }
   ])
 })

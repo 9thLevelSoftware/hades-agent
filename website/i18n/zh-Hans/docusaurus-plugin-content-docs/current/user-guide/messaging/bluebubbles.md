@@ -31,7 +31,7 @@ hermes gateway setup
 
 选择 **BlueBubbles (iMessage)** 并输入服务端 URL 和密码。
 
-或直接在 `~/.hermes/.env` 中设置环境变量：
+或直接在 `~/.hades/.env` 中设置环境变量：
 
 ```bash
 BLUEBUBBLES_SERVER_URL=http://192.168.1.10:1234
@@ -49,12 +49,12 @@ hermes pairing approve bluebubbles <CODE>
 ```
 使用 `hermes pairing list` 查看待处理的配对码和已授权用户。
 
-**预授权特定用户**（在 `~/.hermes/.env` 中）：
+**预授权特定用户**（在 `~/.hades/.env` 中）：
 ```bash
 BLUEBUBBLES_ALLOWED_USERS=user@icloud.com,+15551234567
 ```
 
-**开放访问**（在 `~/.hermes/.env` 中）：
+**开放访问**（在 `~/.hades/.env` 中）：
 ```bash
 BLUEBUBBLES_ALLOW_ALL_USERS=true
 ```
@@ -91,7 +91,7 @@ Hermes → BlueBubbles REST API → Messages.app → iMessage
 | `BLUEBUBBLES_ALLOWED_USERS` | 否 | — | 逗号分隔的授权用户列表 |
 | `BLUEBUBBLES_ALLOW_ALL_USERS` | 否 | `false` | 允许所有用户 |
 
-自动将消息标记为已读由 `~/.hermes/config.yaml` 中 `platforms.bluebubbles.extra` 下的 `send_read_receipts` 键控制（默认值：`true`）。该选项没有对应的环境变量。
+自动将消息标记为已读由 `~/.hades/config.yaml` 中 `platforms.bluebubbles.extra` 下的 `send_read_receipts` 键控制（默认值：`true`）。该选项没有对应的环境变量。
 
 ## 功能特性
 

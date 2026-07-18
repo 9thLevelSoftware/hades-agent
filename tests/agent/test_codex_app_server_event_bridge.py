@@ -80,7 +80,7 @@ class TestCodexItemToToolName:
         ) == "web_search"
 
     def test_hermes_tools_mcp_server_emits_bare_tool_name(self):
-        """The hermes-tools MCP server wraps Hermes' own tools for codex;
+        """The hermes-tools MCP server wraps Hades' own tools for codex;
         the inner dispatch subprocess can't fire native progress events,
         so the codex-level event IS the display event — shown without the
         mcp.hermes-tools.* namespacing (from #26541 by @simpolism)."""
@@ -392,18 +392,18 @@ class TestToolProgressDispatch:
         bridge(_item_started({
             "type": "webSearch",
             "id": "ws-1",
-            "query": "hermes agent docs",
+            "query": "hades agent docs",
         }))
         bridge(_item_completed({
             "type": "webSearch",
             "id": "ws-1",
-            "query": "hermes agent docs",
+            "query": "hades agent docs",
         }))
         calls = agent.tool_progress_callback.call_args_list
         assert [c.args[0] for c in calls] == ["tool.started", "tool.completed"]
         assert calls[0].args[1] == "web_search"
-        assert calls[0].args[2] == "hermes agent docs"
-        assert calls[0].args[3] == {"query": "hermes agent docs"}
+        assert calls[0].args[2] == "hades agent docs"
+        assert calls[0].args[3] == {"query": "hades agent docs"}
 
     def test_duration_falls_back_to_wall_time_when_codex_missing_ms(self):
         agent = _make_stub_agent()

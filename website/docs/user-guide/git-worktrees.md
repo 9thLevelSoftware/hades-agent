@@ -7,21 +7,21 @@ description: "Run multiple Hermes agents safely on the same repository using git
 
 # Git Worktrees
 
-Hermes Agent is often used on large, long‑lived repositories. When you want to:
+Hades Agent is often used on large, long‑lived repositories. When you want to:
 
 - Run **multiple agents in parallel** on the same project, or
 - Keep experimental refactors isolated from your main branch,
 
 Git **worktrees** are the safest way to give each agent its own checkout without duplicating the entire repository.
 
-This page shows how to combine worktrees with Hermes so each session has a clean, isolated working directory.
+This page shows how to combine worktrees with Hades so each session has a clean, isolated working directory.
 
-## Why Use Worktrees with Hermes?
+## Why Use Worktrees with Hades?
 
 Hermes treats the **current working directory** as the project root:
 
 - CLI: the directory where you run `hermes` or `hermes chat`
-- Messaging gateways: the directory set by `terminal.cwd` in `~/.hermes/config.yaml`
+- Messaging gateways: the directory set by `terminal.cwd` in `~/.hades/config.yaml`
 
 If you run multiple agents in the **same checkout**, their changes can interfere with each other:
 
@@ -122,7 +122,7 @@ Notes:
 
 - `git worktree remove` will refuse to remove a worktree with uncommitted changes unless you force it.
 - Removing a worktree does **not** automatically delete the branch; you can delete or keep the branch using normal `git branch` commands.
-- Hermes checkpoint data under `~/.hermes/checkpoints/` is not automatically pruned when you remove a worktree, but it is usually very small.
+- Hermes checkpoint data under `~/.hades/checkpoints/` is not automatically pruned when you remove a worktree, but it is usually very small.
 
 ## Best Practices
 

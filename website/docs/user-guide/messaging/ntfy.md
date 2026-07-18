@@ -2,7 +2,7 @@
 
 [ntfy](https://ntfy.sh/) is a simple HTTP-based pub-sub notification service. It works with the free public server at `ntfy.sh` or any self-hosted instance, and supports any client that can make HTTP requests — phones, browsers, scripts, watches.
 
-ntfy makes a great lightweight push channel for Hermes: subscribe to a topic from the [ntfy mobile app](https://ntfy.sh/docs/subscribe/phone/), send messages to the topic to talk to the agent, get the response back on your phone.
+ntfy makes a great lightweight push channel for Hades: subscribe to a topic from the [ntfy mobile app](https://ntfy.sh/docs/subscribe/phone/), send messages to the topic to talk to the agent, get the response back on your phone.
 
 > Run `hermes gateway setup` and pick **ntfy** for a guided walk-through.
 
@@ -26,7 +26,7 @@ Select **ntfy** and follow the prompts.
 
 ### Via environment variables
 
-Add these to `~/.hermes/.env`:
+Add these to `~/.hades/.env`:
 
 ```
 NTFY_TOPIC=hermes-myname-2026
@@ -66,8 +66,8 @@ In all cases, do not put sensitive data through ntfy unless the underlying topic
 2. On your phone: install the [ntfy app](https://ntfy.sh/docs/subscribe/phone/), tap **+**, enter `hermes-myname-2026`
 3. On the host:
    ```bash
-   echo 'NTFY_TOPIC=hermes-myname-2026' >> ~/.hermes/.env
-   echo 'NTFY_ALLOWED_USERS=hermes-myname-2026' >> ~/.hermes/.env
+   echo 'NTFY_TOPIC=hermes-myname-2026' >> ~/.hades/.env
+   echo 'NTFY_ALLOWED_USERS=hermes-myname-2026' >> ~/.hades/.env
    hermes gateway restart
    ```
 4. From the ntfy app, send a message to the topic. The agent's reply lands as a push notification.

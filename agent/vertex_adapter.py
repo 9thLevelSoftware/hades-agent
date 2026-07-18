@@ -1,4 +1,4 @@
-"""Vertex AI (Google Cloud) adapter for Hermes Agent.
+"""Vertex AI (Google Cloud) adapter for Hades Agent.
 
 Provides authentication and configuration for Vertex AI's OpenAI-compatible
 endpoint. This allows Hermes to use Gemini models via Google Cloud with
@@ -55,7 +55,7 @@ def _vertex_config() -> dict:
     directly at the call sites below, with config.yaml as the fallback.
     """
     try:
-        from hermes_cli.config import load_config
+        from hades_cli.config import load_config
 
         section = load_config().get("vertex")
         return section if isinstance(section, dict) else {}

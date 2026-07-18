@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import textwrap
 
-from hermes_cli.timeouts import (
+from hades_cli.timeouts import (
     get_provider_request_timeout,
     get_provider_stale_timeout,
 )
@@ -13,7 +13,7 @@ def _write_config(tmp_path, body: str) -> None:
 
 
 def test_model_timeout_override_wins(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     _write_config(
         tmp_path,
         """\
@@ -30,7 +30,7 @@ def test_model_timeout_override_wins(monkeypatch, tmp_path):
 
 
 def test_provider_timeout_used_when_no_model_override(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     _write_config(
         tmp_path,
         """\
@@ -44,7 +44,7 @@ def test_provider_timeout_used_when_no_model_override(monkeypatch, tmp_path):
 
 
 def test_model_stale_timeout_override_wins(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     _write_config(
         tmp_path,
         """\
@@ -61,7 +61,7 @@ def test_model_stale_timeout_override_wins(monkeypatch, tmp_path):
 
 
 def test_provider_stale_timeout_used_when_no_model_override(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     _write_config(
         tmp_path,
         """\
@@ -75,7 +75,7 @@ def test_provider_stale_timeout_used_when_no_model_override(monkeypatch, tmp_pat
 
 
 def test_missing_timeout_returns_none(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     _write_config(
         tmp_path,
         """\
@@ -92,7 +92,7 @@ def test_missing_timeout_returns_none(monkeypatch, tmp_path):
 
 
 def test_invalid_timeout_values_return_none(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     _write_config(
         tmp_path,
         """\
@@ -113,7 +113,7 @@ def test_invalid_timeout_values_return_none(monkeypatch, tmp_path):
 
 
 def test_invalid_stale_timeout_values_return_none(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     _write_config(
         tmp_path,
         """\
@@ -151,8 +151,8 @@ def test_anthropic_adapter_honors_timeout_kwarg():
 
 def test_resolved_api_call_timeout_priority(monkeypatch, tmp_path):
     """AIAgent._resolved_api_call_timeout() honors config > env > default priority."""
-    # Isolate HERMES_HOME
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    # Isolate HADES_HOME
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")
 
     # Case A: config wins over env var
@@ -188,9 +188,9 @@ def test_resolved_api_call_timeout_priority(monkeypatch, tmp_path):
     _write_config(tmp_path, "")
     # Clear the cached config load
     import importlib
-    from hermes_cli import config as cfg_mod
+    from hades_cli import config as cfg_mod
     importlib.reload(cfg_mod)
-    from hermes_cli import timeouts as to_mod
+    from hades_cli import timeouts as to_mod
     importlib.reload(to_mod)
     import run_agent as ra_mod
     importlib.reload(ra_mod)
@@ -214,7 +214,7 @@ def test_resolved_api_call_timeout_priority(monkeypatch, tmp_path):
 
 def test_resolved_api_call_stale_timeout_priority(monkeypatch, tmp_path):
     """AIAgent stale timeout honors config > env > default priority."""
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")
 
     _write_config(tmp_path, """\
@@ -245,9 +245,9 @@ def test_resolved_api_call_stale_timeout_priority(monkeypatch, tmp_path):
 
     _write_config(tmp_path, "")
     import importlib
-    from hermes_cli import config as cfg_mod
+    from hades_cli import config as cfg_mod
     importlib.reload(cfg_mod)
-    from hermes_cli import timeouts as to_mod
+    from hades_cli import timeouts as to_mod
     importlib.reload(to_mod)
     import run_agent as ra_mod
     importlib.reload(ra_mod)
@@ -269,7 +269,7 @@ def test_resolved_api_call_stale_timeout_priority(monkeypatch, tmp_path):
 
 
 def test_default_non_stream_stale_timeout_auto_disables_for_local_endpoints(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")
     monkeypatch.delenv("HERMES_API_CALL_STALE_TIMEOUT", raising=False)
 
@@ -289,7 +289,7 @@ def test_default_non_stream_stale_timeout_auto_disables_for_local_endpoints(monk
 
 
 def test_explicit_non_stream_stale_timeout_is_honored_for_local_endpoints(monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")
     monkeypatch.setenv("HERMES_API_CALL_STALE_TIMEOUT", "300")
 

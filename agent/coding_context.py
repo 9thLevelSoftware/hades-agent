@@ -61,7 +61,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+from hades_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
 
 logger = logging.getLogger("hermes.coding_context")
 
@@ -214,7 +214,7 @@ def _edit_format_line(model: Optional[str]) -> str:
 
 # Operating brief for the coding posture. Tool names referenced here (read_file,
 # search_files, patch, write_file, terminal, todo) are in the coding toolset and
-# in _HERMES_CORE_TOOLS, so they're present on every surface this fires on.
+# in _HADES_CORE_TOOLS, so they're present on every surface this fires on.
 CODING_AGENT_GUIDANCE = (
     "You are a coding agent pairing with the user inside their codebase. "
     "Operate like a careful senior engineer.\n"
@@ -338,7 +338,7 @@ def _coding_mode(config: Optional[dict[str, Any]]) -> str:
     """Return the normalized ``agent.coding_context`` mode (auto/focus/on/off)."""
     if config is None:
         try:
-            from hermes_cli.config import load_config
+            from hades_cli.config import load_config
 
             config = load_config()
         except Exception:
@@ -366,7 +366,7 @@ def _coding_instructions(config: Optional[dict[str, Any]]) -> str:
     """
     if config is None:
         try:
-            from hermes_cli.config import load_config
+            from hades_cli.config import load_config
 
             config = load_config()
         except Exception:
@@ -671,8 +671,8 @@ def _enabled_mcp_servers(config: Optional[dict[str, Any]]) -> list[str]:
     of the coding workflow, not noise to strip.
     """
     try:
-        from hermes_cli.config import read_raw_config
-        from hermes_cli.tools_config import _parse_enabled_flag
+        from hades_cli.config import read_raw_config
+        from hades_cli.tools_config import _parse_enabled_flag
 
         servers = read_raw_config().get("mcp_servers") or {}
         return [

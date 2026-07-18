@@ -75,11 +75,11 @@ class _TinyImageHandler(http.server.BaseHTTPRequestHandler):
 
 @pytest.fixture
 def http_server(tmp_path, monkeypatch):
-    """Spin up a localhost HTTP server and isolate HERMES_HOME under tmp_path."""
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
-    (tmp_path / ".hermes").mkdir()
+    """Spin up a localhost HTTP server and isolate HADES_HOME under tmp_path."""
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    (tmp_path / ".hades").mkdir()
 
-    # Force the constants/image cache helpers to re-read HERMES_HOME.
+    # Force the constants/image cache helpers to re-read HADES_HOME.
     import sys
     for mod in list(sys.modules):
         if mod.startswith("hermes_constants") or mod.startswith("agent.image_gen_provider"):
@@ -102,7 +102,7 @@ class TestSaveUrlImage:
 
         assert path.exists()
         assert path.read_bytes() == PNG_1PX
-        # The cache directory must be under HERMES_HOME — gateway cleanup
+        # The cache directory must be under HADES_HOME — gateway cleanup
         # relies on this being the canonical location.
         assert "cache/images" in str(path)
         assert path.suffix == ".png"

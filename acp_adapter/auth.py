@@ -18,7 +18,7 @@ def detect_provider() -> Optional[str]:
     handshake rejects the legitimate provider.
     """
     try:
-        from hermes_cli.runtime_provider import resolve_runtime_provider
+        from hades_cli.runtime_provider import resolve_runtime_provider
         runtime = resolve_runtime_provider()
         api_key = runtime.get("api_key")
         provider = runtime.get("provider")
@@ -39,7 +39,7 @@ def has_provider() -> bool:
 
 
 def build_auth_methods() -> list[Any]:
-    """Return registry-compatible ACP auth methods for Hermes.
+    """Return registry-compatible ACP auth methods for Hades.
 
     The official ACP registry validates that agents advertise at least one
     usable auth method during the initial handshake. A fresh Zed install may
@@ -69,7 +69,7 @@ def build_auth_methods() -> list[Any]:
             id=TERMINAL_SETUP_AUTH_METHOD_ID,
             name="Configure Hermes provider",
             description=(
-                "Open Hermes' interactive model/provider setup in a terminal. "
+                "Open Hades' interactive model/provider setup in a terminal. "
                 "Use this when Hermes has not been configured on this machine yet."
             ),
             type="terminal",

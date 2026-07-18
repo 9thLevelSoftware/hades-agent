@@ -1,4 +1,4 @@
-# Hermes Agent Breakthrough Opportunity Portfolio
+# Hades Agent Breakthrough Opportunity Portfolio
 
 **Date:** 2026-07-15
 
@@ -19,7 +19,7 @@ Pursue a portfolio of twenty user-facing capability bets that can move Hermes fr
 1. a concrete user outcome;
 2. a credible enabling technology, standard, product API, or research result;
 3. verified Hermes substrate and a specific missing contract;
-4. a delivery shape compatible with Hermes's narrow-core architecture; and
+4. a delivery shape compatible with Hades's narrow-core architecture; and
 5. a bounded 90-day proof that can falsify the idea before a large build.
 
 The approved portfolio is:
@@ -123,7 +123,7 @@ The portfolio excludes:
 | Tool plane | Dynamic discovery/registration, stable core toolset, operation metadata, approval hooks, programmatic code-mode access | `tools/registry.py:89`, `tools/registry.py:250-345`, `model_tools.py:1026`, `toolsets.py:31` |
 | Execution | Local, Docker, SSH, Modal, Daytona, Singularity, browser, computer-use, and code-execution environments | `tools/environments/base.py:390`, `tools/code_execution_tool.py:1266`, `tools/computer_use/tool.py:238-899` |
 | Providers and routing | 32 model-provider plugin directories, fallback chains, credential pools, auxiliary routing, model capabilities, and pricing | `agent/agent_init.py:1174-1196`, `agent/auxiliary_client.py:3981-4120`, `agent/models_dev.py:397-504` |
-| Durable state | SQLite sessions with FTS, goals, turn outcomes, operation journal, checkpoints, delivery state, and session leases | `hermes_state.py:813`, `hermes_state.py:1023`, `agent/operation_journal.py:87-281`, `tools/checkpoint_manager.py:610-809` |
+| Durable state | SQLite sessions with FTS, goals, turn outcomes, operation journal, checkpoints, delivery state, and session leases | `hades_state.py:813`, `hades_state.py:1023`, `agent/operation_journal.py:87-281`, `tools/checkpoint_manager.py:610-809` |
 | Memory and context | Memory-provider ABC, manager, multiple external providers, provenance-bearing writes, context-engine ABC, compression | `agent/memory_provider.py:43-315`, `agent/memory_manager.py:353`, `agent/context_engine.py:32-231`, `agent/context_compressor.py:2987-3386` |
 | Automation | Cron, goals, deployable workflows, persisted executions/node runs/events/schedules/feeds/dedupe, webhooks, Kanban workers, nested delegates, and MoA | `cron/scheduler.py`, `hermes_cli/goals.py:313-425`, `hermes_cli/workflows_db.py:107-209`, `hermes_cli/workflows_db.py:1289-1473`, `tools/delegate_tool.py:337-506` |
 | Channels and surfaces | CLI, Ink TUI, Electron desktop, dashboard, API server, and 20 platform-plugin directories | `cli.py`, `tui_gateway/server.py`, `apps/desktop/`, `web/`, `gateway/platforms/api_server.py:1860-2171` |
@@ -138,7 +138,7 @@ The user's belief that the first three prior proposals were implemented is close
 | Earlier proposal | Audited status | Evidence | Treatment in this portfolio |
 |---|---|---|---|
 | 1. Code-Mode Tool Orchestration | Implemented | merged by `ea068b89a`; persistent kernels, programmatic full-registry access, and artifacts exist in `tools/code_execution_tool.py` | Baseline substrate, not a new slot |
-| 2. Turn-Outcome Ledger | Implemented | merged by `575b6b629`; schema starts at `hermes_state.py:813`, with turn ledger and reflection integration | Baseline for #9 and #12 |
+| 2. Turn-Outcome Ledger | Implemented | merged by `575b6b629`; schema starts at `hades_state.py:813`, with turn ledger and reflection integration | Baseline for #9 and #12 |
 | 3. Durable Agent Execution | Partially implemented | merged by `dea930324`; operation journaling and unknown-effect recovery exist, but full-turn/fleet resume and general exactly-once effects do not | Expanded into #1 and #2 |
 | 4. Declarative Permission Policy | Planned over partial approval substrate | approvals and operation metadata exist; no unified declarative preference/authority/flow system | Consolidated into #6 and #15 |
 | 5. Event-Driven Automations | Planned over substantial automation substrate | gateway events, cron, webhook, goals, and workflows exist; no canonical event/attention contract | Consolidated into #1 and #7 |
@@ -191,7 +191,7 @@ Every proposal must preserve the repository's load-bearing design rules:
 2. Message-role alternation remains valid; no synthetic user message is inserted mid-loop.
 3. Most capability ships at the edge. New model-visible core tools are a last resort.
 4. Non-secret configuration lives in `config.yaml`; credentials alone use secret stores or `.env`.
-5. Every state, security, resolution, and remote-I/O change receives real-path E2E coverage against a temporary `HERMES_HOME`.
+5. Every state, security, resolution, and remote-I/O change receives real-path E2E coverage against a temporary `HADES_HOME`.
 6. Point-in-time results are never mislabeled as exactly-once, reversible, private, or verified when an external dependency cannot provide that guarantee.
 7. Learned behavior never grades and promotes itself without an independent signal.
 8. Proactivity, telemetry, sensing, federation, and commerce remain explicit opt-ins.
@@ -282,11 +282,11 @@ Each section distinguishes current Hermes substrate from the missing product. Th
 
 **Why now.** [Graphiti/Zep](https://arxiv.org/abs/2501.13956) and [A-MEM](https://arxiv.org/abs/2502.12110) show temporal and dynamically linked approaches to agent memory, while 2026 work on [user-governed cross-platform personalization](https://arxiv.org/abs/2605.09794) argues that only the user can combine fragmented personal context across services. The strongest governance result is the [deployment-time memory deletion](https://arxiv.org/abs/2606.10062) study: deleting raw records alone left substantial derived residue, while lineage-aware purge/tombstone methods removed the tested canaries. All remain early evidence, so the product must treat extracted claims as revisable, not truth.
 
-**Hermes position.** Hermes has memory-provider and manager abstractions (`agent/memory_provider.py:43-315`, `agent/memory_manager.py:903-1034`), committed-memory gating and provenance metadata, FTS session/tool histories (`hermes_state.py:4338-4519`), turn outcomes (`agent/turn_ledger.py:28-118`), and web results with URL/title metadata. It lacks a temporal entity/fact/claim graph, claim-to-source evidence edges, validity intervals, confidence/freshness, contradiction workflows, multimodal indexing, and a complete inspect/edit/delete interface.
+**Hermes position.** Hermes has memory-provider and manager abstractions (`agent/memory_provider.py:43-315`, `agent/memory_manager.py:903-1034`), committed-memory gating and provenance metadata, FTS session/tool histories (`hades_state.py:4338-4519`), turn outcomes (`agent/turn_ledger.py:28-118`), and web results with URL/title metadata. It lacks a temporal entity/fact/claim graph, claim-to-source evidence edges, validity intervals, confidence/freshness, contradiction workflows, multimodal indexing, and a complete inspect/edit/delete interface.
 
 **Design.** Store immutable evidence records separately from derived claims. Claims carry source edges, extraction method, time interval, confidence, visibility/consent scope, and supersession or contradiction links. Derived summaries, embeddings, graph edges, exports, and caches record their lineage so correction or deletion can cascade. User edits remain explicit higher-authority assertions rather than silently rewriting source history. CLI commands and an Ink TUI inspector are the primary timeline/query/edit/delete surface; the Dashboard may later add richer graph visualization. Both show why Hermes believes something, what disagrees, when it was last checked, and every downstream copy affected by deletion.
 
-**90-day proof.** Ingest two authorized cross-platform exports plus Hermes session memory, seed temporal changes, contradictions, and deletion canaries, then expose a timeline/editor. Freeze at least 100 ground-truthed temporal questions/claims with validity intervals and expected evidence before evaluation. Pass with at least a 10-percentage-point improvement in evidence-backed answer accuracy over current retrieval, at least 90% evidence precision and 80% evidence recall, no increase in stale-conflict answers, explicit origin for every displayed claim, and zero recovered canaries after erasure across raw memory, summaries, embeddings, graph indexes, caches, and exports controlled by Hermes.
+**90-day proof.** Ingest two authorized cross-platform exports plus Hermes session memory, seed temporal changes, contradictions, and deletion canaries, then expose a timeline/editor. Freeze at least 100 ground-truthed temporal questions/claims with validity intervals and expected evidence before evaluation. Pass with at least a 10-percentage-point improvement in evidence-backed answer accuracy over current retrieval, at least 90% evidence precision and 80% evidence recall, no increase in stale-conflict answers, explicit origin for every displayed claim, and zero recovered canaries after erasure across raw memory, summaries, embeddings, graph indexes, caches, and exports controlled by Hades.
 
 **Dependencies and failure conditions.** The graph engine should be a memory-provider plugin with only generic ABC widening in core. The system must distinguish “source says,” “Hermes inferred,” and “user confirmed”; provenance does not make an extracted claim correct.
 
@@ -344,7 +344,7 @@ Each section distinguishes current Hermes substrate from the missing product. Th
 
 **Layman outcome:** Before touching reality, Hermes can compare several approaches inside a bounded simulation and show likely changes, irreversible boundaries, and missing assumptions.
 
-**Why now.** Shadow execution in [Cordon](https://arxiv.org/abs/2606.17573) and dependency-aware revision in [Revisable by Design](https://arxiv.org/abs/2604.23283) make a bounded preview technically credible. The [Computer-Using World Model](https://arxiv.org/abs/2602.17365) shows one-step action search over predicted Microsoft Office interface states; it does not demonstrate generic multi-step simulation across browsers, filesystems, services, and workflows. Extending counterfactual search across Hermes's declared effect adapters is therefore a testable hypothesis, not an established result. Nothing here justifies a general “digital twin” of people or the world.
+**Why now.** Shadow execution in [Cordon](https://arxiv.org/abs/2606.17573) and dependency-aware revision in [Revisable by Design](https://arxiv.org/abs/2604.23283) make a bounded preview technically credible. The [Computer-Using World Model](https://arxiv.org/abs/2602.17365) shows one-step action search over predicted Microsoft Office interface states; it does not demonstrate generic multi-step simulation across browsers, filesystems, services, and workflows. Extending counterfactual search across Hades's declared effect adapters is therefore a testable hypothesis, not an established result. Nothing here justifies a general “digital twin” of people or the world.
 
 **Hermes position.** Hermes has isolated environments and network controls (`tools/environments/base.py:390-1048`, `tools/environments/docker.py:568-929`), deterministic reliability fakes, workflow validation/result contracts, and checkpoint diff/restore (`tools/checkpoint_manager.py:759-809`). It lacks a general effect-model interface, simulated external state, counterfactual scorer, and predicted-versus-observed comparison.
 
@@ -426,7 +426,7 @@ Each section distinguishes current Hermes substrate from the missing product. Th
 
 **Why now.** Apple's production [Private Cloud Compute architecture](https://security.apple.com/blog/private-cloud-compute/) and its [2026 expansion](https://security.apple.com/blog/expanding-pcc/) demonstrate remote attestation and verifiable stateless compute for sensitive inference. The 2026 [OpenJarvis](https://arxiv.org/abs/2605.17172) work argues for and benchmarks a composable local-first personal-AI stack. [Automerge](https://automerge.org/) demonstrates implemented offline-first convergent state, while a recent [cross-device control disclosure](https://www.tdcommons.org/dpubs_series/10076/) describes dispatch to a device holding credentials/files but supplies no empirical evaluation. No source demonstrates the combined pairing, encrypted selective replication, residency, attestation, revocation, and task-migration system; the composition is the hypothesis.
 
-**Hermes position.** Hermes already proxies remote gateway work, exposes session APIs, manages session leases, shares a WebSocket JSON-RPC client, and supports local models (`gateway/run.py:17172-17476`, `gateway/platforms/api_server.py:1860-2171`, `hermes_state.py:2899-3027`, `apps/shared/src/json-rpc-gateway.ts:69-240`). It lacks device identity/pairing, end-to-end encrypted selective replication, conflict handling, offline task migration, workload placement, enforceable residency labels, and attestation verification.
+**Hermes position.** Hermes already proxies remote gateway work, exposes session APIs, manages session leases, shares a WebSocket JSON-RPC client, and supports local models (`gateway/run.py:17172-17476`, `gateway/platforms/api_server.py:1860-2171`, `hades_state.py:2899-3027`, `apps/shared/src/json-rpc-gateway.ts:69-240`). It lacks device identity/pairing, end-to-end encrypted selective replication, conflict handling, offline task migration, workload placement, enforceable residency labels, and attestation verification.
 
 **Design.** Each paired `DeviceNode` has a cryptographic identity, user-approved capabilities, data-residency labels, availability/cost telemetry, and optional attestation evidence. Missions move as scoped task/evidence envelopes; sensitive raw context stays on its owning node whenever possible. The router sends computation to data rather than copying data to computation. Replicated state is minimal, encrypted, lineage-aware, and conflict-safe; key recovery and device revocation are first-class user flows. Attestation remains an optional provider capability, not a core vendor dependency.
 
@@ -515,7 +515,7 @@ Each section distinguishes current Hermes substrate from the missing product. Th
 
 **Hermes position.** Hermes has a ContextEngine lifecycle, model-aware token updates, preflight compression, a cached system prompt, conversation compression, and session rotation (`agent/context_engine.py:32-231`, `run_agent.py:635`, `run_agent.py:716-783`, `agent/context_compressor.py:2987-3386`). The registry can also apply dynamic schema overrides (`tools/registry.py:133-140`, `tools/registry.py:263-272`), which makes freezing the effective schema essential. Hermes lacks a declarative segment graph describing stability class, cache key, token budget, provenance, dependencies, incremental recomputation, and provider cache telemetry.
 
-**Design.** Compile context into four logical lanes: an immutable cached prefix (system and pinned effective tool-definition snapshot), versioned user/memory snapshots, hot mission state/evidence, and ephemeral tool payloads. Every segment has identity, provenance, token cost, stability, freshness, and recomputation rules. Provider-native compaction/editing is an adapter optimization invoked only at Hermes's existing compression boundary. Tool search/programmatic calling may reduce hot payloads, but dynamic registry overrides may not alter the effective model tool schema during a conversation. System prompt, effective tool schema, provider, and model are fingerprinted independently as the conversation's cache identity.
+**Design.** Compile context into four logical lanes: an immutable cached prefix (system and pinned effective tool-definition snapshot), versioned user/memory snapshots, hot mission state/evidence, and ephemeral tool payloads. Every segment has identity, provenance, token cost, stability, freshness, and recomputation rules. Provider-native compaction/editing is an adapter optimization invoked only at Hades's existing compression boundary. Tool search/programmatic calling may reduce hot payloads, but dynamic registry overrides may not alter the effective model tool schema during a conversation. System prompt, effective tool schema, provider, and model are fingerprinted independently as the conversation's cache identity.
 
 **90-day proof.** Replay 100 long sessions and missions against current behavior, measuring behavioral evaluation, total/cached input tokens, latency, compression frequency, and independent hashes for system prompt, effective tool schema, provider, and model. Pass with equivalent or better outcome scores, target 30% lower uncached input cost, improved cache-hit rate, no identity change outside an explicit new conversation/transition, and invariant-safe role alternation.
 
@@ -712,7 +712,7 @@ Every proof and later implementation must satisfy the following where applicable
 | Information-flow system destroys usability | #15 | Benign blocking remains unacceptable after rule/label refinement; keep to high-confidence sinks. |
 | Realtime sensing costs more trust than it adds | #16 | False engagement, latency, retention confusion, or user preference favors push-to-talk. |
 | Sandbox/runtime ecosystem is immature | #17 | Required extensions cannot run without broad undeclared authority; retain scanning/quarantine and defer runtime migration. |
-| Cache optimization breaks correctness | #18 | Behavioral scores decline, prefix hashes drift, or provider-native state cannot be reconciled with Hermes history. |
+| Cache optimization breaks correctness | #18 | Behavioral scores decline, prefix hashes drift, or provider-native state cannot be reconciled with Hades history. |
 | Federation has no repeated user demand | #19 | Fewer than three recurring workflows justify ongoing trust and maintenance burden. |
 | Commerce protocols remain fragmented/unsafe | #20 | Replay, cart mutation, refunds, disputes, or legal ownership cannot be reconciled; stay sandbox-only. |
 

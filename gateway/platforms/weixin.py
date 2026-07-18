@@ -1,7 +1,7 @@
 """
 Weixin platform adapter.
 
-Connects Hermes Agent to WeChat personal accounts via Tencent's iLink Bot API.
+Connects Hades Agent to WeChat personal accounts via Tencent's iLink Bot API.
 
 Design notes:
 - Long-poll ``getupdates`` drives inbound delivery.
@@ -66,7 +66,7 @@ from gateway.platforms.base import (
     cache_document_from_bytes,
     cache_image_from_bytes,
 )
-from hermes_constants import get_hermes_home
+from hades_constants import get_hades_home
 from utils import atomic_json_write
 from agent.secret_scope import get_secret
 
@@ -1151,7 +1151,7 @@ class WeixinAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.WEIXIN)
         extra = config.extra or {}
-        hermes_home = str(get_hermes_home())
+        hermes_home = str(get_hades_home())
         self._hermes_home = hermes_home
         self._token_store = ContextTokenStore(hermes_home)
         self._typing_cache = TypingTicketCache()
@@ -1304,7 +1304,7 @@ class WeixinAdapter(BasePlatformAdapter):
                 "WeChat groups. iLink usually does not deliver ordinary-group events for "
                 "these accounts, so group messages may never reach Hermes regardless of this "
                 "policy. If group delivery doesn't work, the limitation is on the iLink side, "
-                "not in Hermes.",
+                "not in Hades.",
                 self.name,
                 self._group_policy,
             )
@@ -2302,7 +2302,7 @@ async def send_weixin_direct(
     if not account_id:
         return {"error": "Weixin account ID missing. Configure WEIXIN_ACCOUNT_ID or platforms.weixin.extra.account_id."}
 
-    token_store = ContextTokenStore(str(get_hermes_home()))
+    token_store = ContextTokenStore(str(get_hades_home()))
     token_store.restore(account_id)
     context_token = token_store.get(account_id, chat_id)
 

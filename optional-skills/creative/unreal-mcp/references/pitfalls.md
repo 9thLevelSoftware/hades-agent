@@ -19,7 +19,7 @@ Tools don't hot-appear mid-session.
 The Unreal MCP plugin ships the SERVER, not the tools. If `list_toolsets`
 returns nothing/near-nothing, the toolset provider plugin (AllToolsets) or
 Toolset Registry isn't enabled in this project. Fix in Edit > Plugins,
-restart the editor, restart the Hermes session.
+restart the editor, restart the Hades session.
 
 ### 3. macOS: full Xcode is required, not just Command Line Tools
 
@@ -37,9 +37,9 @@ compiling shaders.
 ### 4. Port 8000 conflicts
 
 Common collisions: local dev servers, Jupyter, other MCP hosts. Symptom: the
-server fails to bind (Output Log) or Hermes' probe times out. Fix: change
+server fails to bind (Output Log) or Hades' probe times out. Fix: change
 Server Port Number in Editor Preferences > Model Context Protocol AND the
-`url` in `~/.hermes/config.yaml` (`mcp_servers.unreal-engine`), then restart
+`url` in `~/.hades/config.yaml` (`mcp_servers.unreal-engine`), then restart
 both sides. Verify: `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/mcp`
 (non-000 means something is listening; whether it's Unreal is a different
 question — check the Output Log).
@@ -51,13 +51,13 @@ The editor was closed, crashed, or the server was stopped
 the user, have them relaunch/restart the server, then reconnect (new session
 if tools were lost).
 
-### 5. GenerateClientConfig is not for Hermes
+### 5. GenerateClientConfig is not for Hades
 
 `ModelContextProtocol.GenerateClientConfig` writes config files for Claude
-Code/Cursor/VSCode/Gemini/Codex into the project root. Hermes' connection
-lives in `~/.hermes/config.yaml` via `hermes mcp install unreal-engine`.
+Code/Cursor/VSCode/Gemini/Codex into the project root. Hades' connection
+lives in `~/.hades/config.yaml` via `hermes mcp install unreal-engine`.
 Running GenerateClientConfig neither helps nor harms Hermes — just don't
-mistake it for the Hermes setup step.
+mistake it for the Hades setup step.
 
 ## Calling Discipline
 
@@ -87,7 +87,7 @@ prompts don't appear at bad times.
 
 ### 9. Timeouts: Hermes gives up before Unreal does
 
-Hermes' default per-call timeout is 120 s. Asset imports, first-shader
+Hades' default per-call timeout is 120 s. Asset imports, first-shader
 compiles, big saves, and renders can exceed it — the call "fails" while the
 editor happily finishes the work. Symptoms: timeout error, then the next
 scene query shows the operation actually completed. Fixes: raise

@@ -24,9 +24,9 @@ paths — which we persist as ``PHOTON_PROJECT_ID`` for the runtime.
 
 Credential storage mirrors every other Hermes channel:
 
-    * runtime SDK creds  -> ``~/.hermes/.env``  (``PHOTON_PROJECT_ID`` =
+    * runtime SDK creds  -> ``~/.hades/.env``  (``PHOTON_PROJECT_ID`` =
       project id, ``PHOTON_PROJECT_SECRET``) via ``save_env_value``
-    * management metadata -> ``~/.hermes/auth.json`` under
+    * management metadata -> ``~/.hades/auth.json`` under
       ``credential_pool.photon`` (device token),
       ``credential_pool.photon_project`` (dashboard id, spectrum id, name), and
       ``credential_pool.photon_user`` (operator number + assigned text line)
@@ -72,7 +72,7 @@ DEFAULT_DASHBOARD_HOST = "https://app.photon.codes"
 DEFAULT_SPECTRUM_HOST = "https://spectrum.photon.codes"
 
 # Default name of the project Hermes provisions for the operator.
-DEFAULT_PROJECT_NAME = "Hermes Agent"
+DEFAULT_PROJECT_NAME = "Hades Agent"
 
 # Polling defaults per RFC 8628.  Photon overrides via `interval` /
 # `expires_in` in the device-code response — those win.
@@ -86,12 +86,12 @@ E164_RE = re.compile(r"^\+[1-9]\d{6,14}$")
 # auth.json helpers — share the file with the rest of hermes-agent.
 
 def _auth_json_path() -> Path:
-    """Resolve ``~/.hermes/auth.json`` honouring the active Hermes profile."""
+    """Resolve ``~/.hades/auth.json`` honouring the active Hermes profile."""
     try:
-        from hermes_constants import get_hermes_home
-        return Path(get_hermes_home()) / "auth.json"
+        from hades_constants import get_hades_home
+        return Path(get_hades_home()) / "auth.json"
     except Exception:
-        return Path(os.path.expanduser("~/.hermes")) / "auth.json"
+        return Path(os.path.expanduser("~/.hades")) / "auth.json"
 
 
 def _load_auth() -> Dict[str, Any]:
@@ -146,7 +146,7 @@ def store_photon_token(token: str) -> None:
 def load_project_credentials() -> Tuple[Optional[str], Optional[str]]:
     """Return the runtime SDK creds ``(spectrum_project_id, project_secret)``.
 
-    Precedence: process env (``~/.hermes/.env`` is loaded into the gateway's
+    Precedence: process env (``~/.hades/.env`` is loaded into the gateway's
     environment at startup) wins, then ``auth.json`` for offline / status
     use.  This is the pair the Node sidecar feeds to ``spectrum-ts``; the id
     is the unified project id (dashboard id == spectrumProjectId).
@@ -198,7 +198,7 @@ def store_project_credentials(
 ) -> None:
     """Persist project credentials to both .env (runtime) and auth.json (mgmt).
 
-    The runtime SDK creds land in ``~/.hermes/.env`` via the same
+    The runtime SDK creds land in ``~/.hades/.env`` via the same
     ``save_env_value`` helper every other channel uses, so the gateway picks
     them up from the environment with zero adapter changes.  A copy of the
     non-secret ids (plus the secret, for offline ``status``) is written to
@@ -245,16 +245,16 @@ def store_user_numbers(
 
 
 def _persist_runtime_env(spectrum_project_id: str, project_secret: str) -> None:
-    """Write the SDK creds to ``~/.hermes/.env`` (canonical runtime store).
+    """Write the SDK creds to ``~/.hades/.env`` (canonical runtime store).
 
     Isolated in its own helper so the secret value flows straight into
     ``save_env_value`` without ever being bound to a printable local in a
     caller — same CodeQL-clean-flow rationale as the rest of this module.
     """
     try:
-        from hermes_cli.config import save_env_value
+        from hades_cli.config import save_env_value
     except ImportError:
-        logger.warning("photon: hermes_cli.config unavailable — skipping .env write")
+        logger.warning("photon: hades_cli.config unavailable — skipping .env write")
         return
     try:
         save_env_value("PHOTON_PROJECT_ID", spectrum_project_id)
@@ -916,7 +916,7 @@ def _configured_operator_phone() -> Optional[str]:
 
 def _get_config_env_value(key: str) -> Optional[str]:
     try:
-        from hermes_cli.config import get_env_value
+        from hades_cli.config import get_env_value
     except Exception:
         return os.getenv(key)
     return get_env_value(key)

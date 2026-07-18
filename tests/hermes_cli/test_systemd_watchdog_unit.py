@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from gateway.config import GatewayConfig
-from hermes_cli import gateway as gateway_cli
+from hades_cli import gateway as gateway_cli
 
 
 def test_default_user_unit_keeps_simple_service_without_watchdog(monkeypatch):
@@ -58,7 +58,7 @@ def test_user_unit_reads_watchdog_from_config_yaml(tmp_path, monkeypatch):
         "gateway:\n  systemd_watchdog_seconds: 45\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     unit = gateway_cli.generate_systemd_unit(system=False)
 
@@ -80,7 +80,7 @@ def test_system_unit_reads_watchdog_from_target_home(tmp_path, monkeypatch):
         "gateway:\n  systemd_watchdog_seconds: 75\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("HERMES_HOME", str(caller_home))
+    monkeypatch.setenv("HADES_HOME", str(caller_home))
     monkeypatch.setattr(
         gateway_cli,
         "_system_service_identity",
@@ -111,10 +111,10 @@ def test_managed_watchdog_override_controls_generated_unit(tmp_path, monkeypatch
         "gateway:\n  systemd_watchdog_seconds: 0\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
     monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_home))
 
-    from hermes_cli import managed_scope
+    from hades_cli import managed_scope
 
     managed_scope.invalidate_managed_cache()
     unit = gateway_cli.generate_systemd_unit(system=False)

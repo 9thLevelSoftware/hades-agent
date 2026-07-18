@@ -22,7 +22,7 @@ from agent.operation_journal import OperationJournal
 from gateway.config import GatewayConfig, Platform
 from gateway.delivery import DeliveryRouter, DeliveryTarget
 from gateway.platforms.base import SendResult
-from hermes_state import SessionDB
+from hades_state import SessionDB
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ def _journal_for(tmp_path) -> OperationJournal:
 async def test_confirmed_record_short_circuits_resend(tmp_path, monkeypatch):
     """If the journal already has a confirmed row for this delivery_id +
     payload, do NOT call the adapter again — return the prior receipt."""
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
 
     # Pre-seed a confirmed row (this is what a restart with a previous
@@ -128,7 +128,7 @@ async def test_confirmed_record_short_circuits_resend(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_identity_conflict_raises_value_error(tmp_path, monkeypatch):
     """Same delivery_id but different payload_hash → ValueError, no send."""
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
 
     journal.create(
@@ -166,7 +166,7 @@ async def test_identity_conflict_raises_value_error(tmp_path, monkeypatch):
 async def test_pre_dispatch_failure_records_failed_none(tmp_path, monkeypatch):
     """A sync exception before ``adapter.send()`` records failed/none so the
     retry path can deterministically know it didn't fly."""
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
 
     adapter = RecordingAdapter()
@@ -210,7 +210,7 @@ async def test_cancellation_records_unknown_and_does_not_retry(
     The next attempt must NOT be auto-retried from the router: the journal
     row blocks re-send, and the caller decides what to do.
     """
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
 
     adapter = RecordingAdapter()
@@ -271,7 +271,7 @@ async def test_restart_keeps_unknown_and_blocks_resend(tmp_path, monkeypatch):
     """After a process restart, ``reconcile_after_restart()`` leaves an
     in-flight row as ``unknown/unknown``. The new process must NOT
     auto-retry it — that would risk a duplicate send."""
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
 
     # Simulate the previous process: created + dispatched, then died.
@@ -328,7 +328,7 @@ async def test_silence_filtered_send_records_confirmed_none(tmp_path, monkeypatc
     """A silence-narration filter drop is a deterministic, known outcome
     (the message never flies). Record it as confirmed/none so the caller
     doesn't redeliver."""
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
 
     adapter = RecordingAdapter()
@@ -367,7 +367,7 @@ async def test_happy_path_records_landed_receipt(tmp_path, monkeypatch):
     """A successful send persists a bounded receipt (no full content, no
     credentials) so a recovery can show "this fired and returned msg-42"
     without leaking the body."""
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
 
     adapter = RecordingAdapter(message_id="msg-42")
@@ -417,7 +417,7 @@ async def test_metadata_delivery_id_is_required_when_journal_set(
     """A journal is wired but the caller forgot to provide ``delivery_id``:
     we fail loudly rather than invent an identity (the journal row needs a
     stable id to dedup across restarts)."""
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
 
     adapter = RecordingAdapter()
@@ -444,7 +444,7 @@ async def test_metadata_delivery_id_is_required_when_journal_set(
 async def test_no_journal_falls_back_to_legacy_send(tmp_path, monkeypatch):
     """When the router has no journal, behavior must match the previous
     ship-it-every-time shape: no record is written and no error is raised."""
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
 
     adapter = RecordingAdapter(message_id="msg-legacy")
     router = DeliveryRouter(
@@ -470,7 +470,7 @@ async def test_local_delivery_is_not_journaled(tmp_path, monkeypatch):
     """LOCAL delivery is a file save, not a transport round-trip — no journal
     row should be created even when a journal is wired and a delivery_id is
     passed."""
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
 
     router = DeliveryRouter(
@@ -500,7 +500,7 @@ async def test_local_delivery_is_not_journaled(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_payload_hash_uses_sha256(tmp_path, monkeypatch):
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
 
     adapter = RecordingAdapter()
@@ -526,7 +526,7 @@ async def test_payload_hash_uses_sha256(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_failed_delivery_is_retryable(tmp_path, monkeypatch):
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
     journal.create(
         operation_id="delivery-retry",
@@ -572,7 +572,7 @@ async def test_failed_delivery_is_retryable(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dispatch_transition_failure_still_records_unknown(tmp_path, monkeypatch):
-    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr("gateway.delivery.get_hades_home", lambda: tmp_path)
     journal, db = _journal_for(tmp_path)
     original_transition = journal.transition
 

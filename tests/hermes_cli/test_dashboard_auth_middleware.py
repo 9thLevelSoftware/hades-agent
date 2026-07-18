@@ -18,10 +18,10 @@ import pytest
 
 from fastapi.testclient import TestClient
 
-from hermes_cli import web_server
-from hermes_cli.dashboard_auth import clear_providers, register_provider
-from hermes_cli.dashboard_auth.cookies import SESSION_AT_COOKIE
-from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
+from hades_cli import web_server
+from hades_cli.dashboard_auth import clear_providers, register_provider
+from hades_cli.dashboard_auth.cookies import SESSION_AT_COOKIE
+from tests.hades_cli.conftest_dashboard_auth import StubAuthProvider
 
 
 @pytest.fixture
@@ -258,7 +258,7 @@ def test_gated_require_token_endpoint_still_rejects_no_cookie(gated_app):
 
 
 def test_gated_mounted_workflow_plugin_routes_require_and_accept_dashboard_auth(gated_app, monkeypatch, tmp_path):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
 
     unauthenticated = gated_app.get("/api/plugins/workflows/status")
     assert unauthenticated.status_code == 401, (
@@ -508,12 +508,12 @@ class _UnreachableProvider(StubAuthProvider):
     display_name = "Unreachable IdP (test only)"
 
     def verify_session(self, *, access_token: str):
-        from hermes_cli.dashboard_auth.base import ProviderError
+        from hades_cli.dashboard_auth.base import ProviderError
 
         raise ProviderError("simulated: IDP/JWKS unreachable")
 
     def refresh_session(self, *, refresh_token: str):
-        from hermes_cli.dashboard_auth.base import ProviderError
+        from hades_cli.dashboard_auth.base import ProviderError
 
         raise ProviderError("simulated: IDP/JWKS unreachable")
 

@@ -28,7 +28,7 @@ _WORKTREE = Path(__file__).resolve().parents[2]
 if str(_WORKTREE) not in sys.path:
     sys.path.insert(0, str(_WORKTREE))
 
-from hermes_cli import kanban_db as kb
+from hades_cli import kanban_db as kb
 
 
 # ---------------------------------------------------------------------------
@@ -37,15 +37,15 @@ from hermes_cli import kanban_db as kb
 
 @pytest.fixture
 def fresh_home(tmp_path, monkeypatch):
-    """Isolated HERMES_HOME with no prior kanban state.
+    """Isolated HADES_HOME with no prior kanban state.
 
     The autouse hermetic conftest already nukes credentials + TZ; this
-    fixture layers a per-test HERMES_HOME plus a path-init cache reset
+    fixture layers a per-test HADES_HOME plus a path-init cache reset
     so each test sees a truly empty board set.
     """
     home = tmp_path / "hermes_home"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     for var in (
         "HERMES_KANBAN_DB",
         "HERMES_KANBAN_WORKSPACES_ROOT",
@@ -53,10 +53,10 @@ def fresh_home(tmp_path, monkeypatch):
         "HERMES_KANBAN_BOARD",
     ):
         monkeypatch.delenv(var, raising=False)
-    # Also reset hermes_constants cache so get_default_hermes_root() re-reads.
+    # Also reset hermes_constants cache so get_default_hades_root() re-reads.
     try:
-        import hermes_constants
-        hermes_constants._cached_default_hermes_root = None  # type: ignore[attr-defined]
+        import hades_constants
+        hades_constants._cached_default_hermes_root = None  # type: ignore[attr-defined]
     except Exception:
         pass
     # Kanban module-level init cache must not leak between tests.
@@ -70,7 +70,7 @@ def fresh_home(tmp_path, monkeypatch):
 
 class TestSlugValidation:
     @pytest.mark.parametrize("good", [
-        "default", "atm10-server", "hermes-agent", "proj_1", "a",
+        "default", "atm10-server", "hades-agent", "proj_1", "a",
         "very-long-but-still-ok-slug-with-hyphens-and-numbers-1234",
     ])
     def test_accepts_valid(self, good):
@@ -474,7 +474,7 @@ def _cli(args: list[str], env_extra: dict | None = None) -> subprocess.Completed
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
-        [sys.executable, "-m", "hermes_cli.main", "kanban"] + args,
+        [sys.executable, "-m", "hades_cli.main", "kanban"] + args,
         env=env,
         capture_output=True,
         text=True,
@@ -485,7 +485,7 @@ def _cli(args: list[str], env_extra: dict | None = None) -> subprocess.Completed
 
 class TestCLI:
     def test_boards_list_default_only(self, tmp_path):
-        env = {"HERMES_HOME": str(tmp_path)}
+        env = {"HADES_HOME": str(tmp_path)}
         res = _cli(["boards", "list", "--json"], env_extra=env)
         assert res.returncode == 0, res.stderr
         data = json.loads(res.stdout)
@@ -494,7 +494,7 @@ class TestCLI:
         assert data[0]["is_current"] is True
 
     def test_boards_create_and_switch(self, tmp_path):
-        env = {"HERMES_HOME": str(tmp_path)}
+        env = {"HADES_HOME": str(tmp_path)}
         r1 = _cli(
             ["boards", "create", "myproj", "--name", "My Project", "--switch"],
             env_extra=env,
@@ -509,7 +509,7 @@ class TestCLI:
         assert cur["slug"] == "myproj"
 
     def test_per_board_task_isolation_via_cli(self, tmp_path):
-        env = {"HERMES_HOME": str(tmp_path)}
+        env = {"HADES_HOME": str(tmp_path)}
         assert _cli(["boards", "create", "projA"], env_extra=env).returncode == 0
         assert _cli(["boards", "create", "projB"], env_extra=env).returncode == 0
 
@@ -533,7 +533,7 @@ class TestCLI:
         assert titlesD == []
 
     def test_board_flag_rejects_unknown(self, tmp_path):
-        env = {"HERMES_HOME": str(tmp_path)}
+        env = {"HADES_HOME": str(tmp_path)}
         r = _cli(["--board", "ghost", "list"], env_extra=env)
         # main.py's dispatcher doesn't propagate return codes today, so we
         # assert the user-visible signal: a stderr error message. Whether
@@ -541,14 +541,14 @@ class TestCLI:
         assert "does not exist" in r.stderr
 
     def test_board_flag_rejects_empty_board_dir(self, tmp_path):
-        env = {"HERMES_HOME": str(tmp_path)}
+        env = {"HADES_HOME": str(tmp_path)}
         ghost = tmp_path / "kanban" / "boards" / "ghost"
         ghost.mkdir(parents=True)
         r = _cli(["--board", "ghost", "list"], env_extra=env)
         assert "does not exist" in r.stderr
 
     def test_boards_rm_archives(self, tmp_path):
-        env = {"HERMES_HOME": str(tmp_path)}
+        env = {"HADES_HOME": str(tmp_path)}
         _cli(["boards", "create", "rmme"], env_extra=env)
         r = _cli(["boards", "rm", "rmme"], env_extra=env)
         assert r.returncode == 0, r.stderr

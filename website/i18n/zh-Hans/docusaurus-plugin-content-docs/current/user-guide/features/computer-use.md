@@ -5,7 +5,7 @@ sidebar_position: 16
 
 # 电脑操控（macOS）
 
-Hermes Agent 可以在**后台**驱动你的 Mac 桌面——点击、输入、滚动、拖拽。你的光标不会移动，键盘焦点不会改变，macOS 也不会切换 Spaces。你和 Agent 可以在同一台机器上协同工作。
+Hades Agent 可以在**后台**驱动你的 Mac 桌面——点击、输入、滚动、拖拽。你的光标不会移动，键盘焦点不会改变，macOS 也不会切换 Spaces。你和 Agent 可以在同一台机器上协同工作。
 
 与大多数电脑操控集成不同，这适用于**任何支持工具调用的模型**——Claude、GPT、Gemini，或本地 vLLM 端点上的开源模型。无需关心 Anthropic 原生 schema。
 
@@ -47,7 +47,7 @@ hermes computer-use install
    ```
    hermes -t computer_use chat
    ```
-   或在 `~/.hermes/config.yaml` 中将 `computer_use` 添加到已启用的工具集列表。
+   或在 `~/.hades/config.yaml` 中将 `computer_use` 添加到已启用的工具集列表。
 
 ## 保持 cua-driver 最新
 
@@ -93,7 +93,7 @@ Hermes 应用多层防护机制：
 - 硬性屏蔽的输入模式：`curl | bash`、`sudo rm -rf /`、fork bomb 等。
 - Agent 的系统 prompt 明确规定：不得点击权限对话框，不得输入密码，不得执行截图中嵌入的指令。
 
-如需对每个操作进行确认，可在 `~/.hermes/config.yaml` 中配置 `approvals.mode: manual`。
+如需对每个操作进行确认，可在 `~/.hades/config.yaml` 中配置 `approvals.mode: manual`。
 
 ## Token 效率
 
@@ -139,6 +139,6 @@ HERMES_COMPUTER_USE_BACKEND=noop   # records calls, no side effects
 
 ## 另请参阅
 
-- [通用技能：`macos-computer-use`](https://github.com/NousResearch/hermes-agent/blob/main/skills/apple/macos-computer-use/SKILL.md)
+- [通用技能：`macos-computer-use`](https://github.com/9thLevelSoftware/hades-agent/blob/main/skills/apple/macos-computer-use/SKILL.md)
 - [cua-driver 源码（trycua/cua）](https://github.com/trycua/cua)
 - 跨平台 Web 任务请参阅[浏览器自动化](./browser.md)。

@@ -45,7 +45,7 @@ hermes teams-pipeline maintain-subscriptions
 
 ## 第一步：添加 Microsoft Graph 凭据
 
-将 Graph 应用凭据添加到 `~/.hermes/.env`：
+将 Graph 应用凭据添加到 `~/.hades/.env`：
 
 ```bash
 MSGRAPH_TENANT_ID=<tenant-id>
@@ -84,7 +84,7 @@ https://ops.example.com/msgraph/webhook
 
 会议流水线从现有的 `teams` 平台条目读取运行时配置。流水线专属参数位于 `teams.extra.meeting_pipeline` 下。Teams 出站投递仍使用常规 Teams 平台配置。
 
-`~/.hermes/config.yaml` 示例：
+`~/.hades/config.yaml` 示例：
 
 ```yaml
 platforms:

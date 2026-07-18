@@ -1,18 +1,18 @@
 ---
 sidebar_position: 16
 title: "xAI Grok OAuth (SuperGrok / X Premium+)"
-description: "Sign in with your SuperGrok or X Premium+ subscription to use Grok models in Hermes Agent — no API key required"
+description: "Sign in with your SuperGrok or X Premium+ subscription to use Grok models in Hades Agent — no API key required"
 ---
 
 # xAI Grok OAuth (SuperGrok / X Premium+)
 
-Hermes Agent supports xAI Grok through a browser-based OAuth device-code login flow against [accounts.x.ai](https://accounts.x.ai), using either a **SuperGrok subscription** ([grok.com](https://x.ai/grok)) or an **X Premium+ subscription** (linked X account). No `XAI_API_KEY` is required — log in once and Hermes automatically refreshes your session in the background.
+Hades Agent supports xAI Grok through a browser-based OAuth device-code login flow against [accounts.x.ai](https://accounts.x.ai), using either a **SuperGrok subscription** ([grok.com](https://x.ai/grok)) or an **X Premium+ subscription** (linked X account). No `XAI_API_KEY` is required — log in once and Hermes automatically refreshes your session in the background.
 
 When you sign in with an X account that has Premium+, xAI automatically links the subscription status to your xAI session, so the OAuth flow works the same as it does for direct SuperGrok subscribers.
 
 The transport reuses the `codex_responses` adapter (xAI exposes a Responses-style endpoint), so reasoning, tool-calling, streaming, and prompt caching work without any adapter changes.
 
-The same OAuth bearer token is also reused by every direct-to-xAI surface in Hermes — TTS, image generation, video generation, and transcription — so a single login covers all four.
+The same OAuth bearer token is also reused by every direct-to-xAI surface in Hades — TTS, image generation, video generation, and transcription — so a single login covers all four.
 
 ## Overview
 
@@ -31,12 +31,12 @@ The same OAuth bearer token is also reused by every direct-to-xAI surface in Her
 ## Prerequisites
 
 - Python 3.9+
-- Hermes Agent installed
+- Hades Agent installed
 - An active **SuperGrok** subscription on your xAI account, **or** an **X Premium+** subscription on the X account you sign in with (xAI links the subscription automatically)
 - A browser available anywhere you can open the printed verification URL
 
 :::warning xAI may restrict OAuth API access by tier
-xAI's backend enforces its own allowlist on the OAuth API surface and has been seen to reject standard SuperGrok subscribers with `HTTP 403` (see issue [#26847](https://github.com/NousResearch/hermes-agent/issues/26847)) even though the in-app subscription is active. If OAuth login succeeds in the browser but inference returns 403, set `XAI_API_KEY` and switch to the API-key path (`provider: xai`) — that surface is not subject to the same gating today.
+xAI's backend enforces its own allowlist on the OAuth API surface and has been seen to reject standard SuperGrok subscribers with `HTTP 403` (see issue [#26847](https://github.com/9thLevelSoftware/hades-agent/issues/26847)) even though the in-app subscription is active. If OAuth login succeeds in the browser but inference returns 403, set `XAI_API_KEY` and switch to the API-key path (`provider: xai`) — that surface is not subject to the same gating today.
 :::
 
 ## Quick Start
@@ -53,7 +53,7 @@ hermes model
 hermes
 ```
 
-After the first login, credentials are stored under `~/.hermes/auth.json` and refreshed automatically before they expire.
+After the first login, credentials are stored under `~/.hades/auth.json` and refreshed automatically before they expire.
 
 ## Logging In Manually
 
@@ -78,7 +78,7 @@ The same device-code flow applies when you sign in from the web dashboard or the
 
 1. Hermes requests a device code from `auth.x.ai`.
 2. You open the verification URL, sign in, enter the displayed code if prompted, and approve access.
-3. Hermes polls xAI until approval, then saves tokens to `~/.hermes/auth.json`.
+3. Hermes polls xAI until approval, then saves tokens to `~/.hades/auth.json`.
 4. From then on, Hermes refreshes the access token in the background — you stay signed in until you `hermes auth logout xai-oauth` or revoke access from your xAI account settings.
 
 ## Checking Login Status
@@ -106,7 +106,7 @@ hermes config set model.provider xai-oauth
 
 ## Configuration Reference
 
-After login, `~/.hermes/config.yaml` will contain:
+After login, `~/.hades/config.yaml` will contain:
 
 ```yaml
 model:
@@ -205,7 +205,7 @@ For loopback-redirect providers (Spotify, MCP servers), see [OAuth over SSH / Re
 
 OAuth completed in the browser, tokens are saved, but inference or token refresh returns `HTTP 403` with a message similar to *"The caller does not have permission to execute the specified operation"*.
 
-This is **not** a stale-token problem — re-running `hermes model` won't change it. xAI's backend has been seen to restrict OAuth API access to specific SuperGrok tiers despite the in-app subscription being active (issue [#26847](https://github.com/NousResearch/hermes-agent/issues/26847)).
+This is **not** a stale-token problem — re-running `hermes model` won't change it. xAI's backend has been seen to restrict OAuth API access to specific SuperGrok tiers despite the in-app subscription being active (issue [#26847](https://github.com/9thLevelSoftware/hades-agent/issues/26847)).
 
 **Fix:** set `XAI_API_KEY` and switch to the API-key path:
 

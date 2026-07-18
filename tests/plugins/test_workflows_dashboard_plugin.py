@@ -15,8 +15,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from hermes_cli import workflows_db as wfdb
-from hermes_cli import workflows_dispatcher
+from hades_cli import workflows_db as wfdb
+from hades_cli import workflows_dispatcher
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "workflows" / "dashboard"
@@ -98,9 +98,9 @@ def test_dashboard_api_error_helpers_redact_secret_values():
 
 @pytest.fixture
 def workflows_home(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     wfdb.init_db()
     return home
@@ -219,7 +219,7 @@ def test_dashboard_input_feed_api_rejects_non_continuous_trigger(client):
 
 
 def test_dashboard_tick_endpoint_advances_workflows(client, monkeypatch):
-    from hermes_cli.workflows_dispatcher import TickReport
+    from hades_cli.workflows_dispatcher import TickReport
 
     def fake_tick_detailed(*, limit: int = 1) -> TickReport:
         return TickReport(processed=3, executions_advanced=3)
@@ -649,7 +649,7 @@ def test_definition_draft_endpoint_returns_validated_spec(client, monkeypatch):
 
     def fake_draft(goal):
         assert goal == "Build demo"
-        from hermes_cli.workflows_assistant import parse_assistant_payload
+        from hades_cli.workflows_assistant import parse_assistant_payload
 
         return parse_assistant_payload(
             {
@@ -674,7 +674,7 @@ def test_definition_draft_endpoint_returns_validated_spec(client, monkeypatch):
 
 def test_dashboard_plain_language_draft_deploy_run_e2e(client, monkeypatch):
     import hermes_dashboard_plugin_workflows_test as plugin
-    from hermes_cli.workflows_assistant import parse_assistant_payload
+    from hades_cli.workflows_assistant import parse_assistant_payload
 
     def fake_draft(goal):
         assert "plain language" in goal
@@ -808,7 +808,7 @@ def test_definition_refine_endpoint_uses_existing_spec(client, monkeypatch):
 
     def fake_refine(spec, instruction):
         calls.append((spec.id, instruction))
-        from hermes_cli.workflows_assistant import parse_assistant_payload
+        from hades_cli.workflows_assistant import parse_assistant_payload
 
         return parse_assistant_payload(
             {
@@ -841,7 +841,7 @@ def test_definition_refine_endpoint_uses_deployed_workflow_id(client, monkeypatc
 
     def fake_refine(spec, instruction):
         calls.append((spec.id, instruction))
-        from hermes_cli.workflows_assistant import parse_assistant_payload
+        from hades_cli.workflows_assistant import parse_assistant_payload
 
         return parse_assistant_payload(
             {
@@ -3024,7 +3024,7 @@ def _assistant_fixture(name: str) -> dict:
 
 def test_definition_draft_endpoint_returns_summary_assumptions_and_warnings_envelope(client, monkeypatch):
     import hermes_dashboard_plugin_workflows_test as plugin
-    from hermes_cli.workflows_assistant import parse_assistant_payload
+    from hades_cli.workflows_assistant import parse_assistant_payload
 
     payload = _assistant_fixture("draft")
 
@@ -3049,7 +3049,7 @@ def test_definition_draft_endpoint_returns_summary_assumptions_and_warnings_enve
 
 def test_definition_refine_endpoint_returns_summary_assumptions_and_warnings_envelope(client, monkeypatch):
     import hermes_dashboard_plugin_workflows_test as plugin
-    from hermes_cli.workflows_assistant import parse_assistant_payload
+    from hades_cli.workflows_assistant import parse_assistant_payload
 
     payload = _assistant_fixture("refine")
 
@@ -3078,7 +3078,7 @@ def test_definition_draft_endpoint_returns_typed_assistant_validation_error(clie
     """Invalid candidate output must surface as the typed
     workflow_assistant_validation_error code so the UI can route to Repair-with-AI."""
     import hermes_dashboard_plugin_workflows_test as plugin
-    from hermes_cli.workflows_assistant import AssistantValidationError
+    from hades_cli.workflows_assistant import AssistantValidationError
 
     def fake_draft(goal):
         raise AssistantValidationError(
@@ -3098,7 +3098,7 @@ def test_definition_draft_endpoint_returns_typed_assistant_validation_error(clie
 
 
 def test_dashboard_tick_endpoint_returns_detailed_report(client, monkeypatch):
-    from hermes_cli.workflows_dispatcher import TickReport
+    from hades_cli.workflows_dispatcher import TickReport
 
     def fake_tick_detailed(*, limit: int = 1) -> TickReport:
         return TickReport(

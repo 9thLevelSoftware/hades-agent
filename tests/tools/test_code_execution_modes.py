@@ -124,7 +124,7 @@ class TestGetExecutionMode(unittest.TestCase):
                     "artifact_dir": str(Path(home) / "artifacts"),
                 },
             }), encoding="utf-8")
-            with patch.dict(os.environ, {"HERMES_HOME": home}, clear=False):
+            with patch.dict(os.environ, {"HADES_HOME": home}, clear=False):
                 os.environ.pop("HERMES_CONFIG", None)
                 self.assertEqual(_get_execution_mode(), "strict")
                 self.assertEqual(code_execution_tool._load_config()["max_stdout_bytes"], 123)
@@ -372,7 +372,7 @@ class TestExecuteCodeModeIntegration(unittest.TestCase):
             with patch.dict(os.environ, env_overrides):
                 with (
                     patch(
-                        "hermes_cli.plugins.get_plugin_manager",
+                        "hades_cli.plugins.get_plugin_manager",
                         return_value=execution_manager,
                     ),
                     patch(

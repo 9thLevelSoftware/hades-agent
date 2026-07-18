@@ -1,9 +1,9 @@
 """Tests for credential_pool .env fallback and auth credential_pool lookup.
 
 Covers the fix from #15914 / PR #15920 and the rotation fix from #20591:
-- _seed_from_env reads API keys from ~/.hermes/.env when not in os.environ
+- _seed_from_env reads API keys from ~/.hades/.env when not in os.environ
 - _resolve_api_key_provider_secret falls back to credential_pool when env vars are empty
-- ~/.hermes/.env takes priority over os.environ for Hermes-managed credentials
+- ~/.hades/.env takes priority over os.environ for Hades-managed credentials
   (so a deliberate rotation in .env wins over a stale shell export)
 - env / dotenv values take priority over credential pool (pool fires only when both are empty)
 """
@@ -21,7 +21,7 @@ def _make_pconfig(provider_id="deepseek", env_vars=None):
     Default provider_id is 'deepseek' because it's a real api_key provider
     in PROVIDER_REGISTRY (needed for _seed_from_env's generic path).
     """
-    from hermes_cli.auth import ProviderConfig
+    from hades_cli.auth import ProviderConfig
     return ProviderConfig(
         id=provider_id,
         name=provider_id.title(),
@@ -32,14 +32,14 @@ def _make_pconfig(provider_id="deepseek", env_vars=None):
 
 @pytest.fixture
 def isolated_hermes_home(tmp_path, monkeypatch):
-    """Point HERMES_HOME at a temp dir and clear known API key env vars.
+    """Point HADES_HOME at a temp dir and clear known API key env vars.
 
     Also invalidates any cached get_env_value state by patching Path.home().
     """
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
 
     # Clear all known API key env vars so get_env_value falls through to .env
     for key in [
@@ -53,13 +53,13 @@ def isolated_hermes_home(tmp_path, monkeypatch):
 
 
 def _write_env_file(home: Path, **kwargs) -> None:
-    """Write key=value pairs to ~/.hermes/.env."""
+    """Write key=value pairs to ~/.hades/.env."""
     lines = [f"{k}={v}" for k, v in kwargs.items()]
     (home / ".env").write_text("\n".join(lines) + "\n")
 
 
 class TestCredentialPoolSeedsFromDotEnv:
-    """_seed_from_env must read keys from ~/.hermes/.env, not just os.environ.
+    """_seed_from_env must read keys from ~/.hades/.env, not just os.environ.
 
     This is the load-bearing behaviour for the fix: when a user adds a key to
     .env mid-session or via a non-CLI entry point that doesn't run
@@ -108,7 +108,7 @@ class TestCredentialPoolSeedsFromDotEnv:
         assert entries == []
 
     def test_dotenv_wins_over_stale_os_environ(self, isolated_hermes_home, monkeypatch):
-        """Regression for #20591: a fresh key rotated into ~/.hermes/.env must
+        """Regression for #20591: a fresh key rotated into ~/.hades/.env must
         win over a stale value inherited from os.environ (parent shell export
         from Codex CLI, test runner, login profile, etc.). Without this, key
         rotation produces persistent 401s.
@@ -127,14 +127,14 @@ class TestCredentialPoolSeedsFromDotEnv:
 
 
 class TestAuthResolvesFromDotEnv:
-    """_resolve_api_key_provider_secret must also read from ~/.hermes/.env."""
+    """_resolve_api_key_provider_secret must also read from ~/.hades/.env."""
 
     def test_key_from_dotenv_only(self, isolated_hermes_home):
         """Key in .env but not os.environ → _resolve returns it with the env var source."""
         _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="sk-dotenv-resolve-789")
         assert "DEEPSEEK_API_KEY" not in os.environ
 
-        from hermes_cli.auth import _resolve_api_key_provider_secret
+        from hades_cli.auth import _resolve_api_key_provider_secret
         key, source = _resolve_api_key_provider_secret(
             provider_id="deepseek",
             pconfig=_make_pconfig(),
@@ -145,7 +145,7 @@ class TestAuthResolvesFromDotEnv:
     def test_dotenv_wins_over_stale_os_environ_on_resolve(
         self, isolated_hermes_home, monkeypatch
     ):
-        """Regression for #20591: when both ~/.hermes/.env and os.environ define
+        """Regression for #20591: when both ~/.hades/.env and os.environ define
         the key, the .env value wins. Symmetric with the pool seeding rule —
         without this, the pool gets re-seeded with the fresh .env key while the
         live request path keeps returning the stale shell export, producing
@@ -154,7 +154,7 @@ class TestAuthResolvesFromDotEnv:
         _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="dotenv-fresh-deepseek")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "stale-shell-deepseek")
 
-        from hermes_cli.auth import _resolve_api_key_provider_secret
+        from hades_cli.auth import _resolve_api_key_provider_secret
         key, source = _resolve_api_key_provider_secret(
             provider_id="deepseek",
             pconfig=_make_pconfig(),
@@ -166,7 +166,7 @@ class TestAuthResolvesFromDotEnv:
         self, isolated_hermes_home, monkeypatch
     ):
         """Regression for #20591 (sibling site): get_anthropic_key() must also
-        prefer ~/.hermes/.env over a stale shell export. This path resolves
+        prefer ~/.hades/.env over a stale shell export. This path resolves
         ANTHROPIC_API_KEY/ANTHROPIC_TOKEN/CLAUDE_CODE_OAUTH_TOKEN and had the
         identical os.environ-first rotation bug that the api-key resolution
         path did, just for Anthropic.
@@ -174,7 +174,7 @@ class TestAuthResolvesFromDotEnv:
         _write_env_file(isolated_hermes_home, ANTHROPIC_API_KEY="dotenv-fresh-anthropic")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-shell-anthropic")
 
-        from hermes_cli.auth import get_anthropic_key
+        from hades_cli.auth import get_anthropic_key
         assert get_anthropic_key() == "dotenv-fresh-anthropic"
 
 
@@ -191,7 +191,7 @@ class TestAuthCredentialPoolFallback:
         mock_pool.has_credentials.return_value = True
         mock_pool.peek.return_value = mock_entry
 
-        from hermes_cli.auth import _resolve_api_key_provider_secret
+        from hades_cli.auth import _resolve_api_key_provider_secret
         with patch("agent.credential_pool.load_pool", return_value=mock_pool):
             key, source = _resolve_api_key_provider_secret(
                 provider_id="deepseek",
@@ -205,7 +205,7 @@ class TestAuthCredentialPoolFallback:
         mock_pool = MagicMock()
         mock_pool.has_credentials.return_value = False
 
-        from hermes_cli.auth import _resolve_api_key_provider_secret
+        from hades_cli.auth import _resolve_api_key_provider_secret
         with patch("agent.credential_pool.load_pool", return_value=mock_pool):
             key, source = _resolve_api_key_provider_secret(
                 provider_id="deepseek",
@@ -220,7 +220,7 @@ class TestAuthCredentialPoolFallback:
         mock_pool = MagicMock()
         mock_pool.has_credentials.return_value = True
 
-        from hermes_cli.auth import _resolve_api_key_provider_secret
+        from hades_cli.auth import _resolve_api_key_provider_secret
         with patch("agent.credential_pool.load_pool", return_value=mock_pool) as mp:
             key, source = _resolve_api_key_provider_secret(
                 provider_id="deepseek",
@@ -239,7 +239,7 @@ class TestAuthCredentialPoolFallback:
         mock_pool = MagicMock()
         mock_pool.has_credentials.return_value = True
 
-        from hermes_cli.auth import _resolve_api_key_provider_secret
+        from hades_cli.auth import _resolve_api_key_provider_secret
         with patch("agent.credential_pool.load_pool", return_value=mock_pool) as mp:
             key, source = _resolve_api_key_provider_secret(
                 provider_id="deepseek",

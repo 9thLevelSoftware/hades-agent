@@ -1,7 +1,7 @@
 ---
 sidebar_position: 13
 title: "Browser Provider Plugins"
-description: "How to build a cloud browser backend plugin for Hermes Agent"
+description: "How to build a cloud browser backend plugin for Hades Agent"
 ---
 
 # Building a Browser Provider Plugin
@@ -14,7 +14,7 @@ Browser backends are one of several **backend plugins** Hermes supports. The oth
 
 ## How it fits together
 
-A browser provider does **not** implement browsing. It implements **session lifecycle**: create a remote browser session, hand back a CDP websocket URL, and tear the session down. Hermes' own browser stack (`agent-browser` + `tools/browser_tool.py`) connects to whatever CDP URL you return and drives the page from there — every provider gets the full `browser_*` toolset for free.
+A browser provider does **not** implement browsing. It implements **session lifecycle**: create a remote browser session, hand back a CDP websocket URL, and tear the session down. Hades' own browser stack (`agent-browser` + `tools/browser_tool.py`) connects to whatever CDP URL you return and drives the page from there — every provider gets the full `browser_*` toolset for free.
 
 The active provider is selected by `browser.cloud_provider` in `config.yaml`; the dispatcher in `tools/browser_tool.py` is a pure registry lookup with no per-provider conditionals.
 
@@ -23,8 +23,8 @@ The active provider is selected by `browser.cloud_provider` in `config.yaml`; th
 Hermes scans for browser backends in three places:
 
 1. **Bundled** — `<repo>/plugins/browser/<name>/` (auto-loaded with `kind: backend`)
-2. **User** — `~/.hermes/plugins/browser/<name>/` (opt-in via `plugins.enabled` or `hermes plugins enable <name>`)
-3. **Pip** — packages declaring a `hermes_agent.plugins` entry point
+2. **User** — `~/.hades/plugins/browser/<name>/` (opt-in via `plugins.enabled` or `hermes plugins enable <name>`)
+3. **Pip** — packages declaring a `hades_agent.plugins` entry point
 
 Each plugin's `register(ctx)` calls `ctx.register_browser_provider(...)`, which puts the instance into the registry in `agent/browser_registry.py`.
 

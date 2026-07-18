@@ -301,7 +301,7 @@ def build_billing_state(*, timeout: float = 15.0) -> BillingState:
         return fixture
 
     try:
-        from hermes_cli.nous_billing import (
+        from hades_cli.nous_billing import (
             BillingAuthError,
             BillingError,
             _absolutize_portal_url,
@@ -361,7 +361,7 @@ def _dev_fixture_billing_state() -> Optional[BillingState]:
     Mirrors ``HERMES_DEV_CREDITS_FIXTURE``; the usage *bar* still comes from
     ``HERMES_DEV_CREDITS_FIXTURE`` (set both to pair a bar with a billing state).
     """
-    name = (os.getenv("HERMES_DEV_BILLING_FIXTURE") or "").strip().lower()
+    name = (os.getenv("HADES_DEV_BILLING_FIXTURE") or "").strip().lower()
     if not name:
         return None
 

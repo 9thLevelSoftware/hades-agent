@@ -414,7 +414,7 @@ class TestAPISmoke:
 
 ### Token 处理
 - 不要记录完整 token。脱敏处理：`Bearer <REDACTED>`。
-- 不要在脚本中硬编码 token。从环境变量（`os.environ["API_TOKEN"]`）或 `~/.hermes/.env` 读取。
+- 不要在脚本中硬编码 token。从环境变量（`os.environ["API_TOKEN"]`）或 `~/.hades/.env` 读取。
 - 如果 token 出现在日志、错误信息或 git 历史中，立即轮换。
 
 ### 安全日志记录

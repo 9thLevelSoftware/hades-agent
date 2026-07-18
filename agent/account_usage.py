@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 
 from agent.anthropic_adapter import _is_oauth_token, resolve_anthropic_token
-from hermes_cli.auth import AuthError, _read_codex_tokens, resolve_codex_runtime_credentials
-from hermes_cli.runtime_provider import resolve_runtime_provider
+from hades_cli.auth import AuthError, _read_codex_tokens, resolve_codex_runtime_credentials
+from hades_cli.runtime_provider import resolve_runtime_provider
 
 if TYPE_CHECKING:
     from typing import TypeGuard
@@ -145,7 +145,7 @@ def build_nous_credits_snapshot(account_info) -> Optional[AccountUsageSnapshot]:
     account info to show (fail-open: caller just shows nothing).
     """
     try:
-        from hermes_cli.nous_account import nous_portal_topup_url
+        from hades_cli.nous_account import nous_portal_topup_url
 
         if account_info is None or not getattr(account_info, "logged_in", False):
             return None
@@ -255,7 +255,7 @@ def nous_credits_lines(*, markdown: bool = False, timeout: float = 10.0) -> list
         return render_account_usage_lines(snapshot, markdown=markdown)
 
     try:
-        from hermes_cli.auth import get_provider_auth_state
+        from hades_cli.auth import get_provider_auth_state
 
         tok = (get_provider_auth_state("nous") or {}).get("access_token")
         if not (isinstance(tok, str) and tok.strip()):
@@ -265,7 +265,7 @@ def nous_credits_lines(*, markdown: bool = False, timeout: float = 10.0) -> list
     try:
         import concurrent.futures
 
-        from hermes_cli.nous_account import get_nous_portal_account_info
+        from hades_cli.nous_account import get_nous_portal_account_info
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             account = pool.submit(
@@ -365,7 +365,7 @@ def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> Cred
     """
     not_logged_in = CreditsView(logged_in=False)
     try:
-        from hermes_cli.auth import get_provider_auth_state
+        from hades_cli.auth import get_provider_auth_state
 
         tok = (get_provider_auth_state("nous") or {}).get("access_token")
         if not (isinstance(tok, str) and tok.strip()):
@@ -376,7 +376,7 @@ def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> Cred
     try:
         import concurrent.futures
 
-        from hermes_cli.nous_account import (
+        from hades_cli.nous_account import (
             get_nous_portal_account_info,
             nous_portal_topup_url,
         )
@@ -456,7 +456,7 @@ def _resolve_codex_usage_credentials(
     """Resolve Codex quota credentials from the native runtime path.
 
     Prefer explicit live-agent credentials, then the legacy singleton OAuth
-    state, then the credential pool.  Hermes's native OAuth setup now stores
+    state, then the credential pool.  Hades's native OAuth setup now stores
     device-code logins in the pool, so quota diagnostics must not depend only
     on the older singleton store.
     """

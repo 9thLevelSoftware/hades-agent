@@ -17,7 +17,7 @@ Cron reviewer files improvement tasks; kanban workers fix.
 | Source | Optional — install with `hermes skills install official/autonomous-ai-agents/self-improvement-loop` |
 | Path | `optional-skills/autonomous-ai-agents/self-improvement-loop` |
 | Version | `1.0.0` |
-| Author | 9thLevelSoftware, Hermes Agent |
+| Author | 9thLevelSoftware, Hades Agent |
 | License | MIT |
 | Platforms | linux, macos, windows |
 | Tags | `self-improvement`, `kanban`, `cron`, `multi-agent`, `orchestration`, `automation` |
@@ -66,7 +66,7 @@ process, so one `hermes gateway` powers the whole loop.
 This skill runs in three modes. Detect which one applies before acting:
 
 - **Setup mode** — a user interactively asks to set up / install / configure
-  the loop. Follow [references/setup.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/setup.md).
+  the loop. Follow [references/setup.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/setup.md).
 - **Review mode** — you were spawned by the loop's cron job (non-interactive
   session, prompt says "run the self-improvement review pass"). Run the
   review pass below.
@@ -93,7 +93,7 @@ Don't use for:
 
 Run these steps in order. The cron prompt supplies the parameters; when one
 is missing, use the defaults given in
-[references/setup.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/setup.md#the-review-prompt) (board
+[references/setup.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/setup.md#the-review-prompt) (board
 `self-improvement`, cap 3, assignee `improver`).
 
 ### 1. Orient
@@ -120,7 +120,7 @@ Survey the improvement sources named in the cron prompt — read-only, using
 the file/web tools you have. You do not have (and must not need) terminal
 access: candidates come from reading, not from running things. Typical
 sources: repo `TODO`/`FIXME` markers, recent cron output failures under
-`~/.hermes/cron/output/`, stale or contradictory docs, gaps the user noted in
+`~/.hades/cron/output/`, stale or contradictory docs, gaps the user noted in
 memory, previously blocked-then-unblocked tasks whose follow-ups were
 deferred.
 
@@ -133,7 +133,7 @@ will reuse in the report.
 ### 4. File tasks
 
 For each pick, call `kanban_create` following the conventions in
-[references/task-filing.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/task-filing.md) — title style, body
+[references/task-filing.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/task-filing.md) — title style, body
 template with checkable acceptance criteria and verification commands,
 `idempotency_key` (mandatory — it is what makes re-filing across passes
 safe), workspace choice, `goal_mode`, `max_runtime_seconds`, and `priority`.
@@ -198,13 +198,13 @@ lists are empty, respond with only `[SILENT]` so nothing is delivered.
    misconfiguration in the delivery instead of silently doing nothing.
 2. **Duplicate tasks every pass.** Cause: missing/unstable
    `idempotency_key`. Fix: derive the key from the finding, not the pass
-   (see [references/task-filing.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/task-filing.md#idempotency-keys)).
+   (see [references/task-filing.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/task-filing.md#idempotency-keys)).
 3. **Runaway spend.** Cause: no cap, no `max_runtime_seconds`, or an
    unpinned cron model. Pin `provider`/`model` on the job (unpinned jobs
    fail closed if the global default changes — by design).
 4. **Worker output vanished.** `scratch` workspaces are deleted on
    completion. Anything worth keeping needs `worktree` or `dir:` — see the
-   workspace table in [references/task-filing.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/task-filing.md#workspace-selection).
+   workspace table in [references/task-filing.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/task-filing.md#workspace-selection).
 5. **Loop "runs" but nothing happens.** Both the cron ticker and the kanban
    dispatcher live in the gateway process. No gateway → no reviewer runs and
    no worker spawns. Check `hermes cron status` and
@@ -223,7 +223,7 @@ lists are empty, respond with only `[SILENT]` so nothing is delivered.
 
 ## Verification Checklist
 
-After setup (all commands in [references/setup.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/setup.md)):
+After setup (all commands in [references/setup.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/autonomous-ai-agents/self-improvement-loop/references/setup.md)):
 
 - [ ] Gateway running; `hermes cron status` shows a live ticker
 - [ ] Board exists: `hermes kanban boards list` shows `self-improvement`

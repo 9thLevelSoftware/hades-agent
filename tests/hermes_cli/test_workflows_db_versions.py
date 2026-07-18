@@ -4,9 +4,9 @@ from argparse import Namespace
 
 import pytest
 
-from hermes_cli import workflows
-from hermes_cli import workflows_db as wfdb
-from hermes_cli.workflows_spec import WorkflowSpec
+from hades_cli import workflows
+from hades_cli import workflows_db as wfdb
+from hades_cli.workflows_spec import WorkflowSpec
 
 
 def _spec(output=True, *, version=1):
@@ -43,10 +43,10 @@ def test_init_db_runs_schema_once_per_resolved_path(tmp_path, monkeypatch):
         def close(self):
             pass
 
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     (home / "workflows.db").touch()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(wfdb, "connect", lambda db_path=None: FakeConn())
     wfdb._INITIALIZED_DB_PATHS.clear()
     try:
@@ -157,7 +157,7 @@ def test_init_db_upgrades_pre_continuous_input_database_without_losing_rows(tmp_
 
 
 def test_redeploy_same_version_same_checksum_is_idempotent(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _spec(True), created_by="first")
@@ -178,7 +178,7 @@ def test_redeploy_same_version_same_checksum_is_idempotent(tmp_path, monkeypatch
 
 
 def test_redeploy_same_version_different_checksum_is_rejected(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _spec(True), created_by="first")
@@ -189,7 +189,7 @@ def test_redeploy_same_version_different_checksum_is_rejected(tmp_path, monkeypa
 
 
 def test_deploy_new_version_with_different_checksum_succeeds(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _spec(True, version=1), created_by="v1")
@@ -200,7 +200,7 @@ def test_deploy_new_version_with_different_checksum_succeeds(tmp_path, monkeypat
 
 
 def test_cli_deploy_json_reports_exact_deployed_version(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     v1 = tmp_path / "v1.json"
     v2 = tmp_path / "v2.json"
     v1.write_text(json.dumps(_spec(True, version=1).model_dump(mode="json")), encoding="utf-8")
@@ -216,7 +216,7 @@ def test_cli_deploy_json_reports_exact_deployed_version(tmp_path, monkeypatch, c
 
 
 def test_redeploy_same_schedule_definition_preserves_schedule_row(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _schedule_spec(), created_by="first")

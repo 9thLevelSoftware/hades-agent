@@ -1,8 +1,8 @@
 """
-IRC Platform Adapter for Hermes Agent.
+IRC Platform Adapter for Hades Agent.
 
 A plugin-based gateway adapter that connects to an IRC server and relays
-messages to/from the Hermes agent.  Zero external dependencies — uses
+messages to/from the Hades agent.  Zero external dependencies — uses
 Python's stdlib asyncio for the IRC protocol.
 
 Configuration in config.yaml::
@@ -193,7 +193,7 @@ class IRCAdapter(BasePlatformAdapter):
         if self.server_password:
             await self._send_raw(f"PASS {self.server_password}")
         await self._send_raw(f"NICK {self.nickname}")
-        await self._send_raw(f"USER {self.nickname} 0 * :Hermes Agent")
+        await self._send_raw(f"USER {self.nickname} 0 * :Hades Agent")
 
         # Start receive loop
         self._recv_task = asyncio.create_task(self._receive_loop())
@@ -231,7 +231,7 @@ class IRCAdapter(BasePlatformAdapter):
         self._mark_disconnected()
         if self._writer and not self._writer.is_closing():
             try:
-                await self._send_raw("QUIT :Hermes Agent shutting down")
+                await self._send_raw("QUIT :Hades Agent shutting down")
                 await asyncio.sleep(0.5)
             except Exception:
                 pass
@@ -538,10 +538,10 @@ def validate_config(config) -> bool:
 def interactive_setup() -> None:
     """Interactive `hermes gateway setup` flow for the IRC platform.
 
-    Lazy-imports ``hermes_cli.setup`` helpers so the plugin stays importable
+    Lazy-imports ``hades_cli.setup`` helpers so the plugin stays importable
     in non-CLI contexts (gateway runtime, tests).
     """
-    from hermes_cli.setup import (
+    from hades_cli.setup import (
         prompt,
         prompt_yes_no,
         save_env_value,
@@ -638,7 +638,7 @@ def interactive_setup() -> None:
             print_info("No nicks allowed — the bot will ignore all messages until you add nicks.")
 
     print()
-    print_success("IRC configuration saved to ~/.hermes/.env")
+    print_success("IRC configuration saved to ~/.hades/.env")
     print_info("Restart the gateway for changes to take effect: hermes gateway restart")
 
 
@@ -800,7 +800,7 @@ async def _standalone_send(
         if server_password:
             await _raw(f"PASS {_strip_irc_control_chars(server_password)}")
         await _raw(f"NICK {standalone_nick}")
-        await _raw(f"USER {standalone_nick} 0 * :Hermes Agent (cron)")
+        await _raw(f"USER {standalone_nick} 0 * :Hades Agent (cron)")
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 15.0
@@ -927,7 +927,7 @@ async def _standalone_send(
 
 
 def register(ctx):
-    """Plugin entry point: called by the Hermes plugin system."""
+    """Plugin entry point: called by the Hades plugin system."""
     ctx.register_platform(
         name="irc",
         label="IRC",

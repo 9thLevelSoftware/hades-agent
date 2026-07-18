@@ -27,7 +27,7 @@ def test_session_id_env_set_on_init():
         skip_context_files=True,
         skip_memory=True,
     )
-    assert os.environ.get("HERMES_SESSION_ID") == agent.session_id
+    assert os.environ.get("HADES_SESSION_ID") == agent.session_id
     assert len(agent.session_id) > 0
 
 
@@ -42,7 +42,7 @@ def test_session_id_env_uses_provided_id():
         skip_context_files=True,
         skip_memory=True,
     )
-    assert os.environ["HERMES_SESSION_ID"] == custom_id
+    assert os.environ["HADES_SESSION_ID"] == custom_id
     assert agent.session_id == custom_id
 
 

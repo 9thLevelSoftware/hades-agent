@@ -2,7 +2,7 @@
 """Parent-death watchdog supervisor for stdio MCP subprocesses.
 
 Problem this fixes (#TBD): a stdio MCP server (e.g. ``npx -y mcp-remote
-<url>``) is spawned as a direct child of the Hermes process. Hermes's own
+<url>``) is spawned as a direct child of the Hades process. Hades's own
 teardown path (``MCPServerTask.shutdown()`` / ``_kill_orphaned_mcp_children``
 at final exit) reaps it cleanly on a *graceful* exit. But if the spawning
 Hermes process dies hard — ``kill -9``, an OS-level crash, a force-quit of

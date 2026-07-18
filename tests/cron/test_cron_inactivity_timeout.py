@@ -178,7 +178,7 @@ class TestInactivityTimeout:
     def test_timeout_env_var_parsing(self, monkeypatch):
         """HERMES_CRON_TIMEOUT env var is respected."""
         monkeypatch.setenv("HERMES_CRON_TIMEOUT", "1200")
-        raw = os.getenv("HERMES_CRON_TIMEOUT", "").strip()
+        raw = os.getenv("HADES_CRON_TIMEOUT", "").strip()
         _cron_timeout = self._parse_cron_timeout(raw)
         assert _cron_timeout == 1200.0
 
@@ -188,7 +188,7 @@ class TestInactivityTimeout:
     def test_timeout_zero_means_unlimited(self, monkeypatch):
         """HERMES_CRON_TIMEOUT=0 yields None (unlimited)."""
         monkeypatch.setenv("HERMES_CRON_TIMEOUT", "0")
-        raw = os.getenv("HERMES_CRON_TIMEOUT", "").strip()
+        raw = os.getenv("HADES_CRON_TIMEOUT", "").strip()
         _cron_timeout = self._parse_cron_timeout(raw)
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
         assert _cron_inactivity_limit is None
@@ -196,7 +196,7 @@ class TestInactivityTimeout:
     def test_timeout_invalid_value_falls_back_to_default(self, monkeypatch):
         """HERMES_CRON_TIMEOUT=abc should fall back to 600s, not raise ValueError."""
         monkeypatch.setenv("HERMES_CRON_TIMEOUT", "abc")
-        raw = os.getenv("HERMES_CRON_TIMEOUT", "").strip()
+        raw = os.getenv("HADES_CRON_TIMEOUT", "").strip()
         _cron_timeout = self._parse_cron_timeout(raw)
         assert _cron_timeout == 600.0
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
@@ -205,7 +205,7 @@ class TestInactivityTimeout:
     def test_timeout_empty_string_uses_default(self, monkeypatch):
         """HERMES_CRON_TIMEOUT='' (empty) should use the 600s default."""
         monkeypatch.setenv("HERMES_CRON_TIMEOUT", "")
-        raw = os.getenv("HERMES_CRON_TIMEOUT", "").strip()
+        raw = os.getenv("HADES_CRON_TIMEOUT", "").strip()
         _cron_timeout = self._parse_cron_timeout(raw)
         assert _cron_timeout == 600.0
 
@@ -309,5 +309,5 @@ class TestSysPathOrdering:
 
     def test_hermes_constants_importable(self):
         """hermes_constants should be importable from cron context."""
-        from hermes_constants import get_hermes_home
-        assert callable(get_hermes_home)
+        from hades_constants import get_hades_home
+        assert callable(get_hades_home)

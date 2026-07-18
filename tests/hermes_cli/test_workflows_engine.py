@@ -1,5 +1,5 @@
-from hermes_cli.workflows_engine import next_edges, run_in_memory_until_waiting
-from hermes_cli.workflows_spec import WorkflowSpec
+from hades_cli.workflows_engine import next_edges, run_in_memory_until_waiting
+from hades_cli.workflows_spec import WorkflowSpec
 
 
 import pytest

@@ -654,12 +654,12 @@ def main() -> int:
         "-j",
         "--jobs",
         type=int,
-        default=int(os.environ.get("HERMES_TEST_WORKERS") or (os.cpu_count() or 4) * 2),
+        default=int(os.environ.get("HADES_TEST_WORKERS") or (os.cpu_count() or 4) * 2),
         help="Parallel worker count (default: $HERMES_TEST_WORKERS or cpu_count*2)",
     )
     parser.add_argument(
         "--paths",
-        default=os.environ.get("HERMES_TEST_PATHS", ":".join(_DEFAULT_ROOTS)),
+        default=os.environ.get("HADES_TEST_PATHS", ":".join(_DEFAULT_ROOTS)),
         help="Colon-separated discovery roots (default: 'tests')",
     )
     parser.add_argument(
@@ -671,7 +671,7 @@ def main() -> int:
         "--file-timeout",
         type=float,
         default=float(
-            os.environ.get("HERMES_TEST_FILE_TIMEOUT", _DEFAULT_FILE_TIMEOUT_SECONDS)
+            os.environ.get("HADES_TEST_FILE_TIMEOUT", _DEFAULT_FILE_TIMEOUT_SECONDS)
         ),
         help=(
             "Per-file wall-clock cap in seconds. On timeout, the pytest "
@@ -683,7 +683,7 @@ def main() -> int:
         "--file-retries",
         type=int,
         default=int(
-            os.environ.get("HERMES_TEST_FILE_RETRIES", _DEFAULT_FILE_RETRIES)
+            os.environ.get("HADES_TEST_FILE_RETRIES", _DEFAULT_FILE_RETRIES)
         ),
         help=(
             "Re-run a failing test FILE this many times in a fresh subprocess "
@@ -800,7 +800,7 @@ def main() -> int:
 
     # Parse --slice (or HERMES_TEST_SLICE) early so we can exit on bad input
     # before doing any expensive discovery.
-    slice_raw = args.slice or os.environ.get("HERMES_TEST_SLICE")
+    slice_raw = args.slice or os.environ.get("HADES_TEST_SLICE")
     slice_index: int | None = None
     slice_count: int = 1
     if slice_raw:

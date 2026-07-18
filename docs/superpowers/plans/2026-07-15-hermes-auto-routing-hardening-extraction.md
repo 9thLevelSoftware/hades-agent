@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- The initially supported private-host contract is exactly Hermes Agent `0.18.2`, the version in this fork. A later version is unsupported until its generated contract and real-path suite are reviewed and committed.
+- The initially supported private-host contract is exactly Hades Agent `0.18.2`, the version in this fork. A later version is unsupported until its generated contract and real-path suite are reviewed and committed.
 - Unknown versions or drift in a critical fresh-session, exact access-binding, model-discovery/reasoning, PluginLlm, RuntimeIntent, child-construction, or manual-precedence capability produce an inactive adapter and unchanged Hermes behavior. Drift isolated to the optional recorded-fallback seam keeps the complete pre-call/manual wrapper group active and reports `post_call_failover=False`; drift in the versioned evidence payload disables evidence/adaptation while preserving compatible static routing. Never install a partial critical group.
 - Compatibility checks inspect signatures and required attributes, not fragile source-code hashes. Behavior tests remain the authoritative gate.
 - Schema creation remains declarative and idempotent. Ordered migrations contain only required data transforms, are checksum-addressed, and create a verified pre-migration backup.
@@ -19,9 +19,9 @@
 - Restore/import never overwrites the only recoverable copy. All writes are preview/hash guarded, locked, validated in a sibling temporary path, and atomically replaced.
 - Schema migration, restore, and downgrade never replace a database beneath another live process. Every hardened `RoutingStore` registers a profile-local process lease before opening; destructive maintenance quiesces all local instances and refuses while any other live PID/start-token lease exists.
 - No automatic live provider calls occur in tests or installation. A live smoke command requires an explicit runtime allowlist and `--allow-billable`; local-only targets still require an explicit target.
-- Standalone packaging has no runtime dependency on a pinned Hermes wheel. It declares the host integration through the `hermes_agent.plugins` entry point and imports host internals lazily only inside the compatibility adapter.
+- Standalone packaging has no runtime dependency on a pinned Hermes wheel. It declares the host integration through the `hades_agent.plugins` entry point and imports host internals lazily only inside the compatibility adapter.
 - `plugins/auto_routing` remains the source in this fork. Extraction documentation describes a future operation; this plan does not publish a repository or package.
-- Preserve the Hermes MIT license and credit the MIT-licensed `b3nw/hermes-delegate-routing` design reference. If implementation code is actually reused, preserve its copyright/license notice and preferably its git authorship.
+- Preserve the Hades MIT license and credit the MIT-licensed `b3nw/hermes-delegate-routing` design reference. If implementation code is actually reused, preserve its copyright/license notice and preferably its git authorship.
 - Full prompt-cache, manual precedence, fallback, inventory, authority, privacy, experiment, and rollback invariants from Plans 1–5 remain release blockers.
 - Before every Step 5 commit, run both `git diff --check` and the shown `git diff --cached --check`; stop on any output/error.
 
@@ -80,7 +80,7 @@
 
 ---
 
-### Task 1: Freeze and Enforce the Hermes 0.18.2 Compatibility Contract
+### Task 1: Freeze and Enforce the Hades 0.18.2 Compatibility Contract
 
 **Files:**
 - Create: `plugins/auto_routing/auto_routing/compatibility.py`
@@ -101,7 +101,7 @@ def test_current_host_matches_committed_contract() -> None:
 
 
 def test_unknown_patch_version_is_not_assumed_compatible(monkeypatch) -> None:
-    monkeypatch.setattr("hermes_cli.__version__", "0.18.3")
+    monkeypatch.setattr("hades_cli.__version__", "0.18.3")
     result = select_contract()
     assert not result.compatible
     assert result.reason == "unsupported_host_version"
@@ -171,8 +171,8 @@ def test_runtime_access_slot_contract_drift_blocks_active(
 @pytest.mark.parametrize(
     ("path", "parameter"),
     [
-        ("hermes_cli.models.provider_model_discovery", "resolver_name"),
-        ("hermes_cli.inventory.build_models_payload", "discovery_provenance"),
+        ("hades_cli.models.provider_model_discovery", "resolver_name"),
+        ("hades_cli.inventory.build_models_payload", "discovery_provenance"),
     ],
 )
 def test_discovery_callable_drift_blocks_active(
@@ -186,7 +186,7 @@ def test_discovery_callable_drift_blocks_active(
 
 def test_discovery_provenance_enum_drift_blocks_active(fake_host, adapter_service) -> None:
     fake_host.set_constant(
-        "hermes_cli.models.PROVIDER_MODEL_PROVENANCE_VALUES",
+        "hades_cli.models.PROVIDER_MODEL_PROVENANCE_VALUES",
         ("authenticated_live", "static_curated"),
     )
     status = Hermes018Adapter(fake_host).install(adapter_service)
@@ -229,7 +229,7 @@ The JSON contract contains normalized callable structure rather than Python-vers
 ```json
 {
   "contract_version": 4,
-  "host_distribution": "hermes-agent",
+  "host_distribution": "hades-agent",
   "host_version": "0.18.2",
   "seams": [
     {"module": "run_agent", "qualname": "AIAgent.run_conversation", "group": "critical", "parameters": [["self","POSITIONAL_OR_KEYWORD",{"required":true}],["user_message","POSITIONAL_OR_KEYWORD",{"required":true}],["system_message","POSITIONAL_OR_KEYWORD",{"default":null}],["conversation_history","POSITIONAL_OR_KEYWORD",{"default":null}],["task_id","POSITIONAL_OR_KEYWORD",{"default":null}],["stream_callback","POSITIONAL_OR_KEYWORD",{"default":null}],["persist_user_message","POSITIONAL_OR_KEYWORD",{"default":null}],["persist_user_timestamp","POSITIONAL_OR_KEYWORD",{"default":null}],["moa_config","POSITIONAL_OR_KEYWORD",{"default":null}]]},
@@ -249,21 +249,21 @@ The JSON contract contains normalized callable structure rather than Python-vers
     {"module": "agent.plugin_llm", "qualname": "PluginLlm.complete_structured", "group": "critical", "match": "required_subset", "parameters": [["reasoning_config","KEYWORD_ONLY",{"default":null}]]},
     {"module": "agent.plugin_llm", "qualname": "PluginLlm.acomplete", "group": "critical", "match": "required_subset", "parameters": [["reasoning_config","KEYWORD_ONLY",{"default":null}]]},
     {"module": "agent.plugin_llm", "qualname": "PluginLlm.acomplete_structured", "group": "critical", "match": "required_subset", "parameters": [["reasoning_config","KEYWORD_ONLY",{"default":null}]]},
-    {"module": "hermes_cli.models", "qualname": "provider_model_discovery", "group": "critical", "match": "exact", "parameters": [["provider","POSITIONAL_OR_KEYWORD",{"required":true}],["force_refresh","KEYWORD_ONLY",{"default":false}],["resolver_name","KEYWORD_ONLY",{"default":null}]]},
-    {"module": "hermes_cli.inventory", "qualname": "build_models_payload", "group": "critical", "match": "required_subset", "parameters": [["ctx","POSITIONAL_OR_KEYWORD",{"required":true}],["picker_hints","KEYWORD_ONLY",{"default":false}],["pricing","KEYWORD_ONLY",{"default":false}],["capabilities","KEYWORD_ONLY",{"default":false}],["refresh","KEYWORD_ONLY",{"default":false}],["discovery_provenance","KEYWORD_ONLY",{"default":false}]]}
+    {"module": "hades_cli.models", "qualname": "provider_model_discovery", "group": "critical", "match": "exact", "parameters": [["provider","POSITIONAL_OR_KEYWORD",{"required":true}],["force_refresh","KEYWORD_ONLY",{"default":false}],["resolver_name","KEYWORD_ONLY",{"default":null}]]},
+    {"module": "hades_cli.inventory", "qualname": "build_models_payload", "group": "critical", "match": "required_subset", "parameters": [["ctx","POSITIONAL_OR_KEYWORD",{"required":true}],["picker_hints","KEYWORD_ONLY",{"default":false}],["pricing","KEYWORD_ONLY",{"default":false}],["capabilities","KEYWORD_ONLY",{"default":false}],["refresh","KEYWORD_ONLY",{"default":false}],["discovery_provenance","KEYWORD_ONLY",{"default":false}]]}
   ],
   "record_contracts": [
     {"module": "agent.runtime_intent", "qualname": "RuntimeIntent", "group": "critical", "dataclass_fields": ["source"], "dataclass_frozen": true, "constants": {"RUNTIME_INTENT_CONTRACT_VERSION": 1, "RUNTIME_INTENT_SOURCES": ["config_default","explicit_session","configured_scope","scheduled_pin","batch_pin","internal","auto_projection","unknown"]}},
     {"module": "agent.runtime_access", "qualname": "RuntimeAccessBinding", "group": "critical", "slots": ["provider","model","api_mode","endpoint_identity","auth_identity","credential_pool_identity","local_backend","_base_url","_api_key","_credential_pool","_sealed"], "constants": {"RUNTIME_ACCESS_BINDING_CONTRACT_VERSION": 1}},
     {"module": "agent.reasoning_support", "qualname": "ReasoningSupport", "group": "critical", "dataclass_fields": ["efforts","provider_aliases","provenance","exact"], "dataclass_frozen": true, "constants": {"REASONING_SUPPORT_CONTRACT_VERSION": 1}},
-    {"module": "hermes_cli.models", "qualname": "ProviderModelDiscovery", "group": "critical", "dataclass_fields": ["model_ids","model_provenance","provenance_details","live_attempt_status","observed_at","credential_fingerprint"], "dataclass_frozen": true, "constants": {"PROVIDER_MODEL_DISCOVERY_CONTRACT_VERSION": 1, "PROVIDER_MODEL_PROVENANCE_VALUES": ["authenticated_live","validated_contract","stale_live_cache","static_curated","configured_declared","current_offline_fallback"], "PROVIDER_MODEL_LIVE_ATTEMPT_STATUSES": ["not_attempted","succeeded","failed","probe_disabled"]}},
+    {"module": "hades_cli.models", "qualname": "ProviderModelDiscovery", "group": "critical", "dataclass_fields": ["model_ids","model_provenance","provenance_details","live_attempt_status","observed_at","credential_fingerprint"], "dataclass_frozen": true, "constants": {"PROVIDER_MODEL_DISCOVERY_CONTRACT_VERSION": 1, "PROVIDER_MODEL_PROVENANCE_VALUES": ["authenticated_live","validated_contract","stale_live_cache","static_curated","configured_declared","current_offline_fallback"], "PROVIDER_MODEL_LIVE_ATTEMPT_STATUSES": ["not_attempted","succeeded","failed","probe_disabled"]}},
     {"module": "agent.plugin_llm", "qualname": null, "group": "critical", "dataclass_fields": [], "constants": {"PLUGIN_LLM_REASONING_CONTRACT_VERSION": 1}},
     {"module": "agent.turn_finalizer", "qualname": null, "group": "evidence", "dataclass_fields": [], "constants": {"POST_LLM_CALL_PAYLOAD_VERSION": 2}, "required_set_members": {"POST_LLM_CALL_PAYLOAD_FIELDS": ["hook_payload_version","session_id","task_id","turn_id","model","provider","reasoning_config","outcome","outcome_reason","api_calls","tool_iterations","response_transformed"]}}
   ],
   "required_symbols": [
     "tools.delegate_tool.delegate_task",
     "agent.conversation_loop.build_turn_context",
-    "hermes_cli.inventory.load_picker_context"
+    "hades_cli.inventory.load_picker_context"
   ],
   "instance_attributes": [
     {"owner": "run_agent.AIAgent", "name": "_fallback_chain", "group": "fallback", "check": "on_live_instance"}
@@ -278,7 +278,7 @@ uv run python scripts/check_auto_routing_compat.py --emit-candidate plugins/auto
 git diff -- plugins/auto_routing/auto_routing/assets/contracts/hermes-0.18.2.json
 ```
 
-Expected: the script reads `hermes_cli.__version__`, resolves every declared
+Expected: the script reads `hades_cli.__version__`, resolves every declared
 seam/capability/record, serializes callable parameter name,
 `inspect.Parameter.kind.name`, tagged required/default semantics, ordered
 dataclass fields plus frozen status, ordered `__slots__`, literal version
@@ -530,7 +530,7 @@ Each ordered transform is a frozen record with `version`, `name`, `checksum`, `u
 
 1. after successful quiescence, write `maintenance.json` with state `in_progress`, old generation, target generation, operation, and precondition hash;
 2. checkpoint WAL with `PRAGMA wal_checkpoint(TRUNCATE)` after all local connections are closed;
-3. compute `timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")`, then use `sqlite3.Connection.backup()` into `get_hermes_home() / "auto-routing" / "backups" / f"{timestamp}-schema-v{current_version}" / "state.db"`;
+3. compute `timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")`, then use `sqlite3.Connection.backup()` into `get_hades_home() / "auto-routing" / "backups" / f"{timestamp}-schema-v{current_version}" / "state.db"`;
 4. copy config and write canonical `manifest.json` containing profile name, schema/authority/revision IDs, maintenance generation, sizes, and SHA-256 hashes;
 5. reopen and integrity-check the backup;
 6. run declarative `SCHEMA_SQL` and additive reconciliation, then execute each transform and verifier inside `BEGIN IMMEDIATE`;
@@ -726,7 +726,7 @@ def test_cross_profile_import_requires_explicit_flag(exchange_fixture) -> None:
         exchange_fixture.import_into_profile(bundle, profile_name="work")
 ```
 
-Define `exchange_fixture` in the test with two profile-local homes, sample decisions/evidence/revisions/lineage, a non-secret `auth_identity="oauth:default"`, sentinel raw content and exact fake credential values `sk-secret-canary-123` and `refresh-token-secret-456` in adjacent Hermes state, and an export path under the test temp directory. Runtime identity field names and non-secret credential-profile identities must survive; only secret material is forbidden.
+Define `exchange_fixture` in the test with two profile-local homes, sample decisions/evidence/revisions/lineage, a non-secret `auth_identity="oauth:default"`, sentinel raw content and exact fake credential values `sk-secret-canary-123` and `refresh-token-secret-456` in adjacent Hades state, and an export path under the test temp directory. Runtime identity field names and non-secret credential-profile identities must survive; only secret material is forbidden.
 
 - [ ] **Step 2: Run exchange tests and record RED**
 
@@ -917,7 +917,7 @@ def test_entry_point_registers_same_plugin_in_clean_process(installed_plugin_env
         "python",
         "-c",
         "from importlib.metadata import entry_points; "
-        "ep=next(e for e in entry_points(group='hermes_agent.plugins') if e.name=='auto-routing'); "
+        "ep=next(e for e in entry_points(group='hades_agent.plugins') if e.name=='auto-routing'); "
         "print(ep.load().__name__)",
     )
     assert result.stdout.strip() == "auto_routing.plugin"
@@ -946,7 +946,7 @@ def test_core_services_run_with_injected_standalone_host_ports(fake_host_ports) 
     assert fake_host_ports.process_liveness.checked_identities
 ```
 
-`built_plugin_wheel` runs `uv build plugins/auto_routing --wheel --out-dir TEMP_DIR`. `installed_plugin_env` creates a temporary venv with `system_site_packages=True`, installs only that wheel without dependencies, and executes the entry-point check. `scan_private_imports` is imported from the script module and must fail if any required core module is missing from its scan. `fake_host_ports` uses only temporary paths and recording fake liveness/quiescence ports; it provides no importable Hermes module and performs no network call. Extend the Task 2 maintenance fixture to build those same protocol-shaped path, liveness, and quiescence fakes so the extraction refactor cannot fall back to Hermes globals.
+`built_plugin_wheel` runs `uv build plugins/auto_routing --wheel --out-dir TEMP_DIR`. `installed_plugin_env` creates a temporary venv with `system_site_packages=True`, installs only that wheel without dependencies, and executes the entry-point check. `scan_private_imports` is imported from the script module and must fail if any required core module is missing from its scan. `fake_host_ports` uses only temporary paths and recording fake liveness/quiescence ports; it provides no importable Hermes module and performs no network call. Extend the Task 2 maintenance fixture to build those same protocol-shaped path, liveness, and quiescence fakes so the extraction refactor cannot fall back to Hades globals.
 
 - [ ] **Step 2: Run extraction tests and record RED**
 
@@ -961,9 +961,9 @@ Expected: failures report missing entry-point package/assets and boundary toolin
 
 - [ ] **Step 3: Consolidate registration and declare the standalone artifact**
 
-Before moving registration, add frozen protocols in `auto_routing/host.py` for profile/config paths, managed-config write authorization, executable inventory/runtime resolution, exact reasoning support, catalog sources, process-liveness checks, and process-local service quiescence/reopen. The quiescence port must return an opaque snapshot of the local stores and scheduler states it stopped; its reopen call consumes that snapshot plus the published generation, which keeps backup/maintenance core code independent of service implementation details. Refactor `config_io.py` to perform its own ruamel round-trip plus standard-library lock/temp-file/fsync/`os.replace` mechanics against injected paths/guard; refactor `storage.py` to own SQLite WAL fallback and additive-column logic; and inject profile paths and liveness/quiescence ports into `backup.py` and `maintenance.py`. Move Hermes/models.dev catalog source construction and every `hermes_constants`, `hermes_state`, `hermes_cli.*`, `agent.*`, `tools.*`, or `run_agent` import into `plugin.py` or `adapters/hermes_0_18.py`. Core `catalog.py` accepts `CatalogSource` protocols and core `service.py` accepts a complete `HostPorts`; neither discovers Hermes globals. The extraction acceptance test must traverse inventory/catalog, config, storage, backup creation, maintenance preview/apply, liveness, quiescence, and reopen through those ports, and the Task 2 multi-store/drain/scheduler tests remain green against the injected construction.
+Before moving registration, add frozen protocols in `auto_routing/host.py` for profile/config paths, managed-config write authorization, executable inventory/runtime resolution, exact reasoning support, catalog sources, process-liveness checks, and process-local service quiescence/reopen. The quiescence port must return an opaque snapshot of the local stores and scheduler states it stopped; its reopen call consumes that snapshot plus the published generation, which keeps backup/maintenance core code independent of service implementation details. Refactor `config_io.py` to perform its own ruamel round-trip plus standard-library lock/temp-file/fsync/`os.replace` mechanics against injected paths/guard; refactor `storage.py` to own SQLite WAL fallback and additive-column logic; and inject profile paths and liveness/quiescence ports into `backup.py` and `maintenance.py`. Move Hermes/models.dev catalog source construction and every `hermes_constants`, `hermes_state`, `hades_cli.*`, `agent.*`, `tools.*`, or `run_agent` import into `plugin.py` or `adapters/hermes_0_18.py`. Core `catalog.py` accepts `CatalogSource` protocols and core `service.py` accepts a complete `HostPorts`; neither discovers Hermes globals. The extraction acceptance test must traverse inventory/catalog, config, storage, backup creation, maintenance preview/apply, liveness, quiescence, and reopen through those ports, and the Task 2 multi-store/drain/scheduler tests remain green against the injected construction.
 
-Move all `register(ctx)` logic into `auto_routing/plugin.py`. It builds the Hermes 0.18.2 host ports/adapters and injects them into `AutoRoutingService`. Bundled `plugins/auto_routing/__init__.py` contains only:
+Move all `register(ctx)` logic into `auto_routing/plugin.py`. It builds the Hades 0.18.2 host ports/adapters and injects them into `AutoRoutingService`. Bundled `plugins/auto_routing/__init__.py` contains only:
 
 ```python
 from .auto_routing.plugin import register
@@ -981,7 +981,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-auto-routing"
 version = "0.1.0"
-description = "Cache-safe configurable Auto model routing for Hermes Agent"
+description = "Cache-safe configurable Auto model routing for Hades Agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "MIT"
@@ -993,7 +993,7 @@ dependencies = [
   "ruamel.yaml==0.18.17",
 ]
 
-[project.entry-points."hermes_agent.plugins"]
+[project.entry-points."hades_agent.plugins"]
 "auto-routing" = "auto_routing.plugin"
 
 [tool.setuptools.packages.find]
@@ -1192,7 +1192,7 @@ git commit -m "docs(auto-routing): complete hardening and extraction runbook"
 
 **Interfaces:**
 - Produces immutable `AUTO_ROUTING_BENCHMARK_SCHEMA = "hermes.auto-routing-benchmark.v1"`, `BenchmarkManifest`, `BenchmarkCase`, `BenchmarkRun`, `RoutingPolicyResult`, `SafetySliceResult`, and `compare_portfolio_gate()`.
-- Consumes the final `AutoRoutingService`, item #6-compatible hard-policy fixtures, item #12-compatible terminal outcome labels and independent scorers, recorded `RoutingDecision`/`EvidenceEvent` data, and the cache-lineage observations already exposed by the Hermes adapter.
+- Consumes the final `AutoRoutingService`, item #6-compatible hard-policy fixtures, item #12-compatible terminal outcome labels and independent scorers, recorded `RoutingDecision`/`EvidenceEvent` data, and the cache-lineage observations already exposed by the Hades adapter.
 - Adds no runtime hook, model-visible tool, paid probe, telemetry, or adaptive write path; the benchmark runner is an offline CLI/test surface and writes only content-redacted run artifacts beneath its explicit output directory.
 
 - [ ] **Step 1: Write RED manifest and denominator tests**
@@ -1258,7 +1258,7 @@ Run all four policies against the same frozen ordered cases, provider-response f
 
 - [ ] **Step 4: Prove policy, cache, and replay safety on the real composition path**
 
-Use a temporary `HERMES_HOME`, real plugin loading, real SQLite/WAL stores, real config compilation, and the Hermes adapter with only model/network responses substituted by frozen fixtures. Assert each candidate was eligible under item #6-compatible hard authority, every remote disclosure matched its residency label, each primary conversation retained one provider/model/runtime-access identity, auxiliary escalation preserved artifact hashes and lineage, and rerunning with the same seed produces byte-identical decisions and aggregate report. Fault runs cover interruption after decision persistence, missing usage, scorer crash, stale price/inventory hash, partial evidence, and adapter incompatibility; each must resume deterministically or fail the affected case closed.
+Use a temporary `HADES_HOME`, real plugin loading, real SQLite/WAL stores, real config compilation, and the Hades adapter with only model/network responses substituted by frozen fixtures. Assert each candidate was eligible under item #6-compatible hard authority, every remote disclosure matched its residency label, each primary conversation retained one provider/model/runtime-access identity, auxiliary escalation preserved artifact hashes and lineage, and rerunning with the same seed produces byte-identical decisions and aggregate report. Fault runs cover interruption after decision persistence, missing usage, scorer crash, stale price/inventory hash, partial evidence, and adapter incompatibility; each must resume deterministically or fail the affected case closed.
 
 - [ ] **Step 5: Run GREEN and the complete portfolio gate**
 

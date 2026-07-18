@@ -1,7 +1,7 @@
 """Tests for PluginContext.register_transcription_provider().
 
 Exercises the plugin context hook end-to-end: drops a fake plugin into
-``$HERMES_HOME/plugins/``, runs ``PluginManager().discover_and_load()``,
+``$HADES_HOME/plugins/``, runs ``PluginManager().discover_and_load()``,
 and asserts the registration result.
 
 Mirrors the shape of ``test_plugins_tts_registration.py`` (companion
@@ -57,12 +57,12 @@ def _enable(hermes_home: Path, name: str) -> None:
 
 class TestRegisterTranscriptionProvider:
     def test_accepts_valid_provider(self):
-        from hermes_cli.plugins import PluginManager
+        from hades_cli.plugins import PluginManager
 
         from agent import transcription_registry
         transcription_registry._reset_for_tests()
 
-        hermes_home = Path(os.environ["HERMES_HOME"])
+        hermes_home = Path(os.environ["HADES_HOME"])
         _write_plugin(
             hermes_home / "plugins",
             "my-stt-plugin",
@@ -89,12 +89,12 @@ class TestRegisterTranscriptionProvider:
         transcription_registry._reset_for_tests()
 
     def test_rejects_non_provider(self, caplog):
-        from hermes_cli.plugins import PluginManager
+        from hades_cli.plugins import PluginManager
 
         from agent import transcription_registry
         transcription_registry._reset_for_tests()
 
-        hermes_home = Path(os.environ["HERMES_HOME"])
+        hermes_home = Path(os.environ["HADES_HOME"])
         _write_plugin(
             hermes_home / "plugins",
             "bad-stt-plugin",
@@ -114,12 +114,12 @@ class TestRegisterTranscriptionProvider:
         transcription_registry._reset_for_tests()
 
     def test_rejects_builtin_shadow(self, caplog):
-        from hermes_cli.plugins import PluginManager
+        from hades_cli.plugins import PluginManager
 
         from agent import transcription_registry
         transcription_registry._reset_for_tests()
 
-        hermes_home = Path(os.environ["HERMES_HOME"])
+        hermes_home = Path(os.environ["HADES_HOME"])
         _write_plugin(
             hermes_home / "plugins",
             "shadow-stt-plugin",

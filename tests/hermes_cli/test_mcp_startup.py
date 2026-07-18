@@ -12,8 +12,8 @@ import types
 import pytest
 
 import cli as cli_mod
-from hermes_cli import main as main_mod
-from hermes_cli import mcp_startup
+from hades_cli import main as main_mod
+from hades_cli import mcp_startup
 
 
 @pytest.fixture(autouse=True)
@@ -55,12 +55,12 @@ def test_prepare_agent_startup_backgrounds_blocking_mcp_for_chat(monkeypatch):
 
     monkeypatch.setitem(
         sys.modules,
-        "hermes_cli.plugins",
+        "hades_cli.plugins",
         types.SimpleNamespace(discover_plugins=lambda: None),
     )
     monkeypatch.setitem(
         sys.modules,
-        "hermes_cli.config",
+        "hades_cli.config",
         types.SimpleNamespace(
             read_raw_config=lambda: {"mcp_servers": {"demo": {"transport": "stdio"}}},
             load_config=lambda: {},
@@ -117,7 +117,7 @@ def test_background_mcp_discovery_suppresses_interactive_oauth(monkeypatch):
 
     monkeypatch.setitem(
         sys.modules,
-        "hermes_cli.config",
+        "hades_cli.config",
         types.SimpleNamespace(
             read_raw_config=lambda: {"mcp_servers": {"demo": {"url": "https://mcp.example.test/mcp"}}},
         ),
@@ -151,12 +151,12 @@ def test_prepare_agent_startup_skips_mcp_bootstrap_for_tui_chat(monkeypatch):
 
     monkeypatch.setitem(
         sys.modules,
-        "hermes_cli.plugins",
+        "hades_cli.plugins",
         types.SimpleNamespace(discover_plugins=lambda: None),
     )
     monkeypatch.setitem(
         sys.modules,
-        "hermes_cli.config",
+        "hades_cli.config",
         types.SimpleNamespace(load_config=lambda: {}),
     )
     monkeypatch.setitem(

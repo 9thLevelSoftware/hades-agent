@@ -253,7 +253,7 @@ from agent.reliability_report import (
     ScenarioResult as AgentScenarioResult,
     summarize_scenarios,
 )
-from hermes_state import SessionDB
+from hades_state import SessionDB
 
 
 # ── shared local helpers (matrix-only) ──────────────────────────────────────

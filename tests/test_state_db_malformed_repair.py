@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-import hermes_state
-from hermes_state import (
+import hades_state
+from hades_state import (
     SessionDB,
     is_malformed_db_error,
     repair_state_db_schema,
@@ -129,7 +129,7 @@ def test_auto_heal_attempted_once_per_process(tmp_path, monkeypatch):
     monkeypatch.setattr(hermes_state, "_repair_attempted_paths", set())
 
     calls = {"n": 0}
-    real_repair = hermes_state.repair_state_db_schema
+    real_repair = hades_state.repair_state_db_schema
 
     def fake_repair(path, **kw):
         calls["n"] += 1
@@ -172,7 +172,7 @@ def test_strategy_b_rebuild_when_dedup_insufficient(tmp_path, monkeypatch):
     # + VACUUM) and runs its real SQL against the file. Keyed on whether the FTS
     # schema is still present rather than a call counter, so it stays correct as
     # earlier verification call sites are added/removed.
-    real_check = hermes_state._db_opens_cleanly
+    real_check = hades_state._db_opens_cleanly
     calls = {"n": 0}
 
     def flaky_check(path):
@@ -230,7 +230,7 @@ def test_non_malformed_error_is_not_auto_repaired(tmp_path, monkeypatch):
     monkeypatch.setattr(hermes_state, "_repair_attempted_paths", set())
 
     called = {"n": 0}
-    orig = hermes_state.repair_state_db_schema
+    orig = hades_state.repair_state_db_schema
 
     def spy(*a, **kw):
         called["n"] += 1
@@ -277,7 +277,7 @@ def _corrupt_fts_index_data(db_path: Path) -> None:
 
 def test_fts_write_corruption_detected_by_write_probe(tmp_path):
     """_db_opens_cleanly's rolled-back write probe flags FTS write corruption."""
-    from hermes_state import _db_opens_cleanly
+    from hades_state import _db_opens_cleanly
 
     db_path = tmp_path / "state.db"
     _build_healthy_db(db_path)
@@ -298,7 +298,7 @@ def test_fts_write_corruption_detected_by_write_probe(tmp_path):
 
 def test_fts_write_corruption_repaired_in_place(tmp_path):
     """repair_state_db_schema rebuilds the FTS index; reads + writes resume."""
-    from hermes_state import _db_opens_cleanly
+    from hades_state import _db_opens_cleanly
 
     db_path = tmp_path / "state.db"
     _build_healthy_db(db_path)

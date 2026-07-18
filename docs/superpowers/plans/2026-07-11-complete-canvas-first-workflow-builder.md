@@ -6,11 +6,11 @@
 
 **Architecture:** Preserve the existing Hermes dashboard shell, workflow backend, AI Draft/Refine pipeline, `@xyflow/react` renderer, and active-draft state flow. Recompose the page content through the existing modular dashboard files: `app.js` remains state owner/orchestrator, while `palette.js`, `inspector.js`, `canvas-nodes.js`, `topbar.js`, and `panels.js` own focused render surfaces. Use native HTML5 drag events plus React Flow’s `screenToFlowPosition()`—no additional drag/drop or graph dependency is required.
 
-**Tech Stack:** JavaScript IIFE dashboard plugin, React runtime supplied by the Hermes dashboard SDK, `@xyflow/react`, native HTML5 drag/drop, CSS Grid/Flexbox, Vitest, pytest dashboard asset/build/plugin tests.
+**Tech Stack:** JavaScript IIFE dashboard plugin, React runtime supplied by the Hades dashboard SDK, `@xyflow/react`, native HTML5 drag/drop, CSS Grid/Flexbox, Vitest, pytest dashboard asset/build/plugin tests.
 
 ## Global Constraints
 
-- Modify only Workflows page content; retain the Hermes global dashboard navigation.
+- Modify only Workflows page content; retain the Hades global dashboard navigation.
 - Preserve prompt-first Draft/Refine creation; YAML/JSON remains an optional advanced escape hatch.
 - Preserve workflow spec/runtime/deploy semantics; frontend work must not silently alter dispatcher behavior.
 - Reuse installed `@xyflow/react` and native `DragEvent`/`DataTransfer`; do **not** add another drag/drop, graph, CSS, or component framework.

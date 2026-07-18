@@ -27,7 +27,7 @@ from agent.credential_pool import (
     CredentialPool,
     PooledCredential,
 )
-from hermes_cli import auth as A
+from hades_cli import auth as A
 
 
 def _write_store(path, store):

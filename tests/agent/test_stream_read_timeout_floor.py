@@ -35,7 +35,7 @@ def _resolve_stale_timeout(base_url, est_tokens, stale_base=180.0):
 
 def _resolve_read_timeout(base_url, stale_timeout, base_timeout=1800.0):
     """Mirror of the httpx socket read-timeout builder (cloud branch)."""
-    read_timeout = float(os.getenv("HERMES_STREAM_READ_TIMEOUT", 120.0))
+    read_timeout = float(os.getenv("HADES_STREAM_READ_TIMEOUT", 120.0))
     if read_timeout == 120.0 and base_url and is_local_endpoint(base_url):
         read_timeout = base_timeout
     elif (

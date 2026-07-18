@@ -56,7 +56,7 @@ def test_entrypoint_is_init_not_tini(built_image: str) -> None:
     assert "/init" in entrypoint, (
         f"ENTRYPOINT is not /init: {entrypoint!r}"
     )
-    # The entrypoint array should be ["/init", "/opt/hermes/docker/main-wrapper.sh"]
+    # The entrypoint array should be ["/init", "/opt/hades/docker/main-wrapper.sh"]
     # /usr/bin/tini should NOT be in the entrypoint.
     assert "tini" not in entrypoint.lower(), (
         f"ENTRYPOINT references tini instead of /init: {entrypoint!r}"

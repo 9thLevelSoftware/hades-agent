@@ -1,4 +1,4 @@
-"""ACP permission bridging for Hermes dangerous-command approvals."""
+"""ACP permission bridging for Hades dangerous-command approvals."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from acp.schema import (
 
 logger = logging.getLogger(__name__)
 
-# Maps ACP permission option ids to Hermes approval result strings.
+# Maps ACP permission option ids to Hades approval result strings.
 # Option ids are stable across both the ``allow_permanent=True`` and
 # ``allow_permanent=False`` paths even though the option list differs.
 _OPTION_ID_TO_HERMES = {
@@ -96,7 +96,7 @@ def _build_permission_tool_call(command: str, description: str):
 
 
 def _map_outcome_to_hermes(outcome: object, *, allowed_option_ids: set[str]) -> str:
-    """Map an ACP permission outcome into Hermes approval strings."""
+    """Map an ACP permission outcome into Hades approval strings."""
     if not isinstance(outcome, AllowedOutcome):
         return "deny"
 

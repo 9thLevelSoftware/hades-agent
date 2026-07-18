@@ -402,7 +402,7 @@ def test_nested_project_folders_pick_the_deepest_match():
 
 
 def test_junk_root_never_becomes_an_auto_project():
-    # A session whose git root is HERMES_HOME (config/state) must not spawn a
+    # A session whose git root is HADES_HOME (config/state) must not spawn a
     # phantom project; it falls through to flat Recents (unscoped). A real repo
     # alongside it still groups normally.
     resolve = _resolver(
@@ -424,7 +424,7 @@ def test_junk_root_never_becomes_an_auto_project():
 
 
 def test_junk_root_is_dropped_from_the_discovered_tier():
-    discovered = [{"root": "/home/me/.hermes", "label": ".hermes", "sessions": 0, "last_active": 9}]
+    discovered = [{"root": "/home/me/.hermes", "label": ".hades", "sessions": 0, "last_active": 9}]
 
     tree = pt.build_tree([], [], discovered, resolve=None, is_junk_root=lambda r: r == "/home/me/.hermes")
 

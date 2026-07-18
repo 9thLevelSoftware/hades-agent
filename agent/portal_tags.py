@@ -3,7 +3,7 @@
 Every Hermes request that hits the Nous Portal — main agent loop, auxiliary
 client (compression / titles / vision / web_extract / session_search / etc.),
 and any future code path — must carry the same product-attribution tags so
-Nous can attribute usage to Hermes Agent and bucket it by client release.
+Nous can attribute usage to Hades Agent and bucket it by client release.
 
 Tag shape (sent in OpenAI-compatible ``extra_body['tags']``):
 
@@ -12,7 +12,7 @@ Tag shape (sent in OpenAI-compatible ``extra_body['tags']``):
         "client=hermes-client-v<__version__>",
     ]
 
-The version is sourced live from ``hermes_cli.__version__`` so it auto-aligns
+The version is sourced live from ``hades_cli.__version__`` so it auto-aligns
 to whatever release is installed; the release script
 (``scripts/release.py``) regex-bumps that single string, and every Portal
 request picks up the new tag on the next process start.
@@ -26,7 +26,7 @@ Why one helper instead of inlining the literal at each site:
 
 Do NOT pre-compute these as module-level constants in the consumers. The
 version can change at runtime (editable installs, hot-reload tooling), and
-``hermes_cli.__version__`` is the canonical source of truth.
+``hades_cli.__version__`` is the canonical source of truth.
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def _hermes_version() -> str:
     never happen in a real install — guarded for defensive testing).
     """
     try:
-        from hermes_cli import __version__
+        from hades_cli import __version__
         return __version__
     except Exception:
         return "unknown"
@@ -108,7 +108,7 @@ def conversation_tag(session_id: str) -> str:
 
     Format: ``conversation=<session_id>``. ``session_id`` is the canonical
     Hermes conversation identifier (``AIAgent.session_id``) — the same value
-    used for ``~/.hermes/sessions/`` storage, session logs, and lineage.
+    used for ``~/.hades/sessions/`` storage, session logs, and lineage.
 
     Unlike the product/client tags this is high-cardinality (one value per
     conversation), so it is only appended when a session id is actually

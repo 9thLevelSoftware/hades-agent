@@ -6,13 +6,13 @@ description: "会话持久化、恢复、搜索、管理及各平台会话跟踪
 
 # Sessions（会话）
 
-Hermes Agent 自动将每次对话保存为一个 session。Session 支持对话恢复、跨 session 搜索以及完整的对话历史管理。
+Hades Agent 自动将每次对话保存为一个 session。Session 支持对话恢复、跨 session 搜索以及完整的对话历史管理。
 
 ## Session 的工作原理
 
 每次对话——无论来自 CLI、Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Teams 还是其他任何消息平台——都会以完整消息历史的形式存储为一个 session。Session 记录在：
 
-1. **SQLite 数据库**（`~/.hermes/state.db`）——包含 FTS5 全文搜索的结构化 session 元数据，以及完整消息历史
+1. **SQLite 数据库**（`~/.hades/state.db`）——包含 FTS5 全文搜索的结构化 session 元数据，以及完整消息历史
 
 SQLite 数据库存储：
 - Session ID、来源平台、用户 ID
@@ -134,7 +134,7 @@ Session ID 在退出 CLI session 时显示，也可通过 `hermes sessions list`
 - **最多**显示最近 10 轮，并以"... N earlier messages ..."指示器标注
 - 使用**暗色样式**与活跃对话区分
 
-要禁用摘要并保留最简单的单行行为，在 `~/.hermes/config.yaml` 中设置：
+要禁用摘要并保留最简单的单行行为，在 `~/.hades/config.yaml` 中设置：
 
 ```yaml
 display:
@@ -347,7 +347,7 @@ Trace 导出默认强制脱敏（它们本来就是要离开本机的）；`--no
 
 #### Markdown / QMD
 
-当你想在隐藏或删除旧 session 之前保留一份可读的文件归档时，传入 `--format md` 或 `--format qmd`。Markdown/QMD 导出会为每个 session 写入一个文件到目录中（默认：`~/.hermes/session-exports`）。
+当你想在隐藏或删除旧 session 之前保留一份可读的文件归档时，传入 `--format md` 或 `--format qmd`。Markdown/QMD 导出会为每个 session 写入一个文件到目录中（默认：`~/.hades/session-exports`）。
 
 ```bash
 # 将单个 session 导出为 Markdown
@@ -552,14 +552,14 @@ group_sessions_per_user: false
 
 | 内容 | 路径 | 描述 |
 |------|------|-------------|
-| SQLite 数据库 | `~/.hermes/state.db` | 所有 session 元数据 + 带 FTS5 的消息 |
-| Gateway 消息 | `~/.hermes/state.db` | SQLite——所有 session 消息的权威存储 |
-| Gateway 路由索引 | `~/.hermes/sessions/sessions.json` | 将 session 键映射到活跃 session ID（来源元数据、过期标志） |
+| SQLite 数据库 | `~/.hades/state.db` | 所有 session 元数据 + 带 FTS5 的消息 |
+| Gateway 消息 | `~/.hades/state.db` | SQLite——所有 session 消息的权威存储 |
+| Gateway 路由索引 | `~/.hades/sessions/sessions.json` | 将 session 键映射到活跃 session ID（来源元数据、过期标志） |
 
 SQLite 数据库使用 WAL 模式支持并发读取和单写入，非常适合 gateway 的多平台架构。
 
 :::note 遗留 JSONL 对话记录
-在 state.db 成为权威存储之前创建的 session 可能在 `~/.hermes/sessions/` 中留有
+在 state.db 成为权威存储之前创建的 session 可能在 `~/.hades/sessions/` 中留有
 `*.jsonl` 文件。Hermes 不再写入或读取这些文件。在确认对应 session 存在于
 state.db 后可安全删除。
 :::
@@ -580,9 +580,9 @@ state.db 后可安全删除。
 - 重置前，agent 保存即将过期 session 中的记忆和技能
 - 可选自动清理：当 `sessions.auto_prune` 为 `true` 时，在 CLI/gateway 启动时清理早于 `sessions.retention_days`（默认 90）天的已结束 session
 - 实际删除了行的清理操作完成后，`state.db` 会执行 `VACUUM` 以回收磁盘空间（SQLite 在普通 DELETE 后不会缩小文件）
-- 清理最多每 `sessions.min_interval_hours`（默认 24）小时运行一次；上次运行时间戳记录在 `state.db` 内部，因此在同一 `HERMES_HOME` 下的所有 Hermes 进程间共享
+- 清理最多每 `sessions.min_interval_hours`（默认 24）小时运行一次；上次运行时间戳记录在 `state.db` 内部，因此在同一 `HADES_HOME` 下的所有 Hermes 进程间共享
 
-默认为**关闭**——session 历史对 `session_search` 召回很有价值，静默删除可能会让用户感到意外。在 `~/.hermes/config.yaml` 中启用：
+默认为**关闭**——session 历史对 `session_search` 召回很有价值，静默删除可能会让用户感到意外。在 `~/.hades/config.yaml` 中启用：
 
 ```yaml
 sessions:

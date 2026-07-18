@@ -9,7 +9,7 @@ Defines the pluggable-backend interface for cloud browser providers
 ``browser_*`` tool call.
 
 Providers live in ``<repo>/plugins/browser/<name>/`` (built-in, auto-loaded as
-``kind: backend``) or ``~/.hermes/plugins/browser/<name>/`` (user, opt-in via
+``kind: backend``) or ``~/.hades/plugins/browser/<name>/`` (user, opt-in via
 ``plugins.enabled``).
 
 This ABC mirrors :class:`agent.web_search_provider.WebSearchProvider` (PR
@@ -127,7 +127,7 @@ class BrowserProvider(abc.ABC):
     def get_setup_schema(self) -> Dict[str, Any]:
         """Return provider metadata for the ``hermes tools`` picker.
 
-        Used by :mod:`hermes_cli.tools_config` to inject this provider as a
+        Used by :mod:`hades_cli.tools_config` to inject this provider as a
         row in the Browser Automation picker. Shape mirrors the existing
         hardcoded entries in ``TOOL_CATEGORIES["browser"]``::
 

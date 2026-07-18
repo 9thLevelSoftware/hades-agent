@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # tools/environments/base.py.  Enables per-call logging of set/check so the
 # caller thread, target thread, and current state are visible when
 # diagnosing "interrupt signaled but tool never saw it" reports.
-_DEBUG_INTERRUPT = bool(os.getenv("HERMES_DEBUG_INTERRUPT"))
+_DEBUG_INTERRUPT = bool(os.getenv("HADES_DEBUG_INTERRUPT"))
 
 if _DEBUG_INTERRUPT:
     # AIAgent's quiet_mode path forces `tools` logger to ERROR on CLI startup.

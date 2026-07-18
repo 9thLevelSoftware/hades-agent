@@ -5,7 +5,7 @@ Authentication
 --------------
 The tool registers when **either** xAI credential path is available:
 
-* ``XAI_API_KEY`` is set in ``~/.hermes/.env`` or the process environment
+* ``XAI_API_KEY`` is set in ``~/.hades/.env`` or the process environment
   (paid xAI API key), OR
 * The user is signed in via xAI Grok OAuth — SuperGrok subscription —
   i.e. ``hermes auth add xai-oauth`` has been run and the stored refresh
@@ -68,7 +68,7 @@ MAX_HANDLES = 10
 
 def _load_x_search_config() -> Dict[str, Any]:
     try:
-        from hermes_cli.config import load_config
+        from hades_cli.config import load_config
 
         return load_config().get("x_search", {}) or {}
     except Exception:
@@ -128,7 +128,7 @@ def check_x_search_requirements() -> bool:
     """Return True when xAI credentials are available AND valid.
 
     ``resolve_xai_http_credentials`` calls
-    :func:`hermes_cli.auth.resolve_xai_oauth_runtime_credentials` which
+    :func:`hades_cli.auth.resolve_xai_oauth_runtime_credentials` which
     auto-refreshes the OAuth access token if it's expiring; a successful
     return therefore implies a usable bearer.
     """

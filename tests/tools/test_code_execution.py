@@ -244,15 +244,15 @@ class TestCodeModeDispatchIntegration:
                 return kwargs["next_call"]({**kwargs["args"], "execution_rewritten": True})
 
             manager = SimpleNamespace(_middleware={"tool_execution": [execution_middleware]})
-            monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
-            monkeypatch.setattr("hermes_cli.plugins.invoke_middleware", request_middleware)
+            monkeypatch.setattr("hades_cli.plugins.get_plugin_manager", lambda: manager)
+            monkeypatch.setattr("hades_cli.plugins.invoke_middleware", request_middleware)
             monkeypatch.setattr(
-                "hermes_cli.plugins.has_middleware",
+                "hades_cli.plugins.has_middleware",
                 lambda kind: kind in {"tool_request", "tool_execution"},
             )
-            monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _name: True)
+            monkeypatch.setattr("hades_cli.plugins.has_hook", lambda _name: True)
             monkeypatch.setattr(
-                "hermes_cli.plugins.invoke_hook",
+                "hades_cli.plugins.invoke_hook",
                 lambda hook_name, **kwargs: seen["hooks"].append((hook_name, kwargs)) or [],
             )
 
@@ -342,7 +342,7 @@ print(json.dumps([
         )
         try:
             monkeypatch.setattr(
-                "hermes_cli.plugins.get_plugin_manager",
+                "hades_cli.plugins.get_plugin_manager",
                 lambda: SimpleNamespace(_middleware={}),
             )
             context = CodeExecutionContext(
@@ -415,12 +415,12 @@ print(json.dumps([
                 return kwargs["next_call"](kwargs["args"])
 
             monkeypatch.setattr(
-                "hermes_cli.plugins.get_plugin_manager",
+                "hades_cli.plugins.get_plugin_manager",
                 lambda: SimpleNamespace(_middleware={"tool_execution": [execution_middleware]}),
             )
-            monkeypatch.setattr("hermes_cli.plugins.invoke_middleware", request_middleware)
-            monkeypatch.setattr("hermes_cli.plugins.has_middleware", lambda kind: kind == "tool_request")
-            monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda _name: False)
+            monkeypatch.setattr("hades_cli.plugins.invoke_middleware", request_middleware)
+            monkeypatch.setattr("hades_cli.plugins.has_middleware", lambda kind: kind == "tool_request")
+            monkeypatch.setattr("hades_cli.plugins.has_hook", lambda _name: False)
             dispatch_seen = []
 
             def recording_dispatch(function_name, function_args, **kwargs):
@@ -478,7 +478,7 @@ print(json.dumps([
         )
         try:
             monkeypatch.setattr(
-                "hermes_cli.plugins.get_plugin_manager",
+                "hades_cli.plugins.get_plugin_manager",
                 lambda: SimpleNamespace(_middleware={}),
             )
             context = CodeExecutionContext(
@@ -753,7 +753,7 @@ class TestHermesToolsGeneration(unittest.TestCase):
         src = generate_hermes_tools_module(["terminal"], transport="file")
         self.assertIn("import json, os, shlex, tempfile, threading, time", src)
         self.assertIn("os.path.join(tempfile.gettempdir(), \"hermes_rpc\")", src)
-        self.assertNotIn('os.environ.get("HERMES_RPC_DIR", "/tmp/hermes_rpc")', src)
+        self.assertNotIn('os.environ.get("HADES_RPC_DIR", "/tmp/hermes_rpc")', src)
 
     def test_uds_transport_serializes_concurrent_calls(self):
         """Regression: UDS _call() must hold a lock across send+recv so that
@@ -782,7 +782,7 @@ class TestHermesToolsGeneration(unittest.TestCase):
 
         context = CodeExecutionContext("task", "session", ("terminal",), ())
         with patch(
-            "hermes_cli.plugins.get_plugin_manager",
+            "hades_cli.plugins.get_plugin_manager",
             return_value=SimpleNamespace(_middleware={"tool_execution": [object()]}),
         ), patch("model_tools.get_tool_definitions",
                    return_value=[{"function": {"name": "terminal"}}]), \
@@ -934,7 +934,7 @@ class TestExecuteCode(unittest.TestCase):
             ]},
         )
         with (
-            patch("hermes_cli.plugins.get_plugin_manager", return_value=execution_manager),
+            patch("hades_cli.plugins.get_plugin_manager", return_value=execution_manager),
             patch("model_tools.handle_function_call", side_effect=_mock_handle_function_call),
         ):
             result = execute_code(
@@ -963,9 +963,9 @@ class TestExecuteCode(unittest.TestCase):
 
     def test_repo_root_modules_are_importable(self):
         """Sandboxed scripts can import modules that live at the repo root."""
-        result = self._run('import hermes_constants; print(hermes_constants.__file__)')
+        result = self._run('import hades_constants; print(hades_constants.__file__)')
         self.assertEqual(result["status"], "success")
-        self.assertIn("hermes_constants.py", result["output"])
+        self.assertIn("hades_constants.py", result["output"])
 
     def test_single_tool_call(self):
         """Script calls terminal and prints the result."""
@@ -1058,7 +1058,7 @@ else:
             ]},
         )
         with (
-            patch("hermes_cli.plugins.get_plugin_manager", return_value=execution_manager),
+            patch("hades_cli.plugins.get_plugin_manager", return_value=execution_manager),
             patch("model_tools.handle_function_call", side_effect=slow_mock),
         ):
             raw = execute_code(
@@ -1519,7 +1519,7 @@ class TestEnvVarFiltering(unittest.TestCase):
     def test_timezone_injected_when_set(self):
         env_backup = os.environ.copy()
         try:
-            os.environ["HERMES_TIMEZONE"] = "America/New_York"
+            os.environ["HADES_TIMEZONE"] = "America/New_York"
             child_env = self._get_child_env()
             self.assertEqual(child_env.get("TZ"), "America/New_York")
         finally:
@@ -1706,7 +1706,7 @@ class TestLoadConfig(unittest.TestCase):
 
     def test_returns_code_execution_section(self):
         from tools.code_execution_tool import _load_config
-        with patch("hermes_cli.config.read_raw_config",
+        with patch("hades_cli.config.read_raw_config",
                    return_value={"code_execution": {"timeout": 120, "max_tool_calls": 10}}):
             result = _load_config()
         self.assertEqual(result, {"timeout": 120, "max_tool_calls": 10})
@@ -1716,7 +1716,7 @@ class TestLoadConfig(unittest.TestCase):
         mock_cli = MagicMock()
         mock_cli.CLI_CONFIG = {"code_execution": {"timeout": 999}}
         with patch.dict("sys.modules", {"cli": mock_cli}), \
-             patch("hermes_cli.config.read_raw_config", return_value={}):
+             patch("hades_cli.config.read_raw_config", return_value={}):
             result = _load_config()
         self.assertEqual(result, {})
 
@@ -1771,7 +1771,7 @@ def test_temp_home_config_controls_output_limit_and_artifact_directory():
                 "artifact_dir": str(artifact_dir),
             },
         }), encoding="utf-8")
-        with patch.dict(os.environ, {"HERMES_HOME": home}, clear=False):
+        with patch.dict(os.environ, {"HADES_HOME": home}, clear=False):
             os.environ.pop("HERMES_CONFIG", None)
             with patch("model_tools.handle_function_call", side_effect=_mock_handle_function_call):
                 result = json.loads(execute_code(
@@ -1932,7 +1932,7 @@ class TestRpcTokenAuthorization(unittest.TestCase):
         def _run():
             with (
                 patch(
-                    "hermes_cli.plugins.get_plugin_manager",
+                    "hades_cli.plugins.get_plugin_manager",
                     return_value=SimpleNamespace(_middleware={"tool_execution": [object()]}),
                 ),
                 patch(
@@ -2068,7 +2068,7 @@ def test_execute_code_returns_structured_image_for_local_path(tmp_path):
 def test_execute_code_collects_generated_image_artifact():
     result = json.loads(execute_code(
         "import os\nfrom pathlib import Path\n"
-        "p = Path(os.environ['HERMES_ARTIFACTS_DIR']) / 'chart.png'\n"
+        "p = Path(os.environ['HADES_ARTIFACTS_DIR']) / 'chart.png'\n"
         "p.write_bytes(b'PNG')\nprint(p)",
         task_id="structured-generated-image",
     ))
@@ -2149,7 +2149,7 @@ import json
 import os
 from pathlib import Path
 from hermes_tools import save_artifact
-source = Path(os.environ['HERMES_ARTIFACTS_DIR']) / 'report.txt'
+source = Path(os.environ['HADES_ARTIFACTS_DIR']) / 'report.txt'
 source.write_text('artifact output', encoding='utf-8')
 print(json.dumps(save_artifact(str(source))))
 """,
@@ -2193,7 +2193,7 @@ import json
 import os
 from pathlib import Path
 from hermes_tools import save_artifact
-link = Path(os.environ['HERMES_ARTIFACTS_DIR']) / 'escape.txt'
+link = Path(os.environ['HADES_ARTIFACTS_DIR']) / 'escape.txt'
 link.symlink_to('/etc/hosts')
 print(json.dumps(save_artifact(str(link))))
 """,

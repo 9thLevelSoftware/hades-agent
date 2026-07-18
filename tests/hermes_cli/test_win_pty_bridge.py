@@ -1,4 +1,4 @@
-"""Unit tests for hermes_cli.win_pty_bridge — ConPTY spawning + byte forwarding.
+"""Unit tests for hades_cli.win_pty_bridge — ConPTY spawning + byte forwarding.
 
 Windows-only counterpart to tests/hermes_cli/test_pty_bridge.py.  Drives
 ``WinPtyBridge`` with minimal Windows processes (``cmd.exe``, ``python -c …``)
@@ -23,7 +23,7 @@ import pytest
 # WinPtyBridge can be imported on every platform — ``is_available`` just
 # returns False when pywinpty isn't usable.  Importing the module itself
 # must never raise, otherwise the web_server import branch becomes a trap.
-from hermes_cli.win_pty_bridge import PtyUnavailableError, WinPtyBridge
+from hades_cli.win_pty_bridge import PtyUnavailableError, WinPtyBridge
 
 windows_only = pytest.mark.skipif(
     not sys.platform.startswith("win"),
@@ -64,7 +64,7 @@ class TestWinPtyBridgeUnavailable:
 
     def test_bridge_class_is_importable(self):
         # The platform-branched import in web_server.py relies on this:
-        #     from hermes_cli.win_pty_bridge import WinPtyBridge, PtyUnavailableError
+        #     from hades_cli.win_pty_bridge import WinPtyBridge, PtyUnavailableError
         # Both symbols must always exist; ``is_available()`` is the gate.
         assert WinPtyBridge is not None
         assert callable(WinPtyBridge.is_available)
@@ -201,25 +201,25 @@ class TestClampDimension:
     setwinsize will happily raise on out-of-range u16 values."""
 
     def test_clamps_above_max(self):
-        from hermes_cli.win_pty_bridge import _MAX_COLS, _MAX_ROWS, _clamp
+        from hades_cli.win_pty_bridge import _MAX_COLS, _MAX_ROWS, _clamp
 
         assert _clamp(131072, _MAX_COLS) == _MAX_COLS
         assert _clamp(131072, _MAX_ROWS) == _MAX_ROWS
 
     def test_floors_at_one(self):
-        from hermes_cli.win_pty_bridge import _MAX_COLS, _clamp
+        from hades_cli.win_pty_bridge import _MAX_COLS, _clamp
 
         assert _clamp(0, _MAX_COLS) == 1
         assert _clamp(-5, _MAX_COLS) == 1
 
     def test_passes_through_sane_values(self):
-        from hermes_cli.win_pty_bridge import _MAX_COLS, _clamp
+        from hades_cli.win_pty_bridge import _MAX_COLS, _clamp
 
         assert _clamp(80, _MAX_COLS) == 80
         assert _clamp(2000, _MAX_COLS) == 2000
 
     def test_non_numeric_falls_back_to_min(self):
-        from hermes_cli.win_pty_bridge import _MAX_COLS, _clamp
+        from hades_cli.win_pty_bridge import _MAX_COLS, _clamp
 
         assert _clamp(None, _MAX_COLS) == 1  # type: ignore[arg-type]
         assert _clamp("not-a-number", _MAX_COLS) == 1  # type: ignore[arg-type]
@@ -286,7 +286,7 @@ class TestWinPtyBridgeEnv:
             [
                 sys.executable,
                 "-c",
-                "import os; print('HERMES_PTY_TEST=' + os.environ.get('HERMES_PTY_TEST',''))",
+                "import os; print('HERMES_PTY_TEST=' + os.environ.get('HADES_PTY_TEST',''))",
             ],
             env={**os.environ, "HERMES_PTY_TEST": "pty-env-works"},
         )

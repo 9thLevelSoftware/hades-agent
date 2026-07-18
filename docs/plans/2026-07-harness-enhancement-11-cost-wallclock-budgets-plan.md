@@ -27,7 +27,7 @@
 
 - `IterationBudget` is a small thread-safe iteration counter used by turn context, agent init, delegate children, and many tests.
 - The loop gate is in `conversation_loop.py`; retry path has its own loop. Budget-exhaustion finalizer calls `handle_max_iterations`/summary.
-- `CanonicalUsage`/pricing/cost normalization and per-session persisted cost already exist in `conversation_loop.py`, `codex_runtime.py`, `usage_pricing.py`, and `hermes_state.py`; enforcement is absent.
+- `CanonicalUsage`/pricing/cost normalization and per-session persisted cost already exist in `conversation_loop.py`, `codex_runtime.py`, `usage_pricing.py`, and `hades_state.py`; enforcement is absent.
 - Delegation captures/rolls up child cost but each child gets a fresh budget and tree scope is not enforced.
 - `AgentNotice`/credits tracker and CLI/TUI/gateway usage/status surfaces already exist.
 - Reasoning config is consumed by transports, providing the first degradation knob. Fallback activation/restore-primary code must be made budget-aware.
@@ -50,7 +50,7 @@ The plan skips external billing APIs, hard cancellation of in-flight streams, an
 - Modify: `agent/conversation_loop.py` — loop/retry gates and charge integration.
 - Modify: `agent/codex_runtime.py` — charge alternate accounting path.
 - Modify: `agent/turn_finalizer.py`, `agent/chat_completion_helpers.py` — exhausted summary/budget failover reason.
-- Modify: `agent/usage_pricing.py`, `hermes_state.py` — cost/token source/aggregate query as required.
+- Modify: `agent/usage_pricing.py`, `hades_state.py` — cost/token source/aggregate query as required.
 - Modify: `tools/delegate_tool.py` — child allocation/tree pool reconciliation.
 - Modify: `agent/credits_tracker.py`, `cli.py`, `tui_gateway/server.py`, `gateway/run.py` — notices/status/usage.
 - Modify: `cron/scheduler.py`, `hermes_cli/config.py`, `cli-config.yaml.example` — job budgets/config.
@@ -240,7 +240,7 @@ git commit -m "feat(budget): degrade gracefully on budget pressure"
 
 **Files:**
 - Modify: `agent/iteration_budget.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Modify: `agent/turn_context.py`, `agent/agent_init.py`
 - Test: new `tests/agent/test_budget_pools.py`
 - Test: state/migration/usage suites.
@@ -274,7 +274,7 @@ def test_session_pool_and_turn_pool_charge_once():
 
 ```bash
 python -m pytest tests/agent/test_budget_pools.py tests/hermes_state/test_state_migrations.py tests/agent/test_usage_pricing.py -q
- git add agent/iteration_budget.py hermes_state.py agent/turn_context.py agent/agent_init.py tests/agent/test_budget_pools.py tests/hermes_state/test_state_migrations.py
+ git add agent/iteration_budget.py hades_state.py agent/turn_context.py agent/agent_init.py tests/agent/test_budget_pools.py tests/hermes_state/test_state_migrations.py
  git diff --cached --check
 git commit -m "feat(budget): add session and daily pools"
 ```
@@ -367,7 +367,7 @@ git commit -m "docs(budget): surface cost and time ceilings"
 - [ ] Run `codex_app_server` coverage test and verify the documented supported/unsupported result.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_turn_budget.py \
   tests/agent/test_budget_pools.py \
   tests/agent/test_budget_enforcement_e2e.py \

@@ -7,7 +7,7 @@ itself.
 
 This contract is intentionally backend-neutral. A plugin can use it for local
 policy, request shaping, tracing, adaptive routing, cache control, sandbox
-selection, or handoff to runtimes such as NeMo Relay without changing Hermes'
+selection, or handoff to runtimes such as NeMo Relay without changing Hades'
 planner, model provider adapters, tool registry, memory, or CLI UX.
 
 With middleware enabled, plugins can:
@@ -118,12 +118,12 @@ Middleware only runs for enabled plugins. For a bundled plugin:
 hermes plugins enable <plugin-name>
 ```
 
-For isolated local testing, use one `HERMES_HOME` for plugin enablement and the
+For isolated local testing, use one `HADES_HOME` for plugin enablement and the
 agent run:
 
 ```bash
-export HERMES_HOME=/tmp/hermes-middleware-test
-mkdir -p "$HERMES_HOME"
+export HADES_HOME=/tmp/hermes-middleware-test
+mkdir -p "$HADES_HOME"
 hermes plugins enable <plugin-name>
 hermes chat --query 'Reply exactly ok'
 ```

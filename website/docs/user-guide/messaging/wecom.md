@@ -1,7 +1,7 @@
 ---
 sidebar_position: 14
 title: "WeCom (Enterprise WeChat)"
-description: "Connect Hermes Agent to WeCom via the AI Bot WebSocket gateway"
+description: "Connect Hades Agent to WeCom via the AI Bot WebSocket gateway"
 ---
 
 # WeCom (Enterprise WeChat)
@@ -64,7 +64,7 @@ Select **WeCom** and follow the prompts. The wizard will guide you through:
 
 #### Option B: Manual Configuration
 
-Add the following to `~/.hermes/.env`:
+Add the following to `~/.hades/.env`:
 
 ```bash
 WECOM_BOT_ID=your-bot-id

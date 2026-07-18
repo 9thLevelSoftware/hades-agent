@@ -35,7 +35,7 @@ description: "通过 nano-pdf CLI 编辑 PDF 文本/错别字/标题（自然语
 ## 前置条件
 
 ```bash
-# Install with uv (recommended — already available in Hermes)
+# Install with uv (recommended — already available in Hades)
 uv pip install nano-pdf
 
 # Or with pip

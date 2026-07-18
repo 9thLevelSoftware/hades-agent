@@ -2,7 +2,7 @@
 name: openhands
 description: Delegate coding to OpenHands CLI (model-agnostic, LiteLLM).
 version: 0.1.0
-author: Tim Koepsel (xzessmedia), Hermes Agent
+author: Tim Koepsel (xzessmedia), Hades Agent
 license: MIT
 platforms: [linux, macos]
 metadata:
@@ -15,7 +15,7 @@ metadata:
 
 Delegate coding tasks to the [OpenHands CLI](https://github.com/All-Hands-AI/OpenHands) via the `terminal` tool. OpenHands is model-agnostic: any LiteLLM-supported provider (OpenAI, Anthropic, OpenRouter, DeepSeek, Ollama, vLLM, etc.).
 
-This skill is the headless-mode wrapper for batch / one-shot delegation. The interactive textual UI is not used from Hermes.
+This skill is the headless-mode wrapper for batch / one-shot delegation. The interactive textual UI is not used from Hades.
 
 ## When to Use
 

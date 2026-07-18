@@ -1,12 +1,12 @@
 ---
 sidebar_position: 8
 title: "Memory Provider 插件"
-description: "如何为 Hermes Agent 构建 memory provider 插件"
+description: "如何为 Hades Agent 构建 memory provider 插件"
 ---
 
 # 构建 Memory Provider 插件
 
-Memory provider 插件为 Hermes Agent 提供跨会话的持久化知识，超越内置的 MEMORY.md 和 USER.md。本指南介绍如何构建一个 memory provider 插件。
+Memory provider 插件为 Hades Agent 提供跨会话的持久化知识，超越内置的 MEMORY.md 和 USER.md。本指南介绍如何构建一个 memory provider 插件。
 
 :::tip
 Memory provider 是两种 **provider 插件**类型之一。另一种是 [Context Engine 插件](/developer-guide/context-engine-plugin)，用于替换内置的上下文压缩器。两者遵循相同的模式：单选、配置驱动、通过 `hermes plugins` 管理。
@@ -43,7 +43,7 @@ class MyMemoryProvider(MemoryProvider):
         """在 agent 启动时调用一次。
 
         kwargs 始终包含：
-          hermes_home (str): 当前活跃的 HERMES_HOME 路径。用于存储数据。
+          hermes_home (str): 当前活跃的 HADES_HOME 路径。用于存储数据。
         """
         self._api_key = os.environ.get("MY_API_KEY", "")
         self._session_id = session_id
@@ -115,7 +115,7 @@ def get_config_schema(self):
 `secret: True` 且带有 `env_var` 的字段写入 `.env`。非敏感字段传递给 `save_config()`。
 
 :::tip 最简 Schema 与完整 Schema
-`get_config_schema()` 中的每个字段都会在 `hermes memory setup` 期间提示用户输入。选项较多的 provider 应保持 schema 精简——只包含用户**必须**配置的字段（API key、必要凭证）。可选配置请在配置文件参考文档中说明（例如 `$HERMES_HOME/myprovider.json`），而不是在 setup 向导中逐一提示。这样既能保持 setup 流程简洁，又支持高级配置。可参考 Supermemory provider 的实现——它只提示输入 API key，其余选项均位于 `supermemory.json` 中。
+`get_config_schema()` 中的每个字段都会在 `hermes memory setup` 期间提示用户输入。选项较多的 provider 应保持 schema 精简——只包含用户**必须**配置的字段（API key、必要凭证）。可选配置请在配置文件参考文档中说明（例如 `$HADES_HOME/myprovider.json`），而不是在 setup 向导中逐一提示。这样既能保持 setup 流程简洁，又支持高级配置。可参考 Supermemory provider 的实现——它只提示输入 API key，其余选项均位于 `supermemory.json` 中。
 :::
 
 ## 保存配置
@@ -169,15 +169,15 @@ def sync_turn(self, user_content, assistant_content):
 
 ## Profile 隔离
 
-所有存储路径**必须**使用 `initialize()` 中的 `hermes_home` kwarg，而不是硬编码的 `~/.hermes`：
+所有存储路径**必须**使用 `initialize()` 中的 `hermes_home` kwarg，而不是硬编码的 `~/.hades`：
 
 ```python
 # 正确 — 按 profile 隔离
-from hermes_constants import get_hermes_home
-data_dir = get_hermes_home() / "my-provider"
+from hades_constants import get_hades_home
+data_dir = get_hades_home() / "my-provider"
 
 # 错误 — 所有 profile 共享
-data_dir = Path("~/.hermes/my-provider").expanduser()
+data_dir = Path("~/.hades/my-provider").expanduser()
 ```
 
 ## 测试

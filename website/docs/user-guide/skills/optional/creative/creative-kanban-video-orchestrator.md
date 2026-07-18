@@ -1,14 +1,14 @@
 ---
-title: "Kanban Video Orchestrator — Plan, set up, and monitor a multi-agent video production pipeline backed by Hermes Kanban"
+title: "Kanban Video Orchestrator — Plan, set up, and monitor a multi-agent video production pipeline backed by Hades Kanban"
 sidebar_label: "Kanban Video Orchestrator"
-description: "Plan, set up, and monitor a multi-agent video production pipeline backed by Hermes Kanban"
+description: "Plan, set up, and monitor a multi-agent video production pipeline backed by Hades Kanban"
 ---
 
 {/* This page is auto-generated from the skill's SKILL.md by website/scripts/generate-skill-docs.py. Edit the source SKILL.md, not this page. */}
 
 # Kanban Video Orchestrator
 
-Plan, set up, and monitor a multi-agent video production pipeline backed by Hermes Kanban. Use when the user wants to make ANY video — narrative film, product/marketing, music video, explainer, ASCII/terminal art, abstract/generative loop, comic, 3D, real-time/installation — and the work warrants decomposition into specialized profiles (writer, designer, animator, renderer, voice, editor, etc.) coordinated through a kanban board. Performs adaptive discovery to scope the brief, designs an appropriate team for the requested style, generates the setup script that creates Hermes profiles + initial kanban task, then helps monitor execution and intervene when tasks stall or fail. Routes scenes to whichever Hermes rendering / audio / design skill fits each beat (`ascii-video`, `manim-video`, `p5js`, `comfyui`, `touchdesigner-mcp`, `blender-mcp`, `pixel-art`, `baoyu-comic`, `claude-design`, `excalidraw`, `songsee`, `heartmula`, …) plus external APIs for TTS, image-gen, and image-to-video as needed.
+Plan, set up, and monitor a multi-agent video production pipeline backed by Hades Kanban. Use when the user wants to make ANY video — narrative film, product/marketing, music video, explainer, ASCII/terminal art, abstract/generative loop, comic, 3D, real-time/installation — and the work warrants decomposition into specialized profiles (writer, designer, animator, renderer, voice, editor, etc.) coordinated through a kanban board. Performs adaptive discovery to scope the brief, designs an appropriate team for the requested style, generates the setup script that creates Hermes profiles + initial kanban task, then helps monitor execution and intervene when tasks stall or fail. Routes scenes to whichever Hermes rendering / audio / design skill fits each beat (`ascii-video`, `manim-video`, `p5js`, `comfyui`, `touchdesigner-mcp`, `blender-mcp`, `pixel-art`, `baoyu-comic`, `claude-design`, `excalidraw`, `songsee`, `heartmula`, …) plus external APIs for TTS, image-gen, and image-to-video as needed.
 
 ## Skill metadata
 
@@ -76,7 +76,7 @@ time, listen, then proceed. Make reasonable assumptions whenever the user
 implies an answer.
 
 For complete intake patterns and per-style question banks, see
-**[references/intake.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/intake.md)**.
+**[references/intake.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/intake.md)**.
 
 ### Step 2 — Brief
 
@@ -100,10 +100,10 @@ clone.** Most videos need 4-7 profiles. The director is always present; the
 rest are picked by what the brief actually requires.
 
 For the role library and per-style team compositions, see
-**[references/role-archetypes.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/role-archetypes.md)**.
+**[references/role-archetypes.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/role-archetypes.md)**.
 
 For mapping role → which Hermes skills + toolsets it loads, see
-**[references/tool-matrix.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/tool-matrix.md)**.
+**[references/tool-matrix.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/tool-matrix.md)**.
 
 ### Step 4 — Setup
 
@@ -118,7 +118,7 @@ Generate a setup script (`setup.sh`) and run it. The script:
 7. Fires the initial `hermes kanban create` task assigned to the director
 
 Use `scripts/bootstrap_pipeline.py` to generate setup.sh from a brief +
-team-design JSON. See **[references/kanban-setup.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/kanban-setup.md)**
+team-design JSON. See **[references/kanban-setup.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/kanban-setup.md)**
 for the setup script structure, profile config patterns, and the critical
 "shared workspace" rule.
 
@@ -149,14 +149,14 @@ heartbeats. When a worker's output fails review, the standard interventions are:
 3. Adjust the brief's scope and let the director re-decompose
 
 For diagnostic patterns, intervention recipes, and the "task is stuck"
-playbook, see **[references/monitoring.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/monitoring.md)**.
+playbook, see **[references/monitoring.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/monitoring.md)**.
 
 ## Reference: worked examples
 
 Six concrete pipelines covering very different video styles — narrative film,
 product/marketing, music video, math/algorithm explainer, ASCII video, real-time
 installation — showing how the same workflow yields very different teams and
-task graphs. See **[references/examples.md](https://github.com/NousResearch/hermes-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/examples.md)**.
+task graphs. See **[references/examples.md](https://github.com/9thLevelSoftware/hades-agent/blob/main/optional-skills/creative/kanban-video-orchestrator/references/examples.md)**.
 
 ## Critical rules
 
@@ -195,7 +195,7 @@ task graphs. See **[references/examples.md](https://github.com/NousResearch/herm
    right human-review gates.
 
 8. **Verify API keys BEFORE firing.** External APIs (TTS, image-gen,
-   image-to-video) need keys in `${HERMES_HOME:-~/.hermes}/.env` or the user's secret store.
+   image-to-video) need keys in `${HADES_HOME:-~/.hades}/.env` or the user's secret store.
    A worker that hits a missing-key error wastes a task slot. The setup
    script's `check_key` helper aborts cleanly if a required key is missing.
 

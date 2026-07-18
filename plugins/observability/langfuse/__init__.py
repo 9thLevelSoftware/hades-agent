@@ -2,13 +2,13 @@
 
 Traces Hermes conversations, LLM calls, and tool usage to Langfuse.
 
-Activation is handled by the Hermes plugin system — standalone plugins only
+Activation is handled by the Hades plugin system — standalone plugins only
 load when listed in ``plugins.enabled`` (via ``hermes plugins enable
 observability/langfuse`` or ``hermes tools → Langfuse Observability``). At
 runtime the plugin also requires the ``langfuse`` SDK and credentials; if
 either is missing the hooks are inert.
 
-Required env vars (set via ``hermes tools`` or ~/.hermes/.env):
+Required env vars (set via ``hermes tools`` or ~/.hades/.env):
   HERMES_LANGFUSE_PUBLIC_KEY  - Langfuse project public key (pk-lf-...)
   HERMES_LANGFUSE_SECRET_KEY  - Langfuse project secret key (sk-lf-...)
   HERMES_LANGFUSE_BASE_URL    - Langfuse server URL (default: https://cloud.langfuse.com)
@@ -149,7 +149,7 @@ def _validate_langfuse_key(env_name: str, value: str) -> Optional[str]:
 def _get_langfuse() -> Optional[Langfuse]:
     """Return a cached Langfuse client, or ``None`` if unavailable.
 
-    Activation of this plugin is controlled by the Hermes plugin system —
+    Activation of this plugin is controlled by the Hades plugin system —
     this function only handles the runtime-availability gate (SDK installed
     + credentials present). The result is cached: on the first call we try
     to construct a client, and every subsequent call returns that client

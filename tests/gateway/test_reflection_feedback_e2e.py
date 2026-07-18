@@ -21,7 +21,7 @@ from agent.reflection_triggers import (
     record_feedback_event,
     should_trigger_review,
 )
-from hermes_state import SessionDB
+from hades_state import SessionDB
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────

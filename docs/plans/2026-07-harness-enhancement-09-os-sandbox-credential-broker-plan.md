@@ -332,7 +332,7 @@ git commit -m "feat(security): add scoped credential leases"
 - Test: existing remote environment/credential tests.
 
 - [ ] Add `credential_mode=brokered|legacy` with legacy default for remote backends until broker availability is proven.
-- [ ] In brokered mode, sync only non-secret config and proxy/lease endpoint; never copy `~/.hermes` credentials. Failure to acquire a lease prevents the remote operation rather than reverting to legacy automatically.
+- [ ] In brokered mode, sync only non-secret config and proxy/lease endpoint; never copy `~/.hades` credentials. Failure to acquire a lease prevents the remote operation rather than reverting to legacy automatically.
 - [ ] Test no provider key/auth file appears in remote sync payload; test explicit legacy mode preserves current behavior and warnings.
 
 ```bash
@@ -360,7 +360,7 @@ git commit -m "feat(security): add brokered remote credential mode"
 - [ ] Run process interruption/cleanup tests: proxy/socket/process group/temporary lease cleanup leaves no orphan.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_secret_redaction.py \
   tests/agent/test_credential_broker.py \
   tests/tools/environments/test_sandbox_capabilities.py \

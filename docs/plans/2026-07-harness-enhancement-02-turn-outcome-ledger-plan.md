@@ -2,7 +2,7 @@
 
 > For agentic workers: implement this plan task-by-task. The ledger is telemetry and learning plumbing, not a new model tool. Keep all writes best-effort so a broken ledger can never fail a user turn.
 
-**Goal:** Persist Hermes' existing eight-state turn outcome with per-turn cost/tool/skill context, then use the recorded signal to trigger targeted reflection and rank skills by measured utility.
+**Goal:** Persist Hades' existing eight-state turn outcome with per-turn cost/tool/skill context, then use the recorded signal to trigger targeted reflection and rank skills by measured utility.
 
 **Architecture:** Add one append-only `turn_outcomes` table and a small `agent/turn_ledger.py` adapter around `SessionDB`. Call the adapter from both finalizer paths (`turn_finalizer.py` and `codex_runtime.py`) after classification, with an exception boundary. Derive correction, failure-streak, and reaction signals as updates to the previous ledger row, not as a second event store. Feed utility as evidence to the existing Curator and skill index, never as an irreversible automatic archive rule.
 
@@ -18,13 +18,13 @@
 - Use Laplace smoothing and minimum sample thresholds. Correlation is evidence for the Curator, not an auto-delete predicate.
 - Reaction and correction ingestion must be authenticated by the existing platform/session identity and must not synthesize an extra user turn for the same feedback event.
 - Use YAML/config for intervals, cooldowns, and thresholds. Do not introduce non-secret `HERMES_*` configuration.
-- Validate persistence and gateway events with temporary `HERMES_HOME` and real SQLite/file-lock paths; do not rely on MagicMock-only tests.
+- Validate persistence and gateway events with temporary `HADES_HOME` and real SQLite/file-lock paths; do not rely on MagicMock-only tests.
 
 ## Current-State Review
 
 The source review confirms a disconnected-but-usable foundation:
 
-- `agent/turn_outcome.py` already classifies eight outcomes and is called at `agent/turn_finalizer.py` and `agent/codex_runtime.py`; `hermes_state.py` currently has no outcome table or outcome references.
+- `agent/turn_outcome.py` already classifies eight outcomes and is called at `agent/turn_finalizer.py` and `agent/codex_runtime.py`; `hades_state.py` currently has no outcome table or outcome references.
 - Background review is forked from `agent/background_review.py`, but normal triggers are blind interval counters and currently require `verified` outcome.
 - `tools/skill_usage.py` persists open-ended per-skill records with locking; it counts views/uses/patches but not helped/hurt outcomes.
 - `agent/insights.py` already extracts `skill_view` calls from stored messages and supplies CLI/gateway report surfaces.
@@ -45,7 +45,7 @@ The plan skips a new analytics backend, a new event bus, and an LLM correction c
 
 - Create: `agent/turn_ledger.py` — immutable record construction, serialization, exception-guarded write helper.
 - Create: `agent/reflection_triggers.py` — lexical correction, tool-failure streak, outcome trigger, cooldown/dedup state.
-- Modify: `hermes_state.py` — `turn_outcomes` DDL, migration reconciliation, record/query/update methods.
+- Modify: `hades_state.py` — `turn_outcomes` DDL, migration reconciliation, record/query/update methods.
 - Modify: `agent/turn_finalizer.py` — record the classified result and invoke reflection trigger evaluation.
 - Modify: `agent/codex_runtime.py` — record the same fields for Codex app-server/runtime turns.
 - Modify: `agent/turn_context.py` — capture turn-start token/cost counters and incoming-message identity.
@@ -111,7 +111,7 @@ where `verified` is helped, `failed`/`blocked`/`unresolved` are hurt evidence, o
 ## Task 1: Persist the Ledger and Cover Both Finalizers
 
 **Files:**
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `agent/turn_ledger.py`
 - Modify: `agent/turn_finalizer.py`
 - Modify: `agent/codex_runtime.py`
@@ -127,7 +127,7 @@ where `verified` is helped, `failed`/`blocked`/`unresolved` are hurt evidence, o
 
 ```python
 def test_turn_outcome_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     db = SessionDB.open_for_profile("default")
     record = TurnOutcomeRecord(
         session_id="s1", turn_id="t1", created_at=1.0,
@@ -179,7 +179,7 @@ python -m pytest \
 - [ ] Step 8: Commit the durable foundation.
 
 ```bash
-git add hermes_state.py agent/turn_ledger.py agent/turn_finalizer.py agent/codex_runtime.py agent/turn_context.py tests/agent/test_turn_ledger.py tests/agent/test_turn_outcome.py
+git add hades_state.py agent/turn_ledger.py agent/turn_finalizer.py agent/codex_runtime.py agent/turn_context.py tests/agent/test_turn_ledger.py tests/agent/test_turn_outcome.py
 git diff --cached --check
 git commit -m "feat(learning): persist per-turn outcomes"
 ```
@@ -235,7 +235,7 @@ python -m pytest tests/tools/test_skill_usage.py tests/agent/test_turn_ledger.py
 - [ ] Step 7: Run sidecar, ledger, and Insights tests with a temporary home to exercise file locking and unknown-field preservation.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/tools/test_skill_usage.py tests/agent/test_turn_ledger.py tests/agent/test_insights.py -q
 ```
 
@@ -383,7 +383,7 @@ python -m pytest tests/agent/test_prompt_builder.py tests/agent/test_curator_cla
 - [ ] Step 7: Run the prompt/cache, Curator, and Insights tests with a temp home.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_prompt_builder.py \
   tests/agent/test_curator_classification.py \
   tests/agent/test_insights.py -q
@@ -407,7 +407,7 @@ git commit -m "feat(learning): consume skill utility evidence"
 - [ ] Step 1: Exercise a real temporary profile through a successful turn and a failed/blocked turn using the existing fake provider fixtures. Assert two rows exist, deltas are non-negative, the correct skill names are stored, and the final response is unaffected by a forced ledger write exception.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_turn_ledger_e2e.py \
   tests/gateway/test_reflection_feedback_e2e.py -q
 ```

@@ -1,4 +1,4 @@
-"""Tests for Codex auth — tokens stored in Hermes auth store (~/.hermes/auth.json)."""
+"""Tests for Codex auth — tokens stored in Hades auth store (~/.hades/auth.json)."""
 
 import json
 import time
@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_cli.auth import (
+from hades_cli.auth import (
     AuthError,
     DEFAULT_CODEX_BASE_URL,
     PROVIDER_REGISTRY,
@@ -23,7 +23,7 @@ from hermes_cli.auth import (
 
 
 def _setup_hermes_auth(hermes_home: Path, *, access_token: str = "access", refresh_token: str = "refresh"):
-    """Write Codex tokens into the Hermes auth store."""
+    """Write Codex tokens into the Hades auth store."""
     hermes_home.mkdir(parents=True, exist_ok=True)
     auth_store = {
         "version": 1,
@@ -51,9 +51,9 @@ def _jwt_with_exp(exp_epoch: int) -> str:
 
 
 def test_read_codex_tokens_success(tmp_path, monkeypatch):
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     _setup_hermes_auth(hermes_home)
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     data = _read_codex_tokens()
     assert data["tokens"]["access_token"] == "access"
@@ -61,11 +61,11 @@ def test_read_codex_tokens_success(tmp_path, monkeypatch):
 
 
 def test_read_codex_tokens_missing(tmp_path, monkeypatch):
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     # Empty auth store
     (hermes_home / "auth.json").write_text(json.dumps({"version": 1, "providers": {}}))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     with pytest.raises(AuthError) as exc:
         _read_codex_tokens()
@@ -73,9 +73,9 @@ def test_read_codex_tokens_missing(tmp_path, monkeypatch):
 
 
 def test_resolve_codex_runtime_credentials_missing_access_token(tmp_path, monkeypatch):
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     _setup_hermes_auth(hermes_home, access_token="")
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "missing-codex"))
 
     with pytest.raises(AuthError) as exc:
@@ -85,10 +85,10 @@ def test_resolve_codex_runtime_credentials_missing_access_token(tmp_path, monkey
 
 
 def test_resolve_codex_runtime_credentials_refreshes_expiring_token(tmp_path, monkeypatch):
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     expiring_token = _jwt_with_exp(int(time.time()) - 10)
     _setup_hermes_auth(hermes_home, access_token=expiring_token, refresh_token="refresh-old")
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     called = {"count": 0}
 
@@ -96,7 +96,7 @@ def test_resolve_codex_runtime_credentials_refreshes_expiring_token(tmp_path, mo
         called["count"] += 1
         return {"access_token": "access-new", "refresh_token": "refresh-new"}
 
-    monkeypatch.setattr("hermes_cli.auth._refresh_codex_auth_tokens", _fake_refresh)
+    monkeypatch.setattr("hades_cli.auth._refresh_codex_auth_tokens", _fake_refresh)
 
     resolved = resolve_codex_runtime_credentials()
 
@@ -105,9 +105,9 @@ def test_resolve_codex_runtime_credentials_refreshes_expiring_token(tmp_path, mo
 
 
 def test_resolve_codex_runtime_credentials_force_refresh(tmp_path, monkeypatch):
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     _setup_hermes_auth(hermes_home, access_token="access-current", refresh_token="refresh-old")
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     called = {"count": 0}
 
@@ -115,7 +115,7 @@ def test_resolve_codex_runtime_credentials_force_refresh(tmp_path, monkeypatch):
         called["count"] += 1
         return {"access_token": "access-forced", "refresh_token": "refresh-new"}
 
-    monkeypatch.setattr("hermes_cli.auth._refresh_codex_auth_tokens", _fake_refresh)
+    monkeypatch.setattr("hades_cli.auth._refresh_codex_auth_tokens", _fake_refresh)
 
     resolved = resolve_codex_runtime_credentials(force_refresh=True, refresh_if_expiring=False)
 
@@ -133,7 +133,7 @@ def test_resolve_codex_runtime_credentials_falls_back_to_pool_when_singleton_emp
     re-auth, restore from backup) hit a bare HTTP 401 on chat but worked fine on
     auxiliary calls.  The fallback closes that divergence.
     """
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     # Singleton: empty tokens (would normally raise AuthError).
     # Pool: valid access_token.
@@ -153,7 +153,7 @@ def test_resolve_codex_runtime_credentials_falls_back_to_pool_when_singleton_emp
         },
     }
     (hermes_home / "auth.json").write_text(json.dumps(auth_store))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     resolved = resolve_codex_runtime_credentials()
     assert resolved["api_key"] == "pool-fallback-token"
@@ -165,7 +165,7 @@ def test_resolve_codex_runtime_credentials_pool_fallback_skips_exhausted(tmp_pat
     """The pool fallback skips entries currently in an exhaustion cooldown window."""
     import time as _time
 
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     future_reset = _time.time() + 3600  # 1h cooldown remaining
     auth_store = {
@@ -187,7 +187,7 @@ def test_resolve_codex_runtime_credentials_pool_fallback_skips_exhausted(tmp_pat
         },
     }
     (hermes_home / "auth.json").write_text(json.dumps(auth_store))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     resolved = resolve_codex_runtime_credentials()
     assert resolved["api_key"] == "usable-token"
@@ -196,7 +196,7 @@ def test_resolve_codex_runtime_credentials_pool_fallback_skips_exhausted(tmp_pat
 
 def test_resolve_codex_runtime_credentials_pool_fallback_no_usable_entry(tmp_path, monkeypatch):
     """When both singleton and pool are empty/unusable, the original AuthError propagates."""
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     auth_store = {
         "version": 1,
@@ -208,7 +208,7 @@ def test_resolve_codex_runtime_credentials_pool_fallback_no_usable_entry(tmp_pat
         },
     }
     (hermes_home / "auth.json").write_text(json.dumps(auth_store))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     with pytest.raises(AuthError) as exc:
         resolve_codex_runtime_credentials()
@@ -222,10 +222,10 @@ def test_resolve_provider_explicit_codex_does_not_fallback(monkeypatch):
 
 
 def test_save_codex_tokens_roundtrip(tmp_path, monkeypatch):
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "auth.json").write_text(json.dumps({"version": 1, "providers": {}}))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     _save_codex_tokens({"access_token": "at123", "refresh_token": "rt456"})
     data = _read_codex_tokens()
@@ -242,7 +242,7 @@ def test_save_codex_tokens_syncs_credential_pool(tmp_path, monkeypatch):
     holding a consumed refresh token and stale error markers, causing an
     immediate 401 token_invalidated on the next request.
     """
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "auth.json").write_text(json.dumps({
         "version": 1,
@@ -276,7 +276,7 @@ def test_save_codex_tokens_syncs_credential_pool(tmp_path, monkeypatch):
             ],
         },
     }))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     _save_codex_tokens({"access_token": "new-at", "refresh_token": "new-rt"},
                        last_refresh="2026-05-27T00:00:00Z")
@@ -320,7 +320,7 @@ def test_save_codex_tokens_syncs_manual_device_code_entries(tmp_path, monkeypatc
     the *previous* singleton access_token (true legacy aliases), and leaves
     distinct-token entries alone (independent accounts).
     """
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "auth.json").write_text(json.dumps({
         "version": 1,
@@ -373,7 +373,7 @@ def test_save_codex_tokens_syncs_manual_device_code_entries(tmp_path, monkeypatc
             ],
         },
     }))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     _save_codex_tokens({"access_token": "fresh-at", "refresh_token": "fresh-rt"},
                        last_refresh="2026-05-28T00:00:00Z")
@@ -423,7 +423,7 @@ def test_save_codex_tokens_does_not_overwrite_independent_manual_entries(tmp_pat
     entries whose tokens never matched the singleton are independent accounts
     and must be left alone.
     """
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "auth.json").write_text(json.dumps({
         "version": 1,
@@ -471,7 +471,7 @@ def test_save_codex_tokens_does_not_overwrite_independent_manual_entries(tmp_pat
             ],
         },
     }))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     # User re-authenticates account A — fresh device-code login produces new
     # tokens.  The legitimate update is the seeded singleton mirror; the
@@ -518,7 +518,7 @@ def test_save_codex_tokens_still_refreshes_legacy_manual_alias(tmp_path, monkeyp
     The distinguishing signal: a legacy alias has access_token == previous
     singleton access_token; an independent account does not.
     """
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "auth.json").write_text(json.dumps({
         "version": 1,
@@ -554,7 +554,7 @@ def test_save_codex_tokens_still_refreshes_legacy_manual_alias(tmp_path, monkeyp
             ],
         },
     }))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     _save_codex_tokens(
         {"access_token": "fresh-at", "refresh_token": "fresh-rt"},
@@ -589,7 +589,7 @@ def test_save_codex_tokens_handles_missing_previous_singleton_tokens(tmp_path, m
     pool entry can be a true alias and only the singleton-seeded entry gets
     written.
     """
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "auth.json").write_text(json.dumps({
         "version": 1,
@@ -607,7 +607,7 @@ def test_save_codex_tokens_handles_missing_previous_singleton_tokens(tmp_path, m
             ],
         },
     }))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     _save_codex_tokens(
         {"access_token": "first-at", "refresh_token": "first-rt"},
@@ -631,7 +631,7 @@ def test_save_codex_tokens_alias_match_uses_access_token_only(tmp_path, monkeypa
     have access_token but no refresh_token.  These should still be treated as
     aliases when the access_token matches.
     """
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "auth.json").write_text(json.dumps({
         "version": 1,
@@ -653,7 +653,7 @@ def test_save_codex_tokens_alias_match_uses_access_token_only(tmp_path, monkeypa
             ],
         },
     }))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     _save_codex_tokens(
         {"access_token": "new-at", "refresh_token": "new-rt"},
@@ -674,7 +674,7 @@ def test_save_codex_tokens_clears_error_markers_only_on_refreshed_entries(tmp_pa
     with their own stale-error markers must be left alone (their stale state
     is not the current re-auth's business).
     """
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     hermes_home.mkdir(parents=True, exist_ok=True)
     (hermes_home / "auth.json").write_text(json.dumps({
         "version": 1,
@@ -708,7 +708,7 @@ def test_save_codex_tokens_clears_error_markers_only_on_refreshed_entries(tmp_pa
             ],
         },
     }))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     _save_codex_tokens(
         {"access_token": "fresh-at", "refresh_token": "fresh-rt"},
@@ -753,14 +753,14 @@ def test_import_codex_cli_tokens_missing(tmp_path, monkeypatch):
 
 
 def test_codex_tokens_not_written_to_shared_file(tmp_path, monkeypatch):
-    """Verify _save_codex_tokens writes only to Hermes auth store, not ~/.codex/."""
-    hermes_home = tmp_path / "hermes"
+    """Verify _save_codex_tokens writes only to Hades auth store, not ~/.codex/."""
+    hermes_home = tmp_path / "hades"
     codex_home = tmp_path / "codex-cli"
     hermes_home.mkdir(parents=True, exist_ok=True)
     codex_home.mkdir(parents=True, exist_ok=True)
 
     (hermes_home / "auth.json").write_text(json.dumps({"version": 1, "providers": {}}))
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     _save_codex_tokens({"access_token": "hermes-at", "refresh_token": "hermes-rt"})
@@ -774,9 +774,9 @@ def test_codex_tokens_not_written_to_shared_file(tmp_path, monkeypatch):
 
 
 def test_resolve_returns_hermes_auth_store_source(tmp_path, monkeypatch):
-    hermes_home = tmp_path / "hermes"
+    hermes_home = tmp_path / "hades"
     _setup_hermes_auth(hermes_home)
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
     creds = resolve_codex_runtime_credentials()
     assert creds["source"] == "hermes-auth-store"
@@ -815,7 +815,7 @@ def _patch_httpx(monkeypatch, response):
     def _factory(*args, **kwargs):
         return _StubHTTPClient(response)
 
-    monkeypatch.setattr("hermes_cli.auth.httpx.Client", _factory)
+    monkeypatch.setattr("hades_cli.auth.httpx.Client", _factory)
 
 
 def test_refresh_parses_openai_nested_error_shape_refresh_token_reused(monkeypatch):
@@ -912,7 +912,7 @@ def test_refresh_429_classified_as_quota_not_auth_failure(monkeypatch):
     dedicated rate-limit code so callers surface a "retry later" notice rather
     than a misleading "run hermes auth".
     """
-    from hermes_cli.auth import (
+    from hades_cli.auth import (
         CODEX_RATE_LIMITED_CODE,
         format_auth_error,
         is_rate_limited_auth_error,
@@ -941,7 +941,7 @@ def test_refresh_429_classified_as_quota_not_auth_failure(monkeypatch):
 
 def test_refresh_429_without_retry_after_header(monkeypatch):
     """429 without a Retry-After header still classifies as quota, no relogin."""
-    from hermes_cli.auth import CODEX_RATE_LIMITED_CODE
+    from hades_cli.auth import CODEX_RATE_LIMITED_CODE
 
     response = _StubHTTPResponse(429, {"error": "rate_limited"})
     _patch_httpx(monkeypatch, response)
@@ -957,7 +957,7 @@ def test_refresh_429_without_retry_after_header(monkeypatch):
 
 def test_is_rate_limited_auth_error_distinguishes_credential_errors():
     """Missing/expired credentials must NOT be treated as rate-limit errors."""
-    from hermes_cli.auth import CODEX_RATE_LIMITED_CODE, is_rate_limited_auth_error
+    from hades_cli.auth import CODEX_RATE_LIMITED_CODE, is_rate_limited_auth_error
 
     rate_limited = AuthError(
         "quota", provider="openai-codex", code=CODEX_RATE_LIMITED_CODE, relogin_required=False
@@ -977,15 +977,15 @@ def test_login_openai_codex_force_new_login_skips_existing_reuse_prompt(monkeypa
     called = {"device_login": 0}
 
     monkeypatch.setattr(
-        "hermes_cli.auth.resolve_codex_runtime_credentials",
+        "hades_cli.auth.resolve_codex_runtime_credentials",
         lambda: {"base_url": DEFAULT_CODEX_BASE_URL},
     )
     monkeypatch.setattr(
-        "hermes_cli.auth._import_codex_cli_tokens",
+        "hades_cli.auth._import_codex_cli_tokens",
         lambda: {"access_token": "cli-at", "refresh_token": "cli-rt"},
     )
     monkeypatch.setattr(
-        "hermes_cli.auth._codex_device_code_login",
+        "hades_cli.auth._codex_device_code_login",
         lambda: {
             "tokens": {"access_token": "fresh-at", "refresh_token": "fresh-rt"},
             "last_refresh": "2026-04-01T00:00:00Z",
@@ -998,8 +998,8 @@ def test_login_openai_codex_force_new_login_skips_existing_reuse_prompt(monkeypa
         called["tokens"] = dict(tokens)
         called["last_refresh"] = last_refresh
 
-    monkeypatch.setattr("hermes_cli.auth._save_codex_tokens", _fake_save)
-    monkeypatch.setattr("hermes_cli.auth._update_config_for_provider", lambda *args, **kwargs: "/tmp/config.yaml")
+    monkeypatch.setattr("hades_cli.auth._save_codex_tokens", _fake_save)
+    monkeypatch.setattr("hades_cli.auth._update_config_for_provider", lambda *args, **kwargs: "/tmp/config.yaml")
     monkeypatch.setattr(
         "builtins.input",
         lambda prompt="": (_ for _ in ()).throw(AssertionError("force_new_login should not prompt for reuse/import")),
@@ -1022,7 +1022,7 @@ class _FakeResp:
 
 
 def _patch_httpx_post(monkeypatch, responses):
-    """Patch hermes_cli.auth.httpx.Client so .post() returns queued responses."""
+    """Patch hades_cli.auth.httpx.Client so .post() returns queued responses."""
     seq = iter(responses)
 
     class _FakeClient:
@@ -1035,12 +1035,12 @@ def _patch_httpx_post(monkeypatch, responses):
         def post(self, *args, **kwargs):
             return next(seq)
 
-    monkeypatch.setattr("hermes_cli.auth.httpx.Client", lambda *a, **k: _FakeClient())
+    monkeypatch.setattr("hades_cli.auth.httpx.Client", lambda *a, **k: _FakeClient())
 
 
 def test_device_code_login_retries_on_429_then_succeeds(monkeypatch):
     """A transient 429 on the device-code request is retried, not surfaced."""
-    from hermes_cli import auth as auth_mod
+    from hades_cli import auth as auth_mod
 
     sleeps = []
     monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
@@ -1067,7 +1067,7 @@ def test_device_code_login_retries_on_429_then_succeeds(monkeypatch):
 
 def test_device_code_login_persistent_429_raises_rate_limited(monkeypatch):
     """A persistent 429 surfaces a clear rate-limit error, not a bare status."""
-    from hermes_cli import auth as auth_mod
+    from hades_cli import auth as auth_mod
 
     monkeypatch.setattr("time.sleep", lambda s: None)
     _patch_httpx_post(monkeypatch, [_FakeResp(429, headers={"retry-after": "30"})] * 4)
@@ -1084,7 +1084,7 @@ def test_device_code_login_persistent_429_raises_rate_limited(monkeypatch):
 
 def test_device_code_login_non_429_error_unchanged(monkeypatch):
     """Non-429 failures keep the generic device_code_request_error code."""
-    from hermes_cli import auth as auth_mod
+    from hades_cli import auth as auth_mod
 
     monkeypatch.setattr("time.sleep", lambda s: None)
     _patch_httpx_post(monkeypatch, [_FakeResp(500)])

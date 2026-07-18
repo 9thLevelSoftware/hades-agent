@@ -22,7 +22,7 @@ def _isolate_kanban_board_env():
     leaks into subsequent tests and breaks anything that resolves a kanban
     path from the env (e.g. ``TestSharedBoardPaths`` in test_kanban_db.py).
     """
-    prev = os.environ.get("HERMES_KANBAN_BOARD")
+    prev = os.environ.get("HADES_KANBAN_BOARD")
     os.environ.pop("HERMES_KANBAN_BOARD", None)
     try:
         yield
@@ -30,25 +30,25 @@ def _isolate_kanban_board_env():
         if prev is None:
             os.environ.pop("HERMES_KANBAN_BOARD", None)
         else:
-            os.environ["HERMES_KANBAN_BOARD"] = prev
+            os.environ["HADES_KANBAN_BOARD"] = prev
 
 
 def test_pin_writes_resolved_board_when_env_unset(monkeypatch):
-    main_mod = importlib.import_module("hermes_cli.main")
+    main_mod = importlib.import_module("hades_cli.main")
 
-    import hermes_cli.kanban_db as kdb
+    import hades_cli.kanban_db as kdb
     monkeypatch.setattr(kdb, "get_current_board", lambda: "space")
 
     main_mod._pin_kanban_board_env()
 
-    assert main_mod.os.environ.get("HERMES_KANBAN_BOARD") == "space"
+    assert main_mod.os.environ.get("HADES_KANBAN_BOARD") == "space"
 
 
 def test_pin_does_not_overwrite_existing_env(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_BOARD", "preset")
-    main_mod = importlib.import_module("hermes_cli.main")
+    main_mod = importlib.import_module("hades_cli.main")
 
-    import hermes_cli.kanban_db as kdb
+    import hades_cli.kanban_db as kdb
 
     def _explode():
         raise AssertionError("get_current_board must not be called when env is set")
@@ -57,13 +57,13 @@ def test_pin_does_not_overwrite_existing_env(monkeypatch):
 
     main_mod._pin_kanban_board_env()
 
-    assert main_mod.os.environ.get("HERMES_KANBAN_BOARD") == "preset"
+    assert main_mod.os.environ.get("HADES_KANBAN_BOARD") == "preset"
 
 
 def test_pin_swallows_resolution_failures(monkeypatch):
-    main_mod = importlib.import_module("hermes_cli.main")
+    main_mod = importlib.import_module("hades_cli.main")
 
-    import hermes_cli.kanban_db as kdb
+    import hades_cli.kanban_db as kdb
 
     def _boom():
         raise RuntimeError("disk gone")

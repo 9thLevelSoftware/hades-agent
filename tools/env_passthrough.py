@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from contextvars import ContextVar
 from typing import Iterable
-from hermes_cli.config import cfg_get
+from hades_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ _config_passthrough: frozenset[str] | None = None
 
 
 def _is_hermes_provider_credential(name: str) -> bool:
-    """True if ``name`` is a Hermes-managed provider credential (API key,
+    """True if ``name`` is a Hades-managed provider credential (API key,
     token, or similar) per ``_HERMES_PROVIDER_ENV_BLOCKLIST``.
 
     Skill-declared ``required_environment_variables`` frontmatter must
@@ -93,10 +93,10 @@ def register_env_passthrough(var_names: Iterable[str]) -> None:
 
     Typically called when a skill declares ``required_environment_variables``.
 
-    Variables that are Hermes-managed provider credentials (from
+    Variables that are Hades-managed provider credentials (from
     ``_HERMES_PROVIDER_ENV_BLOCKLIST``) are rejected here to preserve
     the ``execute_code`` sandbox's credential-scrubbing guarantee per
-    GHSA-rhgp-j443-p4rf. A skill that needs to talk to a Hermes-managed
+    GHSA-rhgp-j443-p4rf. A skill that needs to talk to a Hades-managed
     provider should do so via the agent's main-process tools (web_search,
     web_extract, etc.) where the credential remains safely in the main
     process.
@@ -129,7 +129,7 @@ def _load_config_passthrough() -> frozenset[str]:
 
     result: set[str] = set()
     try:
-        from hermes_cli.config import read_raw_config
+        from hades_cli.config import read_raw_config
         cfg = read_raw_config()
         passthrough = cfg_get(cfg, "terminal", "env_passthrough")
         if isinstance(passthrough, list):
@@ -138,7 +138,7 @@ def _load_config_passthrough() -> frozenset[str]:
                     continue
                 name = item.strip()
                 # Mirror the skill-path filter in register_env_passthrough:
-                # Hermes-managed provider credentials must not be passed
+                # Hades-managed provider credentials must not be passed
                 # through to execute_code / terminal children, regardless of
                 # whether the request came from a skill or from config.yaml.
                 # See GHSA-rhgp-j443-p4rf.

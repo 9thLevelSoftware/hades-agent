@@ -6,7 +6,7 @@
 
 **Architecture:** Persist final turn outcomes/watermarks through A2. `agent/skill_distiller.py` selects sessions older than a settle window with `distilled_at IS NULL`, excludes fork/curator/parent-superseded sessions, groups them by tool/task fingerprint and existing skill descriptions, and creates bounded per-session digests. A restricted auxiliary distiller sees the batch plus relevant umbrella skills and outputs structured patch proposals only. Proposals enter `write_approval` as `background_review` writes; plan 12’s verifier reviews/applies them. Run state/report/watermarks make the pass restartable and idempotent.
 
-**Tech Stack:** `hermes_state.SessionDB`/FTS5/trigram/anchored views, `agent/turn_outcome.py`, `agent/turn_finalizer.py`, `agent/background_review._digest_history`, `agent/agent_runtime_helpers.convert_to_trajectory_format`, `agent/curator.py` scheduling/report patterns, `tools/skill_manager_tool.py`/provenance/write approval, `tools/skill_usage.py`, `agent/skill_verifier.py`, auxiliary runtime resolution.
+**Tech Stack:** `hades_state.SessionDB`/FTS5/trigram/anchored views, `agent/turn_outcome.py`, `agent/turn_finalizer.py`, `agent/background_review._digest_history`, `agent/agent_runtime_helpers.convert_to_trajectory_format`, `agent/curator.py` scheduling/report patterns, `tools/skill_manager_tool.py`/provenance/write approval, `tools/skill_usage.py`, `agent/skill_verifier.py`, auxiliary runtime resolution.
 
 ## Global Constraints
 
@@ -43,7 +43,7 @@ The plan skips cross-model reinforcement learning, full transcript replay, and n
 ## File Map
 
 - Create: `agent/skill_distiller.py` — selector/grouping/digests/fork/proposal/report/state.
-- Modify: `hermes_state.py`, `agent/turn_finalizer.py` — A2 outcome/watermark integration if not already present.
+- Modify: `hades_state.py`, `agent/turn_finalizer.py` — A2 outcome/watermark integration if not already present.
 - Modify: `agent/background_review.py` — reuse/export bounded digest helper only.
 - Modify: `agent/curator.py`, `cli.py`, `gateway/run.py` — idle tick/state gate.
 - Modify: `tools/skill_manager_tool.py`, `tools/write_approval.py` — distiller origin/source metadata handoff.
@@ -101,7 +101,7 @@ class DistillRun:
 ## Task 1: Persisted Outcome/Watermark Handoff and Candidate Selector
 
 **Files:**
-- Modify: `hermes_state.py`, `agent/turn_finalizer.py` only if A2 has not completed these fields.
+- Modify: `hades_state.py`, `agent/turn_finalizer.py` only if A2 has not completed these fields.
 - Create: `agent/skill_distiller.py`
 - Modify: `hermes_cli/config.py`
 - Test: `tests/agent/test_skill_distiller.py`, outcome/state tests.
@@ -147,7 +147,7 @@ python -m pytest tests/agent/test_skill_distiller.py tests/agent/test_turn_outco
 **Files:**
 - Modify: `agent/skill_distiller.py`
 - Reuse/modify: `agent/background_review.py` digest helper.
-- Modify: `hermes_state.py` only for bounded FTS query helper.
+- Modify: `hades_state.py` only for bounded FTS query helper.
 - Test: `tests/agent/test_skill_distiller.py`, background-digest tests.
 
 - [ ] Step 1: Add grouping/digest tests.
@@ -184,7 +184,7 @@ python -m pytest tests/agent/test_skill_distiller.py tests/agent/test_background
 - [ ] Step 6: Commit batch/dry-run implementation.
 
 ```bash
-git add agent/skill_distiller.py agent/background_review.py hermes_state.py tests/agent/test_skill_distiller.py tests/agent/test_background_review.py
+git add agent/skill_distiller.py agent/background_review.py hades_state.py tests/agent/test_skill_distiller.py tests/agent/test_background_review.py
  git diff --cached --check
 git commit -m "feat(skills): add batch distillation dry run"
 ```
@@ -310,7 +310,7 @@ skill_distiller:
 - [ ] Run no-live-network/no-terminal/no-memory fork tests and cost/time cap tests.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_skill_distiller.py \
   tests/agent/test_skill_distiller_e2e.py \
   tests/agent/test_skill_verifier_e2e.py \

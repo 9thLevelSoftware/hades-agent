@@ -13,7 +13,7 @@
 - Implementation starts only after the public contracts from item #2 (`agent.effects`), item #6 (`agent.autonomy`), and item #12 (`agent.receipts`) have landed. This plan consumes those contracts and must not create local substitutes.
 - Work from the branch containing this plan and preserve unrelated changes. Each task ends in exactly one conventional commit.
 - TDD is mandatory. Run Python tests only through `scripts/run_tests.sh`; use package-local npm commands for Ink, Dashboard, and documentation checks.
-- A dry run causes zero outward effect. It may write only its profile-local `state.db`, the bounded `get_hermes_home()/preview-shadow/` store, and an explicitly requested local report path. It never changes the declared source workspace/repository, Hermes workflow/cron/config source, browser or desktop UI, remote service, channel, account, or network peer.
+- A dry run causes zero outward effect. It may write only its profile-local `state.db`, the bounded `get_hades_home()/preview-shadow/` store, and an explicitly requested local report path. It never changes the declared source workspace/repository, Hermes workflow/cron/config source, browser or desktop UI, remote service, channel, account, or network peer.
 - The dry-run coordinator never calls `EffectAdapter.commit()`, `EffectAdapter.compensate()`, a tool handler callback, `DeliveryRouter`, a workflow dispatcher/tick, a cron writer, `browser_*`, raw CDP, or `computer_use`. Tests enforce this with poison callbacks and egress traps.
 - Built-in simulation is limited to declared filesystem/local-Git overlays and Hermes-owned workflow/cron/config state. Other effects require a validated declarative simulator bundle from a standalone plugin; otherwise every affected field is `unknown`.
 - Browser and computer-use prediction is limited to preregistered, instrumented state-transition fixtures. There is no live navigation, screenshot, click, type, key, form submission, Office automation, arbitrary website model, or generic multi-step CUA world model in dry run.
@@ -26,8 +26,8 @@
 - The system prompt, cached prefix, effective model-tool definition snapshot, provider, and model remain byte-stable for the conversation. Preview state never rewrites messages, injects a synthetic user turn, changes role alternation, or dynamically changes model-visible tools.
 - Add no model-visible core tool and do not change any existing tool JSON schema. Delivery is Footprint Ladder rung 2: CLI + skill over transaction adapters; external-state simulator data remains in standalone plugins.
 - Stable non-secret settings live under `what_if:` in `config.yaml`. No new user-facing environment variable is added. Credentials are neither needed nor exposed to simulation providers.
-- Profiles remain independent islands. Every DB, shadow directory, manifest, report, receipt, and provider lookup resolves from the active `get_hermes_home()`; no live default-profile inheritance or cross-profile source path is allowed.
-- Runtime/security/state changes receive real-path tests with temporary `HERMES_HOME`, real SQLite, real files and local Git repositories, real workflow/cron/config readers, and real CLI imports. Mock only clocks and the final prohibited external/network/process boundary.
+- Profiles remain independent islands. Every DB, shadow directory, manifest, report, receipt, and provider lookup resolves from the active `get_hades_home()`; no live default-profile inheritance or cross-profile source path is allowed.
+- Runtime/security/state changes receive real-path tests with temporary `HADES_HOME`, real SQLite, real files and local Git repositories, real workflow/cron/config readers, and real CLI imports. Mock only clocks and the final prohibited external/network/process boundary.
 - Preview receipts are prediction artifacts and therefore use `completed_unverified`; only item #12's private scorer may emit `verified` after observed outcome evidence. A simulated outcome is never completion evidence.
 - No outbound telemetry. Benchmark reports are local JSON/Markdown with denominator, exclusions/aborts, Wilson intervals, p50/p95, cost source, safety slices, and statistical test details reported separately.
 
@@ -117,7 +117,7 @@ No `what-if` command can call transaction `commit`, `compensate`, or outbox `rel
 
 ### Existing production files modified
 
-- `hermes_state.py` — additive preview tables/indexes and lazy `SessionDB.preview` facade.
+- `hades_state.py` — additive preview tables/indexes and lazy `SessionDB.preview` facade.
 - `hermes_cli/config.py` — safe `what_if` defaults and validation.
 - `hermes_cli/plugins.py` — discover a data-only `what_if_simulator` manifest section without importing provider code.
 - `hermes_cli/commands.py`, `hermes_cli/main.py`, `hermes_cli/cli_commands_mixin.py`, `cli.py` — register top-level/classic `what-if`/`dry-run` routes.
@@ -281,7 +281,7 @@ git commit -m "test: preregister what-if preview proof"
 - Create: `agent/preview/__init__.py`
 - Create: `agent/preview/models.py`
 - Create: `agent/preview/store.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/preview/test_models.py`
 - Create: `tests/agent/preview/test_store.py`
 
@@ -469,7 +469,7 @@ Expected: PASS on new/reopened databases; immutable hashes and CAS transitions h
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/preview hermes_state.py tests/agent/preview/test_models.py tests/agent/preview/test_store.py
+git add agent/preview hades_state.py tests/agent/preview/test_models.py tests/agent/preview/test_store.py
 git commit -m "feat: persist immutable what-if previews"
 ```
 
@@ -669,8 +669,8 @@ class ShadowLimits:
 
 class ShadowStore:
     def open(self, run_id, candidate_id, roots, declared_paths, limits) -> ShadowSession:
-        root = (get_hermes_home() / "preview-shadow" / run_id / candidate_id).resolve()
-        assert root.is_relative_to((get_hermes_home() / "preview-shadow").resolve())
+        root = (get_hades_home() / "preview-shadow" / run_id / candidate_id).resolve()
+        assert root.is_relative_to((get_hades_home() / "preview-shadow").resolve())
         return self._materialize_declared_overlay(root, roots, declared_paths, limits)
 ```
 
@@ -857,7 +857,7 @@ what_if_simulator:
 
 The JSON bundle contains finite `adapter_actions`, `observable_fields`, `initial_states`, and a list of `{state, action, normalized_input, next_state, fields, cost_range, time_range, assumptions, irreversible_boundary}` transitions. It contains no URL fetch instruction, code, template execution, regex with backtracking, environment reference, file read, subprocess, or credential.
 
-`hermes_cli.plugins` discovers the manifest and bundle path but does not import the plugin module for simulation. Validate realpath containment in the installed plugin directory, exact SHA-256, maximum 4 MiB, maximum 1,000 states, maximum 10,000 transitions, maximum 128 fields, finite acyclic JSON, unique transition keys, complete field declarations, semantic version, and no secret-like values. Third-party bundles remain standalone plugin repos under `~/.hermes/plugins/` or pip entry points; none are added to the core `plugins/` tree.
+`hades_cli.plugins` discovers the manifest and bundle path but does not import the plugin module for simulation. Validate realpath containment in the installed plugin directory, exact SHA-256, maximum 4 MiB, maximum 1,000 states, maximum 10,000 transitions, maximum 128 fields, finite acyclic JSON, unique transition keys, complete field declarations, semantic version, and no secret-like values. Third-party bundles remain standalone plugin repos under `~/.hades/plugins/` or pip entry points; none are added to the core `plugins/` tree.
 
 - [ ] **Step 4: Enforce exact coverage and truthful unknowns**
 
@@ -1209,7 +1209,7 @@ Reject one candidate, cosmetic duplicates, unbounded manifests, cycles, unknown 
 
 Run: `scripts/run_tests.sh tests/hermes_cli/test_what_if_cli.py tests/hermes_cli/test_commands.py -q`
 
-Expected: FAIL importing `hermes_cli.what_if`.
+Expected: FAIL importing `hades_cli.what_if`.
 
 - [ ] **Step 3: Implement one parser/service/renderer path**
 
@@ -1274,7 +1274,7 @@ git commit -m "feat: add terminal what-if preview controls"
 
 **Interfaces:**
 - Produces JSON-RPC `what-if.exec` and native `/what-if`/`/dry-run` rendering.
-- Consumes `hermes_cli.what_if.run_argv(..., output_mode="structured")` inside the live TUI gateway process.
+- Consumes `hades_cli.what_if.run_argv(..., output_mode="structured")` inside the live TUI gateway process.
 
 - [ ] **Step 1: Write RED RPC and native-route tests**
 
@@ -1350,7 +1350,7 @@ git commit -m "feat: add native tui what-if comparison"
 
 **Interfaces:**
 - Produces profile-scoped `/api/what-if` read/run/revise/select/accept/receipt endpoints and Dashboard `/what-if`.
-- Consumes the same `hermes_cli.what_if.run_argv(..., output_mode="structured")`; Dashboard does not implement simulation/scoring logic.
+- Consumes the same `hades_cli.what_if.run_argv(..., output_mode="structured")`; Dashboard does not implement simulation/scoring logic.
 
 - [ ] **Step 1: Write RED authenticated/profile-scoped API and page tests**
 
@@ -1477,7 +1477,7 @@ def test_restart_converges_without_effect_or_duplicate(fault, what_if_e2e):
     assert reopened.accepted_transaction_count <= 1
 ```
 
-The harness uses temporary `HERMES_HOME`, real `state.db`, real files and local Git repo/disposable source worktree, real config/workflow/cron stores, real plugin manifest discovery, real CLI parser/service, and local declarative browser/service fixtures. It snapshots source files/modes/hashes, `.git` refs/index/worktree list, workflow DB bytes/logical rows, jobs file, config, checkpoint refs, browser/CUA process counts, sockets/network trap, operation journal, gateway/outbox rows, and environment before/after.
+The harness uses temporary `HADES_HOME`, real `state.db`, real files and local Git repo/disposable source worktree, real config/workflow/cron stores, real plugin manifest discovery, real CLI parser/service, and local declarative browser/service fixtures. It snapshots source files/modes/hashes, `.git` refs/index/worktree list, workflow DB bytes/logical rows, jobs file, config, checkpoint refs, browser/CUA process counts, sockets/network trap, operation journal, gateway/outbox rows, and environment before/after.
 
 - [ ] **Step 2: Add adversarial source-to-sink security tests**
 

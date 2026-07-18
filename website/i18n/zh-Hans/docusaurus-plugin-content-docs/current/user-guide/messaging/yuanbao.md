@@ -1,7 +1,7 @@
 ---
 sidebar_position: 16
 title: "Yuanbao"
-description: "通过 WebSocket gateway 将 Hermes Agent 连接到元宝企业消息平台"
+description: "通过 WebSocket gateway 将 Hades Agent 连接到元宝企业消息平台"
 ---
 
 # Yuanbao
@@ -53,7 +53,7 @@ WebSocket URL 和 API Domain 均内置了合理的默认值。只需提供 APP_I
 
 ### 3. 配置环境变量
 
-初始配置完成后，在 `~/.hermes/.env` 中验证以下变量：
+初始配置完成后，在 `~/.hades/.env` 中验证以下变量：
 
 ```bash
 # 必填
@@ -130,7 +130,7 @@ hermes gateway
 如果未配置主频道，第一个向机器人发消息的用户将自动成为主频道所有者。如果当前主频道是群聊，第一条单聊消息将把主频道升级为直接频道。
 :::
 
-也可以在 `~/.hermes/.env` 中手动设置：
+也可以在 `~/.hades/.env` 中手动设置：
 
 ```bash
 YUANBAO_HOME_CHANNEL=direct:user_account_id
@@ -204,7 +204,7 @@ Please analyze this document
 1. 验证 APP_ID 和 APP_SECRET 是否正确
 2. 检查 WebSocket URL 是否可访问
 3. 确保机器人账号拥有适当权限
-4. 查看 gateway 日志：`tail -f ~/.hermes/logs/gateway.log`
+4. 查看 gateway 日志：`tail -f ~/.hades/logs/gateway.log`
 
 ### "Connection refused" 错误
 

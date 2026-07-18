@@ -17,7 +17,7 @@ description: "通过 gh 或 REST 创建、分类、标记、分配 GitHub Issues
 | 来源 | 内置（默认安装） |
 | 路径 | `skills/github/github-issues` |
 | 版本 | `1.1.0` |
-| 作者 | Hermes Agent |
+| 作者 | Hades Agent |
 | 许可证 | MIT |
 | 平台 | linux, macos, windows |
 | 标签 | `GitHub`, `Issues`, `Project-Management`, `Bug-Tracking`, `Triage` |
@@ -46,8 +46,8 @@ if command -v gh &>/dev/null && gh auth status &>/dev/null; then
 else
   AUTH="git"
   if [ -z "$GITHUB_TOKEN" ]; then
-    if [ -f ~/.hermes/.env ] && grep -q "^GITHUB_TOKEN=" ~/.hermes/.env; then
-      GITHUB_TOKEN=$(grep "^GITHUB_TOKEN=" ~/.hermes/.env | head -1 | cut -d= -f2 | tr -d '\n\r')
+    if [ -f ~/.hades/.env ] && grep -q "^GITHUB_TOKEN=" ~/.hades/.env; then
+      GITHUB_TOKEN=$(grep "^GITHUB_TOKEN=" ~/.hades/.env | head -1 | cut -d= -f2 | tr -d '\n\r')
     elif grep -q "github.com" ~/.git-credentials 2>/dev/null; then
       GITHUB_TOKEN=$(grep "github.com" ~/.git-credentials 2>/dev/null | head -1 | sed 's|https://[^:]*:\([^@]*\)@.*|\1|')
     fi

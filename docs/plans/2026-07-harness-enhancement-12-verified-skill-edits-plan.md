@@ -6,7 +6,7 @@
 
 **Architecture:** Extend `write_approval` records with verification/session evidence. At background review/curator completion and periodic orphan drains, claim pending skill writes lacking verdict. Materialize the staged post-edit skill into a temp sandbox. Tier 1 runs declared skill scripts/tests; Tier 2 compares a bounded stored trajectory/rubric without replaying unsafe external side effects; Tier 3 marks unverifiable. A distinct `agent/skill_verifier.py` fork has terminal/execute/files read/run access but no `skill_manage`/memory writes and a `skill_verifier` origin rejected by skill-write guards. Passes can auto-apply only when user write-approval policy permits; foreground/user approval always wins. Fail/unverifiable returns to the existing CLI/gateway pending surface.
 
-**Tech Stack:** `tools/write_approval.py`, `tools/skill_manager_tool.py`, `tools/skill_provenance.py`, `agent/background_review.py`, `agent/curator.py`, `agent/curator_backup.py`, `hermes_state.SessionDB`, `tools/skill_usage.py`, `agent/insights.py`, `hermes_cli/write_approval_commands.py`, sandboxed terminal/docker/local environment, auxiliary runtime resolution.
+**Tech Stack:** `tools/write_approval.py`, `tools/skill_manager_tool.py`, `tools/skill_provenance.py`, `agent/background_review.py`, `agent/curator.py`, `agent/curator_backup.py`, `hades_state.SessionDB`, `tools/skill_usage.py`, `agent/insights.py`, `hermes_cli/write_approval_commands.py`, sandboxed terminal/docker/local environment, auxiliary runtime resolution.
 
 ## Global Constraints
 
@@ -308,7 +308,7 @@ git commit -m "feat(skills): gate background edits on verdicts"
 - [ ] Run a real temp profile scenario: background review stages a skill, verifier pass applies in scratch/live safely, restart preserves metrics/pending, failing edit remains reviewable, rollback restores prior skill.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_skill_verifier.py \
   tests/agent/test_skill_verifier_e2e.py \
   tests/tools/test_write_approval.py \

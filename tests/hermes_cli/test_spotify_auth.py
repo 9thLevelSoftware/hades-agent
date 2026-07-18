@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_cli import auth as auth_mod
-from hermes_cli.auth import AuthError, resolve_spotify_runtime_credentials
+from hades_cli import auth as auth_mod
+from hades_cli.auth import AuthError, resolve_spotify_runtime_credentials
 
 
 def test_store_provider_state_can_skip_active_provider() -> None:
@@ -26,7 +26,7 @@ def test_resolve_spotify_runtime_credentials_refreshes_without_changing_active_p
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
 
     with auth_mod._auth_store_lock():
         store = auth_mod._load_auth_store()
@@ -81,7 +81,7 @@ def test_auth_spotify_status_command_reports_logged_in(capsys, monkeypatch: pyte
         },
     )
 
-    from hermes_cli.auth_commands import auth_status_command
+    from hades_cli.auth_commands import auth_status_command
 
     auth_status_command(SimpleNamespace(provider="spotify"))
     output = capsys.readouterr().out
@@ -94,7 +94,7 @@ def test_spotify_logout_does_not_reset_model_provider(
     monkeypatch: pytest.MonkeyPatch,
     capsys,
 ) -> None:
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "model:\n"
@@ -141,7 +141,7 @@ def test_spotify_interactive_setup_persists_client_id(
     capsys,
 ) -> None:
     """The wizard writes HERMES_SPOTIFY_CLIENT_ID to .env and returns the value."""
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     monkeypatch.setattr("builtins.input", lambda prompt="": "wizard-client-123")
     # Prevent actually opening the browser during tests.
     monkeypatch.setattr(auth_mod, "webbrowser", SimpleNamespace(open=lambda *_a, **_k: False))
@@ -169,7 +169,7 @@ def test_spotify_interactive_setup_empty_aborts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Empty input aborts cleanly instead of persisting an empty client_id."""
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     monkeypatch.setattr("builtins.input", lambda prompt="": "")
     monkeypatch.setattr(auth_mod, "webbrowser", SimpleNamespace(open=lambda *_a, **_k: False))
     monkeypatch.setattr(auth_mod, "_is_remote_session", lambda: True)
@@ -222,7 +222,7 @@ def test_resolve_credentials_quarantines_dead_tokens_on_terminal_refresh_failure
     last_auth_error marker so subsequent calls fail fast without a network retry.
     Mirrors Nous / xAI-OAuth / Codex-OAuth / MiniMax quarantine pattern.
     """
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     _seed_spotify_state(tmp_path, dict(_STALE_SPOTIFY_STATE))
 
     def _terminal_refresh(_state, **_kw):
@@ -276,7 +276,7 @@ def test_resolve_credentials_does_not_quarantine_on_transient_refresh_failure(
     """Transient refresh failure (relogin_required=False, e.g. 429 / 5xx) must
     NOT trigger the quarantine path — tokens stay on disk for the next attempt.
     """
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     _seed_spotify_state(tmp_path, dict(_STALE_SPOTIFY_STATE))
 
     def _transient_refresh(_state, **_kw):

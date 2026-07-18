@@ -20,18 +20,18 @@ import pytest
 
 @pytest.fixture
 def curator_env(tmp_path, monkeypatch, capsys):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
     (home / "skills").mkdir()
     (home / "logs").mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-    import hermes_constants
+    import hades_constants
     importlib.reload(hermes_constants)
     from agent import curator
     importlib.reload(curator)
-    from hermes_cli import main as hermes_main
+    from hades_cli import main as hermes_main
     importlib.reload(hermes_main)
 
     yield {

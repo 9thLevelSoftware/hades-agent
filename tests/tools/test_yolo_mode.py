@@ -111,7 +111,7 @@ class TestYoloMode:
         """HERMES_YOLO_MODE should not be set by default."""
         # Clean env check — if it happens to be set in test env, that's fine,
         # we just verify the mechanism exists
-        assert os.getenv("HERMES_YOLO_MODE") is None or True  # no-op, documents intent
+        assert os.getenv("HADES_YOLO_MODE") is None or True  # no-op, documents intent
 
     def test_yolo_mode_empty_string_does_not_bypass(self, monkeypatch):
         """Empty string for HERMES_YOLO_MODE should not trigger bypass."""

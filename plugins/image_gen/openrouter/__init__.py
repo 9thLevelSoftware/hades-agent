@@ -9,7 +9,7 @@ content parts for grounding, and read the generated images back from
 
 Nous Portal proxies OpenRouter, so one implementation services both — we only
 swap the resolved ``(base_url, api_key)``. Credentials are resolved through the
-agent's existing :func:`~hermes_cli.runtime_provider.resolve_runtime_provider`,
+agent's existing :func:`~hades_cli.runtime_provider.resolve_runtime_provider`,
 which already understands OpenRouter's key pool and the Nous OAuth device-code
 token, so this plugin never reinvents auth.
 
@@ -74,7 +74,7 @@ _REQUEST_TIMEOUT = 300.0
 def _load_image_gen_config() -> Dict[str, Any]:
     """Read the ``image_gen`` section from config.yaml (``{}`` on failure)."""
     try:
-        from hermes_cli.config import load_config
+        from hades_cli.config import load_config
 
         cfg = load_config()
         section = cfg.get("image_gen") if isinstance(cfg, dict) else None
@@ -208,7 +208,7 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
 
     def _resolve_runtime(self) -> Dict[str, Any]:
         """Resolve ``(base_url, api_key)`` via the shared runtime resolver."""
-        from hermes_cli.runtime_provider import resolve_runtime_provider
+        from hades_cli.runtime_provider import resolve_runtime_provider
 
         return resolve_runtime_provider(requested=self._runtime_name)
 
@@ -337,8 +337,8 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             # OpenRouter attribution headers (harmless against Nous Portal).
-            "HTTP-Referer": "https://github.com/NousResearch/hermes-agent",
-            "X-Title": "Hermes Agent",
+            "HTTP-Referer": "https://github.com/9thLevelSoftware/hades-agent",
+            "X-Title": "Hades Agent",
         }
         last_error: Optional[Dict[str, Any]] = None
         for i, model_id in enumerate(model_chain):

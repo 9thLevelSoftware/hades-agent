@@ -18,7 +18,7 @@ Hermes 本身需要配置好 provider（提供商）和工具后端，API 服务
 
 ### 1. 启用 API 服务器
 
-在 `~/.hermes/.env` 中添加：
+在 `~/.hades/.env` 中添加：
 
 ```bash
 API_SERVER_ENABLED=true
@@ -48,7 +48,7 @@ hermes gateway
 curl http://localhost:8642/v1/chat/completions \
   -H "Authorization: Bearer change-me-local-dev" \
   -H "Content-Type: application/json" \
-  -d '{"model": "hermes-agent", "messages": [{"role": "user", "content": "Hello!"}]}'
+  -d '{"model": "hades-agent", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
 或连接 Open WebUI、LobeChat 或其他任意前端——参见 [Open WebUI 集成指南](/user-guide/messaging/open-webui)获取分步说明。
@@ -62,7 +62,7 @@ curl http://localhost:8642/v1/chat/completions \
 **请求：**
 ```json
 {
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "messages": [
     {"role": "system", "content": "You are a Python expert."},
     {"role": "user", "content": "Write a fibonacci function"}
@@ -77,7 +77,7 @@ curl http://localhost:8642/v1/chat/completions \
   "id": "chatcmpl-abc123",
   "object": "chat.completion",
   "created": 1710000000,
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "choices": [{
     "index": 0,
     "message": {"role": "assistant", "content": "Here's a fibonacci function..."},
@@ -91,7 +91,7 @@ curl http://localhost:8642/v1/chat/completions \
 
 ```json
 {
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "messages": [
     {
       "role": "user",
@@ -119,7 +119,7 @@ OpenAI Responses API 格式。通过 `previous_response_id` 支持服务端对�
 **请求：**
 ```json
 {
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "input": "What files are in my project?",
   "instructions": "You are a helpful coding assistant.",
   "store": true
@@ -132,7 +132,7 @@ OpenAI Responses API 格式。通过 `previous_response_id` 支持服务端对�
   "id": "resp_abc123",
   "object": "response",
   "status": "completed",
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "output": [
     {"type": "function_call", "name": "terminal", "arguments": "{\"command\": \"ls\"}", "call_id": "call_1"},
     {"type": "function_call_output", "call_id": "call_1", "output": "README.md src/ tests/"},
@@ -146,7 +146,7 @@ OpenAI Responses API 格式。通过 `previous_response_id` 支持服务端对�
 
 ```json
 {
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "input": [
     {
       "role": "user",
@@ -205,8 +205,8 @@ OpenAI Responses API 格式。通过 `previous_response_id` 支持服务端对�
 ```json
 {
   "object": "hermes.api_server.capabilities",
-  "platform": "hermes-agent",
-  "model": "hermes-agent",
+  "platform": "hades-agent",
+  "model": "hades-agent",
   "auth": {"type": "bearer", "required": true},
   "features": {
     "chat_completions": true,
@@ -258,7 +258,7 @@ Runs 接受简单的 `input` 字符串，以及可选的 `session_id`、`instruc
   "run_id": "run_abc123",
   "status": "completed",
   "session_id": "space-session",
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "output": "Done.",
   "usage": {"input_tokens": 50, "output_tokens": 200, "total_tokens": 250}
 }
@@ -409,13 +409,13 @@ hermes profile create bob
 
 # 在不同端口上配置每个 profile 的 API 服务器。API_SERVER_* 是环境变量
 # （不是 config.yaml 键），因此将它们写入每个 profile 的 .env：
-cat >> ~/.hermes/profiles/alice/.env <<EOF
+cat >> ~/.hades/profiles/alice/.env <<EOF
 API_SERVER_ENABLED=true
 API_SERVER_PORT=8643
 API_SERVER_KEY=alice-secret
 EOF
 
-cat >> ~/.hermes/profiles/bob/.env <<EOF
+cat >> ~/.hades/profiles/bob/.env <<EOF
 API_SERVER_ENABLED=true
 API_SERVER_PORT=8644
 API_SERVER_KEY=bob-secret

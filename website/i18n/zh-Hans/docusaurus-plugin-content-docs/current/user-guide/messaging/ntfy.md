@@ -24,7 +24,7 @@ hermes gateway setup
 
 ### 通过环境变量
 
-将以下内容添加到 `~/.hermes/.env`：
+将以下内容添加到 `~/.hades/.env`：
 
 ```
 NTFY_TOPIC=hermes-myname-2026
@@ -64,8 +64,8 @@ ntfy 没有原生的已认证用户身份。已发布消息中的 `title` 字段
 2. 在手机上：安装 [ntfy 应用](https://ntfy.sh/docs/subscribe/phone/)，点击 **+**，输入 `hermes-myname-2026`
 3. 在主机上：
    ```bash
-   echo 'NTFY_TOPIC=hermes-myname-2026' >> ~/.hermes/.env
-   echo 'NTFY_ALLOWED_USERS=hermes-myname-2026' >> ~/.hermes/.env
+   echo 'NTFY_TOPIC=hermes-myname-2026' >> ~/.hades/.env
+   echo 'NTFY_ALLOWED_USERS=hermes-myname-2026' >> ~/.hades/.env
    hermes gateway restart
    ```
 4. 从 ntfy 应用向该 topic 发送一条消息。agent 的回复将以推送通知的形式送达。

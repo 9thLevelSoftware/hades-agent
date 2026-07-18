@@ -3,7 +3,7 @@
 # Usage: bash scripts/test-workflows-dashboard-e2e.sh /tmp/hermes-workflows-browser-proof
 #
 # Requires: hermes CLI, agent-browser, uv, a display server.
-# Creates a temporary HERMES_HOME, starts the dashboard, exercises every
+# Creates a temporary HADES_HOME, starts the dashboard, exercises every
 # workflow scenario across five viewport sizes, saves screenshots, and
 # asserts no console errors.
 
@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FIXTURES="$REPO_ROOT/tests/fixtures/workflows/assistant_responses.json"
 PORT=9148
-HERMES_HOME=$(mktemp -d)
+HADES_HOME=$(mktemp -d)
 DASHBOARD_PID=""
 BROWSER_SESSION="workflows-e2e"
 
@@ -27,7 +27,7 @@ cleanup() {
     kill "$DASHBOARD_PID" 2>/dev/null
     wait "$DASHBOARD_PID" 2>/dev/null
   fi
-  rm -rf "$HERMES_HOME"
+  rm -rf "$HADES_HOME"
 }
 trap cleanup EXIT
 
@@ -36,7 +36,7 @@ mkdir -p "$PROOF_DIR"
 # --- 1. Start dashboard ------------------------------------------------------
 echo "Starting hermes dashboard on port $PORT..."
 cd "$REPO_ROOT"
-HERMES_HOME="$HERMES_HOME" uv run --extra dev hermes dashboard \
+HADES_HOME="$HADES_HOME" uv run --extra dev hermes dashboard \
   --port "$PORT" --no-open --skip-build &
 DASHBOARD_PID=$!
 

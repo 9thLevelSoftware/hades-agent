@@ -17,14 +17,14 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from hermes_constants import get_hermes_home
+from hades_constants import get_hades_home
 
 from plugins.google_meet import process_manager as pm
 from plugins.google_meet.meet_bot import _is_safe_meet_url
 
 
 def _auth_state_path() -> Path:
-    return Path(get_hermes_home()) / "workspace" / "meetings" / "auth.json"
+    return Path(get_hades_home()) / "workspace" / "meetings" / "auth.json"
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
 
     join_p = subs.add_parser("join", help="Join a Meet URL")
     join_p.add_argument("url", help="https://meet.google.com/...")
-    join_p.add_argument("--guest-name", default="Hermes Agent")
+    join_p.add_argument("--guest-name", default="Hades Agent")
     join_p.add_argument("--duration", default=None, help="e.g. 30m, 2h, 90s")
     join_p.add_argument("--headed", action="store_true", help="show browser")
     join_p.add_argument(
@@ -250,7 +250,7 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
     pip_pkgs = ["playwright", "websockets"]
     print(f"\n[1/3] pip install: {' '.join(pip_pkgs)}")
     try:
-        from hermes_cli.tools_config import _pip_install
+        from hades_cli.tools_config import _pip_install
 
         res = _pip_install(["--upgrade", *pip_pkgs], capture_output=False)
         if res.returncode != 0:

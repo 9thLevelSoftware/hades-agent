@@ -18,7 +18,7 @@ Hermes itself needs a configured provider and tool backends for the API server t
 
 ### 1. Enable the API server
 
-Add to `~/.hermes/.env`:
+Add to `~/.hades/.env`:
 
 ```bash
 API_SERVER_ENABLED=true
@@ -48,7 +48,7 @@ Point any OpenAI-compatible client at `http://localhost:8642/v1`:
 curl http://localhost:8642/v1/chat/completions \
   -H "Authorization: Bearer change-me-local-dev" \
   -H "Content-Type: application/json" \
-  -d '{"model": "hermes-agent", "messages": [{"role": "user", "content": "Hello!"}]}'
+  -d '{"model": "hades-agent", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
 Or connect Open WebUI, LobeChat, or any other frontend — see the [Open WebUI integration guide](/user-guide/messaging/open-webui) for step-by-step instructions.
@@ -62,7 +62,7 @@ Standard OpenAI Chat Completions format. Stateless — the full conversation is 
 **Request:**
 ```json
 {
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "messages": [
     {"role": "system", "content": "You are a Python expert."},
     {"role": "user", "content": "Write a fibonacci function"}
@@ -77,7 +77,7 @@ Standard OpenAI Chat Completions format. Stateless — the full conversation is 
   "id": "chatcmpl-abc123",
   "object": "chat.completion",
   "created": 1710000000,
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "choices": [{
     "index": 0,
     "message": {"role": "assistant", "content": "Here's a fibonacci function..."},
@@ -91,7 +91,7 @@ Standard OpenAI Chat Completions format. Stateless — the full conversation is 
 
 ```json
 {
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "messages": [
     {
       "role": "user",
@@ -106,7 +106,7 @@ Standard OpenAI Chat Completions format. Stateless — the full conversation is 
 
 Uploaded files (`file` / `input_file` / `file_id`) and non-image `data:` URLs return `400 unsupported_content_type`.
 
-**Streaming** (`"stream": true`): Returns Server-Sent Events (SSE) with token-by-token response chunks. For **Chat Completions**, the stream uses standard `chat.completion.chunk` events plus Hermes' custom `hermes.tool.progress` event for tool-start UX. For **Responses**, the stream uses OpenAI Responses event types such as `response.created`, `response.output_text.delta`, `response.output_item.added`, `response.output_item.done`, and `response.completed`.
+**Streaming** (`"stream": true`): Returns Server-Sent Events (SSE) with token-by-token response chunks. For **Chat Completions**, the stream uses standard `chat.completion.chunk` events plus Hades' custom `hermes.tool.progress` event for tool-start UX. For **Responses**, the stream uses OpenAI Responses event types such as `response.created`, `response.output_text.delta`, `response.output_item.added`, `response.output_item.done`, and `response.completed`.
 
 **Tool progress in streams**:
 - **Chat Completions**: Hermes emits `event: hermes.tool.progress` for tool-start visibility without polluting persisted assistant text.
@@ -119,7 +119,7 @@ OpenAI Responses API format. Supports server-side conversation state via `previo
 **Request:**
 ```json
 {
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "input": "What files are in my project?",
   "instructions": "You are a helpful coding assistant.",
   "store": true
@@ -132,7 +132,7 @@ OpenAI Responses API format. Supports server-side conversation state via `previo
   "id": "resp_abc123",
   "object": "response",
   "status": "completed",
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "output": [
     {"type": "function_call", "name": "terminal", "arguments": "{\"command\": \"ls\"}", "call_id": "call_1"},
     {"type": "function_call_output", "call_id": "call_1", "output": "README.md src/ tests/"},
@@ -146,7 +146,7 @@ OpenAI Responses API format. Supports server-side conversation state via `previo
 
 ```json
 {
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "input": [
     {
       "role": "user",
@@ -205,8 +205,8 @@ Returns a machine-readable description of the API server's stable surface for ex
 ```json
 {
   "object": "hermes.api_server.capabilities",
-  "platform": "hermes-agent",
-  "model": "hermes-agent",
+  "platform": "hades-agent",
+  "model": "hades-agent",
   "auth": {"type": "bearer", "required": true},
   "features": {
     "chat_completions": true,
@@ -264,7 +264,7 @@ Poll the current run state. This is useful for dashboards that need status witho
   "run_id": "run_abc123",
   "status": "completed",
   "session_id": "space-session",
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "output": "Done.",
   "usage": {"input_tokens": 50, "output_tokens": 200, "total_tokens": 250}
 }
@@ -483,13 +483,13 @@ hermes profile create bob
 
 # Configure each profile's API server on a different port. API_SERVER_* are env
 # vars (not config.yaml keys), so write them to each profile's .env:
-cat >> ~/.hermes/profiles/alice/.env <<EOF
+cat >> ~/.hades/profiles/alice/.env <<EOF
 API_SERVER_ENABLED=true
 API_SERVER_PORT=8643
 API_SERVER_KEY=alice-secret
 EOF
 
-cat >> ~/.hermes/profiles/bob/.env <<EOF
+cat >> ~/.hades/profiles/bob/.env <<EOF
 API_SERVER_ENABLED=true
 API_SERVER_PORT=8644
 API_SERVER_KEY=bob-secret

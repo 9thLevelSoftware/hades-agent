@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent.turn_finalizer import finalize_turn
-from hermes_state import SessionDB
+from hades_state import SessionDB
 
 
 # ── FakeAgent (mirrors test_turn_finalizer_final_response_persistence) ────

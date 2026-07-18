@@ -5,7 +5,7 @@ Two steps, mirroring the UX across every surface:
 1. :func:`generate_base_drafts` — a handful of prompt-only "what should this pet
    look like" variants. Cheap; the user picks one (or retries for a fresh set).
 2. :func:`hatch_pet` — takes the chosen base and generates one grounded row
-   strip per Hermes state, slices each into frames, composes the atlas, validates
+   strip per Hades state, slices each into frames, composes the atlas, validates
    it, and writes the pet into the store.
 
 Splitting it this way bounds cost (4 cheap base calls per round; the ~6 row

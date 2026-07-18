@@ -6,7 +6,7 @@
 
 **Architecture:** Create `agent/memory_curator.py` by reusing Curator idle gates, restricted fork, report, and backup patterns. A `memory_curator` run snapshots the memory directory, gathers bounded memory/session candidates with `session_search`, runs a memory-only auxiliary agent, validates proposed writes through existing `MemoryStore` threat/drift/write-approval gates, and applies one atomic batch per store/topic. Default mode is dry-run/staged; automatic consolidation is opt-in. The builtin provider from A6 receives end-of-session extraction only through this controlled path; external providers remain skipped.
 
-**Tech Stack:** `agent/curator.py`, `agent/curator_backup.py`, `agent/background_review.py`, `tools/memory_tool.py`, `tools/write_approval.py`, `tools/session_search_tool.py`, `hermes_state.SessionDB`, `MemoryStore` topic/archive support, auxiliary model routing, CLI/gateway idle ticks, and existing skill/curator CLI/report conventions.
+**Tech Stack:** `agent/curator.py`, `agent/curator_backup.py`, `agent/background_review.py`, `tools/memory_tool.py`, `tools/write_approval.py`, `tools/session_search_tool.py`, `hades_state.SessionDB`, `MemoryStore` topic/archive support, auxiliary model routing, CLI/gateway idle ticks, and existing skill/curator CLI/report conventions.
 
 ## Global Constraints
 
@@ -152,7 +152,7 @@ def test_single_flight_lease_recovers_after_ttl(tmp_path):
 - [ ] Step 5: Run backup/idle tests with real temp files/locks.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest tests/agent/test_memory_curator.py tests/agent/test_memory_curator_backup.py tests/agent/test_curator_backup.py -q
+HADES_HOME="$(mktemp -d)" python -m pytest tests/agent/test_memory_curator.py tests/agent/test_memory_curator_backup.py tests/agent/test_curator_backup.py -q
 ```
 
 - [ ] Step 6: Commit state/backup foundation.
@@ -298,7 +298,7 @@ def test_short_session_is_queued_for_builtin_dreaming(tmp_path):
 - [ ] Step 6: Run e2e session-boundary/tick tests and commit.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_memory_curator_e2e.py \
   tests/agent/test_memory_boundary_commit.py \
   tests/agent/test_curator_activity.py \
@@ -323,7 +323,7 @@ git commit -m "feat(memory): run dreaming during idle windows"
 - [ ] Run contradiction, missing provenance, prompt injection, concurrent live write, external provider, subagent skip-memory, and repeated-run dedup tests.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/agent/test_memory_curator.py \
   tests/agent/test_memory_curator_backup.py \
   tests/agent/test_memory_curator_e2e.py \

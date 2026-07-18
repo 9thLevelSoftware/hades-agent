@@ -1,6 +1,6 @@
 # Context Compression and Caching
 
-Hermes Agent uses a dual compression system and Anthropic prompt caching to
+Hades Agent uses a dual compression system and Anthropic prompt caching to
 manage context window usage efficiently across long conversations.
 
 Source files: `agent/context_engine.py` (ABC), `agent/context_compressor.py` (default engine),
@@ -116,7 +116,7 @@ GitHub Copilot). At the default 50% trigger, compaction would fire at ~136K —
 half the window the model can actually use. When the active route is Codex
 OAuth (`provider: openai-codex`) and the model is gpt-5.5, Hermes raises the
 trigger to **85%** (~231K) and shows a notice with the opt-out command. The
-notice is shown once per profile — a marker under `$HERMES_HOME`
+notice is shown once per profile — a marker under `$HADES_HOME`
 (`.codex_gpt55_autoraise_notice`) records that it ran, so repeated agent/session
 inits (e.g. every inbound gateway message) don't re-emit it; if the raised
 threshold later changes it re-notifies once. Only this exact route is affected;
@@ -137,7 +137,7 @@ hermes config set compression.codex_gpt55_autoraise_notice false
 
 Codex app-server sessions (`api_mode: codex_app_server` — the codex CLI/agent
 runtime) are different from every other route: the codex agent owns the backing
-thread context, so Hermes' auxiliary summarizer cannot shrink it — rewriting the
+thread context, so Hades' auxiliary summarizer cannot shrink it — rewriting the
 local transcript mirror leaves the real thread growing unbounded until a hard
 context reset. For this runtime, compaction goes through the app-server's own
 mechanism instead:
@@ -147,13 +147,13 @@ mechanism instead:
 - Automatic compaction is controlled by `compression.codex_app_server_auto`:
   the default `native` lets the app-server decide when to compact and Hermes
   records the resulting compaction events (compression counters, session
-  events). Set `hermes` to let Hermes' compression threshold initiate
+  events). Set `hermes` to let Hades' compression threshold initiate
   app-server compaction, or `off` to disable Hermes-initiated automatic
   compaction entirely (codex may still compact natively).
 
-Hermes' local transcript is never rewritten on this runtime — state.db records
+Hades' local transcript is never rewritten on this runtime — state.db records
 the compaction boundary while the visible transcript stays intact. All other
-routes (including Codex OAuth chat sessions) keep Hermes' summary compressor.
+routes (including Codex OAuth chat sessions) keep Hades' summary compressor.
 
 ### Computed Values (for a 200K context model at defaults)
 

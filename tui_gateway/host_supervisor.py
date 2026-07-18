@@ -22,7 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hermes_constants import get_hermes_home
+from hades_constants import get_hades_home
 from tools.environments.local import hermes_subprocess_env
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ def _build_sha() -> str:
 
 
 def _default_registry_path() -> Path:
-    return get_hermes_home() / "state" / _REGISTRY_NAME
+    return get_hades_home() / "state" / _REGISTRY_NAME
 
 
 def _pid_alive(pid: int) -> bool:
@@ -148,7 +148,7 @@ class HostSupervisor:
         self.respawn_max = max(0, int(respawn_max))
         self.heartbeat_secs = max(1, int(heartbeat_secs))
         self.expected_build_sha = expected_build_sha if expected_build_sha is not None else _build_sha()
-        self.expected_hermes_home = expected_hermes_home if expected_hermes_home is not None else str(get_hermes_home())
+        self.expected_hermes_home = expected_hermes_home if expected_hermes_home is not None else str(get_hades_home())
 
         self._lock = threading.RLock()
         self._proc: subprocess.Popen[str] | None = None
@@ -349,7 +349,7 @@ class HostSupervisor:
             raise RuntimeError("compute host missing hello")
         got_home = str(hello.get("hermes_home") or "")
         if got_home and got_home != self.expected_hermes_home:
-            raise RuntimeError(f"compute host HERMES_HOME mismatch: {got_home} != {self.expected_hermes_home}")
+            raise RuntimeError(f"compute host HADES_HOME mismatch: {got_home} != {self.expected_hermes_home}")
         got_sha = str(hello.get("build_sha") or "")
         if self.expected_build_sha != "unknown" and got_sha not in {"", "unknown", self.expected_build_sha}:
             raise RuntimeError(f"compute host build mismatch: {got_sha} != {self.expected_build_sha}")

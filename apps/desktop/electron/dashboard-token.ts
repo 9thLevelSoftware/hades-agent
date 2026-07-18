@@ -20,7 +20,7 @@ async function fetchPublicText(url, options: any = {}) {
 
   const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) }).catch(error => {
     if (error.name === 'TimeoutError') {
-      throw new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`)
+      throw new Error(`Timed out connecting to Hades backend after ${timeoutMs}ms`)
     }
 
     throw error

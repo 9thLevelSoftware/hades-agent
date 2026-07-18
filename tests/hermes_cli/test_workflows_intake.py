@@ -1,4 +1,4 @@
-from hermes_cli.workflows_spec import WorkflowSpec
+from hades_cli.workflows_spec import WorkflowSpec
 
 
 def _trigger(input_schema=None, intake=None):
@@ -18,7 +18,7 @@ def _trigger(input_schema=None, intake=None):
 
 
 def test_evaluate_intake_requires_fields_and_lengths():
-    from hermes_cli.workflows_intake import evaluate_intake
+    from hades_cli.workflows_intake import evaluate_intake
 
     result = evaluate_intake(
         _trigger({"brief": {"kind": "long_text", "required": True, "min_length": 5}}),
@@ -31,7 +31,7 @@ def test_evaluate_intake_requires_fields_and_lengths():
 
 
 def test_evaluate_intake_treats_blank_required_text_as_missing():
-    from hermes_cli.workflows_intake import evaluate_intake
+    from hades_cli.workflows_intake import evaluate_intake
 
     result = evaluate_intake(
         _trigger({"brief": {"kind": "long_text", "required": True}}),
@@ -44,7 +44,7 @@ def test_evaluate_intake_treats_blank_required_text_as_missing():
 
 
 def test_evaluate_intake_enforces_numeric_min_and_max():
-    from hermes_cli.workflows_intake import evaluate_intake
+    from hades_cli.workflows_intake import evaluate_intake
 
     low = evaluate_intake(
         _trigger({"score": {"kind": "number", "required": True, "min": 3, "max": 5}}),
@@ -67,7 +67,7 @@ def test_evaluate_intake_enforces_numeric_min_and_max():
 
 
 def test_evaluate_intake_rejects_boolean_for_numeric_fields():
-    from hermes_cli.workflows_intake import evaluate_intake
+    from hades_cli.workflows_intake import evaluate_intake
 
     result = evaluate_intake(
         _trigger({"score": {"kind": "number", "required": True, "min": 0}}),
@@ -80,7 +80,7 @@ def test_evaluate_intake_rejects_boolean_for_numeric_fields():
 
 
 def test_evaluate_intake_handles_ready_when_runtime_errors(monkeypatch):
-    import hermes_cli.workflows_intake as intake
+    import hades_cli.workflows_intake as intake
 
     def raise_runtime_error(_condition, _data):
         raise RuntimeError("boom")
@@ -101,7 +101,7 @@ def test_evaluate_intake_handles_ready_when_runtime_errors(monkeypatch):
 
 
 def test_evaluate_intake_ready_when_uses_workflow_conditions():
-    from hermes_cli.workflows_intake import evaluate_intake
+    from hades_cli.workflows_intake import evaluate_intake
 
     result = evaluate_intake(
         _trigger(

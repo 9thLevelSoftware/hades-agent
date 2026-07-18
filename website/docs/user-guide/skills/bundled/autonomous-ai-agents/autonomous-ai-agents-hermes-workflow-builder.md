@@ -17,7 +17,7 @@ Use when creating, designing, improving, validating, or deploying Hermes Workflo
 | Source | Bundled (installed by default) |
 | Path | `skills/autonomous-ai-agents/hermes-workflow-builder` |
 | Version | `1.0.0` |
-| Author | Hermes Agent |
+| Author | Hades Agent |
 | License | MIT |
 | Platforms | linux, macos, windows |
 | Tags | `workflows`, `orchestration`, `kanban`, `planning`, `automation` |

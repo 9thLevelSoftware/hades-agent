@@ -470,9 +470,9 @@ class TestBlockingApprovalE2E:
             from tools.approval import reset_current_session_key, set_current_session_key
 
             token = set_current_session_key(session_key)
-            os.environ["HERMES_GATEWAY_SESSION"] = "1"
-            os.environ["HERMES_EXEC_ASK"] = "1"
-            os.environ["HERMES_SESSION_KEY"] = session_key
+            os.environ["HADES_GATEWAY_SESSION"] = "1"
+            os.environ["HADES_EXEC_ASK"] = "1"
+            os.environ["HADES_SESSION_KEY"] = session_key
             try:
                 result_holder[0] = check_all_command_guards(
                     "rm -rf /important", "local"
@@ -518,9 +518,9 @@ class TestBlockingApprovalE2E:
             from tools.approval import reset_current_session_key, set_current_session_key
 
             token = set_current_session_key(session_key)
-            os.environ["HERMES_GATEWAY_SESSION"] = "1"
-            os.environ["HERMES_EXEC_ASK"] = "1"
-            os.environ["HERMES_SESSION_KEY"] = session_key
+            os.environ["HADES_GATEWAY_SESSION"] = "1"
+            os.environ["HADES_EXEC_ASK"] = "1"
+            os.environ["HADES_SESSION_KEY"] = session_key
             try:
                 result_holder[0] = check_all_command_guards(
                     "rm -rf /important", "local"
@@ -573,9 +573,9 @@ class TestBlockingApprovalE2E:
 
         def agent_thread():
             token = set_current_session_key(session_key)
-            os.environ["HERMES_GATEWAY_SESSION"] = "1"
-            os.environ["HERMES_EXEC_ASK"] = "1"
-            os.environ["HERMES_SESSION_KEY"] = session_key
+            os.environ["HADES_GATEWAY_SESSION"] = "1"
+            os.environ["HADES_EXEC_ASK"] = "1"
+            os.environ["HADES_SESSION_KEY"] = session_key
             try:
                 with patch(
                     "tools.approval._get_approval_config",
@@ -621,9 +621,9 @@ class TestBlockingApprovalE2E:
                 from tools.approval import reset_current_session_key, set_current_session_key
 
                 token = set_current_session_key(session_key)
-                os.environ["HERMES_GATEWAY_SESSION"] = "1"
-                os.environ["HERMES_EXEC_ASK"] = "1"
-                os.environ["HERMES_SESSION_KEY"] = session_key
+                os.environ["HADES_GATEWAY_SESSION"] = "1"
+                os.environ["HADES_EXEC_ASK"] = "1"
+                os.environ["HADES_SESSION_KEY"] = session_key
                 try:
                     results[idx] = check_all_command_guards(cmd, "local")
                 finally:
@@ -678,9 +678,9 @@ class TestBlockingApprovalE2E:
                 from tools.approval import reset_current_session_key, set_current_session_key
 
                 token = set_current_session_key(session_key)
-                os.environ["HERMES_GATEWAY_SESSION"] = "1"
-                os.environ["HERMES_EXEC_ASK"] = "1"
-                os.environ["HERMES_SESSION_KEY"] = session_key
+                os.environ["HADES_GATEWAY_SESSION"] = "1"
+                os.environ["HADES_EXEC_ASK"] = "1"
+                os.environ["HADES_SESSION_KEY"] = session_key
                 try:
                     results[idx] = check_all_command_guards(cmd, "local")
                 finally:
@@ -739,8 +739,8 @@ class TestFallbackNoCallback:
         """
         from tools.approval import check_all_command_guards
 
-        os.environ["HERMES_EXEC_ASK"] = "1"
-        os.environ["HERMES_SESSION_KEY"] = "no-callback-test"
+        os.environ["HADES_EXEC_ASK"] = "1"
+        os.environ["HADES_SESSION_KEY"] = "no-callback-test"
         try:
             result = check_all_command_guards("rm -rf /important", "local")
         finally:
@@ -780,7 +780,7 @@ class TestCrossSessionApprovalIsolation:
     """Regression for #24100.
 
     The gateway used to write the per-turn session key to the
-    process-global ``os.environ["HERMES_SESSION_KEY"]`` inside
+    process-global ``os.environ["HADES_SESSION_KEY"]`` inside
     ``GatewayRunner._run_agent``. Because ``os.environ`` is process-global,
     a concurrent gateway session (e.g. a second Discord thread) clobbered
     the value, and a tool worker thread whose approval contextvar was unset
@@ -814,7 +814,7 @@ class TestCrossSessionApprovalIsolation:
 
         # Simulate a concurrent session B having written process-global env
         # last (the "last writer wins" clobber that caused #24100).
-        os.environ["HERMES_SESSION_KEY"] = "session-B"
+        os.environ["HADES_SESSION_KEY"] = "session-B"
 
         token = set_current_session_key("session-A")
         try:
@@ -844,7 +844,7 @@ class TestCrossSessionApprovalIsolation:
         # but we set it here to prove the resolver no longer trusts it once
         # the session-context contextvars are explicitly cleared (as the
         # gateway does in its finally block via clear_session_vars()).
-        os.environ["HERMES_SESSION_KEY"] = "session-B-stale"
+        os.environ["HADES_SESSION_KEY"] = "session-B-stale"
 
         # The gateway explicitly clears its session contextvars at turn end;
         # clear_session_vars sets them to "" to *suppress* the os.environ
@@ -879,9 +879,9 @@ class TestCrossSessionApprovalIsolation:
         register_gateway_notify("session-B", lambda d: notified_b.append(d))
 
         # Concurrent session B clobbered the process-global env var last.
-        os.environ["HERMES_SESSION_KEY"] = "session-B"
-        os.environ["HERMES_GATEWAY_SESSION"] = "1"
-        os.environ["HERMES_EXEC_ASK"] = "1"
+        os.environ["HADES_SESSION_KEY"] = "session-B"
+        os.environ["HADES_GATEWAY_SESSION"] = "1"
+        os.environ["HADES_EXEC_ASK"] = "1"
 
         result_holder = [None]
 
@@ -925,7 +925,7 @@ class TestCrossSessionApprovalIsolation:
 
         Two concurrent worker threads with DISTINCT session keys each set
         only ``set_current_session_key()`` — they deliberately never write
-        ``os.environ["HERMES_SESSION_KEY"]``. This proves the contextvar is
+        ``os.environ["HADES_SESSION_KEY"]``. This proves the contextvar is
         sufficient post-fix, and would FAIL if contextvar routing regressed
         (the prior 'parallel' tests share one key and dual-set env+contextvar,
         so they cannot guard this invariant). Each session's dangerous command
@@ -944,8 +944,8 @@ class TestCrossSessionApprovalIsolation:
 
         # No HERMES_SESSION_KEY in os.environ at all — pure contextvar routing.
         os.environ.pop("HERMES_SESSION_KEY", None)
-        os.environ["HERMES_GATEWAY_SESSION"] = "1"
-        os.environ["HERMES_EXEC_ASK"] = "1"
+        os.environ["HADES_GATEWAY_SESSION"] = "1"
+        os.environ["HADES_EXEC_ASK"] = "1"
 
         register_gateway_notify("sess-A", lambda d: None)
         register_gateway_notify("sess-B", lambda d: None)

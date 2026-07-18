@@ -45,13 +45,13 @@ def _coerce_usage_int(value: Any) -> int:
 
 
 def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
-    """Translate Codex app-server token usage into Hermes accounting.
+    """Translate Codex app-server token usage into Hades accounting.
 
     Codex app-server reports usage via thread/tokenUsage/updated as:
     inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens,
     totalTokens.
 
-    Hermes' canonical prompt bucket includes uncached input + cached input.
+    Hades' canonical prompt bucket includes uncached input + cached input.
     The Codex app-server protocol does not currently expose cache-write tokens,
     so that bucket remains zero on this runtime.
 
@@ -196,7 +196,7 @@ def _record_codex_app_server_compaction(
     approx_tokens: int | None = None,
     force: bool = False,
 ) -> bool:
-    """Record a Codex-native context compaction boundary in Hermes state.
+    """Record a Codex-native context compaction boundary in Hades state.
 
     The app-server owns the compacted thread context, so Hermes should not
     rewrite local transcript rows here; state.db records the boundary via the
@@ -296,7 +296,7 @@ _CODEX_TOOL_ITEM_TYPES = frozenset(
     {"commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "webSearch"}
 )
 
-# Internal MCP server that wraps Hermes' native tools for codex. When
+# Internal MCP server that wraps Hades' native tools for codex. When
 # codex calls back through it, the inner dispatch runs in a SEPARATE
 # hermes-tools-mcp-server subprocess that has no access to the parent
 # agent's tool_progress_callback — so the inner call can never surface
@@ -354,7 +354,7 @@ def _codex_item_to_args(item: dict) -> dict:
 
 def _codex_item_to_preview(item: dict) -> Any:
     """Short human-readable preview for the tool.started bubble. Returns
-    None when no useful preview is available (Hermes' UI tolerates None)."""
+    None when no useful preview is available (Hades' UI tolerates None)."""
     item_type = item.get("type") or ""
     if item_type == "commandExecution":
         cmd = item.get("command") or ""
@@ -428,7 +428,7 @@ def _codex_item_completion_payload(item: dict) -> tuple[str, bool]:
 
 def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
     """Build an ``on_event`` callback that wires codex app-server JSON-RPC
-    notifications into Hermes' gateway UI callbacks.
+    notifications into Hades' gateway UI callbacks.
 
     Returns a single-argument callable suitable for
     ``CodexAppServerSession(on_event=...)``.
@@ -623,7 +623,7 @@ def run_codex_app_server_turn(
     should_review_memory: bool = False,
 ) -> Dict[str, Any]:
     """Codex app-server runtime path. Hands the entire turn to a `codex
-    app-server` subprocess and projects its events back into Hermes'
+    app-server` subprocess and projects its events back into Hades'
     messages list so memory/skill review keep working.
 
     Called from run_conversation() when agent.api_mode == "codex_app_server".
@@ -641,7 +641,7 @@ def run_codex_app_server_turn(
         from agent.runtime_cwd import resolve_agent_cwd
 
         cwd = getattr(agent, "session_cwd", None) or str(resolve_agent_cwd())
-        # Approval callback: defer to Hermes' standard prompt flow if a
+        # Approval callback: defer to Hades' standard prompt flow if a
         # CLI thread has installed one. Gateway / cron contexts get the
         # codex-side fail-closed default.
         try:
@@ -653,7 +653,7 @@ def run_codex_app_server_turn(
         # Gateway / cron contexts have no UI to surface codex's approval
         # requests through, so codex app-server exec / apply_patch requests
         # fail closed (silently decline) by default. When the user has
-        # explicitly opted out of Hermes approvals — via `approvals.mode: off`
+        # explicitly opted out of Hades approvals — via `approvals.mode: off`
         # in config, the /yolo session toggle, or --yolo / HERMES_YOLO_MODE —
         # honor that and let codex's own sandbox permission profile
         # (~/.codex/config.toml) be the policy gate instead of double-gating
@@ -672,7 +672,7 @@ def run_codex_app_server_turn(
             )
 
         # Bridge codex JSON-RPC notifications (item/started, item/completed,
-        # item/agentMessage/delta, ...) into Hermes' gateway UI callbacks
+        # item/agentMessage/delta, ...) into Hades' gateway UI callbacks
         # (tool_progress_callback, _fire_stream_delta,
         # _emit_interim_assistant_message). Without this, Discord/Telegram
         # users see no live tool-progress or interim commentary while

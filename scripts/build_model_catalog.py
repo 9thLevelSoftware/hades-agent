@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build the Hermes Model Catalog — a centralized JSON manifest of curated models.
+"""Build the Hades Model Catalog — a centralized JSON manifest of curated models.
 
 This script reads the in-repo hardcoded curated lists (``OPENROUTER_MODELS``,
 ``_PROVIDER_MODELS["nous"]``) and writes them to a JSON manifest that the
-Hermes CLI fetches at runtime. Publishing the catalog through the docs site
+Hades CLI fetches at runtime. Publishing the catalog through the docs site
 lets maintainers update model lists without shipping a Hermes release.
 
 The runtime fetcher falls back to the same in-repo hardcoded lists if the
@@ -30,10 +30,10 @@ from datetime import datetime, timezone
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
-# Ensure HERMES_HOME is set for imports that touch it at module level.
-os.environ.setdefault("HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes"))
+# Ensure HADES_HOME is set for imports that touch it at module level.
+os.environ.setdefault("HADES_HOME", os.path.join(os.path.expanduser("~"), ".hades"))
 
-from hermes_cli.models import (  # noqa: E402
+from hades_cli.models import (  # noqa: E402
     OPENROUTER_MODELS,
     PREFERRED_SILENT_DEFAULT_MODEL,
     _PROVIDER_MODELS,

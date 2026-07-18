@@ -37,7 +37,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermes_state import SessionDB
+from hades_state import SessionDB
 
 
 def _build_agent_with_db(db: SessionDB, session_id: str):
@@ -464,7 +464,7 @@ def test_missing_lock_subsystem_fails_open_not_infinite_loop(tmp_path: Path, mon
     """A truly old in-memory SessionDB class must still make progress.
 
     A module reload can update ``conversation_compression`` while the cached
-    ``hermes_state.SessionDB`` class remains pre-lock. The compatibility path is
+    ``hades_state.SessionDB`` class remains pre-lock. The compatibility path is
     only valid for that exact class identity, not a proxy that merely uses the
     same name.
     """
@@ -474,9 +474,9 @@ def test_missing_lock_subsystem_fails_open_not_infinite_loop(tmp_path: Path, mon
 
     agent = _build_agent_with_db(db, parent_sid)
     legacy_type = _make_legacy_session_db_class()
-    import hermes_state
+    import hades_state
 
-    real_session_db_type = hermes_state.SessionDB
+    real_session_db_type = hades_state.SessionDB
     monkeypatch.setattr(hermes_state, "SessionDB", legacy_type)
     try:
         # The same module now exposes its genuinely old SessionDB class; its

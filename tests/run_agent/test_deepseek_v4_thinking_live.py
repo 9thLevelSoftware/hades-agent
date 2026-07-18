@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 
-LIVE = os.environ.get("HERMES_LIVE_TESTS") == "1"
+LIVE = os.environ.get("HADES_LIVE_TESTS") == "1"
 DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 LIVE_MODELS = ("deepseek-v4-flash", "deepseek-v4-pro")
 LIVE_BASE_URL = "https://api.deepseek.com"

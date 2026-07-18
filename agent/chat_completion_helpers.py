@@ -26,8 +26,8 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
-from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
-from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
+from hades_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
+from hades_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import FailoverReason
 from agent.errors import EmptyStreamError
 from agent.gemini_native_adapter import is_native_gemini_base_url
@@ -677,7 +677,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
         _ttfb_enabled = False
     elif _openai_codex_backend:
         _ttfb_disable_above = _env_float("HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS", 10_000.0)
-        _ttfb_strict = os.environ.get("HERMES_CODEX_TTFB_STRICT", "").strip().lower() in {
+        _ttfb_strict = os.environ.get("HADES_CODEX_TTFB_STRICT", "").strip().lower() in {
             "1", "true", "yes", "on"
         }
         if (
@@ -1491,7 +1491,7 @@ def _fallback_entry_unavailable_without_network(agent, fb: dict) -> Optional[str
     if fb_provider != "nous":
         return None
     try:
-        from hermes_cli.auth import get_provider_auth_state
+        from hades_cli.auth import get_provider_auth_state
 
         state = get_provider_auth_state("nous") or {}
     except Exception as exc:
@@ -1628,7 +1628,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             unavailable.add(fb_key)
             return agent._try_activate_fallback(reason)  # try next in chain
         try:
-            from hermes_cli.model_normalize import normalize_model_for_provider
+            from hades_cli.model_normalize import normalize_model_for_provider
 
             fb_model = normalize_model_for_provider(fb_model, fb_provider)
         except Exception as _norm_err:
@@ -1819,8 +1819,8 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # (YAML boolean False = disabled). Wrapped in try/except because a
         # config load failure must not kill the swap.
         try:
-            from hermes_cli.config import load_config
-            from hermes_constants import resolve_reasoning_config
+            from hades_cli.config import load_config
+            from hades_constants import resolve_reasoning_config
 
             agent.reasoning_config = resolve_reasoning_config(
                 load_config() or {}, agent.model
@@ -3477,7 +3477,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # env var ``HERMES_LOCAL_STREAM_STALE_TIMEOUT`` overrides for escape-hatch.
         _local_default = 900.0
         try:
-            from hermes_cli.config import load_config
+            from hades_cli.config import load_config
 
             _cfg = load_config()
             _agent_cfg = _cfg.get("agent") if isinstance(_cfg, dict) else None

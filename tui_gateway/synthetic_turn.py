@@ -39,7 +39,7 @@ from typing import Any, Callable, Optional
 
 def synth_turn_armed() -> bool:
     """True when the synthetic-turn test seam is armed via env."""
-    return os.environ.get("HERMES_ISO_CERTIFY_SYNTH_TURN") == "1"
+    return os.environ.get("HADES_ISO_CERTIFY_SYNTH_TURN") == "1"
 
 
 def _env_float(name: str, default: float) -> float:

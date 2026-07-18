@@ -79,7 +79,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from hermes_cli.dashboard_auth import (
+from hades_cli.dashboard_auth import (
     DashboardAuthProvider,
     InvalidCodeError,
     LoginStart,
@@ -549,7 +549,7 @@ def _load_config_oauth_section() -> dict:
     through to ``{}`` so register() can rely on `.get(...)` access.
     """
     try:
-        from hermes_cli.config import cfg_get, load_config
+        from hades_cli.config import cfg_get, load_config
 
         cfg = load_config()
     except Exception as exc:  # noqa: BLE001 — broad catch is intentional
@@ -574,7 +574,7 @@ def _resolve_client_id() -> str:
       2. ``dashboard.oauth.client_id`` in ``config.yaml``.
       3. Empty string — signals "no client_id configured" to the caller.
     """
-    env = os.environ.get("HERMES_DASHBOARD_OAUTH_CLIENT_ID", "").strip()
+    env = os.environ.get("HADES_DASHBOARD_OAUTH_CLIENT_ID", "").strip()
     if env:
         return env
     cfg_value = _load_config_oauth_section().get("client_id", "")
@@ -589,7 +589,7 @@ def _resolve_portal_url() -> str:
       2. ``dashboard.oauth.portal_url`` in ``config.yaml``.
       3. :data:`_DEFAULT_PORTAL_URL` (production Portal).
     """
-    env = os.environ.get("HERMES_DASHBOARD_PORTAL_URL", "").strip()
+    env = os.environ.get("HADES_DASHBOARD_PORTAL_URL", "").strip()
     if env:
         return env
     cfg_value = str(
@@ -616,7 +616,7 @@ def register(ctx) -> None:
 
     Operator-owned dashboards (loopback / ``--insecure``) leave both
     surfaces unset, so this plugin is a no-op for them. The gate-
-    engagement layer (``hermes_cli.web_server.should_require_auth`` +
+    engagement layer (``hades_cli.web_server.should_require_auth`` +
     the fail-closed check in ``start_server``) handles the "public bind
     with zero providers" case independently.
     """
@@ -631,7 +631,7 @@ def register(ctx) -> None:
             "HERMES_DASHBOARD_OAUTH_CLIENT_ID is not set (and "
             "dashboard.oauth.client_id in config.yaml is empty). The "
             "Nous Portal provisions this env var (shape "
-            "'agent:{instance_id}') when it deploys a Hermes Agent "
+            "'agent:{instance_id}') when it deploys a Hades Agent "
             "instance — set it to your provisioned client id (either "
             "as an env var or under dashboard.oauth.client_id in "
             "config.yaml), or pass --insecure to skip the OAuth gate "

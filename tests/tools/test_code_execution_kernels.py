@@ -81,7 +81,7 @@ def test_config_persistent_default_is_opt_in_without_overriding_explicit_false(t
         "code_execution:\n  persistent: true\n  kernel_idle_ttl: 900\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_CONFIG", raising=False)
     try:
         first = json.loads(execute_code(
@@ -108,7 +108,7 @@ def test_config_persistent_default_is_opt_in_without_overriding_explicit_false(t
 
 def test_persistent_kernel_exports_artifact_root_and_multimodal_results():
     env_probe = _run(
-        "import os; print(bool(os.environ.get('HERMES_ARTIFACTS_DIR')))",
+        "import os; print(bool(os.environ.get('HADES_ARTIFACTS_DIR')))",
         "kernel-test",
         kernel_id="artifacts",
     )
@@ -127,7 +127,7 @@ def test_persistent_kernel_exports_artifact_root_and_multimodal_results():
     execution_manager = SimpleNamespace(_middleware={"tool_execution": [object()]})
     with (
         patch(
-            "hermes_cli.plugins.get_plugin_manager",
+            "hades_cli.plugins.get_plugin_manager",
             return_value=execution_manager,
         ),
         patch(
@@ -213,7 +213,7 @@ def test_persistent_kernel_resets_tool_call_limit_per_execution():
 
     with (
         patch("tools.code_execution_tool._load_config", return_value={"max_tool_calls": 1}),
-        patch("hermes_cli.plugins.get_plugin_manager", return_value=execution_manager),
+        patch("hades_cli.plugins.get_plugin_manager", return_value=execution_manager),
         patch("model_tools.handle_function_call", side_effect=dispatch),
     ):
         first = _run(
@@ -248,7 +248,7 @@ def test_persistent_kernel_updates_dispatch_context_on_reuse():
         return json.dumps({"output": "rpc-ok", "exit_code": 0})
 
     with (
-        patch("hermes_cli.plugins.get_plugin_manager", return_value=execution_manager),
+        patch("hades_cli.plugins.get_plugin_manager", return_value=execution_manager),
         patch("model_tools.handle_function_call", side_effect=dispatch),
     ):
         first = _run(

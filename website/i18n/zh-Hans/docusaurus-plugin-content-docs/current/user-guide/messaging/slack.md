@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Slack"
-description: "使用 Socket Mode 将 Hermes Agent 设置为 Slack 机器人"
+description: "使用 Socket Mode 将 Hades Agent 设置为 Slack 机器人"
 ---
 
 # Slack 设置
 
-使用 Socket Mode 将 Hermes Agent 作为机器人连接到 Slack。Socket Mode 使用 WebSocket 而非公开 HTTP 端点，因此你的 Hermes 实例无需公开访问——它可以在防火墙后、笔记本电脑上或私有服务器上正常运行。
+使用 Socket Mode 将 Hades Agent 作为机器人连接到 Slack。Socket Mode 使用 WebSocket 而非公开 HTTP 端点，因此你的 Hermes 实例无需公开访问——它可以在防火墙后、笔记本电脑上或私有服务器上正常运行。
 
 :::warning 经典 Slack 应用已弃用
 使用 RTM API 的经典 Slack 应用已于 **2025 年 3 月完全弃用**。Hermes 使用带有 Socket Mode 的现代 Bolt SDK。如果你有旧的经典应用，必须按照以下步骤创建新应用。
@@ -33,7 +33,7 @@ description: "使用 Socket Mode 将 Hermes Agent 设置为 Slack 机器人"
    ```bash
    hermes slack manifest --write
    ```
-   此命令会将 `~/.hermes/slack-manifest.json` 写入磁盘并打印粘贴说明。
+   此命令会将 `~/.hades/slack-manifest.json` 写入磁盘并打印粘贴说明。
 2. 前往 [https://api.slack.com/apps](https://api.slack.com/apps) →
    **Create New App** → **From an app manifest**
 3. 选择你的工作区，粘贴 JSON 内容，检查后点击 **Next** → **Create**
@@ -44,7 +44,7 @@ description: "使用 Socket Mode 将 Hermes Agent 设置为 Slack 机器人"
 1. 前往 [https://api.slack.com/apps](https://api.slack.com/apps)
 2. 点击 **Create New App**
 3. 选择 **From scratch**
-4. 输入应用名称（例如 "Hermes Agent"）并选择你的工作区
+4. 输入应用名称（例如 "Hades Agent"）并选择你的工作区
 5. 点击 **Create App**
 
 你将进入应用的 **Basic Information** 页面。继续执行下方第 2–6 步。
@@ -171,7 +171,7 @@ Member ID 格式类似 `U01ABC2DEF3`。你至少需要自己的 Member ID。
 
 ## 第八步：配置 Hermes
 
-将以下内容添加到你的 `~/.hermes/.env` 文件：
+将以下内容添加到你的 `~/.hades/.env` 文件：
 
 ```bash
 # 必需
@@ -205,7 +205,7 @@ sudo hermes gateway install --system   # 仅 Linux：开机启动系统服务
 启动 gateway 后，你需要**邀请机器人**加入希望它响应的频道：
 
 ```
-/invite @Hermes Agent
+/invite @Hades Agent
 ```
 
 机器人**不会**自动加入频道。你必须逐个频道邀请它。
@@ -216,7 +216,7 @@ sudo hermes gateway install --system   # 仅 Linux：开机启动系统服务
 
 每个 Hermes 命令（`/btw`、`/stop`、`/new`、`/model`、`/help`……）都是原生 Slack 斜杠命令——与它们在 Telegram 和 Discord 上的工作方式完全相同。在 Slack 中输入 `/`，自动补全选择器会列出每个 Hermes 命令及其描述。
 
-底层实现：Hermes 附带一个生成的 Slack 应用 manifest（见第一步，方式 A），它将 [`COMMAND_REGISTRY`](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/commands.py) 中的每个命令声明为斜杠命令。在 Socket Mode 下，无论 manifest 的 `url` 字段如何，Slack 都会通过 WebSocket 路由命令事件。
+底层实现：Hermes 附带一个生成的 Slack 应用 manifest（见第一步，方式 A），它将 [`COMMAND_REGISTRY`](https://github.com/9thLevelSoftware/hades-agent/blob/main/hermes_cli/commands.py) 中的每个命令声明为斜杠命令。在 Socket Mode 下，无论 manifest 的 `url` 字段如何，Slack 都会通过 WebSocket 路由命令事件。
 
 ### 更新后刷新斜杠命令
 
@@ -230,7 +230,7 @@ hermes slack manifest --write
 1. 打开 [https://api.slack.com/apps](https://api.slack.com/apps) →
    你的 Hermes 应用
 2. **Features → App Manifest → Edit**
-3. 粘贴 `~/.hermes/slack-manifest.json` 的新内容
+3. 粘贴 `~/.hades/slack-manifest.json` 的新内容
 4. **保存**。如果权限范围或斜杠命令有变化，Slack 会提示重新安装应用。
 
 ### 旧版 `/hermes <子命令>` 仍然有效
@@ -264,7 +264,7 @@ hermes slack manifest --slashes-only > /tmp/slashes.json
 | 场景 | 行为 |
 |---------|----------|
 | **私信** | 机器人响应每条消息——无需 @ 提及 |
-| **频道** | 机器人**仅在被 @ 提及时响应**（例如 `@Hermes Agent what time is it?`）。在频道中，Hermes 在该消息附带的话题中回复。 |
+| **频道** | 机器人**仅在被 @ 提及时响应**（例如 `@Hades Agent what time is it?`）。在频道中，Hermes 在该消息附带的话题中回复。 |
 | **话题** | 如果你在现有话题中 @ 提及 Hermes，它会在同一话题中回复。一旦机器人在话题中有活跃会话，**该话题中的后续回复无需 @ 提及**——机器人会自然跟进对话。 |
 
 :::tip
@@ -275,7 +275,7 @@ hermes slack manifest --slashes-only > /tmp/slashes.json
 
 ## 配置选项
 
-除了第八步中的必需环境变量外，你还可以通过 `~/.hermes/config.yaml` 自定义 Slack 机器人行为。
+除了第八步中的必需环境变量外，你还可以通过 `~/.hades/config.yaml` 自定义 Slack 机器人行为。
 
 ### 话题与回复行为
 
@@ -458,7 +458,7 @@ platforms:
 SLACK_HOME_CHANNEL=C01234567890
 ```
 
-确保机器人已被**邀请到该频道**（`/invite @Hermes Agent`）。
+确保机器人已被**邀请到该频道**（`/invite @Hades Agent`）。
 
 ---
 
@@ -478,7 +478,7 @@ SLACK_BOT_TOKEN=xoxb-workspace1-token,xoxb-workspace2-token,xoxb-workspace3-toke
 SLACK_APP_TOKEN=xapp-your-app-token
 ```
 
-或在 `~/.hermes/config.yaml` 中：
+或在 `~/.hades/config.yaml` 中：
 
 ```yaml
 platforms:
@@ -491,7 +491,7 @@ platforms:
 除了环境变量或配置中的 token 外，Hermes 还会从以下位置的 **OAuth token 文件**加载 token：
 
 ```
-~/.hermes/slack_tokens.json
+~/.hades/slack_tokens.json
 ```
 
 此文件是一个将团队 ID 映射到 token 条目的 JSON 对象：
@@ -575,13 +575,13 @@ slack:
 | 问题 | 解决方案 |
 |---------|----------|
 | 机器人不响应私信 | 验证 `message.im` 在事件订阅中，且应用已重新安装 |
-| 机器人在私信中正常但在频道中不响应 | **最常见问题。** 将 `message.channels` 和 `message.groups` 添加到事件订阅，重新安装应用，并用 `/invite @Hermes Agent` 邀请机器人加入频道 |
+| 机器人在私信中正常但在频道中不响应 | **最常见问题。** 将 `message.channels` 和 `message.groups` 添加到事件订阅，重新安装应用，并用 `/invite @Hades Agent` 邀请机器人加入频道 |
 | 机器人不响应频道中的 @mention | 1) 检查 `message.channels` 事件是否已订阅。2) 机器人必须被邀请到频道。3) 确保已添加 `channels:history` 权限范围。4) 更改权限范围/事件后重新安装应用 |
 | 机器人忽略私有频道中的消息 | 添加 `message.groups` 事件订阅和 `groups:history` 权限范围，然后重新安装应用并 `/invite` 机器人 |
 | 机器人不响应群组私信（多人私信） | 添加 `message.mpim` 事件订阅和 `mpim:history` 权限范围（以及 `mpim:read`），然后**重新安装**应用。没有 `message.mpim`，即使 1:1 私信正常，Slack 也永远不会向机器人投递群组私信消息。 |
 | 私信中出现"向此应用发送消息已被关闭" | 在 App Home 设置中启用 **Messages Tab**（见第五步） |
 | "not_authed" 或 "invalid_auth" 错误 | 重新生成 Bot Token 和 App Token，更新 `.env` |
-| 机器人响应但无法在频道中发帖 | 用 `/invite @Hermes Agent` 邀请机器人加入频道 |
+| 机器人响应但无法在频道中发帖 | 用 `/invite @Hades Agent` 邀请机器人加入频道 |
 | 机器人可以聊天但无法读取上传的图片/文件 | 添加 `files:read`，然后**重新安装**应用。当 Slack 返回权限范围/认证/权限失败时，Hermes 现在会在聊天中显示附件访问诊断信息。 |
 | `missing_scope` 错误 | 在 OAuth & Permissions 中添加所需权限范围，然后**重新安装**应用 |
 | Socket 频繁断开 | 检查你的网络；Bolt 会自动重连，但不稳定的连接会导致延迟 |
@@ -597,7 +597,7 @@ slack:
 4. ✅ 已添加 `channels:history` 权限范围（公开频道）
 5. ✅ 已添加 `groups:history` 权限范围（私有频道）
 6. ✅ 添加权限范围/事件后已**重新安装**应用
-7. ✅ 已**邀请**机器人加入频道（`/invite @Hermes Agent`）
+7. ✅ 已**邀请**机器人加入频道（`/invite @Hades Agent`）
 8. ✅ 你在消息中**@mention** 了机器人
 
 ---
@@ -608,7 +608,7 @@ slack:
 **始终设置 `SLACK_ALLOWED_USERS`**，填入授权用户的 Member ID。没有此设置，gateway 默认会**拒绝所有消息**作为安全措施。切勿分享你的 bot token——像密码一样对待它们。
 :::
 
-- Token 应存储在 `~/.hermes/.env` 中（文件权限 `600`）
+- Token 应存储在 `~/.hades/.env` 中（文件权限 `600`）
 - 定期通过 Slack 应用设置轮换 token
 - 审计谁有权访问你的 Hermes 配置目录
 - Socket Mode 意味着不暴露公开端点——减少一个攻击面

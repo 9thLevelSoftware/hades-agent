@@ -17,7 +17,7 @@ Use when a Hermes Kanban worker wants to run Codex CLI as an isolated implementa
 | Source | Bundled (installed by default) |
 | Path | `skills/autonomous-ai-agents/kanban-codex-lane` |
 | Version | `1.0.0` |
-| Author | Hermes Agent |
+| Author | Hades Agent |
 | License | MIT |
 | Tags | `kanban`, `codex`, `worktrees`, `autonomous-agents`, `prediction-market-bot` |
 | Related skills | [`codex`](/docs/user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-codex), [`hermes-agent`](/docs/user-guide/skills/bundled/autonomous-ai-agents/autonomous-ai-agents-hermes-agent) |
@@ -41,7 +41,7 @@ The convention exists so a Hermes worker can use Codex for bounded implementatio
 Use the Codex lane when all of these are true:
 
 - The Kanban task is a coding, refactor, documentation, test, or mechanical migration task with clear acceptance criteria.
-- A bounded diff can be evaluated by Hermes in one run.
+- A bounded diff can be evaluated by Hades in one run.
 - The repo can be copied or checked out in an isolated git worktree/branch.
 - Hermes can run the relevant tests itself after Codex exits.
 - The prompt can state all safety constraints and files that must not change.
@@ -59,7 +59,7 @@ Do not use the Codex lane when any of these are true:
 
 1. Hermes owns the Kanban lifecycle. Codex must never call `kanban_complete`, `kanban_block`, `kanban_create`, gateway messaging, or any Hermes board CLI as a substitute for the worker.
 2. Hermes owns final acceptance. Treat Codex commits/diffs as untrusted patches until reviewed and verified.
-3. Hermes owns test execution. Codex may run tests, but those runs are advisory; repeat required verification from Hermes with the repo's canonical wrapper.
+3. Hermes owns test execution. Codex may run tests, but those runs are advisory; repeat required verification from Hades with the repo's canonical wrapper.
 4. Hermes owns safety. If Codex changes safety boundaries, risk gates, live trading behavior, or secrets handling, reject the lane even if tests pass.
 5. Hermes owns cleanup. Kill stuck Codex processes and remove temporary worktrees when they are no longer needed.
 
@@ -215,12 +215,12 @@ After kill, inspect `git status --short`, preserve useful patches only if safe, 
 Hermes must perform this checklist before accepting any Codex lane result:
 
 - [ ] `git -C <WORKTREE> status --short --branch` shows only expected files.
-- [ ] `git -C <WORKTREE> diff --stat` and `git diff` were reviewed by Hermes.
+- [ ] `git -C <WORKTREE> diff --stat` and `git diff` were reviewed by Hades.
 - [ ] No secrets, credentials, generated caches, unrelated data, or local artifacts are included.
 - [ ] PMB safety constraints were preserved: no live REST order entry, no market orders, no execution crossing, no fake passive fills/PnL, no risk-gate weakening, no secrets.
 - [ ] Codex commits are small enough to cherry-pick or squash cleanly.
-- [ ] Hermes ran the canonical tests itself, using `scripts/run_tests.sh` for Hermes Agent or the repo's documented wrapper for other repos.
-- [ ] Any Codex-run tests are listed separately from Hermes-run tests.
+- [ ] Hermes ran the canonical tests itself, using `scripts/run_tests.sh` for Hades Agent or the repo's documented wrapper for other repos.
+- [ ] Any Codex-run tests are listed separately from Hades-run tests.
 - [ ] Accepted commits/diffs were applied to the Hermes-owned workspace/branch.
 - [ ] Rejected or partial work has a concrete reason and artifact path if useful.
 
@@ -276,7 +276,7 @@ For tasks that intentionally skip Codex:
 
 ## Common Pitfalls
 
-1. Treating Codex self-report as verification. Always inspect the diff and rerun tests from Hermes.
+1. Treating Codex self-report as verification. Always inspect the diff and rerun tests from Hades.
 2. Running Codex in the user's dirty main checkout. Always isolate in a worktree/branch.
 3. Letting Codex own Kanban. Codex may summarize progress, but Hermes writes board state.
 4. Forgetting PMB safety invariants in the prompt. Missing safety text is a lane setup failure.

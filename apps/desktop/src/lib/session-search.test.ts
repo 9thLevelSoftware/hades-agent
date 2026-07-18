@@ -49,7 +49,7 @@ describe('sessionMatchesSearch', () => {
 
     expect(sessionMatchesSearch(session, 'desktop search')).toBe(true)
     expect(sessionMatchesSearch(session, 'session search')).toBe(true)
-    expect(sessionMatchesSearch(session, 'hermes-agent')).toBe(true)
+    expect(sessionMatchesSearch(session, 'hades-agent')).toBe(true)
   })
 
   it('matches sessions by git branch', () => {

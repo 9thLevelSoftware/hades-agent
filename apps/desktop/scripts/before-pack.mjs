@@ -21,7 +21,7 @@
  * rename a `electron` file that no longer exists. The build dies with:
  *
  *   ENOENT: no such file or directory, rename
- *   '.../release/linux-unpacked/electron' -> '.../release/linux-unpacked/Hermes'
+ *   '.../release/linux-unpacked/electron' -> '.../release/linux-unpacked/Hades'
  *
  * This is a hard failure with no obvious cause for the user — `hermes desktop`
  * just prints "Desktop GUI build failed" and the only fix is to manually

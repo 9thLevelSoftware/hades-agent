@@ -1,7 +1,7 @@
 import threading
 from unittest.mock import MagicMock, patch
 
-from hermes_state import SessionDB
+from hades_state import SessionDB
 from run_agent import AIAgent
 
 

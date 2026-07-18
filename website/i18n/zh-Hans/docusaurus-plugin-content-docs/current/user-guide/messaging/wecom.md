@@ -1,7 +1,7 @@
 ---
 sidebar_position: 14
 title: "WeCom（企业微信）"
-description: "通过 AI Bot WebSocket 网关将 Hermes Agent 连接到 WeCom"
+description: "通过 AI Bot WebSocket 网关将 Hades Agent 连接到 WeCom"
 ---
 
 # WeCom（企业微信）
@@ -62,7 +62,7 @@ hermes gateway setup
 
 #### 方式 B：手动配置
 
-将以下内容添加到 `~/.hermes/.env`：
+将以下内容添加到 `~/.hades/.env`：
 
 ```bash
 WECOM_BOT_ID=your-bot-id

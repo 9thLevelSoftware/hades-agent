@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import hermes_cli.dashboard_register as dr
+import hades_cli.dashboard_register as dr
 
 
 def _ns(**kw):
@@ -44,13 +44,13 @@ class TestNameGenerator:
 
 class TestFastFails:
     def test_not_logged_in_exits_1_with_setup_hint(self, capsys):
-        from hermes_cli.auth import AuthError
+        from hades_cli.auth import AuthError
 
         err = AuthError("not logged in", provider="nous", relogin_required=True)
         with patch.object(dr, "cmd_dashboard_register", dr.cmd_dashboard_register):
             with patch(
-                "hermes_cli.auth.resolve_nous_access_token", side_effect=err
-            ), patch("hermes_cli.config.is_managed", return_value=False):
+                "hades_cli.auth.resolve_nous_access_token", side_effect=err
+            ), patch("hades_cli.config.is_managed", return_value=False):
                 with pytest.raises(SystemExit) as exc:
                     dr.cmd_dashboard_register(_ns())
         assert exc.value.code == 1
@@ -59,7 +59,7 @@ class TestFastFails:
         assert "hermes setup" in out
 
     def test_managed_install_refuses(self, capsys):
-        with patch("hermes_cli.config.is_managed", return_value=True):
+        with patch("hades_cli.config.is_managed", return_value=True):
             with pytest.raises(SystemExit) as exc:
                 dr.cmd_dashboard_register(_ns())
         assert exc.value.code == 1
@@ -108,13 +108,13 @@ class TestHappyPath:
             return None
 
         with patch(
-            "hermes_cli.auth.resolve_nous_access_token", return_value=account_token
-        ), patch("hermes_cli.config.is_managed", return_value=False), patch.object(
+            "hades_cli.auth.resolve_nous_access_token", return_value=account_token
+        ), patch("hades_cli.config.is_managed", return_value=False), patch.object(
             dr, "_resolve_portal_base_url", return_value=portal
         ), patch(
-            "hermes_cli.config.get_env_value", side_effect=fake_get_env
+            "hades_cli.config.get_env_value", side_effect=fake_get_env
         ), patch(
-            "hermes_cli.config.save_env_value", side_effect=fake_save
+            "hades_cli.config.save_env_value", side_effect=fake_save
         ), patch.object(
             dr.urllib.request, "urlopen", side_effect=fake_urlopen
         ):
@@ -315,15 +315,15 @@ class TestCustomPortalPersistence:
             return None
 
         with patch(
-            "hermes_cli.auth.resolve_nous_access_token", return_value="tok"
-        ), patch("hermes_cli.config.is_managed", return_value=False), patch.dict(
+            "hades_cli.auth.resolve_nous_access_token", return_value="tok"
+        ), patch("hades_cli.config.is_managed", return_value=False), patch.dict(
             dr.os.environ, {}, clear=False
         ), patch.object(
             dr, "_resolve_portal_base_url", return_value=portal
         ), patch(
-            "hermes_cli.config.get_env_value", side_effect=fake_get_env_value
+            "hades_cli.config.get_env_value", side_effect=fake_get_env_value
         ), patch(
-            "hermes_cli.config.save_env_value", side_effect=fake_save
+            "hades_cli.config.save_env_value", side_effect=fake_save
         ), patch.object(
             dr.urllib.request, "urlopen", return_value=_fake_http_ok(response)
         ):
@@ -437,15 +437,15 @@ class TestPublicUrlPersistence:
             return None
 
         with patch(
-            "hermes_cli.auth.resolve_nous_access_token", return_value="tok"
-        ), patch("hermes_cli.config.is_managed", return_value=False), patch.dict(
+            "hades_cli.auth.resolve_nous_access_token", return_value="tok"
+        ), patch("hades_cli.config.is_managed", return_value=False), patch.dict(
             dr.os.environ, {}, clear=False
         ), patch.object(
             dr, "_resolve_portal_base_url", return_value="https://portal.nousresearch.com"
         ), patch(
-            "hermes_cli.config.get_env_value", side_effect=fake_get_env_value
+            "hades_cli.config.get_env_value", side_effect=fake_get_env_value
         ), patch(
-            "hermes_cli.config.save_env_value", side_effect=fake_save
+            "hades_cli.config.save_env_value", side_effect=fake_save
         ), patch.object(
             dr.urllib.request, "urlopen", return_value=_fake_http_ok(response)
         ):
@@ -531,15 +531,15 @@ class TestPublicUrlPersistence:
             saved[key] = value
 
         with patch(
-            "hermes_cli.auth.resolve_nous_access_token", return_value="tok"
-        ), patch("hermes_cli.config.is_managed", return_value=False), patch.dict(
+            "hades_cli.auth.resolve_nous_access_token", return_value="tok"
+        ), patch("hades_cli.config.is_managed", return_value=False), patch.dict(
             dr.os.environ, {}, clear=False
         ), patch.object(
             dr, "_resolve_portal_base_url", return_value="https://preview.example.com"
         ), patch(
-            "hermes_cli.config.get_env_value", return_value=None
+            "hades_cli.config.get_env_value", return_value=None
         ), patch(
-            "hermes_cli.config.save_env_value", side_effect=fake_save
+            "hades_cli.config.save_env_value", side_effect=fake_save
         ), patch.object(
             dr.urllib.request, "urlopen", return_value=_fake_http_ok(response)
         ):
@@ -563,7 +563,7 @@ class TestPortalResolution:
 
     def test_falls_back_to_stored_login_portal(self):
         with patch(
-            "hermes_cli.auth.get_provider_auth_state",
+            "hades_cli.auth.get_provider_auth_state",
             return_value={"portal_base_url": "https://portal.staging-nousresearch.com"},
         ):
             assert (
@@ -573,7 +573,7 @@ class TestPortalResolution:
 
     def test_blank_override_ignored(self):
         with patch(
-            "hermes_cli.auth.get_provider_auth_state",
+            "hades_cli.auth.get_provider_auth_state",
             return_value={"portal_base_url": "https://portal.staging-nousresearch.com"},
         ):
             assert (
@@ -593,8 +593,8 @@ class TestPortalErrors:
         )
 
         with patch(
-            "hermes_cli.auth.resolve_nous_access_token", return_value="tok"
-        ), patch("hermes_cli.config.is_managed", return_value=False), patch.object(
+            "hades_cli.auth.resolve_nous_access_token", return_value="tok"
+        ), patch("hades_cli.config.is_managed", return_value=False), patch.object(
             dr, "_resolve_portal_base_url", return_value="https://portal.nousresearch.com"
         ), patch.object(dr.urllib.request, "urlopen", side_effect=err):
             with pytest.raises(SystemExit) as exc:

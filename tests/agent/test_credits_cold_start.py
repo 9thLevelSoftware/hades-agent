@@ -113,8 +113,8 @@ def test_dev_fixtures_drive_cold_start():
         "depleted": ["credits.depleted"],
     }
     for name, want in expected.items():
-        os.environ["HERMES_DEV_CREDITS"] = "1"  # fixtures gate on the dev flag
-        os.environ["HERMES_DEV_CREDITS_FIXTURE"] = name
+        os.environ["HADES_DEV_CREDITS"] = "1"  # fixtures gate on the dev flag
+        os.environ["HADES_DEV_CREDITS_FIXTURE"] = name
         try:
             fx = dev_fixture_credits_state()
             assert fx is not None, name
@@ -160,8 +160,8 @@ def _seed(agent, fixture):
 
     from agent.credits_tracker import seed_credits_at_session_start
 
-    os.environ["HERMES_DEV_CREDITS"] = "1"  # fixtures gate on the dev flag
-    os.environ["HERMES_DEV_CREDITS_FIXTURE"] = fixture
+    os.environ["HADES_DEV_CREDITS"] = "1"  # fixtures gate on the dev flag
+    os.environ["HADES_DEV_CREDITS_FIXTURE"] = fixture
     try:
         return seed_credits_at_session_start(agent)
     finally:

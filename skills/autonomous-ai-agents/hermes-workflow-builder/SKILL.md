@@ -2,7 +2,7 @@
 name: hermes-workflow-builder
 description: Use when creating, designing, improving, validating, or deploying Hermes Workflow graphs from a user goal.
 version: 1.0.0
-author: Hermes Agent
+author: Hades Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:

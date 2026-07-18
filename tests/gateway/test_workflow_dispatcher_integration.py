@@ -8,8 +8,8 @@ from gateway import run as gateway_run
 from gateway.config import GatewayConfig
 from gateway.delivery import DeliveryRouter
 from gateway.run import GatewayRunner, _WORKFLOW_DISPATCH_LIMIT_DEFAULT
-from hermes_cli.config import DEFAULT_CONFIG
-from hermes_cli import workflows_dispatcher
+from hades_cli.config import DEFAULT_CONFIG
+from hades_cli import workflows_dispatcher
 
 
 def _runner():
@@ -23,7 +23,7 @@ def test_workflow_dispatcher_disabled_does_not_tick(monkeypatch):
     calls = []
 
     monkeypatch.setattr(
-        "hermes_cli.config.load_config",
+        "hades_cli.config.load_config",
         lambda: {"workflow": {"dispatch_in_gateway": False}},
     )
     monkeypatch.setattr(workflows_dispatcher, "tick", lambda *, limit: calls.append(limit))
@@ -47,7 +47,7 @@ def test_workflow_dispatcher_string_false_does_not_tick(
     runner = _runner()
     calls = []
 
-    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"workflow": workflow_cfg})
+    monkeypatch.setattr("hades_cli.config.load_config", lambda: {"workflow": workflow_cfg})
     monkeypatch.setattr(workflows_dispatcher, "tick", lambda *, limit: calls.append(limit))
 
     async def fail_sleep(_delay):
@@ -68,7 +68,7 @@ def test_workflow_dispatcher_missing_or_malformed_config_defaults_on(
     calls = []
 
     cfg = {} if workflow_cfg is None else {"workflow": workflow_cfg}
-    monkeypatch.setattr("hermes_cli.config.load_config", lambda: cfg)
+    monkeypatch.setattr("hades_cli.config.load_config", lambda: cfg)
     monkeypatch.setattr(workflows_dispatcher, "tick", lambda *, limit: calls.append(limit) or 0)
 
     async def fake_sleep(_delay):
@@ -86,7 +86,7 @@ def test_workflow_dispatcher_string_true_ticks(monkeypatch, enabled_value):
     sleeps = []
 
     monkeypatch.setattr(
-        "hermes_cli.config.load_config",
+        "hades_cli.config.load_config",
         lambda: {
             "workflow": {
                 "dispatch_in_gateway": enabled_value,
@@ -150,7 +150,7 @@ def test_workflow_dispatcher_enabled_ticks_on_cadence(monkeypatch):
     sleeps = []
 
     monkeypatch.setattr(
-        "hermes_cli.config.load_config",
+        "hades_cli.config.load_config",
         lambda: {
             "workflow": {
                 "dispatch_in_gateway": True,
@@ -175,7 +175,7 @@ def test_workflow_dispatcher_failure_is_logged_and_loop_survives(monkeypatch, ca
     sleeps = []
 
     monkeypatch.setattr(
-        "hermes_cli.config.load_config",
+        "hades_cli.config.load_config",
         lambda: {
             "workflow": {
                 "dispatch_in_gateway": True,
@@ -206,7 +206,7 @@ def test_workflow_dispatcher_cancelled_error_propagates(monkeypatch):
     runner = _runner()
 
     monkeypatch.setattr(
-        "hermes_cli.config.load_config",
+        "hades_cli.config.load_config",
         lambda: {"workflow": {"dispatch_in_gateway": True}},
     )
 
@@ -250,8 +250,8 @@ def test_start_schedules_workflow_dispatcher_watcher(tmp_path):
         return MagicMock()
 
     with patch("gateway.status.write_runtime_status"):
-        with patch("hermes_cli.plugins.discover_plugins"):
-            with patch("hermes_cli.config.load_config", return_value={}):
+        with patch("hades_cli.plugins.discover_plugins"):
+            with patch("hades_cli.config.load_config", return_value={}):
                 with patch("agent.shell_hooks.register_from_config"):
                     with patch(
                         "tools.process_registry.process_registry.recover_from_checkpoint",
@@ -277,7 +277,7 @@ def test_gateway_workflow_slash_command_delegates_to_run_slash(monkeypatch):
         seen.append(rest)
         return "workflow output"
 
-    monkeypatch.setattr("hermes_cli.workflows.run_slash", fake_run_slash)
+    monkeypatch.setattr("hades_cli.workflows.run_slash", fake_run_slash)
 
     event = SimpleNamespace(text="/workflow executions list --limit 5")
     result = asyncio.run(GatewayRunner._handle_workflow_command(runner, event))

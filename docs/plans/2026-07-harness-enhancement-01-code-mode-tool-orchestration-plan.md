@@ -19,7 +19,7 @@
 - Never put recalled/script-generated content into the frozen system prompt. Artifacts and tool results enter only through the existing result envelope or readable file paths.
 - No secrets are copied into generated module source, kernel output, artifact previews, or persisted RPC records.
 - Existing POSIX/Windows transport behavior remains supported. A platform that cannot provide the requested execution mode returns a clear tool error rather than silently running unsandboxed.
-- Verification must include real registry dispatch and a temporary `HERMES_HOME`/terminal environment; mocks alone are insufficient for RPC, approvals, or artifact persistence.
+- Verification must include real registry dispatch and a temporary `HADES_HOME`/terminal environment; mocks alone are insufficient for RPC, approvals, or artifact persistence.
 
 ## Current-State Review
 
@@ -524,10 +524,10 @@ code_execution:
 
 The user guide must state that `include` only narrows the enabled session toolset, unknown/MCP tools are conservative by default, persistent sessions retain variables until reset/idle cleanup, and artifacts are size-capped and subject to the same approval and redaction rails.
 
-- [ ] Step 3: Run the complete focused gate from a clean temporary `HERMES_HOME`.
+- [ ] Step 3: Run the complete focused gate from a clean temporary `HADES_HOME`.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/tools/test_code_execution.py \
   tests/tools/test_code_execution_modes.py \
   tests/tools/test_execute_code_approval_cluster.py -q
@@ -561,7 +561,7 @@ git commit -m "docs(code-mode): document registry sessions and artifacts"
 - [ ] Fresh-process behavior remains the default; persistent kernels are opt-in, resettable, idle-reaped, and environment-scoped.
 - [ ] Timeout kills the execution without leaving an orphan kernel/process group.
 - [ ] Image artifacts use `_multimodal`; other artifacts use a readable spill path; limits and path confinement are tested.
-- [ ] Local and remote RPC modes pass focused tests under a temporary `HERMES_HOME`.
+- [ ] Local and remote RPC modes pass focused tests under a temporary `HADES_HOME`.
 - [ ] No schema bloat, new core tool, new dependency, or non-secret environment configuration was introduced.
 
 ## Deliberate Simplifications

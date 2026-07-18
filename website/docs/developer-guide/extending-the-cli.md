@@ -1,7 +1,7 @@
 ---
 sidebar_position: 8
 title: "Extending the CLI"
-description: "Build wrapper CLIs that extend the Hermes TUI with custom widgets, keybindings, and layout changes"
+description: "Build wrapper CLIs that extend the Hades TUI with custom widgets, keybindings, and layout changes"
 ---
 
 # Extending the CLI
@@ -76,7 +76,7 @@ if __name__ == "__main__":
 Run it:
 
 ```bash
-cd ~/.hermes/hermes-agent
+cd ~/.hades/hermes-agent
 source .venv/bin/activate
 python my_cli.py
 ```

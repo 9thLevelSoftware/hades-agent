@@ -3,7 +3,7 @@ name: unreal-mcp
 description: "Use when the user wants to do anything in Unreal Engine through Epic's official editor-embedded MCP server (catalog entry: unreal-engine) — build/light/populate scenes, place and transform actors, author Blueprints, animate with Sequencer, create material instances, frame cameras, take screenshots, render, import assets, run PIE test sessions and automation tests, or automate the editor end-to-end from plain-English prompts with no Unreal knowledge required. Covers the tool-search discovery walk (list_toolsets/describe_toolset/call_tool), serial game-thread call discipline, ProgrammaticToolset batching, the Blueprint graph DSL loop, scene-craft numbers (physical light units, exposure, scale conventions), complete build recipes, save/undo hygiene, and extending the tool surface with custom Python toolsets."
 version: 1.0.0
 requires: Unreal Editor 5.8+ with the Unreal MCP plugin enabled and its server running
-author: Hermes Agent
+author: Hades Agent
 license: MIT
 tags: [unreal, unreal-engine, ue5, 3d, mcp, scenes, cinematics, lighting, gamedev]
 platforms: [linux, macos, windows]
@@ -15,7 +15,7 @@ metadata:
 
 # Unreal Engine MCP Skill
 
-Companion skill for the `unreal-engine` entry in the Hermes MCP catalog. The
+Companion skill for the `unreal-engine` entry in the Hades MCP catalog. The
 MCP server (Epic's official, experimental "Unreal MCP" plugin, internal id
 `ModelContextProtocol`) runs INSIDE the Unreal Editor process and exposes
 editor functionality as typed tools. This skill teaches how to drive it well:
@@ -67,9 +67,9 @@ This writes the `mcp_servers.unreal-engine` HTTP entry pointing at
 `http://127.0.0.1:8000/mcp` and probes the live server for its tools. Run it
 while the editor + server are up so the probe sees the real surface. If the
 user changed port/path in Editor Preferences, edit the `url` in
-`~/.hermes/config.yaml` under `mcp_servers.unreal-engine` to match.
+`~/.hades/config.yaml` under `mcp_servers.unreal-engine` to match.
 
-Do NOT use `ModelContextProtocol.GenerateClientConfig` for Hermes — that
+Do NOT use `ModelContextProtocol.GenerateClientConfig` for Hades — that
 writes `.mcp.json`-style files for Claude Code/Cursor/etc. Hermes connects
 from `config.yaml` via the catalog entry.
 
@@ -78,7 +78,7 @@ from `config.yaml` via the catalog entry.
 1. Launch Unreal Editor, wait for the project to finish loading; confirm the
    server started (Output Log shows the bind address, or run
    `ModelContextProtocol.StartServer` manually).
-2. Start the Hermes session. Tools register as `mcp_unreal_engine_*`. If
+2. Start the Hades session. Tools register as `mcp_unreal_engine_*`. If
    they're missing: editor wasn't up first — start it, then open a new
    Hermes session.
 3. Sanity check: call `mcp_unreal_engine_list_toolsets` and confirm toolsets
@@ -223,9 +223,9 @@ Load on demand; keep SKILL.md-level rules in mind throughout.
 - **Modal dialogs block everything.** A tool call that opens (or collides
   with) a modal editor dialog stalls until a human dismisses it. If a call
   hangs indefinitely, tell the user to check the editor for a dialog.
-- **Timeouts on long operations.** Hermes' per-call default is 120 s; asset
+- **Timeouts on long operations.** Hades' per-call default is 120 s; asset
   imports, big level saves, and renders can exceed it. Raise
-  `mcp_servers.unreal-engine.timeout` in `~/.hermes/config.yaml` for
+  `mcp_servers.unreal-engine.timeout` in `~/.hades/config.yaml` for
   render/import-heavy sessions.
 - **Stale tool schemas.** After authoring/hot-reloading toolsets or enabling
   a plugin, run `ModelContextProtocol.RefreshTools` in the editor console

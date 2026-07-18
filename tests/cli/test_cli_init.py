@@ -370,8 +370,8 @@ class TestHistoryDisplay:
             },
             {
                 "id": "20260401_201329_d85961",
-                "title": "Checking Running Hermes Agent",
-                "preview": "check running gateways for hermes agent",
+                "title": "Checking Running Hades Agent",
+                "preview": "check running gateways for hades agent",
                 "last_active": 0,
             },
         ]
@@ -380,7 +380,7 @@ class TestHistoryDisplay:
         output = capsys.readouterr().out
 
         assert "No messages in the current chat yet" in output
-        assert "Checking Running Hermes Agent" in output
+        assert "Checking Running Hades Agent" in output
         assert "20260401_201329_d85961" in output
         assert "/resume" in output
         assert "Current preview" not in output
@@ -398,8 +398,8 @@ class TestHistoryDisplay:
             },
             {
                 "id": "20260401_201329_d85961",
-                "title": "Checking Running Hermes Agent",
-                "preview": "check running gateways for hermes agent",
+                "title": "Checking Running Hades Agent",
+                "preview": "check running gateways for hades agent",
                 "last_active": 0,
             },
         ]
@@ -408,13 +408,13 @@ class TestHistoryDisplay:
         output = capsys.readouterr().out
 
         assert "Recent sessions" in output
-        assert "Checking Running Hermes Agent" in output
+        assert "Checking Running Hades Agent" in output
         assert "Use /resume" in output
         assert "session title" in output
 
     def test_resume_updates_hermes_session_id_env_and_context(self, tmp_path):
         from gateway.session_context import _UNSET, _VAR_MAP, get_session_env
-        from hermes_state import SessionDB
+        from hades_state import SessionDB
 
         cli = _make_cli()
         cli.session_id = "current_session"
@@ -425,14 +425,14 @@ class TestHistoryDisplay:
         cli._session_db.create_session("target_session", "cli")
         cli._session_db.append_message("target_session", "user", "hello from resumed session")
 
-        os.environ["HERMES_SESSION_ID"] = "current_session"
+        os.environ["HADES_SESSION_ID"] = "current_session"
         _VAR_MAP["HERMES_SESSION_ID"].set("current_session")
 
         try:
             cli._handle_resume_command("/resume target_session")
 
             assert cli.session_id == "target_session"
-            assert os.environ["HERMES_SESSION_ID"] == "target_session"
+            assert os.environ["HADES_SESSION_ID"] == "target_session"
             assert get_session_env("HERMES_SESSION_ID") == "target_session"
         finally:
             cli._session_db.close()
@@ -481,8 +481,8 @@ class TestHistoryDisplay:
         cli._session_db.list_sessions_rich.return_value = [
             {
                 "id": "20260401_201329_d85961",
-                "title": "Checking Running Hermes Agent",
-                "preview": "check running gateways for hermes agent",
+                "title": "Checking Running Hades Agent",
+                "preview": "check running gateways for hades agent",
                 "last_active": 0,
             },
         ]
@@ -494,7 +494,7 @@ class TestHistoryDisplay:
 
         assert "Unknown command" not in output
         assert "Recent sessions" in output
-        assert "Checking Running Hermes Agent" in output
+        assert "Checking Running Hades Agent" in output
         assert "20260401_201329_d85961" in output
 
     def test_sessions_list_subcommand_lists_recent_sessions(self, capsys):
@@ -505,8 +505,8 @@ class TestHistoryDisplay:
         cli._session_db.list_sessions_rich.return_value = [
             {
                 "id": "20260401_201329_d85961",
-                "title": "Checking Running Hermes Agent",
-                "preview": "check running gateways for hermes agent",
+                "title": "Checking Running Hades Agent",
+                "preview": "check running gateways for hades agent",
                 "last_active": 0,
             },
         ]
@@ -516,7 +516,7 @@ class TestHistoryDisplay:
 
         assert "Unknown command" not in output
         assert "Recent sessions" in output
-        assert "Checking Running Hermes Agent" in output
+        assert "Checking Running Hades Agent" in output
 
     def test_sessions_with_target_delegates_to_resume(self):
         """/sessions <id_or_title> behaves identically to /resume <id_or_title>.
@@ -527,10 +527,10 @@ class TestHistoryDisplay:
         """
         cli = _make_cli()
         with patch.object(cli, "_handle_resume_command") as mock_resume:
-            cli.process_command("/sessions Checking Running Hermes Agent")
+            cli.process_command("/sessions Checking Running Hades Agent")
 
         mock_resume.assert_called_once_with(
-            "/resume Checking Running Hermes Agent"
+            "/resume Checking Running Hades Agent"
         )
 
     def test_sessions_command_is_dispatched(self):
@@ -558,9 +558,9 @@ class TestRootLevelProviderOverride:
         """model.provider takes priority — root-level provider is only a fallback."""
         import yaml
 
-        hermes_home = tmp_path / ".hermes"
+        hermes_home = tmp_path / ".hades"
         hermes_home.mkdir()
-        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
         config_path = hermes_home / "config.yaml"
         config_path.write_text(yaml.safe_dump({
@@ -581,9 +581,9 @@ class TestRootLevelProviderOverride:
         """Legacy root-level provider still populates model.provider in the CLI loader."""
         import yaml
 
-        hermes_home = tmp_path / ".hermes"
+        hermes_home = tmp_path / ".hades"
         hermes_home.mkdir()
-        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
         config_path = hermes_home / "config.yaml"
         config_path.write_text(yaml.safe_dump({
@@ -604,9 +604,9 @@ class TestRootLevelProviderOverride:
         """Legacy root-level base_url still populates model.base_url in the CLI loader."""
         import yaml
 
-        hermes_home = tmp_path / ".hermes"
+        hermes_home = tmp_path / ".hades"
         hermes_home.mkdir()
-        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HADES_HOME", str(hermes_home))
 
         config_path = hermes_home / "config.yaml"
         config_path.write_text(yaml.safe_dump({
@@ -624,7 +624,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_root_model_keys_moves_to_model(self):
         """_normalize_root_model_keys migrates root keys into model section."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         config = {
             "provider": "opencode-go",
@@ -643,7 +643,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_root_model_keys_does_not_override_existing(self):
         """Existing model.provider is never overridden by root-level key."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         config = {
             "provider": "stale-provider",
@@ -658,7 +658,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_model_api_base_aliases_to_base_url(self):
         """model.api_base is migrated to model.base_url (issue #8919)."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         config = {
             "model": {
@@ -674,7 +674,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_api_base_does_not_override_base_url(self):
         """An explicit model.base_url is never overridden by api_base."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         config = {
             "model": {
@@ -690,7 +690,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_root_context_length_migrates_to_model(self):
         """Root-level context_length is migrated into the model section."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         config = {
             "context_length": 128000,
@@ -704,7 +704,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_root_context_length_does_not_override_existing(self):
         """Existing model.context_length is not overridden by root-level key."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         config = {
             "context_length": 256000,
@@ -719,7 +719,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_root_context_length_with_string_model(self):
         """Root-level context_length is migrated even when model is a string."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         config = {
             "context_length": 128000,
@@ -738,7 +738,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_model_name_aliases_to_default(self):
         """model.name (custom-provider repro) becomes model.default (#34500)."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         config = {
             "model": {"name": "claude-sonnet-4-20250514", "provider": "my-litellm"},
@@ -749,7 +749,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_model_alias_to_default(self):
         """model.model becomes model.default."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         result = _normalize_root_model_keys({"model": {"model": "via-model-key"}})
         assert result["model"]["default"] == "via-model-key"
@@ -757,7 +757,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_explicit_default_wins_over_name(self):
         """An explicit model.default is never overridden, and a stale alias is dropped."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         result = _normalize_root_model_keys(
             {"model": {"default": "real-model", "name": "ignored"}}
@@ -766,7 +766,7 @@ class TestRootLevelProviderOverride:
         assert "name" not in result["model"]
 
     def test_normalize_explicit_default_wins_over_model(self):
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         result = _normalize_root_model_keys(
             {"model": {"default": "real-model", "model": "ignored"}}
@@ -776,7 +776,7 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_model_wins_over_name(self):
         """Precedence: model > name when both are aliases and default is empty."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         result = _normalize_root_model_keys({"model": {"model": "m-key", "name": "n-key"}})
         assert result["model"]["default"] == "m-key"
@@ -784,18 +784,18 @@ class TestRootLevelProviderOverride:
 
     def test_normalize_empty_model_dict_stays_empty(self):
         """No id key anywhere → default stays empty (no fabricated value)."""
-        from hermes_cli.config import _normalize_root_model_keys
+        from hades_cli.config import _normalize_root_model_keys
 
         result = _normalize_root_model_keys({"model": {"provider": "my-litellm"}})
         assert (result["model"].get("default") or "") == ""
 
     def test_normalize_model_name_save_roundtrip_migrates_key(self, tmp_path, monkeypatch):
         """A model.name config is permanently migrated to model.default on save."""
-        import hermes_cli.config as cfgmod
+        import hades_cli.config as cfgmod
 
-        home = tmp_path / ".hermes"
+        home = tmp_path / ".hades"
         home.mkdir()
-        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HADES_HOME", str(home))
         cfg_path = home / "config.yaml"
         cfg_path.write_text("model:\n  name: claude-sonnet-4\n  provider: my-litellm\n")
         # bust the mtime cache

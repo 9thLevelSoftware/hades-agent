@@ -25,7 +25,7 @@ def _run_show_insights(command: str):
     cli_obj = HermesCLI.__new__(HermesCLI)
     db = MagicMock()
     _InsightsEngineStub.calls = []
-    with patch("hermes_state.SessionDB", return_value=db), \
+    with patch("hades_state.SessionDB", return_value=db), \
          patch("agent.insights.InsightsEngine", _InsightsEngineStub):
         cli_obj._show_insights(command)
     return _InsightsEngineStub.calls, db
@@ -83,10 +83,10 @@ def test_main_cmd_insights_passes_learning_to_report_generation(capsys):
 
     db = MagicMock()
     with (
-        patch("hermes_state.SessionDB", return_value=db),
+        patch("hades_state.SessionDB", return_value=db),
         patch("agent.insights.InsightsEngine", _MainEngineStub),
     ):
-        from hermes_cli.main import cmd_insights
+        from hades_cli.main import cmd_insights
 
         cmd_insights(SimpleNamespace(days=9, source="main", learning=True))
 

@@ -17,7 +17,7 @@ Drive Blender via the catalog blender MCP, with bpy recipes.
 | Source | Optional — install with `hermes skills install official/creative/blender-mcp` |
 | Path | `optional-skills/creative/blender-mcp` |
 | Version | `2.1.0` |
-| Author | alireza78a + kshitijk4poor + Hermes Agent |
+| Author | alireza78a + kshitijk4poor + Hades Agent |
 | Platforms | linux, macos, windows |
 
 ## Reference: full SKILL.md
@@ -28,7 +28,7 @@ The following is the complete skill definition that Hermes loads when this skill
 
 # Blender MCP Skill
 
-Companion skill for the `blender` entry in the Hermes MCP catalog. The MCP
+Companion skill for the `blender` entry in the Hades MCP catalog. The MCP
 server provides the connection to Blender; this skill teaches the bpy idioms
 and pitfalls for driving it well. It does not cover Blender UI workflows —
 everything here goes through the MCP tools against a live Blender session.

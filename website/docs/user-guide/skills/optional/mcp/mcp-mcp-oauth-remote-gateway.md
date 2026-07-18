@@ -17,7 +17,7 @@ Manual OAuth for remote MCP servers on headless gateways.
 | Source | Optional — install with `hermes skills install official/mcp/mcp-oauth-remote-gateway` |
 | Path | `optional-skills/mcp/mcp-oauth-remote-gateway` |
 | Version | `1.0.0` |
-| Author | Ben Barclay (benbarclay), Hermes Agent |
+| Author | Ben Barclay (benbarclay), Hades Agent |
 | License | MIT |
 | Platforms | linux, macos |
 | Tags | `MCP`, `OAuth`, `PKCE`, `Remote-Deployment` |
@@ -33,15 +33,15 @@ The following is the complete skill definition that Hermes loads when this skill
 
 ## Overview
 
-Hermes' built-in MCP OAuth client runs a one-shot HTTP listener on `127.0.0.1:<port>`
-inside the Hermes process and registers that loopback address as the OAuth
+Hades' built-in MCP OAuth client runs a one-shot HTTP listener on `127.0.0.1:<port>`
+inside the Hades process and registers that loopback address as the OAuth
 `redirect_uri`. That works perfectly for a local CLI on the user's own machine.
 It breaks completely when Hermes runs as a remote gateway (container, VPS,
 messaging bot), because the user's browser resolves `127.0.0.1` to the user's own
 laptop, not the remote container — so the authorization code never reaches Hermes.
 
 This skill does the OAuth dance by hand and writes the resulting tokens into the
-exact files Hermes' token storage expects, so a subsequent `/reload-mcp` finds
+exact files Hades' token storage expects, so a subsequent `/reload-mcp` finds
 cached tokens and skips the browser flow entirely.
 
 ## When to Use
@@ -59,21 +59,21 @@ Do NOT use this for:
 
 ## Why the Built-in OAuth Flow Fails on a Remote Gateway
 
-Hermes' native MCP OAuth client (`tools/mcp_oauth.py`):
+Hades' native MCP OAuth client (`tools/mcp_oauth.py`):
 
 1. Picks a free local port `P`.
 2. Registers a dynamic OAuth client with the AS, sending `redirect_uri = http://127.0.0.1:P/callback`.
-3. Starts an HTTP server on `127.0.0.1:P` **inside the Hermes process**.
+3. Starts an HTTP server on `127.0.0.1:P` **inside the Hades process**.
 4. Prints the authorize URL and waits for the code at its local endpoint.
 
 When Hermes runs remotely, the `127.0.0.1` in the `redirect_uri` is the remote
 container's loopback, not the user's. After authorizing, the user's browser 302s
 to `http://127.0.0.1:P/callback?code=...`, which resolves to the user's own
-laptop and fails to connect. The callback never reaches the Hermes process, the
+laptop and fails to connect. The callback never reaches the Hades process, the
 flow times out, and `/reload-mcp` returns "No MCP tools available" with no detail.
 
 Symptoms to recognize: `[xdg-open] <defunct>` processes under the hermes user, an
-empty or missing tokens directory (`$HERMES_HOME/mcp-tokens/`), and a reload that
+empty or missing tokens directory (`$HADES_HOME/mcp-tokens/`), and a reload that
 responds without any "Added/Reconnected: X" line in `change_detail`.
 
 ## Cheap First Fallbacks: the Built-in Flow's Own Escape Hatches
@@ -89,11 +89,11 @@ options alongside the authorize URL (`tools/mcp_oauth.py`):
 2. **SSH port-forward** — `ssh -N -L <port>:127.0.0.1:<port> <user>@<host>`
    makes the redirect reach the remote listener normally.
 
-Both require an interactive terminal to the Hermes host. The rest of this skill
+Both require an interactive terminal to the Hades host. The rest of this skill
 is for when there is NO interactive TTY — Hermes running purely as a messaging
 gateway/bot where `/reload-mcp` triggers the flow with nobody at a prompt.
 
-## Preferred Front Door: the Hermes Dashboard (try this BEFORE manual token surgery)
+## Preferred Front Door: the Hades Dashboard (try this BEFORE manual token surgery)
 
 A remote Hermes gateway often also runs the **dashboard** web UI as a SEPARATE
 process (e.g. `hermes dashboard --host 0.0.0.0 --port <port>`; check with
@@ -129,13 +129,13 @@ to `*_TOKEN`/`*_SECRET` vars.
 
 **What the dashboard does NOT fix (still host-side / shell):** stdio servers that
 need shell auth state (a CLI `login` command whose credentials may not persist
-across restarts) and anything reading credentials from `$HERMES_HOME/.env`. Those
+across restarts) and anything reading credentials from `$HADES_HOME/.env`. Those
 are out of the dashboard's scope regardless.
 
 ## The Workaround
 
 Do the OAuth dance manually, then write the resulting tokens into the exact files
-Hermes' `HermesTokenStorage` would have written, so on `/reload-mcp` Hermes finds
+Hades' `HermesTokenStorage` would have written, so on `/reload-mcp` Hermes finds
 cached tokens and skips the browser flow entirely.
 
 Run the shell commands below through the `terminal` tool on the gateway host and
@@ -151,15 +151,15 @@ echo "$DISPLAY $WAYLAND_DISPLAY $SSH_CLIENT"
 ```
 
 No display + a remote indicator = remote gateway. `tools/mcp_oauth.py::_can_open_browser()`
-uses these same env vars, so if Hermes' own auto-detect says "headless", the
+uses these same env vars, so if Hades' own auto-detect says "headless", the
 built-in flow won't work.
 
-### 2. Find HERMES_HOME and the config path
+### 2. Find HADES_HOME and the config path
 
 ```bash
-HERMES_HOME=$(python3 -c 'from hermes_constants import get_hermes_home; print(get_hermes_home())')
-echo "config: $HERMES_HOME/config.yaml"
-echo "tokens: $HERMES_HOME/mcp-tokens/"
+HADES_HOME=$(python3 -c 'from hades_constants import get_hades_home; print(get_hades_home())')
+echo "config: $HADES_HOME/config.yaml"
+echo "tokens: $HADES_HOME/mcp-tokens/"
 ```
 
 ### 3. Discover OAuth metadata from the MCP server
@@ -199,7 +199,7 @@ POST to the `registration_endpoint` with:
 
 ```json
 {
-  "client_name": "Hermes Agent (manual OAuth)",
+  "client_name": "Hades Agent (manual OAuth)",
   "redirect_uris": ["http://127.0.0.1:8765/callback"],
   "grant_types": ["authorization_code", "refresh_token"],
   "response_types": ["code"],
@@ -258,10 +258,10 @@ When the user pastes the callback URL:
    - `resource=<mcp_server_url>` (if the AS required it in step 5, include here too)
 4. Response contains `access_token`, `refresh_token`, `token_type`, `expires_in`, `scope`.
 
-### 8. Write tokens in Hermes' exact schema
+### 8. Write tokens in Hades' exact schema
 
 `tools/mcp_oauth.py::HermesTokenStorage` expects two files under
-`$HERMES_HOME/mcp-tokens/` (create dir with `0o700`, files with `0o600`):
+`$HADES_HOME/mcp-tokens/` (create dir with `0o700`, files with `0o600`):
 
 **`<server_name>.json`** — the `OAuthToken` pydantic model:
 ```json
@@ -289,7 +289,7 @@ When the user pastes the callback URL:
 
 Write each file via `json.dumps(..., indent=2)`. Sanitize the filename with
 `re.sub(r'[^\w\-]', '_', server_name)[:128]` — this matches `_safe_filename()` in
-Hermes' token storage.
+Hades' token storage.
 
 ### 9. Add the server to config.yaml
 
@@ -338,7 +338,7 @@ tools. Refresh happens automatically before `expires_in` elapses.
 
 ## Pitfalls & Lessons Learned
 
-1. **Do not assume "headless" means "OAuth impossible."** The built-in flow works fine for local CLI; the issue is strictly remote deployments where the user's browser and the Hermes process are on different machines. Check the execution environment before claiming OAuth isn't an option.
+1. **Do not assume "headless" means "OAuth impossible."** The built-in flow works fine for local CLI; the issue is strictly remote deployments where the user's browser and the Hades process are on different machines. Check the execution environment before claiming OAuth isn't an option.
 
 2. **Read the source, not just the skill docs.** `tools/mcp_oauth.py` and the MCP config reference in `website/docs/` are the authoritative references. Grep the tree before telling the user a feature "doesn't exist."
 
@@ -385,5 +385,5 @@ tools. Refresh happens automatically before `expires_in` elapses.
 
 ## Related
 
-- `native-mcp` — general guide to configuring MCP in Hermes. Authoritative config reference lives there.
-- `mcporter` — the external CLI bridge, for ad-hoc MCP calls outside of Hermes' config.
+- `native-mcp` — general guide to configuring MCP in Hades. Authoritative config reference lives there.
+- `mcporter` — the external CLI bridge, for ad-hoc MCP calls outside of Hades' config.

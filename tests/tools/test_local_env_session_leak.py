@@ -70,7 +70,7 @@ def test_engaged_unset_contextvar_strips_foreign_session_key(monkeypatch):
     """Engaged host + UNSET ContextVar must NOT inherit a foreign global.
 
     This is the production hijack: a concurrent session wrote
-    os.environ["HERMES_SESSION_KEY"], this task's ContextVar is unset, and the
+    os.environ["HADES_SESSION_KEY"], this task's ContextVar is unset, and the
     subprocess must see NO key rather than the foreign one.
     """
     _engage()

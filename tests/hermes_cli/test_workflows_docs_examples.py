@@ -2,8 +2,8 @@ from pathlib import Path
 
 import yaml
 
-from hermes_cli.workflows_capabilities import require_implemented_primitives
-from hermes_cli.workflows_spec import WorkflowSpec, validate_graph
+from hades_cli.workflows_capabilities import require_implemented_primitives
+from hades_cli.workflows_spec import WorkflowSpec, validate_graph
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLES = [

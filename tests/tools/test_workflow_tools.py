@@ -19,9 +19,9 @@ WORKFLOW_TOOL_NAMES = {
 
 @pytest.fixture(autouse=True)
 def _isolated_workflow_home(tmp_path, monkeypatch):
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = tmp_path / ".hades"
     hermes_home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
     monkeypatch.delenv("HERMES_WORKFLOW_CONTEXT", raising=False)
     monkeypatch.delenv("HERMES_PLATFORM", raising=False)
     monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
@@ -65,8 +65,8 @@ def _tool_names_for_workflow_toolset():
 
 
 def _deploy_demo_workflow():
-    from hermes_cli import workflows_db as wfdb
-    from hermes_cli.workflows_spec import WorkflowSpec
+    from hades_cli import workflows_db as wfdb
+    from hades_cli.workflows_spec import WorkflowSpec
 
     spec = WorkflowSpec.model_validate({
         "id": "demo",
@@ -134,7 +134,7 @@ def test_workflow_handlers_return_json_strings(_isolated_workflow_home):
     _enable_workflow_toolset(_isolated_workflow_home)
     spec = _deploy_demo_workflow()
 
-    from hermes_cli import workflows_db as wfdb
+    from hades_cli import workflows_db as wfdb
     from tools.registry import registry
 
     with wfdb.connect() as conn:
@@ -164,8 +164,8 @@ def test_workflow_run_tool_rejects_missing_required_input_before_creating_execut
 ):
     _enable_workflow_toolset(_isolated_workflow_home)
 
-    from hermes_cli import workflows_db as wfdb
-    from hermes_cli.workflows_spec import WorkflowSpec
+    from hades_cli import workflows_db as wfdb
+    from hades_cli.workflows_spec import WorkflowSpec
     from tools.registry import registry
 
     spec = WorkflowSpec.model_validate({
@@ -248,7 +248,7 @@ def test_workflow_validate_rejects_unsupported_primitives(_isolated_workflow_hom
 def test_workflow_draft_tool_returns_validated_spec(_isolated_workflow_home, monkeypatch):
     _enable_workflow_toolset(_isolated_workflow_home)
     import tools.workflow_tools as workflow_tools
-    from hermes_cli.workflows_assistant import parse_assistant_payload
+    from hades_cli.workflows_assistant import parse_assistant_payload
     from tools.registry import registry
 
     def fake_draft(goal):
@@ -301,7 +301,7 @@ def test_workflow_draft_tool_redacts_unexpected_runtime_errors(
 def test_workflow_refine_tool_accepts_spec_object(_isolated_workflow_home, monkeypatch):
     _enable_workflow_toolset(_isolated_workflow_home)
     import tools.workflow_tools as workflow_tools
-    from hermes_cli.workflows_assistant import parse_assistant_payload
+    from hades_cli.workflows_assistant import parse_assistant_payload
     from tools.registry import registry
 
     def fake_refine(spec, instruction):
@@ -353,7 +353,7 @@ def test_workflow_refine_tool_falls_back_to_workflow_id_when_spec_is_none(
 ):
     _enable_workflow_toolset(_isolated_workflow_home)
     import tools.workflow_tools as workflow_tools
-    from hermes_cli.workflows_assistant import parse_assistant_payload
+    from hades_cli.workflows_assistant import parse_assistant_payload
     from tools.registry import registry
 
     seen = {}
@@ -442,7 +442,7 @@ def test_workflow_deploy_rejects_unsupported_primitives(_isolated_workflow_home)
 
 def test_workflow_deploy_returns_deployed_version_not_latest(_isolated_workflow_home):
     _enable_workflow_toolset(_isolated_workflow_home)
-    from hermes_cli import workflows_db as wfdb
+    from hades_cli import workflows_db as wfdb
     from tools.registry import registry
 
     workflow_id = "deploy_version_demo"
@@ -490,7 +490,7 @@ def test_workflow_run_creates_execution_with_provided_input(_isolated_workflow_h
     _enable_workflow_toolset(_isolated_workflow_home)
     spec = _deploy_demo_workflow()
 
-    from hermes_cli import workflows_db as wfdb
+    from hades_cli import workflows_db as wfdb
     from tools.registry import registry
 
     result = registry.dispatch(
@@ -572,7 +572,7 @@ def test_workflow_cancel_is_idempotent(_isolated_workflow_home):
     _enable_workflow_toolset(_isolated_workflow_home)
     spec = _deploy_demo_workflow()
 
-    from hermes_cli import workflows_db as wfdb
+    from hades_cli import workflows_db as wfdb
     from tools.registry import registry
 
     with wfdb.connect() as conn:
@@ -611,7 +611,7 @@ def test_workflow_cancel_is_idempotent(_isolated_workflow_home):
 def test_shared_cancel_execution_records_source(_isolated_workflow_home):
     spec = _deploy_demo_workflow()
 
-    from hermes_cli import workflows_db as wfdb
+    from hades_cli import workflows_db as wfdb
 
     with wfdb.connect() as conn:
         execution_id = wfdb.start_execution(
@@ -641,7 +641,7 @@ def test_shared_cancel_execution_records_source(_isolated_workflow_home):
 
 def _start_queued_execution(workflow_id: str) -> str:
     """Seed a queued execution without workflow_run's inline tick."""
-    from hermes_cli import workflows_db as wfdb
+    from hades_cli import workflows_db as wfdb
 
     with wfdb.connect() as conn:
         return wfdb.start_execution(
@@ -654,7 +654,7 @@ def test_workflow_tick_tool_advances_queued_execution(_isolated_workflow_home):
     spec = _deploy_demo_workflow()
     execution_id = _start_queued_execution(spec.id)
 
-    from hermes_cli import workflows_db as wfdb
+    from hades_cli import workflows_db as wfdb
     from tools.registry import registry
 
     payload = json.loads(registry.dispatch("workflow_tick", {}))
@@ -718,8 +718,8 @@ def test_workflow_execution_show_redacts_model_facing_input_context_runs_and_eve
 ):
     _enable_workflow_toolset(_isolated_workflow_home)
 
-    from hermes_cli import workflows_db as wfdb
-    from hermes_cli.workflows_spec import WorkflowSpec
+    from hades_cli import workflows_db as wfdb
+    from hades_cli.workflows_spec import WorkflowSpec
     from tools.registry import registry
 
     spec = WorkflowSpec.model_validate({
@@ -879,7 +879,7 @@ def test_workflow_deploy_rejects_missing_profile(_isolated_workflow_home):
 
 def test_workflow_tool_deploy_never_mutates_existing_version(_isolated_workflow_home):
     _enable_workflow_toolset(_isolated_workflow_home)
-    from hermes_cli import workflows_db as wfdb
+    from hades_cli import workflows_db as wfdb
     from tools.registry import registry
 
     definition = {

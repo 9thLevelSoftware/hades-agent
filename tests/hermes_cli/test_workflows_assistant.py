@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_cli.workflows_assistant import (
+from hades_cli.workflows_assistant import (
     AssistantValidationError,
     WorkflowDraftResult,
     _json_schema_instruction,
@@ -272,7 +272,7 @@ def test_draft_workflow_calls_runner_with_plain_goal_and_returns_valid_spec():
         calls.append(prompt)
         return json.dumps(_valid_payload())
 
-    from hermes_cli.workflows_assistant import draft_workflow
+    from hades_cli.workflows_assistant import draft_workflow
 
     result = draft_workflow(
         "When I ask for a code change, have an implementer do it.",
@@ -295,7 +295,7 @@ def test_refine_workflow_includes_current_spec_and_instruction():
         payload["summary"] = "Added reviewer step."
         return json.dumps(payload)
 
-    from hermes_cli.workflows_assistant import refine_workflow
+    from hades_cli.workflows_assistant import refine_workflow
 
     result = refine_workflow(current, "Add a reviewer after implement", runner=fake_runner)
 
@@ -319,7 +319,7 @@ def test_draft_workflow_fails_closed_after_invalid_response_without_leaking_outp
             },
         })
 
-    from hermes_cli.workflows_assistant import draft_workflow
+    from hades_cli.workflows_assistant import draft_workflow
 
     with pytest.raises(AssistantValidationError) as exc:
         draft_workflow(
@@ -455,7 +455,7 @@ def test_draft_prompt_mentions_optional_cell_provider_and_model() -> None:
 
 
 def test_default_runner_uses_agent_runtime_adapter(monkeypatch):
-    from hermes_cli import workflows_assistant as wa
+    from hades_cli import workflows_assistant as wa
 
     calls = []
     agents = []
@@ -510,7 +510,7 @@ def test_default_runner_uses_agent_runtime_adapter(monkeypatch):
 
 
 def test_resolve_assistant_runtime_does_not_load_missing_credential_pool(monkeypatch):
-    from hermes_cli import workflows_assistant as wa
+    from hades_cli import workflows_assistant as wa
 
     calls = []
 
@@ -528,8 +528,8 @@ def test_resolve_assistant_runtime_does_not_load_missing_credential_pool(monkeyp
         calls.append(("load_pool", provider))
         raise AssertionError(f"load_pool should not be called for {provider}")
 
-    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"model": {"default": "cfg-model"}})
-    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve_runtime_provider)
+    monkeypatch.setattr("hades_cli.config.load_config", lambda: {"model": {"default": "cfg-model"}})
+    monkeypatch.setattr("hades_cli.runtime_provider.resolve_runtime_provider", fake_resolve_runtime_provider)
     monkeypatch.setattr("agent.credential_pool.load_pool", fake_load_pool)
 
     runtime = wa._resolve_assistant_runtime()
@@ -541,7 +541,7 @@ def test_resolve_assistant_runtime_does_not_load_missing_credential_pool(monkeyp
 
 
 def test_resolve_assistant_runtime_preserves_resolver_credential_pool(monkeypatch):
-    from hermes_cli import workflows_assistant as wa
+    from hades_cli import workflows_assistant as wa
 
     pool = object()
     pool_calls = []
@@ -555,8 +555,8 @@ def test_resolve_assistant_runtime_preserves_resolver_credential_pool(monkeypatc
         pool_calls.append(provider)
         raise AssertionError(f"load_pool should not be called for {provider}")
 
-    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"model": {"default": "cfg-model"}})
-    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve_runtime_provider)
+    monkeypatch.setattr("hades_cli.config.load_config", lambda: {"model": {"default": "cfg-model"}})
+    monkeypatch.setattr("hades_cli.runtime_provider.resolve_runtime_provider", fake_resolve_runtime_provider)
     monkeypatch.setattr("agent.credential_pool.load_pool", fake_load_pool)
 
     runtime = wa._resolve_assistant_runtime()

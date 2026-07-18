@@ -1,12 +1,12 @@
 ---
 sidebar_position: 16
 title: "xAI Grok OAuth（SuperGrok / X Premium+）"
-description: "使用 SuperGrok 或 X Premium+ 订阅登录，在 Hermes Agent 中使用 Grok 模型——无需 API 密钥"
+description: "使用 SuperGrok 或 X Premium+ 订阅登录，在 Hades Agent 中使用 Grok 模型——无需 API 密钥"
 ---
 
 # xAI Grok OAuth（SuperGrok / X Premium+）
 
-Hermes Agent 通过基于浏览器的 OAuth 登录流程支持 xAI Grok，认证服务器为 [accounts.x.ai](https://accounts.x.ai)，支持 **SuperGrok 订阅**（[grok.com](https://x.ai/grok)）或 **X Premium+ 订阅**（已关联的 X 账号）。无需 `XAI_API_KEY`——登录一次后，Hermes 会在后台自动刷新会话。
+Hades Agent 通过基于浏览器的 OAuth 登录流程支持 xAI Grok，认证服务器为 [accounts.x.ai](https://accounts.x.ai)，支持 **SuperGrok 订阅**（[grok.com](https://x.ai/grok)）或 **X Premium+ 订阅**（已关联的 X 账号）。无需 `XAI_API_KEY`——登录一次后，Hermes 会在后台自动刷新会话。
 
 当你使用拥有 Premium+ 的 X 账号登录时，xAI 会自动将订阅状态关联到你的 xAI 会话，因此 OAuth 流程与直接 SuperGrok 订阅者的体验完全相同。
 
@@ -31,12 +31,12 @@ Hermes Agent 通过基于浏览器的 OAuth 登录流程支持 xAI Grok，认证
 ## 前提条件
 
 - Python 3.9+
-- 已安装 Hermes Agent
+- 已安装 Hades Agent
 - 你的 xAI 账号拥有有效的 **SuperGrok** 订阅，**或**你登录所用的 X 账号拥有 **X Premium+** 订阅（xAI 会自动关联订阅）
 - 任意可打开打印出的验证 URL 的浏览器
 
 :::warning xAI 可能按套餐限制 OAuth API 访问
-xAI 的后端对 OAuth API 接口维护自己的白名单，已有记录显示即使应用内订阅处于激活状态，标准 SuperGrok 订阅者也会收到 `HTTP 403`（见 issue [#26847](https://github.com/NousResearch/hermes-agent/issues/26847)）。如果浏览器中 OAuth 登录成功但推理返回 403，请设置 `XAI_API_KEY` 并切换到 API 密钥路径（`provider: xai`）——该接口目前不受相同限制。
+xAI 的后端对 OAuth API 接口维护自己的白名单，已有记录显示即使应用内订阅处于激活状态，标准 SuperGrok 订阅者也会收到 `HTTP 403`（见 issue [#26847](https://github.com/9thLevelSoftware/hades-agent/issues/26847)）。如果浏览器中 OAuth 登录成功但推理返回 403，请设置 `XAI_API_KEY` 并切换到 API 密钥路径（`provider: xai`）——该接口目前不受相同限制。
 :::
 
 ## 快速开始
@@ -53,7 +53,7 @@ hermes model
 hermes
 ```
 
-首次登录后，凭据存储在 `~/.hermes/auth.json` 中，并在过期前自动刷新。
+首次登录后，凭据存储在 `~/.hades/auth.json` 中，并在过期前自动刷新。
 
 ## 手动登录
 
@@ -78,7 +78,7 @@ Web 仪表盘和桌面应用使用相同的设备代码流程：显示验证 URL
 
 1. Hermes 向 `auth.x.ai` 请求设备代码。
 2. 你打开验证 URL，登录，如有提示则输入显示的代码，并批准访问。
-3. Hermes 轮询 xAI 直到批准，然后将 token 保存到 `~/.hermes/auth.json`。
+3. Hermes 轮询 xAI 直到批准，然后将 token 保存到 `~/.hades/auth.json`。
 4. 此后，Hermes 在后台刷新 access token——你将保持登录状态，直到执行 `hermes auth logout xai-oauth` 或在 xAI 账号设置中撤销访问。
 
 ## 检查登录状态
@@ -106,7 +106,7 @@ hermes config set model.provider xai-oauth
 
 ## 配置参考
 
-登录后，`~/.hermes/config.yaml` 将包含：
+登录后，`~/.hades/config.yaml` 将包含：
 
 ```yaml
 model:
@@ -205,7 +205,7 @@ hermes auth add xai-oauth --no-browser
 
 浏览器中 OAuth 完成，token 已保存，但推理或 token 刷新返回 `HTTP 403`，消息类似于 *"The caller does not have permission to execute the specified operation"*。
 
-这**不是** token 过期问题——重新运行 `hermes model` 不会改变结果。xAI 的后端已被观察到将 OAuth API 访问限制在特定 SuperGrok 套餐，即使应用内订阅处于激活状态（issue [#26847](https://github.com/NousResearch/hermes-agent/issues/26847)）。
+这**不是** token 过期问题——重新运行 `hermes model` 不会改变结果。xAI 的后端已被观察到将 OAuth API 访问限制在特定 SuperGrok 套餐，即使应用内订阅处于激活状态（issue [#26847](https://github.com/9thLevelSoftware/hades-agent/issues/26847)）。
 
 **修复方法：** 设置 `XAI_API_KEY` 并切换到 API 密钥路径：
 

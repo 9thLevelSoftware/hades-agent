@@ -230,7 +230,7 @@ test('grantAllApplicationPackagesAcl is a no-op off Windows and reports exec fai
 
   const calls: Array<{ file: string; args: readonly string[] }> = []
 
-  const ok = grantAllApplicationPackagesAcl('C:\\Hermes', {
+  const ok = grantAllApplicationPackagesAcl('C:\\Hades', {
     platform: 'win32',
     execFileSync(file, args) {
       calls.push({ file, args })
@@ -242,9 +242,9 @@ test('grantAllApplicationPackagesAcl is a no-op off Windows and reports exec fai
   assert.deepEqual(ok, { ok: true })
   assert.equal(calls.length, 1)
   assert.equal(calls[0]?.file, 'icacls')
-  assert.deepEqual(calls[0]?.args, buildIcaclsGrantArgs('C:\\Hermes'))
+  assert.deepEqual(calls[0]?.args, buildIcaclsGrantArgs('C:\\Hades'))
 
-  const failed = grantAllApplicationPackagesAcl('C:\\Hermes', {
+  const failed = grantAllApplicationPackagesAcl('C:\\Hades', {
     platform: 'win32',
     execFileSync() {
       throw new Error('access denied')

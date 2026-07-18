@@ -32,8 +32,8 @@ def _state_dir() -> Path:
     override = os.environ.get("WATCHER_STATE_DIR")
     if override:
         return Path(override)
-    # Default: $HERMES_HOME/watcher-state/, falling back to ~/.hermes/watcher-state/.
-    hermes_home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+    # Default: $HADES_HOME/watcher-state/, falling back to ~/.hades/watcher-state/.
+    hermes_home = os.environ.get("HADES_HOME") or str(Path.home() / ".hades")
     return Path(hermes_home) / "watcher-state"
 
 

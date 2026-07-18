@@ -1,5 +1,5 @@
 """
-Photon Spectrum (iMessage) platform adapter for Hermes Agent.
+Photon Spectrum (iMessage) platform adapter for Hades Agent.
 
 Both directions of traffic flow through a small supervised Node sidecar
 (see ``sidecar/index.mjs``) that runs the ``spectrum-ts`` SDK — the SDK is
@@ -176,7 +176,7 @@ def _reinstall_sidecar_deps() -> None:
         return
     # Windows: suppress the console flash these short-lived npm runs would
     # otherwise pop (0 elsewhere). Same helper as the sidecar spawn below.
-    from hermes_cli._subprocess_compat import windows_hide_flags
+    from hades_cli._subprocess_compat import windows_hide_flags
 
     try:
         result = subprocess.run(  # noqa: S603
@@ -936,7 +936,7 @@ class PhotonAdapter(BasePlatformAdapter):
 
         # Windows: hide the child console (0 elsewhere). Same helper the
         # discord/whatsapp adapters use for their sidecar spawns.
-        from hermes_cli._subprocess_compat import windows_hide_flags
+        from hades_cli._subprocess_compat import windows_hide_flags
 
         try:
             patch = subprocess.run(  # noqa: S603
@@ -1744,7 +1744,7 @@ async def _standalone_send(
 # Plugin entry point
 
 def register(ctx) -> None:
-    """Called by the Hermes plugin loader at startup."""
+    """Called by the Hades plugin loader at startup."""
     # Local import to avoid argparse work at module load; reused for both the
     # gateway-setup hook and the `hermes photon` CLI command below.
     from . import cli as _cli

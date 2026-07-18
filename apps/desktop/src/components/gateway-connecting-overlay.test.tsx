@@ -177,7 +177,7 @@ describe('connecting overlay vs recovery surface', () => {
     setGatewayState('error')
     $desktopBoot.set({
       ...$desktopBoot.get(),
-      error: 'Lost connection to the Hermes gateway and could not reconnect.',
+      error: 'Lost connection to the Hades gateway and could not reconnect.',
       running: false,
       visible: true
     })

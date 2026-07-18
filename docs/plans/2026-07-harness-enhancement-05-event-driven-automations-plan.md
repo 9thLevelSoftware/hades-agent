@@ -213,7 +213,7 @@ def test_retry_is_bounded_and_creates_new_attempt():
 - [ ] Step 6: Run queue/scheduler/restart tests under a temporary profile.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/cron/test_review_queue.py \
   tests/cron/test_event_job.py \
   tests/cron/test_cron_shutdown_drain.py -q
@@ -352,7 +352,7 @@ def test_unauthenticated_email_falls_through_to_existing_policy():
 - [ ] Step 5: Run email/review tests and inspect queue state after a process restart.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/cron/test_event_email.py \
   tests/gateway/test_review_queue_rpc.py \
   tests/hermes_cli/test_web_server_cron_profiles.py \
@@ -383,7 +383,7 @@ git commit -m "feat(automations): add email triggers and review commands"
 - [ ] Step 3: Add a real end-to-end test that creates a webhook event job, posts a signed event, waits for the queue item, accepts it, and verifies one delivery. Repeat with retry/discard and assert verdict persistence.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/cron/test_cronjob_schema.py \
   tests/cron/test_review_queue.py \
   tests/gateway/test_event_trigger_dispatch.py \

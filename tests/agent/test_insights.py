@@ -5,7 +5,7 @@ import os
 import time
 import pytest
 
-from hermes_state import SessionDB
+from hades_state import SessionDB
 from agent.insights import (
     InsightsEngine,
     _estimate_cost,
@@ -665,10 +665,10 @@ class TestLearningSections:
         import importlib
         from tools import skill_usage as su
 
-        home = tmp_path / ".hermes"
+        home = tmp_path / ".hades"
         home.mkdir()
         (home / "skills").mkdir()
-        os.environ["HERMES_HOME"] = str(home)
+        os.environ["HADES_HOME"] = str(home)
         importlib.reload(su)
 
         # 5 helped + 1 hurt — eligible: utility = (5+1)/(5+1+2) = 6/8.
@@ -720,7 +720,7 @@ class TestLearningSections:
         """With no sidecar file, learning=True still succeeds."""
         empty_home = tmp_path / "fresh_home"
         empty_home.mkdir()
-        monkeypatch.setenv("HERMES_HOME", str(empty_home))
+        monkeypatch.setenv("HADES_HOME", str(empty_home))
         import tools.skill_usage as su
         import importlib
         importlib.reload(su)
@@ -736,7 +736,7 @@ class TestLearningSections:
         home = tmp_path / ".hermes2"
         home.mkdir()
         (home / "skills").mkdir()
-        os.environ["HERMES_HOME"] = str(home)
+        os.environ["HADES_HOME"] = str(home)
         importlib.reload(su)
         su.save_usage({
             "plan": {
@@ -970,7 +970,7 @@ class TestLearningVerboseFormat:
         home = tmp_path / ".hermes_v"
         home.mkdir()
         (home / "skills").mkdir()
-        os.environ["HERMES_HOME"] = str(home)
+        os.environ["HADES_HOME"] = str(home)
         importlib.reload(su)
 
         su.save_usage({

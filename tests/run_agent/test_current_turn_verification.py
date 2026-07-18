@@ -29,7 +29,7 @@ def _tool_call(call_id):
 
 @pytest.fixture
 def agent(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     with (
         patch(
             "run_agent.get_tool_definitions",
@@ -71,7 +71,7 @@ def agent(tmp_path, monkeypatch):
 def _run(agent, responses, *, tool_result=None):
     agent._interruptible_api_call = lambda _kwargs: next(responses)
     patches = [
-        patch("hermes_cli.plugins.invoke_hook", return_value=[]),
+        patch("hades_cli.plugins.invoke_hook", return_value=[]),
         patch.object(agent, "_persist_session"),
     ]
     if tool_result is not None:

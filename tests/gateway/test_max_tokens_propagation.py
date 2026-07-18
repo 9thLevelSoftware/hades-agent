@@ -20,16 +20,16 @@ import pytest
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
-    """Isolated HERMES_HOME with a writable config.yaml and a clean module cache.
+    """Isolated HADES_HOME with a writable config.yaml and a clean module cache.
 
     These tests deliberately re-import ``hermes_cli`` / ``gateway`` so each
     config write is read fresh. To avoid leaking that purge into sibling test
     files in the same worker (which breaks their import-time mocks), we snapshot
     the affected modules and restore them on teardown.
     """
-    hermes_home = tmp_path / ".hermes"
+    hermes_home = tmp_path / ".hades"
     hermes_home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
     monkeypatch.delenv("HERMES_MAX_TOKENS", raising=False)
 
     _saved = {
@@ -162,7 +162,7 @@ def test_lift_helper_accepts_alias_and_rejects_garbage(isolated_home):
     for mod in list(sys.modules.keys()):
         if mod.startswith("hermes_cli"):
             del sys.modules[mod]
-    rp = importlib.import_module("hermes_cli.runtime_provider")
+    rp = importlib.import_module("hades_cli.runtime_provider")
 
     out: dict = {}
     rp._lift_max_output_tokens({"max_output_tokens": 8192}, out)

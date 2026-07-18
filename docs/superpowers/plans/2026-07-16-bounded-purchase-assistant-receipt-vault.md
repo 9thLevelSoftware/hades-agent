@@ -15,7 +15,7 @@
 - Every live payment, if a later separately authorized pilot is ever opened, requires a fresh approval from the user who is present in the current CLI or Ink session. Session/permanent approval, unattended gateway approval, cron, background agents, inherited approval, and delegated self-approval are invalid for `purchase.commit`.
 - No payment credential, card PAN/CVV, wallet key, shared payment token, UCP payment instrument, authorization header, raw address, or broker plaintext may enter model messages, tool arguments/results, logs, receipts, benchmark output, exception strings, shell history, or the workspace.
 - Stable non-secret settings live under `commerce:` in `config.yaml`. Credential values and encryption roots come only from profile-scoped secret providers or `.env`; user-facing docs never use an environment variable for behavioral configuration.
-- Profiles are independent islands. Mandates, carts, encrypted credentials, operation rows, receipts, callback cursors, locks, reports, and provider configuration resolve from `get_hermes_home()` and never cross `HERMES_HOME`.
+- Profiles are independent islands. Mandates, carts, encrypted credentials, operation rows, receipts, callback cursors, locks, reports, and provider configuration resolve from `get_hades_home()` and never cross `HADES_HOME`.
 - The system prompt, cached prefix, effective tool-definition snapshot, provider, and model remain byte-stable for the conversation. Commerce adds no model-visible core tool, never injects a synthetic user message, and never mutates history outside existing compression.
 - The immutable cart hash covers merchant identity, currency, every normalized line, quantity, unit price, discounts, taxes, fees, shipping method/cost, destination scope hash, warnings, total, and quote expiry. Any change invalidates mandate binding and approval and requires a new preview.
 - Provider idempotency is scoped to one `purchase_id + mandate_id + cart_hash`; retries of that exact intent reuse the key. A different cart or purchase must use a different key. Idempotency is deduplication support, never an exactly-once claim.
@@ -23,7 +23,7 @@
 - Persist an operation-journal `dispatched` fact before crossing a payment boundary and persist provider evidence before reporting success. Ambiguous acknowledgement is `unknown_effect`; Hermes never retries, refunds, or consumes another mandate blindly.
 - The commerce store owns commerce-specific reconciliation facts, not generic effect certainty or evidence truth. `OperationJournal` remains certainty authority; item #2 owns effect semantics; item #6 owns authority/budget; item #15 owns source-to-sink flow; item #12's `ReceiptStore` owns immutable receipts and observations.
 - Merchant/product/callback content is hostile data. It cannot change mandates, shipping scope, approval requirements, provider destinations, broker handles, or policy, and it never becomes an instruction.
-- Real-path tests use temporary `HERMES_HOME`, real imports, real SQLite, real cryptography, real local HTTP simulated merchants, real subprocess boundaries where applicable, and process restart. Mock only an external protocol network/payment boundary that cannot be made a local sandbox.
+- Real-path tests use temporary `HADES_HOME`, real imports, real SQLite, real cryptography, real local HTTP simulated merchants, real subprocess boundaries where applicable, and process restart. Mock only an external protocol network/payment boundary that cannot be made a local sandbox.
 - CLI and terminal/Ink TUI are the primary authoring, approval, recovery, and receipt surfaces. Dashboard is a secondary read-only receipt-vault inspector. `apps/desktop/` is untouched.
 - Delivery stays on Footprint Ladder rung 2/4: optional CLI + skill plus generic provider registration; vendor protocol adapters ship as standalone plugin repos or MCP/CLI packages, never as permanent core tools or vendor directories in this repository.
 - No outbound telemetry. Local reports disclose denominator, exclusions, protocol profile, safety slice, Wilson interval, p50/p95 latency, recovery burden, and every unknown effect without uploading financial or personal data.
@@ -154,7 +154,7 @@ Canonical purchase states are `draft`, `cart_ready`, `approval_pending`, `ready`
 - `agent/secret_scope.py` and `agent/secret_sources/` already provide profile-scoped secret resolution and fail-closed multiplexing. The payment broker consumes key references through that scope and never reads arbitrary process environment.
 - `hermes_cli/plugins.py::PluginContext` already registers CLI commands and typed providers. Add one concrete `register_commerce_provider()` provider category; third-party UCP/Stripe/MPP implementations remain standalone packages.
 - `optional-skills/productivity/shop/SKILL.md`, `optional-skills/payments/stripe-link-cli/SKILL.md`, and `optional-skills/payments/mpp-agent/SKILL.md` currently describe direct checkout/payment procedures. They must route payment commit through the bounded coordinator and retain research/read-only guidance.
-- `hermes_state.py` supplies profile-local SQLite/WAL and bounded writes. `hermes_cli/main.py`, `hermes_cli/commands.py`, `tui_gateway/server.py`, and `ui-tui/src/app/slash/commands/ops.ts` supply top-level, classic slash, and native Ink command seams.
+- `hades_state.py` supplies profile-local SQLite/WAL and bounded writes. `hermes_cli/main.py`, `hermes_cli/commands.py`, `tui_gateway/server.py`, and `ui-tui/src/app/slash/commands/ops.ts` supply top-level, classic slash, and native Ink command seams.
 - `hermes_cli/web_server.py`, `web/src/lib/api.ts`, and `web/src/App.tsx` supply authenticated Dashboard APIs/routes. Dashboard remains read-only and cannot issue, approve, commit, cancel, refund, or dispute.
 
 ### New production files
@@ -178,7 +178,7 @@ Canonical purchase states are `draft`, `cart_ready`, `approval_pending`, `ready`
 
 ### Existing production files modified
 
-- `hermes_state.py` — additive commerce tables/indexes and lazy facade only.
+- `hades_state.py` — additive commerce tables/indexes and lazy facade only.
 - `hermes_cli/config.py` — `commerce.enabled: false`, `mode: sandbox`, provider, retention, timeout, and live hard-disable defaults.
 - `hermes_cli/plugins.py` — generic `register_commerce_provider(provider)` category with one active configured provider.
 - `agent/effects/adapters/__init__.py`, `agent/effects/registry.py` — register the generic commerce effect descriptor without changing model schemas.
@@ -707,7 +707,7 @@ git commit -m "feat: define canonical commerce contracts"
 
 **Files:**
 - Create: `agent/commerce/store.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/commerce/test_store.py`
 
 **Interfaces:**
@@ -761,7 +761,7 @@ Expected: PASS with atomic one-use mandates, immutable carts/events, correct ref
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/commerce/store.py hermes_state.py tests/agent/commerce/test_store.py
+git add agent/commerce/store.py hades_state.py tests/agent/commerce/test_store.py
 git commit -m "feat: persist crash-safe commerce state"
 ```
 
@@ -1204,7 +1204,7 @@ Support `provider list/status`, `research`, `cart import/show/diff`, `mandate pr
 
 - [ ] **Step 4: Route classic slash and Ink natively**
 
-Add one `CommandDef("purchase", ..., category="Tools & Skills", args_hint="<verb> [args]")`. Classic CLI delegates to `hermes_cli.purchases`, while Ink calls `purchase.exec` and renders structured cart changes, mandate scope, total/currency, approval countdown, operation certainty, refund/dispute arithmetic, and receipt chain. Approval/deny reaches the existing exact request pipeline while an agent is blocked and bypasses both gateway guards where applicable. Ink never shells out or displays sensitive fields.
+Add one `CommandDef("purchase", ..., category="Tools & Skills", args_hint="<verb> [args]")`. Classic CLI delegates to `hades_cli.purchases`, while Ink calls `purchase.exec` and renders structured cart changes, mandate scope, total/currency, approval countdown, operation certainty, refund/dispute arithmetic, and receipt chain. Approval/deny reaches the existing exact request pipeline while an agent is blocked and bypasses both gateway guards where applicable. Ink never shells out or displays sensitive fields.
 
 - [ ] **Step 5: Run GREEN**
 
@@ -1302,7 +1302,7 @@ git commit -m "feat: add read-only commerce receipt vault"
 ])
 def test_real_path_commerce_safety(tmp_path, monkeypatch, fault):
     home = tmp_path / "profile"
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     result = run_commerce_scenario(home, ScenarioScript(fault=fault))
     assert result.outside_mandate_debit_micros == 0
     assert result.mandate_consumption_count <= 1
@@ -1319,7 +1319,7 @@ Expected: FAIL because the full real-path harness and all injected boundaries ar
 
 - [ ] **Step 3: Exercise the real profile-local path**
 
-For each fault, create a fresh temp `HERMES_HOME`; write real `config.yaml` with commerce sandbox opt-in; initialize real `SessionDB`, transaction/authority/IFC/capability/receipt/commerce stores; start a real loopback simulated merchant; register it through actual plugin provider discovery; issue an exact approval and signed mandate; run CLI service methods; terminate/recreate the object graph or subprocess at the injected boundary; then reconcile and inspect through the real receipt store. Mock no store, policy, crypto, registry, reducer, approval, operation journal, or CLI/RPC service.
+For each fault, create a fresh temp `HADES_HOME`; write real `config.yaml` with commerce sandbox opt-in; initialize real `SessionDB`, transaction/authority/IFC/capability/receipt/commerce stores; start a real loopback simulated merchant; register it through actual plugin provider discovery; issue an exact approval and signed mandate; run CLI service methods; terminate/recreate the object graph or subprocess at the injected boundary; then reconcile and inspect through the real receipt store. Mock no store, policy, crypto, registry, reducer, approval, operation journal, or CLI/RPC service.
 
 Cover stale authority, expired/revoked/consumed mandate, provider generation downgrade/revocation, forged callback, callback replay/conflict, merchant injection, SSRF/redirect, confusable merchant/item, address/data expansion, corrupted ciphertext, wrong profile, partial provider failure, unavailable provider, cancellation after fulfillment, over-refund, dispute replay, and retention export. Confirm every ambiguity is `unknown_effect`, every non-reversible boundary is labeled, and every success has persisted evidence first.
 

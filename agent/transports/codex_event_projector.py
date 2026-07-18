@@ -1,6 +1,6 @@
-"""Projects codex app-server events into Hermes' messages list.
+"""Projects codex app-server events into Hades' messages list.
 
-The translator that lets Hermes' memory/skill review keep working under the
+The translator that lets Hades' memory/skill review keep working under the
 Codex runtime: it converts Codex `item/*` notifications into the standard
 OpenAI-shaped `{role, content, tool_calls, tool_call_id}` entries that
 `agent/curator.py` already knows how to read.
@@ -16,7 +16,7 @@ Codex emits items with a discriminator field `type`:
   - plan/hookPrompt/collabAgentToolCall → recorded as opaque assistant notes
 
 Each item maps to AT MOST one assistant entry + one tool entry, preserving
-Hermes' message-alternation invariants (system → user → assistant → user/tool
+Hades' message-alternation invariants (system → user → assistant → user/tool
 → assistant → ...). Multiple Codex tool calls within one Codex turn produce
 multiple consecutive (assistant, tool) pairs, which is the same shape Hermes
 already produces for parallel tool calls.
@@ -48,7 +48,7 @@ def _deterministic_call_id(item_type: str, item_id: str) -> str:
 
 
 def _format_tool_args(d: dict) -> str:
-    """Format a dict as JSON the way Hermes' existing tool_calls path does."""
+    """Format a dict as JSON the way Hades' existing tool_calls path does."""
     return json.dumps(d, ensure_ascii=False, sort_keys=True)
 
 
@@ -127,7 +127,7 @@ class CodexEventProjector:
     def _project_user_message(self, item: dict) -> ProjectionResult:
         # codex's userMessage content is a list of UserInput variants. For
         # projection purposes we flatten any text fragments and ignore
-        # non-text parts (images, etc.) — Hermes' messages store text only.
+        # non-text parts (images, etc.) — Hades' messages store text only.
         text_parts: list[str] = []
         for fragment in item.get("content") or []:
             if isinstance(fragment, dict):

@@ -40,7 +40,7 @@ REST Admin API 自 2024-04 起已进入遗留状态，仅接受安全修复。**
 1. 在 Shopify 管理后台：**Settings → Apps and sales channels → Develop apps → Create an app**。
 2. 点击 **Configure Admin API scopes**，选择所需权限（见下方示例），保存。
 3. **Install app** → Admin API 访问令牌仅显示一次。立即复制——Shopify 不会再次展示。令牌以 `shpat_` 开头。
-4. 保存至 `~/.hermes/.env`：
+4. 保存至 `~/.hades/.env`：
    ```
    SHOPIFY_ACCESS_TOKEN=shpat_xxxxxxxxxxxxxxxxxxxx
    SHOPIFY_STORE_DOMAIN=my-store.myshopify.com

@@ -3,13 +3,13 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
-from hermes_cli import kanban_db as kb
+from hades_cli import kanban_db as kb
 
 
 def test_task_round_trips_provider_override(tmp_path, monkeypatch) -> None:
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
@@ -32,7 +32,7 @@ def test_task_round_trips_provider_override(tmp_path, monkeypatch) -> None:
 
 
 def test_task_to_dict_includes_provider_and_model_overrides() -> None:
-    from hermes_cli import kanban as kc
+    from hades_cli import kanban as kc
 
     task = kb.Task(
         id="t_provider",
@@ -60,15 +60,15 @@ def test_task_to_dict_includes_provider_and_model_overrides() -> None:
 
 
 def test_show_prints_provider_and_model_overrides(tmp_path, monkeypatch, capsys) -> None:
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_BOARD", "default")
 
-    from hermes_cli import kanban as kc
+    from hades_cli import kanban as kc
 
     kb.init_db()
     with kb.connect_closing() as conn:

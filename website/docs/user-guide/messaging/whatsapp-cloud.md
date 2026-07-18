@@ -1,7 +1,7 @@
 ---
 sidebar_position: 6
 title: "WhatsApp Business (Cloud API)"
-description: "Set up Hermes Agent as a WhatsApp bot via Meta's official Business Cloud API"
+description: "Set up Hades Agent as a WhatsApp bot via Meta's official Business Cloud API"
 ---
 
 # WhatsApp Business Cloud API Setup
@@ -80,7 +80,7 @@ Temporary access tokens expire after **24 hours**, which means a token generated
    - `whatsapp_business_messaging`
    - `whatsapp_business_management`
 5. Set **token expiration: Never**.
-6. Copy the token → update `WHATSAPP_CLOUD_ACCESS_TOKEN` in `~/.hermes/.env` → restart the gateway.
+6. Copy the token → update `WHATSAPP_CLOUD_ACCESS_TOKEN` in `~/.hades/.env` → restart the gateway.
 
 System User tokens don't expire unless you explicitly revoke them.
 
@@ -88,7 +88,7 @@ System User tokens don't expire unless you explicitly revoke them.
 
 ## Exposing Hermes to the internet
 
-The Cloud API delivers inbound messages by HTTPS POST to your webhook URL — that means the Hermes gateway has to be reachable from Meta's servers.  Three common ways:
+The Cloud API delivers inbound messages by HTTPS POST to your webhook URL — that means the Hades gateway has to be reachable from Meta's servers.  Three common ways:
 
 ### Cloudflare Tunnel (recommended)
 
@@ -142,8 +142,8 @@ Once your tunnel is running:
    ```bash
    python -c "import secrets; print(secrets.token_urlsafe(32))"
    ```
-   Save it as `WHATSAPP_CLOUD_VERIFY_TOKEN` in `~/.hermes/.env`.
-3. Start the Hermes gateway: `hermes gateway`.
+   Save it as `WHATSAPP_CLOUD_VERIFY_TOKEN` in `~/.hades/.env`.
+3. Start the Hades gateway: `hermes gateway`.
 4. In the Meta App Dashboard → **WhatsApp → Configuration** (or **Use cases → Customize → Configuration** depending on UI version) → click **Edit** on the Webhook section.
 5. Fill in:
    - **Callback URL**: `https://abc123.trycloudflare.com/whatsapp/webhook`
@@ -180,7 +180,7 @@ Up to 5 numbers in dev mode.  Going to App Review removes this limit.
 
 ## Allowlist (Hermes-side)
 
-In addition to Meta's recipient whitelist, Hermes has its own per-platform allowlist that controls **which incoming messages the agent processes**.  Add to `~/.hermes/.env`:
+In addition to Meta's recipient whitelist, Hermes has its own per-platform allowlist that controls **which incoming messages the agent processes**.  Add to `~/.hades/.env`:
 
 ```bash
 # Comma-separated phone numbers, country code, no '+' / spaces / dashes
@@ -213,7 +213,7 @@ The `hermes whatsapp-cloud` wizard prints these links at the end of setup. None 
 
 ## Configuration reference
 
-All settings live in `~/.hermes/.env`.  Required values are in **bold**.
+All settings live in `~/.hades/.env`.  Required values are in **bold**.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -309,11 +309,11 @@ Meta only allows **free-form messages** within a 24-hour window after the user's
 
 Hermes warns the agent about this window in its system prompt, so the model knows to mention it when scheduling delayed messages.
 
-Message-template support (the workaround for outside-window sends) is not yet implemented in Hermes. If you need it, please [open an issue](https://github.com/NousResearch/hermes-agent/issues) — it's planned but waiting on a clear demand signal.
+Message-template support (the workaround for outside-window sends) is not yet implemented in Hades. If you need it, please [open an issue](https://github.com/9thLevelSoftware/hades-agent/issues) — it's planned but waiting on a clear demand signal.
 
 ### Group chats
 
-The Cloud API has limited group support (capability-tier gated by Meta).  Hermes's `whatsapp_cloud` adapter currently handles **direct messages only** in v1.  If you need group chats, use the Baileys bridge.
+The Cloud API has limited group support (capability-tier gated by Meta).  Hades's `whatsapp_cloud` adapter currently handles **direct messages only** in v1.  If you need group chats, use the Baileys bridge.
 
 ### Outbound rate limit
 
@@ -328,7 +328,7 @@ Meta's default throughput is **80 messages/second per business phone number**, w
 Almost always one of:
 
 - **Tunnel URL is wrong or stale** — cloudflared quick tunnels rotate.  Get a fresh URL and update both `.env` and Meta's dashboard.
-- **Verify token mismatch** — the token in `~/.hermes/.env`'s `WHATSAPP_CLOUD_VERIFY_TOKEN` must match exactly what you typed into Meta's dashboard.  Run the curl probe above to confirm the gateway's verify handshake works locally first.
+- **Verify token mismatch** — the token in `~/.hades/.env`'s `WHATSAPP_CLOUD_VERIFY_TOKEN` must match exactly what you typed into Meta's dashboard.  Run the curl probe above to confirm the gateway's verify handshake works locally first.
 - **Gateway not running** — check `hermes gateway` is up.
 - **App Secret not set** — without it, Hermes refuses inbound POSTs with 503.  Meta interprets that as "can't validate."
 
@@ -351,7 +351,7 @@ Your access token is invalid.  Subcodes:
 The 24-hour conversation window expired (see "Known limitations").  Either:
 
 - Ask the user to DM the bot first to reopen the window.
-- Wait for template support to land in Hermes.
+- Wait for template support to land in Hades.
 
 ### Inbound message: `media metadata fetch failed (status=401)`
 

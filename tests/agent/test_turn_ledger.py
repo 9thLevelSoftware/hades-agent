@@ -4,7 +4,7 @@ Two surfaces covered here:
 
 1. ``agent.turn_ledger`` — the dataclass + safe writer that the finalizers
    call. Owns no schema.
-2. ``hermes_state.SessionDB`` — the four ledger methods
+2. ``hades_state.SessionDB`` — the four ledger methods
    (``record_turn_outcome``, ``annotate_turn_feedback``,
    ``get_outcome_trends``, ``get_skill_outcome_counts``) and the schema
    that backs them.
@@ -30,7 +30,7 @@ from agent.turn_ledger import (
     record_turn_outcome_safely,
 )
 from agent.turn_outcome import TURN_OUTCOMES, classify_turn_outcome
-from hermes_state import SessionDB
+from hades_state import SessionDB
 
 
 # ---------------------------------------------------------------------------
@@ -820,7 +820,7 @@ def test_finalizer_tool_iterations_count_actual_tool_calls_not_iters_since_skill
         captured.append(record)
         return record
 
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *a, **k: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *a, **k: [])
     monkeypatch.setattr(
         "agent.turn_ledger.record_turn_outcome_safely",
         lambda *a, **k: None,
@@ -894,7 +894,7 @@ def test_finalizer_tool_iterations_zero_when_no_tool_calls(monkeypatch):
         captured.append(record)
         return record
 
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *a, **k: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *a, **k: [])
     monkeypatch.setattr(
         "agent.turn_ledger.record_turn_outcome_safely",
         lambda *a, **k: None,
@@ -952,7 +952,7 @@ def test_finalizer_paths_call_safe_writer_with_canonical_vocabulary(monkeypatch)
 
     # ── Path 1: chat-completions finalizer ──────────────────────────
     agent = _finalizer_agent(verification_status="passed")
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *a, **k: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *a, **k: [])
     turn_finalizer.finalize_turn(
         agent,
         final_response="Done.",
@@ -1288,7 +1288,7 @@ def test_finalizer_passes_messages_to_build_turn_outcome_record(monkeypatch):
         captured_kwargs.update(kwargs)
         return _orig_build(*args, **kwargs)
 
-    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *a, **k: [])
+    monkeypatch.setattr("hades_cli.plugins.invoke_hook", lambda *a, **k: [])
     monkeypatch.setattr(
         "agent.turn_ledger.record_turn_outcome_safely",
         lambda *a, **k: None,
@@ -1637,7 +1637,7 @@ def test_finalizer_invokes_sidecar_bump_with_recorded_skills(monkeypatch):
     records = []
 
     monkeypatch.setattr(
-        "hermes_cli.plugins.invoke_hook", lambda *a, **k: []
+        "hades_cli.plugins.invoke_hook", lambda *a, **k: []
     )
     monkeypatch.setattr(
         "agent.turn_ledger.record_turn_outcome_safely",

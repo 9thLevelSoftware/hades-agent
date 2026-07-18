@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from agent.model_metadata import estimate_tokens_rough
-from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+from hades_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
 
 _QUOTED_REFERENCE_VALUE = r'(?:`[^`\n]+`|"[^"\n]+"|\'[^\'\n]+\')'
 REFERENCE_PATTERN = re.compile(
@@ -362,9 +362,9 @@ def _resolve_path(cwd: Path, target: str, *, allowed_root: Path | None = None) -
 
 
 def _ensure_reference_path_allowed(path: Path) -> None:
-    from hermes_constants import get_hermes_home
+    from hades_constants import get_hades_home
     home = Path(os.path.expanduser("~")).resolve()
-    hermes_home = get_hermes_home().resolve()
+    hermes_home = get_hades_home().resolve()
 
     blocked_exact = {home / rel for rel in _SENSITIVE_HOME_FILES}
     blocked_exact.add(hermes_home / ".env")
@@ -387,7 +387,7 @@ def _ensure_reference_path_allowed(path: Path) -> None:
     # provider keys (auth.json), Anthropic OAuth tokens (.anthropic_oauth.json),
     # MCP OAuth material (mcp-tokens/), webhook HMAC secrets, and project-local
     # .env files. That gap matters because the gateway feeds UNTRUSTED remote
-    # message text into reference expansion, so `@file:~/.hermes/auth.json` from a
+    # message text into reference expansion, so `@file:~/.hades/auth.json` from a
     # chat peer would otherwise read the operator's keys straight into context.
     # Routing through the canonical guard closes the gap today and keeps this path
     # protected automatically whenever that deny-list grows.

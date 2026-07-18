@@ -239,13 +239,13 @@ class TestStagedInactivityWarning:
     def test_warning_env_var_respected(self, monkeypatch):
         """HERMES_AGENT_TIMEOUT_WARNING env var is parsed correctly."""
         monkeypatch.setenv("HERMES_AGENT_TIMEOUT_WARNING", "600")
-        _warning = float(os.getenv("HERMES_AGENT_TIMEOUT_WARNING", 900))
+        _warning = float(os.getenv("HADES_AGENT_TIMEOUT_WARNING", 900))
         assert _warning == 600.0
 
     def test_warning_zero_means_disabled(self, monkeypatch):
         """HERMES_AGENT_TIMEOUT_WARNING=0 disables the warning."""
         monkeypatch.setenv("HERMES_AGENT_TIMEOUT_WARNING", "0")
-        _raw = float(os.getenv("HERMES_AGENT_TIMEOUT_WARNING", 900))
+        _raw = float(os.getenv("HADES_AGENT_TIMEOUT_WARNING", 900))
         _warning = _raw if _raw > 0 else None
         assert _warning is None
 

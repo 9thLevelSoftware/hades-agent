@@ -156,10 +156,10 @@ The crypto implementation is compatible with Tencent's official WXBizMsgCrypt SD
 
 **Signature verification failing.**
 WeCom signs every request with the **Token** you registered in the admin
-console. A mismatch between the token configured in Hermes and the token the
+console. A mismatch between the token configured in Hades and the token the
 admin console expects is the most common cause. Re-copy both the **Token** and
 **EncodingAESKey** from the admin console — they're easy to truncate. Whitespace
-in `~/.hermes/.env` values around `=` will also break signature checks. After
+in `~/.hades/.env` values around `=` will also break signature checks. After
 fixing, restart `hermes gateway run`.
 
 **Callback URL not reachable / verification step fails.**

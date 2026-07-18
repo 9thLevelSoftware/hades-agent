@@ -13,7 +13,7 @@ import urllib.request
 
 DEFAULT_UA = (
     "hermes-osint-investigation/0.2 "
-    "(+https://github.com/NousResearch/hermes-agent; "
+    "(+https://github.com/9thLevelSoftware/hades-agent; "
     "set HERMES_OSINT_UA env var to identify yourself per "
     "Wikimedia / SEC fair-use guidance)"
 )
@@ -38,7 +38,7 @@ def get(
     if params:
         sep = "&" if "?" in url else "?"
         url = f"{url}{sep}{urllib.parse.urlencode(params)}"
-    h = {"User-Agent": user_agent or os.environ.get("HERMES_OSINT_UA", DEFAULT_UA)}
+    h = {"User-Agent": user_agent or os.environ.get("HADES_OSINT_UA", DEFAULT_UA)}
     if headers:
         h.update(headers)
 

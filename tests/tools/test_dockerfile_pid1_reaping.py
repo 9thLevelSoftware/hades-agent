@@ -207,7 +207,7 @@ def test_dockerfile_preinstalls_hindsight_memory_dependency(dockerfile_text):
     assert any("--extra hindsight" in step for step in sync_steps), (
         "Published Docker images must preload the [hindsight] extra so the "
         "native Hindsight memory provider's client (hindsight-client) is baked "
-        "into /opt/hermes/.venv. It lazy-installs into the image layer (not the "
+        "into /opt/hades/.venv. It lazy-installs into the image layer (not the "
         "mounted /opt/data volume), so without baking it in recall/retain fails "
         "with `ModuleNotFoundError: No module named 'hindsight_client'` after "
         "every container recreate / image update (#38128)."
@@ -225,14 +225,14 @@ def test_dockerfile_materializes_local_tui_ink_package(dockerfile_text):
     # ``hermes-ink`` is a bundled workspace package referenced from
     # ``ui-tui/package.json`` via ``file:`` — not pulled from the npm
     # registry. The contract this test pins is just that the image
-    # actually carries the package source so ``await import('@hermes/ink')``
+    # actually carries the package source so ``await import('@hades/ink')``
     # can resolve at runtime; the previous, much pickier assertion (manual
     # ``rm -rf`` + ``npm install --omit=dev --prefix node_modules/@hermes/ink``)
     # baked in implementation details of an older materialisation flow that
     # was simplified once npm workspaces handled the resolution natively.
     assert "ui-tui/packages/hermes-ink/" in dockerfile_text, (
         "Dockerfile must COPY the bundled hermes-ink workspace package "
-        "so ``await import('@hermes/ink')`` resolves at runtime."
+        "so ``await import('@hades/ink')`` resolves at runtime."
     )
 
 

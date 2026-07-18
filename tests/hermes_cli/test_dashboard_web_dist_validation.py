@@ -17,7 +17,7 @@ import pytest
 
 @pytest.fixture()
 def main_mod():
-    import hermes_cli.main as main
+    import hades_cli.main as main
     return main
 
 
@@ -37,7 +37,7 @@ def _args(**over):
 
 def _wire_common(main_mod, monkeypatch):
     monkeypatch.setattr(
-        "hermes_cli.profiles.get_active_profile_name", lambda: "default"
+        "hades_cli.profiles.get_active_profile_name", lambda: "default"
     )
     monkeypatch.setattr(main_mod, "_sync_bundled_skills_quietly", lambda: None)
     monkeypatch.setitem(sys.modules, "fastapi", types.SimpleNamespace())
@@ -49,11 +49,11 @@ def _wire_common(main_mod, monkeypatch):
     )
     monkeypatch.setitem(
         sys.modules,
-        "hermes_cli.plugins",
+        "hades_cli.plugins",
         types.SimpleNamespace(discover_plugins=lambda: None),
     )
     monkeypatch.setattr(
-        "hermes_cli.mcp_startup.start_background_mcp_discovery",
+        "hades_cli.mcp_startup.start_background_mcp_discovery",
         lambda **_k: None,
     )
 
@@ -69,7 +69,7 @@ def test_env_dist_without_index_exits(main_mod, monkeypatch, tmp_path, capsys):
     started = []
     monkeypatch.setitem(
         sys.modules,
-        "hermes_cli.web_server",
+        "hades_cli.web_server",
         types.SimpleNamespace(start_server=lambda **k: started.append(k)),
     )
     builds = []
@@ -99,7 +99,7 @@ def test_env_dist_with_index_starts_server(main_mod, monkeypatch, tmp_path):
     started = []
     monkeypatch.setitem(
         sys.modules,
-        "hermes_cli.web_server",
+        "hades_cli.web_server",
         types.SimpleNamespace(start_server=lambda **k: started.append(k)),
     )
     builds = []
@@ -126,11 +126,11 @@ def test_env_dist_tilde_expanded_for_web_server(main_mod, monkeypatch, tmp_path)
 
     monkeypatch.setitem(
         sys.modules,
-        "hermes_cli.web_server",
+        "hades_cli.web_server",
         types.SimpleNamespace(start_server=lambda **k: None),
     )
 
     main_mod.cmd_dashboard(_args())
 
     import os
-    assert os.environ["HERMES_WEB_DIST"] == str(dist)
+    assert os.environ["HADES_WEB_DIST"] == str(dist)

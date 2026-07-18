@@ -1,11 +1,11 @@
 import json
 from pathlib import Path
 
-from hermes_cli import kanban_db as kb
-from hermes_cli import workflows_db as wfdb
-from hermes_cli import workflows_dispatcher
-from hermes_cli.workflows_engine import EngineResult
-from hermes_cli.workflows_spec import WorkflowSpec
+from hades_cli import kanban_db as kb
+from hades_cli import workflows_db as wfdb
+from hades_cli import workflows_dispatcher
+from hades_cli.workflows_engine import EngineResult
+from hades_cli.workflows_spec import WorkflowSpec
 
 
 def _switch_spec() -> WorkflowSpec:
@@ -116,7 +116,7 @@ def _fail_spec(*, retry=None, catch=None, recover_output=None) -> WorkflowSpec:
 
 
 def _start_execution(tmp_path, monkeypatch, input_data=None) -> str:
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _switch_spec(), created_by="test")
@@ -129,7 +129,7 @@ def _start_execution(tmp_path, monkeypatch, input_data=None) -> str:
 
 
 def _start_spec_execution(tmp_path, monkeypatch, spec: WorkflowSpec) -> str:
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, spec, created_by="test")
@@ -137,9 +137,9 @@ def _start_spec_execution(tmp_path, monkeypatch, spec: WorkflowSpec) -> str:
 
 
 def _start_agent_spec_execution(tmp_path, monkeypatch, spec: WorkflowSpec) -> str:
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -233,7 +233,7 @@ def test_tick_initializes_empty_db_path(tmp_path):
 
 
 def test_tick_runs_queued_pass_switch_execution(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _switch_spec(), created_by="test")
@@ -255,7 +255,7 @@ def test_tick_runs_queued_pass_switch_execution(tmp_path, monkeypatch):
 
 
 def test_tick_starts_ready_feed_items_before_queued_execution_loop(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "intake_demo",
@@ -317,7 +317,7 @@ def test_list_node_runs_keeps_repeated_event_only_successes(tmp_path, monkeypatc
 
 
 def test_tick_runs_parallel_join_execution(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         spec = _parallel_spec()
@@ -341,7 +341,7 @@ def test_tick_runs_parallel_join_execution(tmp_path, monkeypatch):
 
 
 def test_tick_respects_limit(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _switch_spec(), created_by="test")
@@ -359,7 +359,7 @@ def test_tick_respects_limit(tmp_path, monkeypatch):
 
 
 def test_tick_prefers_existing_queued_execution_over_new_feed_admission(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "fair_feed_demo",
@@ -388,7 +388,7 @@ def test_tick_prefers_existing_queued_execution_over_new_feed_admission(tmp_path
 
 
 def test_tick_counts_schedule_admission_against_limit(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "schedule_budget_demo",
@@ -416,7 +416,7 @@ def test_tick_counts_schedule_admission_against_limit(tmp_path, monkeypatch):
 
 
 def test_unresumable_wait_failure_terminalizes_waiting_node_run(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "unresumable_wait_demo",
@@ -445,7 +445,7 @@ def test_unresumable_wait_failure_terminalizes_waiting_node_run(tmp_path, monkey
 
 
 def test_wait_node_persists_wait_until_then_resumes_when_due(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _wait_spec(), created_by="test")
@@ -552,9 +552,9 @@ def test_catch_path_wait_resume_does_not_rerun_failed_node(tmp_path, monkeypatch
 
 
 def test_agent_task_creates_kanban_card_and_resumes_after_completion(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -655,9 +655,9 @@ def test_agent_task_passes_provider_and_model_to_kanban_task(tmp_path, monkeypat
 
 
 def test_agent_task_text_prompt_interpolates_inline_templates(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -707,9 +707,9 @@ def test_agent_task_text_prompt_interpolates_inline_templates(tmp_path, monkeypa
 
 
 def test_agent_task_title_interpolates_inline_templates(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -748,9 +748,9 @@ def test_agent_task_title_interpolates_inline_templates(tmp_path, monkeypatch):
 
 
 def test_agent_task_title_falls_back_to_literal_on_missing_template_path(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -783,9 +783,9 @@ def test_agent_task_title_falls_back_to_literal_on_missing_template_path(tmp_pat
 
 
 def test_waiting_on_unresumable_join_fails_execution(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     wfdb.init_db()
 
@@ -844,9 +844,9 @@ def test_waiting_on_unresumable_join_fails_execution(tmp_path, monkeypatch):
 
 
 def test_agent_task_structured_prompt_remains_supported_and_pretty_printed(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -888,9 +888,9 @@ def test_agent_task_structured_prompt_remains_supported_and_pretty_printed(tmp_p
 
 
 def test_cancel_execution_blocks_linked_agent_task(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -993,9 +993,9 @@ def test_agent_task_materialization_error_blocks_sibling_tasks(tmp_path, monkeyp
 
 
 def test_agent_task_resumes_from_summary_only_json_completion(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -1027,9 +1027,9 @@ def test_agent_task_resumes_from_summary_only_json_completion(tmp_path, monkeypa
 
 
 def test_agent_task_resumes_from_summary_only_plain_text_completion(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -1123,9 +1123,9 @@ def test_agent_task_contract_failure_blocks_sibling_agent_tasks(tmp_path, monkey
 
 
 def test_agent_task_resumes_from_original_kanban_board_after_current_board_changes(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.create_board("workflow-board")
     kb.create_board("other-board")
@@ -1285,9 +1285,9 @@ def test_agent_task_with_matching_result_contract_succeeds(tmp_path, monkeypatch
 
 
 def test_blocked_kanban_agent_task_blocks_workflow(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -1324,9 +1324,9 @@ def test_blocked_kanban_agent_task_blocks_workflow(tmp_path, monkeypatch):
 
 
 def test_auto_blocked_agent_task_uses_last_failure_error_reason(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
+    home = tmp_path / ".hades"
     home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HADES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     wfdb.init_db()
@@ -1353,7 +1353,7 @@ def test_auto_blocked_agent_task_uses_last_failure_error_reason(tmp_path, monkey
 
 
 def test_due_schedule_starts_once_and_advances_next_run(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _schedule_spec(), created_by="test")
@@ -1396,7 +1396,7 @@ def test_due_schedule_starts_once_and_advances_next_run(tmp_path, monkeypatch):
 
 
 def test_due_schedule_uses_trigger_input(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "scheduled_demo", "name": "Scheduled Demo", "version": 1,
@@ -1432,7 +1432,7 @@ def test_due_schedule_uses_trigger_input(tmp_path, monkeypatch):
 
 
 def test_redeploying_schedule_replaces_older_version_rows(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _schedule_spec(version=1), created_by="test")
@@ -1462,7 +1462,7 @@ def test_redeploying_schedule_replaces_older_version_rows(tmp_path, monkeypatch)
 
 
 def test_disabling_scheduled_workflow_removes_schedule_rows(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _schedule_spec(enabled=True), created_by="test")
@@ -1671,7 +1671,7 @@ def test_failed_node_emits_node_failed_event(tmp_path, monkeypatch):
 
 
 def test_fire_due_schedules_drops_stale_disabled_schedule(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "sched_demo", "name": "Sched Demo", "version": 1,
@@ -1698,7 +1698,7 @@ def test_fire_due_schedules_drops_stale_disabled_schedule(tmp_path, monkeypatch)
 
 
 def test_ready_feed_item_for_disabled_definition_is_terminalized(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "disabled_feed_demo",
@@ -1866,7 +1866,7 @@ def test_repeated_tick_after_final_status_does_not_duplicate_events(tmp_path, mo
 
 
 def test_tick_detailed_returns_structured_report(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _switch_spec(), created_by="test")
@@ -1882,7 +1882,7 @@ def test_tick_detailed_returns_structured_report(tmp_path, monkeypatch):
 
 
 def test_tick_detailed_separates_feed_admission_from_execution(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = WorkflowSpec.model_validate({
         "id": "intake_demo",

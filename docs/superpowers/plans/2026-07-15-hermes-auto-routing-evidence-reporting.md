@@ -74,7 +74,7 @@
 def test_post_llm_call_includes_canonical_outcome_and_runtime(monkeypatch, finalizer_agent):
     calls = []
     monkeypatch.setattr(
-        "hermes_cli.plugins.invoke_hook",
+        "hades_cli.plugins.invoke_hook",
         lambda name, **kwargs: calls.append((name, kwargs)) or [],
     )
     finalize_verified_turn(finalizer_agent, api_calls=2, tool_iterations=1)

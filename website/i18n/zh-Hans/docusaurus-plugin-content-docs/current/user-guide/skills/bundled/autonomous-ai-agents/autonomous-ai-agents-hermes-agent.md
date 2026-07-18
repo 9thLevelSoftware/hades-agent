@@ -1,14 +1,14 @@
 ---
-title: "Hermes Agent — 配置、扩展或贡献 Hermes Agent"
-sidebar_label: "Hermes Agent"
-description: "配置、扩展或贡献 Hermes Agent"
+title: "Hades Agent — 配置、扩展或贡献 Hades Agent"
+sidebar_label: "Hades Agent"
+description: "配置、扩展或贡献 Hades Agent"
 ---
 
 {/* This page is auto-generated from the skill's SKILL.md by website/scripts/generate-skill-docs.py. Edit the source SKILL.md, not this page. */}
 
-# Hermes Agent
+# Hades Agent
 
-配置、扩展或贡献 Hermes Agent。
+配置、扩展或贡献 Hades Agent。
 
 ## Skill 元数据
 
@@ -17,7 +17,7 @@ description: "配置、扩展或贡献 Hermes Agent"
 | 来源 | 内置（默认安装） |
 | 路径 | `skills/autonomous-ai-agents/hermes-agent` |
 | 版本 | `2.1.0` |
-| 作者 | Hermes Agent + Teknium |
+| 作者 | Hades Agent + Teknium |
 | 许可证 | MIT |
 | 平台 | linux, macos, windows |
 | 标签 | `hermes`, `setup`, `configuration`, `multi-agent`, `spawning`, `cli`, `gateway`, `development` |
@@ -29,9 +29,9 @@ description: "配置、扩展或贡献 Hermes Agent"
 以下是 Hermes 在触发此 skill 时加载的完整 skill 定义。这是 agent 在 skill 激活时看到的指令内容。
 :::
 
-# Hermes Agent
+# Hades Agent
 
-Hermes Agent 是 Nous Research 开发的开源 AI agent 框架，可在终端、消息平台和 IDE 中运行。它与 Claude Code（Anthropic）、Codex（OpenAI）和 OpenClaw 同属一类——使用工具调用（tool calling）与系统交互的自主编码和任务执行 agent。Hermes 支持任意 LLM 提供商（OpenRouter、Anthropic、OpenAI、DeepSeek、本地模型及 15+ 其他提供商），可在 Linux、macOS 和 WSL 上运行。
+Hades Agent 是 Nous Research 开发的开源 AI agent 框架，可在终端、消息平台和 IDE 中运行。它与 Claude Code（Anthropic）、Codex（OpenAI）和 OpenClaw 同属一类——使用工具调用（tool calling）与系统交互的自主编码和任务执行 agent。Hermes 支持任意 LLM 提供商（OpenRouter、Anthropic、OpenAI、DeepSeek、本地模型及 15+ 其他提供商），可在 Linux、macOS 和 WSL 上运行。
 
 Hermes 的差异化特性：
 
@@ -44,7 +44,7 @@ Hermes 的差异化特性：
 
 人们将 Hermes 用于软件开发、研究、系统管理、数据分析、内容创作、家庭自动化，以及任何受益于具有持久上下文和完整系统访问权限的 AI agent 的场景。
 
-**此 skill 帮助你高效使用 Hermes Agent** — 包括设置、配置功能、生成额外的 agent 实例、排查问题、找到正确的命令和设置，以及在需要扩展或贡献时理解系统的工作原理。
+**此 skill 帮助你高效使用 Hades Agent** — 包括设置、配置功能、生成额外的 agent 实例、排查问题、找到正确的命令和设置，以及在需要扩展或贡献时理解系统的工作原理。
 
 **文档：** https://hermes-agent.nousresearch.com/docs/
 
@@ -259,7 +259,7 @@ hermes uninstall            Uninstall Hermes
 /compress            Manually compress context
 /stop                Kill background processes
 /rollback [N]        Restore filesystem checkpoint
-/snapshot [sub]      Create or restore state snapshots of Hermes config/state (CLI)
+/snapshot [sub]      Create or restore state snapshots of Hades config/state (CLI)
 /background <prompt> Run prompt in background
 /queue <prompt>      Queue for next turn
 /steer <prompt>      Inject a message after the next tool call without interrupting
@@ -294,7 +294,7 @@ hermes uninstall            Uninstall Hermes
 /toolsets            List toolsets (CLI)
 /skills              Search/install skills (CLI)
 /skill <name>        Load a skill into session
-/reload-skills       Re-scan ~/.hermes/skills/ for added/removed skills
+/reload-skills       Re-scan ~/.hades/skills/ for added/removed skills
 /reload              Reload .env variables into the running session (CLI)
 /reload-mcp          Reload MCP servers
 /cron                Manage cron jobs (CLI)
@@ -347,16 +347,16 @@ hermes uninstall            Uninstall Hermes
 ## 关键路径与配置
 
 ```
-~/.hermes/config.yaml       Main configuration
-~/.hermes/.env              API keys and secrets
-$HERMES_HOME/skills/        Installed skills
-~/.hermes/sessions/         Session transcripts
-~/.hermes/logs/             Gateway and error logs
-~/.hermes/auth.json         OAuth tokens and credential pools
-~/.hermes/hermes-agent/     Source code (if git-installed)
+~/.hades/config.yaml       Main configuration
+~/.hades/.env              API keys and secrets
+$HADES_HOME/skills/        Installed skills
+~/.hades/sessions/         Session transcripts
+~/.hades/logs/             Gateway and error logs
+~/.hades/auth.json         OAuth tokens and credential pools
+~/.hades/hermes-agent/     Source code (if git-installed)
 ```
 
-Profiles 使用 `~/.hermes/profiles/<name>/`，布局相同。
+Profiles 使用 `~/.hades/profiles/<name>/`，布局相同。
 
 ### 配置节
 
@@ -445,7 +445,7 @@ Profiles 使用 `~/.hermes/profiles/<name>/`，布局相同。
 | `rl` | 强化学习工具（默认关闭） |
 | `moa` | Mixture of Agents（默认关闭） |
 
-完整枚举位于 `toolsets.py` 的 `TOOLSETS` 字典中；`_HERMES_CORE_TOOLS` 是大多数平台继承的默认工具包。
+完整枚举位于 `toolsets.py` 的 `TOOLSETS` 字典中；`_HADES_CORE_TOOLS` 是大多数平台继承的默认工具包。
 
 工具变更在 `/reset`（新会话）后生效。为保留 prompt 缓存，变更**不会**在对话中途生效。
 
@@ -500,7 +500,7 @@ hermes config set approvals.mode off         # 绕过一切（不推荐）
 
 ### Shell hook 允许列表
 
-某些 shell hook 集成在触发前需要明确加入允许列表。通过 `~/.hermes/shell-hooks-allowlist.json` 管理——在 hook 首次尝试运行时以交互方式提示。
+某些 shell hook 集成在触发前需要明确加入允许列表。通过 `~/.hades/shell-hooks-allowlist.json` 管理——在 hook 首次尝试运行时以交互方式提示。
 
 ### 禁用 web/browser/image-gen 工具
 
@@ -657,7 +657,7 @@ agent 创建的 skill 的后台维护。跟踪使用情况，将闲置 skill 标
 - **CLI：** `hermes curator <verb>` — `status`、`run`、`pause`、`resume`、`pin`、`unpin`、`archive`、`restore`、`prune`、`backup`、`rollback`。
 - **斜杠命令：** `/curator <subcommand>` 与 CLI 对应。
 - **范围：** 仅处理 `created_by: "agent"` 来源的 skill。内置和 hub 安装的 skill 不在范围内。**从不删除** — 最具破坏性的操作是归档。已固定的 skill 不受任何自动转换和任何 LLM 审查的影响。
-- **遥测：** `~/.hermes/skills/.usage.json` 中的 sidecar 保存每个 skill 的 `use_count`、`view_count`、`patch_count`、`last_activity_at`、`state`、`pinned`。
+- **遥测：** `~/.hades/skills/.usage.json` 中的 sidecar 保存每个 skill 的 `use_count`、`view_count`、`patch_count`、`last_activity_at`、`state`、`pinned`。
 
 配置：`curator.*`（`enabled`、`interval_hours`、`min_idle_hours`、`stale_after_days`、`archive_after_days`、`backup.*`）。
 用户文档：https://hermes-agent.nousresearch.com/docs/user-guide/features/curator
@@ -754,13 +754,13 @@ export PYTHONPATH="$(pwd)"
 ### Gateway 问题
 首先检查日志：
 ```bash
-grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
+grep -i "failed to send\|error" ~/.hades/logs/gateway.log | tail -20
 ```
 
 常见 gateway 问题：
 - **SSH 注销后 gateway 停止**：启用 linger：`sudo loginctl enable-linger $USER`
 - **WSL2 关闭后 gateway 停止**：WSL2 需要 `/etc/wsl.conf` 中的 `systemd=true` 才能使 systemd 服务工作。没有它，gateway 回退到 `nohup`（会话关闭时停止）。
-- **Gateway 崩溃循环**：重置失败状态：`systemctl --user reset-failed hermes-gateway`
+- **Gateway 崩溃循环**：重置失败状态：`systemctl --user reset-failed hades-gateway`
 
 ### 平台特定问题
 - **Discord bot 静默**：必须在 Bot → Privileged Gateway Intents 中启用 **Message Content Intent**。
@@ -792,9 +792,9 @@ hermes config set auxiliary.vision.model <model_name>
 | 记忆 | `hermes memory status` 或[记忆文档](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory) |
 | 环境变量 | `hermes config env-path` 或[环境变量参考](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) |
 | CLI 命令 | `hermes --help` 或[CLI 参考](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) |
-| Gateway 日志 | `~/.hermes/logs/gateway.log` |
-| 会话文件 | `~/.hermes/sessions/` 或 `hermes sessions browse` |
-| 源代码 | `~/.hermes/hermes-agent/` |
+| Gateway 日志 | `~/.hades/logs/gateway.log` |
+| 会话文件 | `~/.hades/sessions/` 或 `hermes sessions browse` |
+| 源代码 | `~/.hades/hermes-agent/` |
 
 ---
 
@@ -811,7 +811,7 @@ hermes-agent/
 ├── model_tools.py        # Tool discovery and dispatch
 ├── toolsets.py           # Toolset definitions
 ├── cli.py                # Interactive CLI (HermesCLI)
-├── hermes_state.py       # SQLite session store
+├── hades_state.py       # SQLite session store
 ├── agent/                # Prompt builder, context compression, memory, model routing, credential pooling, skill dispatch
 ├── hermes_cli/           # CLI subcommands, config, setup, commands
 │   ├── commands.py       # Slash command registry (CommandDef)
@@ -827,7 +827,7 @@ hermes-agent/
 ```
 <!-- ascii-guard-ignore-end -->
 
-配置：`~/.hermes/config.yaml`（设置）、`~/.hermes/.env`（API key）。
+配置：`~/.hades/config.yaml`（设置）、`~/.hades/.env`（API key）。
 
 ### 添加工具（3 个文件）
 
@@ -853,11 +853,11 @@ registry.register(
 )
 ```
 
-**2. 添加到 `toolsets.py`** → `_HERMES_CORE_TOOLS` 列表。
+**2. 添加到 `toolsets.py`** → `_HADES_CORE_TOOLS` 列表。
 
 自动发现：任何包含顶层 `registry.register()` 调用的 `tools/*.py` 文件都会自动导入——无需手动列出。
 
-所有处理器必须返回 JSON 字符串。路径使用 `get_hermes_home()`，永远不要硬编码 `~/.hermes`。
+所有处理器必须返回 JSON 字符串。路径使用 `get_hades_home()`，永远不要硬编码 `~/.hades`。
 
 ### 添加斜杠命令
 
@@ -886,7 +886,7 @@ python -m pytest tests/ -o 'addopts=' -q   # 完整套件
 python -m pytest tests/tools/ -q            # 特定区域
 ```
 
-- 测试自动将 `HERMES_HOME` 重定向到临时目录——永远不会触及真实的 `~/.hermes/`
+- 测试自动将 `HADES_HOME` 重定向到临时目录——永远不会触及真实的 `~/.hades/`
 - 推送任何变更前运行完整套件
 - 使用 `-o 'addopts='` 清除任何内置的 pytest 标志
 
@@ -941,6 +941,6 @@ Optional body.
 
 - **永远不要破坏 prompt 缓存** — 不要在对话中途更改上下文、工具或系统 prompt
 - **消息角色交替** — 永远不要连续出现两条 assistant 或两条 user 消息
-- 所有路径使用 `hermes_constants` 中的 `get_hermes_home()`（profile 安全）
+- 所有路径使用 `hermes_constants` 中的 `get_hades_home()`（profile 安全）
 - 配置值放入 `config.yaml`，密钥放入 `.env`
 - 新工具需要 `check_fn`，以便仅在满足要求时才显示

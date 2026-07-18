@@ -25,10 +25,10 @@ import pytest
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
-    hermes = home / ".hermes"
+    hermes = home / ".hades"
     hermes.mkdir(parents=True)
     monkeypatch.setattr(Path, "home", lambda: home)
-    monkeypatch.setenv("HERMES_HOME", str(hermes))
+    monkeypatch.setenv("HADES_HOME", str(hermes))
     # Ensure get_env_value cache doesn't carry stale state.
     for key in list(os.environ):
         if key.startswith("WHATSAPP_"):
@@ -54,7 +54,7 @@ def test_aborted_setup_does_not_enable_whatsapp(isolated_home, monkeypatch):
 
     WHATSAPP_ENABLED must NOT be present in .env after abort.
     """
-    from hermes_cli.main import cmd_whatsapp
+    from hades_cli.main import cmd_whatsapp
 
     # First input() = mode choice, second input() = allowed-users prompt
     # We raise KeyboardInterrupt on the second call to simulate abort.
@@ -68,7 +68,7 @@ def test_aborted_setup_does_not_enable_whatsapp(isolated_home, monkeypatch):
 
     monkeypatch.setattr("builtins.input", fake_input)
     # _require_tty calls sys.stdin.isatty — make it pass.
-    monkeypatch.setattr("hermes_cli.main._require_tty", lambda *_a, **_kw: None)
+    monkeypatch.setattr("hades_cli.main._require_tty", lambda *_a, **_kw: None)
     # No node, no bridge script — we shouldn't reach those steps anyway.
 
     buf = io.StringIO()
@@ -90,7 +90,7 @@ def test_existing_pairing_skip_branch_enables_whatsapp(isolated_home, monkeypatc
     should be (re-)written to true so the gateway picks WhatsApp back up,
     even if the var was lost since the original pairing.
     """
-    from hermes_cli.main import cmd_whatsapp
+    from hades_cli.main import cmd_whatsapp
 
     # Pre-create a paired session WITHOUT WHATSAPP_ENABLED in .env.
     session = isolated_home / "whatsapp" / "session"
@@ -110,7 +110,7 @@ def test_existing_pairing_skip_branch_enables_whatsapp(isolated_home, monkeypatc
             return "n"
 
     monkeypatch.setattr("builtins.input", fake_input)
-    monkeypatch.setattr("hermes_cli.main._require_tty", lambda *_a, **_kw: None)
+    monkeypatch.setattr("hades_cli.main._require_tty", lambda *_a, **_kw: None)
     # Skip the bridge npm install — we're testing setup-ordering, not bridge
     # bootstrapping.  Pretend node_modules exists (Path.exists -> True for that
     # specific check is hard to scope, so instead pretend npm install would

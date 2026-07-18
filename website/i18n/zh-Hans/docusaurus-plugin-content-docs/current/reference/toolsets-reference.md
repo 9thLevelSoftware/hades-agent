@@ -113,7 +113,7 @@ hermes tools                            # curses UI to enable/disable per platfo
 | `hermes-yuanbao` | 在 `hermes-cli` 基础上添加了五个 `yb_*` 工具（私信/群组/表情包）。 |
 | `hermes-homeassistant` | 与 `hermes-cli` 相同（Home Assistant 工具默认已存在，在设置 `HASS_TOKEN` 时激活）。 |
 | `hermes-webhook` | 与 `hermes-cli` 相同。 |
-| `hermes-gateway` | 内部 gateway 编排器工具集——所有 `hermes-<platform>` 工具集的并集；当 gateway 需要接受任意消息来源时使用。 |
+| `hades-gateway` | 内部 gateway 编排器工具集——所有 `hermes-<platform>` 工具集的并集；当 gateway 需要接受任意消息来源时使用。 |
 
 ## 动态工具集
 

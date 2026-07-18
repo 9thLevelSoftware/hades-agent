@@ -1,10 +1,10 @@
 ---
 sidebar_position: 8
-title: "Use Voice Mode with Hermes"
+title: "Use Voice Mode with Hades"
 description: "A practical guide to setting up and using Hermes voice mode across CLI, Telegram, Discord, and Discord voice channels"
 ---
 
-# Use Voice Mode with Hermes
+# Use Voice Mode with Hades
 
 This guide is the practical companion to the [Voice Mode feature reference](/user-guide/features/voice-mode).
 
@@ -24,7 +24,7 @@ Voice mode is especially useful when:
 
 ## Choose your voice mode setup
 
-There are really three different voice experiences in Hermes.
+There are really three different voice experiences in Hades.
 
 | Mode | Best for | Platform |
 |---|---|---|
@@ -61,19 +61,19 @@ If that is not solid yet, fix text mode first.
 ### CLI microphone + playback
 
 ```bash
-cd ~/.hermes/hermes-agent && uv pip install -e ".[voice]"
+cd ~/.hades/hermes-agent && uv pip install -e ".[voice]"
 ```
 
 ### Messaging platforms
 
 ```bash
-cd ~/.hermes/hermes-agent && uv pip install -e ".[messaging]"
+cd ~/.hades/hermes-agent && uv pip install -e ".[messaging]"
 ```
 
 ### Premium ElevenLabs TTS
 
 ```bash
-cd ~/.hermes/hermes-agent && uv pip install -e ".[tts-premium]"
+cd ~/.hades/hermes-agent && uv pip install -e ".[tts-premium]"
 ```
 
 ### Local NeuTTS (optional)
@@ -85,7 +85,7 @@ python -m pip install -U neutts[all]
 ### Everything
 
 ```bash
-cd ~/.hermes/hermes-agent && uv pip install -e ".[all]"
+cd ~/.hades/hermes-agent && uv pip install -e ".[all]"
 ```
 
 ## Step 3: install system dependencies
@@ -124,7 +124,7 @@ This is usually the best place to start.
 
 ### Environment file example
 
-Add to `~/.hermes/.env`:
+Add to `~/.hades/.env`:
 
 ```bash
 # Cloud STT options (local needs no key)

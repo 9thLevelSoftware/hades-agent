@@ -52,7 +52,7 @@ W2 can ship with W1 but must not enable unattended redispatch until W3. W4 consu
 - Create: `tools/effect_journal.py` — journal record type, middleware adapter, size/pruning policy.
 - Create: `tools/delegation_worker.py` — small shared detached-child spec/launcher wrapper around the kanban spawn pattern.
 - Create: `agent/turn_checkpoint.py` — checkpoint dataclass, validation, serialization, resume decision.
-- Modify: `hermes_state.py` — `tool_effect_journal` and `turn_checkpoints` tables/accessors.
+- Modify: `hades_state.py` — `tool_effect_journal` and `turn_checkpoints` tables/accessors.
 - Modify: `hermes_cli/middleware.py` — register the built-in effect-journal callback at the correct execution point; keep callback errors fail-closed for journal semantics.
 - Modify: `agent/tool_executor.py` — resolve committed journal hits and preserve truthful `started`/unknown behavior.
 - Modify: `model_tools.py` and `agent/agent_runtime_helpers.py` — ensure all dispatch sites pass the same journal context already used for operation keys.
@@ -120,7 +120,7 @@ class TurnCheckpoint:
 ### Task 1.1: Add the journal schema and pure accessors
 
 **Files:**
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tools/effect_journal.py`
 - Test: `tests/tools/test_effect_journal.py`
 
@@ -128,7 +128,7 @@ class TurnCheckpoint:
 
 ```python
 def test_committed_effect_round_trips_across_db_reopen(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     db = SessionDB.open_for_profile("default")
     assert db.begin_effect(ToolEffectRecord("op-1", "s", "t", "write_file", "started", None, "unknown", 1.0, None, 0)) is True
     db.commit_effect("op-1", '{"ok":true}', "committed")
@@ -138,7 +138,7 @@ def test_committed_effect_round_trips_across_db_reopen(tmp_path, monkeypatch):
 
 
 def test_duplicate_begin_is_not_a_second_execution_claim(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path))
     db = SessionDB.open_for_profile("default")
     record = ToolEffectRecord("op-1", "s", "t", "terminal", "started", None, "unknown", 1.0, None, 0)
     assert db.begin_effect(record) is True
@@ -160,14 +160,14 @@ python -m pytest tests/tools/test_effect_journal.py -q
 - [ ] Step 6: Run real temp-home tests and compile the new module.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest tests/tools/test_effect_journal.py -q
+HADES_HOME="$(mktemp -d)" python -m pytest tests/tools/test_effect_journal.py -q
 python3 -m compileall -q tools/effect_journal.py
 ```
 
 - [ ] Step 7: Commit the schema/accessor foundation.
 
 ```bash
-git add hermes_state.py tools/effect_journal.py tests/tools/test_effect_journal.py
+git add hades_state.py tools/effect_journal.py tests/tools/test_effect_journal.py
 git diff --cached --check
 git commit -m "feat(durability): add tool effect journal"
 ```
@@ -276,7 +276,7 @@ python -m pytest tests/tools/test_delegation_process.py -q
 - [ ] Step 7: Run process-mode tests with real subprocesses and inspect no child remains after completion.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest tests/tools/test_delegation_process.py tests/tools/test_async_delegation.py -q
+HADES_HOME="$(mktemp -d)" python -m pytest tests/tools/test_delegation_process.py tests/tools/test_async_delegation.py -q
 ```
 
 - [ ] Step 8: Commit opt-in process isolation.
@@ -368,10 +368,10 @@ def test_pid_generation_mismatch_is_interrupted_not_resumed():
 
 - [ ] Step 4: Use the existing file-lock merge-on-persist discipline. A failed spawn releases the reservation and increments attempts exactly once. Two gateway/CLI processes must not both redispatch one record.
 
-- [ ] Step 5: Run restart/dedup tests using separate process invocations against one temporary `HERMES_HOME`.
+- [ ] Step 5: Run restart/dedup tests using separate process invocations against one temporary `HADES_HOME`.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/tools/test_async_delegation.py \
   tests/gateway/test_restart_redelivery_dedup.py -q
 ```
@@ -423,7 +423,7 @@ git commit -m "fix(delegation): clean process worker resources"
 
 **Files:**
 - Create: `agent/turn_checkpoint.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Modify: `run_agent.py`
 - Modify: `agent/conversation_loop.py`
 - Modify: `agent/turn_context.py`
@@ -454,13 +454,13 @@ def test_checkpoint_accepts_matching_barrier():
 - [ ] Step 6: Run checkpoint tests with a real temporary SessionDB and a fake provider that crashes between barriers.
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest tests/agent/test_turn_checkpoint.py tests/agent/test_tool_executor.py -q
+HADES_HOME="$(mktemp -d)" python -m pytest tests/agent/test_turn_checkpoint.py tests/agent/test_tool_executor.py -q
 ```
 
 - [ ] Step 7: Commit checkpoint durability.
 
 ```bash
-git add agent/turn_checkpoint.py hermes_state.py run_agent.py agent/conversation_loop.py agent/turn_context.py agent/turn_finalizer.py tests/agent/test_turn_checkpoint.py
+git add agent/turn_checkpoint.py hades_state.py run_agent.py agent/conversation_loop.py agent/turn_context.py agent/turn_finalizer.py tests/agent/test_turn_checkpoint.py
 git diff --cached --check
 git commit -m "feat(durability): checkpoint in-flight turns"
 ```
@@ -522,7 +522,7 @@ git commit -m "feat(delegation): surface durable worker fleet"
 Commands:
 
 ```bash
-HERMES_HOME="$(mktemp -d)" python -m pytest \
+HADES_HOME="$(mktemp -d)" python -m pytest \
   tests/tools/test_effect_journal.py \
   tests/tools/test_delegation_process.py \
   tests/tools/test_async_delegation.py \

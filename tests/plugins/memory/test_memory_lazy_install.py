@@ -207,7 +207,7 @@ class TestSealedVenvDurableTarget:
         monkeypatch.setenv("HERMES_LAZY_INSTALL_TARGET", str(tmp_path / "lazy"))
         # config.yaml kill-switch left at default (allow).
         monkeypatch.setattr(
-            "hermes_cli.config.load_config",
+            "hades_cli.config.load_config",
             lambda: {"security": {"allow_lazy_installs": True}},
         )
 
@@ -225,7 +225,7 @@ class TestSealedVenvDurableTarget:
 
         def fake_install(specs, **kw):
             captured["specs"] = specs
-            captured["target_env"] = os.environ.get("HERMES_LAZY_INSTALL_TARGET")
+            captured["target_env"] = os.environ.get("HADES_LAZY_INSTALL_TARGET")
             return ld._InstallResult(True, "ok", "")
 
         monkeypatch.setattr(ld, "_venv_pip_install", fake_install)
@@ -245,7 +245,7 @@ class TestSealedVenvDurableTarget:
         monkeypatch.setenv("HERMES_DISABLE_LAZY_INSTALLS", "1")
         monkeypatch.delenv("HERMES_LAZY_INSTALL_TARGET", raising=False)
         monkeypatch.setattr(
-            "hermes_cli.config.load_config",
+            "hades_cli.config.load_config",
             lambda: {"security": {"allow_lazy_installs": True}},
         )
         monkeypatch.setattr(ld, "_is_satisfied", lambda spec: False)

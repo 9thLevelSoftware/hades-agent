@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_cli.console_engine import HermesConsoleEngine, run_console_repl
+from hades_cli.console_engine import HermesConsoleEngine, run_console_repl
 
 
 EXPECTED_CONSOLE_COMMANDS = {
@@ -247,7 +247,7 @@ def test_console_status_hides_cli_next_step_footer(
     monkeypatch: pytest.MonkeyPatch,
     _isolate_hermes_home,
 ):
-    import hermes_cli.status as status_mod
+    import hades_cli.status as status_mod
 
     def fake_show_status(_args):
         print("◆ Sessions")
@@ -275,7 +275,7 @@ def test_console_status_hides_osc_linked_cli_next_step_footer(
     monkeypatch: pytest.MonkeyPatch,
     _isolate_hermes_home,
 ):
-    import hermes_cli.status as status_mod
+    import hades_cli.status as status_mod
 
     def osc_link(text: str) -> str:
         return f"\x1b]8;;https://example.test\x1b\\{text}\x1b]8;;\x1b\\"
@@ -407,7 +407,7 @@ def test_config_set_requires_confirmation_then_writes(_isolate_hermes_home):
     pending = engine.execute("config set console.test true")
     assert pending.status == "confirm_required"
 
-    from hermes_cli.config import read_raw_config
+    from hades_cli.config import read_raw_config
 
     assert read_raw_config() == {}
 
@@ -419,7 +419,7 @@ def test_config_set_requires_confirmation_then_writes(_isolate_hermes_home):
 
 
 def test_sessions_list_and_stats_use_isolated_session_store(_isolate_hermes_home):
-    from hermes_state import SessionDB
+    from hades_state import SessionDB
 
     db = SessionDB()
     try:
@@ -506,7 +506,7 @@ def test_main_console_subcommand_smoke(_isolate_hermes_home):
     import subprocess
 
     result = subprocess.run(
-        [sys.executable, "-m", "hermes_cli.main", "console"],
+        [sys.executable, "-m", "hades_cli.main", "console"],
         cwd=Path(__file__).resolve().parents[2],
         input="help\nexit\n",
         text=True,

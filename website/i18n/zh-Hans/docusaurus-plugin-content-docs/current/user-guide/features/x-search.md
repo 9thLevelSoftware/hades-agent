@@ -18,7 +18,7 @@ sidebar_position: 7
 | 凭据 | 来源 | 配置方式 |
 |------|------|---------|
 | **SuperGrok / X Premium+ OAuth**（推荐） | 在 `accounts.x.ai` 浏览器登录，自动刷新 | `hermes auth add xai-oauth` — 参见 [xAI Grok OAuth (SuperGrok / X Premium+)](../../guides/xai-grok-oauth.md) |
-| **`XAI_API_KEY`** | 付费 xAI API 密钥 | 在 `~/.hermes/.env` 中设置 |
+| **`XAI_API_KEY`** | 付费 xAI API 密钥 | 在 `~/.hades/.env` 中设置 |
 
 两者使用相同的 endpoint 和相同的请求体，区别仅在于 bearer token。**当两者同时配置时，SuperGrok OAuth 优先**，x_search 将消耗你的订阅配额而非付费 API 用量。
 
@@ -43,7 +43,7 @@ hermes tools
 ## 配置
 
 ```yaml
-# ~/.hermes/config.yaml
+# ~/.hades/config.yaml
 x_search:
   # 用于 Responses 调用的 xAI 模型。
   # grok-4.20-reasoning 是推荐的默认值；任何支持
@@ -110,7 +110,7 @@ agent 将：
 
 ### "No xAI credentials available"
 
-当两种认证路径均失败时，工具会显示此错误。请在 `~/.hermes/.env` 中设置 `XAI_API_KEY`，或运行 `hermes auth add xai-oauth` 并完成浏览器登录。然后重启会话，让 agent 重新加载工具注册表。
+当两种认证路径均失败时，工具会显示此错误。请在 `~/.hades/.env` 中设置 `XAI_API_KEY`，或运行 `hermes auth add xai-oauth` 并完成浏览器登录。然后重启会话，让 agent 重新加载工具注册表。
 
 ### "`x_search` is not enabled for this model"
 

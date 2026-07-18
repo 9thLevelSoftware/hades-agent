@@ -1,12 +1,12 @@
 ---
 sidebar_position: 15
 title: "Google Vertex AI"
-description: "Use Hermes Agent with Gemini on Google Cloud Vertex AI — OAuth2 service account or ADC, GCP billing and quotas, no static API key"
+description: "Use Hades Agent with Gemini on Google Cloud Vertex AI — OAuth2 service account or ADC, GCP billing and quotas, no static API key"
 ---
 
 # Google Vertex AI
 
-Hermes Agent supports **Gemini models on Google Cloud Vertex AI** through Vertex's OpenAI-compatible endpoint. Unlike the [Google AI Studio provider](/guides/google-gemini) (which uses a static API key against `generativelanguage.googleapis.com`), Vertex gives you **enterprise-grade rate limits and GCP billing/credits**, and is the right choice when you want Gemini usage to draw on your Google Cloud account rather than an AI Studio key.
+Hades Agent supports **Gemini models on Google Cloud Vertex AI** through Vertex's OpenAI-compatible endpoint. Unlike the [Google AI Studio provider](/guides/google-gemini) (which uses a static API key against `generativelanguage.googleapis.com`), Vertex gives you **enterprise-grade rate limits and GCP billing/credits**, and is the right choice when you want Gemini usage to draw on your Google Cloud account rather than an AI Studio key.
 
 :::info Vertex authenticates with OAuth2, not an API key
 Vertex has **no static API key** for the standard endpoint. Every request needs a short-lived **OAuth2 access token** (≈1 hour TTL) minted from either a service-account JSON or Application Default Credentials (ADC). Hermes mints and **auto-refreshes** these tokens for you — you never paste a token by hand. This is why pasting a temporary token into a custom provider's `api_key` field does not work: it expires mid-session.
@@ -24,7 +24,7 @@ Vertex has **no static API key** for the standard endpoint. Every request needs 
 
 ```bash
 # Option A — service account JSON (recommended for servers / gateways)
-echo "VERTEX_CREDENTIALS_PATH=/path/to/service-account.json" >> ~/.hermes/.env
+echo "VERTEX_CREDENTIALS_PATH=/path/to/service-account.json" >> ~/.hades/.env
 
 # Option B — Application Default Credentials (good for local dev)
 gcloud auth application-default login
@@ -44,10 +44,10 @@ hermes chat
 
 Vertex splits its settings by sensitivity:
 
-- The **credential path** is a pointer to a secret and lives in `~/.hermes/.env`.
-- **Project ID and region** are non-secret routing settings and live in `~/.hermes/config.yaml`.
+- The **credential path** is a pointer to a secret and lives in `~/.hades/.env`.
+- **Project ID and region** are non-secret routing settings and live in `~/.hades/config.yaml`.
 
-`~/.hermes/.env`:
+`~/.hades/.env`:
 
 ```bash
 # One of these (checked in this order); omit both to use ADC:
@@ -55,7 +55,7 @@ VERTEX_CREDENTIALS_PATH=/path/to/service-account.json
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
-`~/.hermes/config.yaml`:
+`~/.hades/config.yaml`:
 
 ```yaml
 model:
@@ -124,7 +124,7 @@ The doctor reports whether Vertex credentials can be resolved (service-account p
 
 ### "Vertex AI credentials could not be resolved"
 
-Hermes found neither a service-account JSON nor working ADC. Either set `VERTEX_CREDENTIALS_PATH` in `~/.hermes/.env`, or run `gcloud auth application-default login`. If your project isn't embedded in the credentials, set `vertex.project_id` in `config.yaml`.
+Hermes found neither a service-account JSON nor working ADC. Either set `VERTEX_CREDENTIALS_PATH` in `~/.hades/.env`, or run `gcloud auth application-default login`. If your project isn't embedded in the credentials, set `vertex.project_id` in `config.yaml`.
 
 ### `google-auth` not installed
 

@@ -12,7 +12,7 @@ Ported from [JimLiu/baoyu-skills](https://github.com/JimLiu/baoyu-skills) v1.57.
 |--------|----------|--------|
 | Metadata namespace | `openclaw` | `hermes` |
 | Trigger | `/baoyu-article-illustrator` slash command + CLI flags | Natural language skill matching |
-| User config | EXTEND.md (project/user/XDG paths) + first-time-setup | Removed — not part of Hermes infra |
+| User config | EXTEND.md (project/user/XDG paths) + first-time-setup | Removed — not part of Hades infra |
 | User prompts | `AskUserQuestion` (batched, multi-question) | `clarify` tool (one question at a time) |
 | Image generation | `baoyu-imagine` (Bun/TypeScript, multi-provider, accepts `--ref`, writes to local path) | `image_generate` (returns URL only; agent downloads via `terminal`/`curl`) |
 | Backend selection | User picks provider via CLI flags | Not agent-selectable — `image_generate` uses the user-configured FAL model. Removed hardcoded "nano banana pro" line from `prompts/system.md`. |
@@ -27,7 +27,7 @@ Ported from [JimLiu/baoyu-skills](https://github.com/JimLiu/baoyu-skills) v1.57.
 - Type × Style × Palette three-dimension framework
 - All style definitions (23 files, verbatim)
 - All palette definitions (4 files, verbatim)
-- Core reference files (workflow, prompt-construction, styles, style-presets) — adapted for Hermes tooling
+- Core reference files (workflow, prompt-construction, styles, style-presets) — adapted for Hades tooling
 - Core principles and workflow structure (analyze → confirm → outline → prompts → generate)
 - Prompt-file-as-reproducibility-record discipline
 - Author, version, homepage attribution
@@ -45,4 +45,4 @@ curl -sL https://raw.githubusercontent.com/JimLiu/baoyu-skills/main/skills/baoyu
 diff <(curl -sL https://raw.githubusercontent.com/JimLiu/baoyu-skills/main/skills/baoyu-article-illustrator/references/styles/blueprint.md) references/styles/blueprint.md
 ```
 
-`references/styles/*` and `references/palettes/*` can be overwritten directly. `SKILL.md`, `references/workflow.md`, `references/usage.md`, `references/style-presets.md`, `references/styles.md`, `references/prompt-construction.md`, and `prompts/system.md` must be manually merged since they contain Hermes-specific adaptations (tool wiring, backend neutrality, removed EXTEND.md references).
+`references/styles/*` and `references/palettes/*` can be overwritten directly. `SKILL.md`, `references/workflow.md`, `references/usage.md`, `references/style-presets.md`, `references/styles.md`, `references/prompt-construction.md`, and `prompts/system.md` must be manually merged since they contain Hades-specific adaptations (tool wiring, backend neutrality, removed EXTEND.md references).

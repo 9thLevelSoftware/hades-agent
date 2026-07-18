@@ -106,7 +106,7 @@ def openclaw_residue_hint_cli() -> str:
     """
     return (
         "A legacy OpenClaw directory was detected at ~/.openclaw/.\n"
-        "To port your config, memory, and skills over to Hermes, run "
+        "To port your config, memory, and skills over to Hades, run "
         "`hermes claw migrate`.\n"
         "If you've already migrated and want to archive the old directory, "
         "run `hermes claw cleanup` (renames it to ~/.openclaw.pre-migration — "
@@ -209,7 +209,7 @@ def mark_seen(config_path: Path, flag: str) -> bool:
     """
     try:
         import yaml
-        from hermes_cli.config import atomic_config_write
+        from hades_cli.config import atomic_config_write
     except Exception as e:  # pragma: no cover — dependency issue
         logger.debug("onboarding: failed to import yaml/utils: %s", e)
         return False

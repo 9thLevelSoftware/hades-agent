@@ -157,10 +157,10 @@ class TestScanCronSkillAssembled:
         """Security postmortems and runbooks routinely describe attack
         commands in prose — that's not a payload, it's documentation.
         Real example: the `hermes-agent-dev` skill contains a postmortem
-        section saying 'the attacker could just cat ~/.hermes/.env'.
+        section saying 'the attacker could just cat ~/.hades/.env'.
         """
         assert _scan_cron_skill_assembled(
-            "the attacker could just cat ~/.hermes/.env to steal credentials"
+            "the attacker could just cat ~/.hades/.env to steal credentials"
         )[1] == ""
         assert _scan_cron_skill_assembled(
             "this rule writes to authorized_keys for persistence"
@@ -338,7 +338,7 @@ class TestUnifiedCronjobTool:
 
     @staticmethod
     def _patch_named_legit(monkeypatch):
-        import hermes_cli.runtime_provider as rp
+        import hades_cli.runtime_provider as rp
         monkeypatch.setattr(rp, "has_named_custom_provider", lambda n: True)
         monkeypatch.setattr(
             rp, "_get_named_custom_provider",
@@ -543,7 +543,7 @@ class TestResolveModelOverride:
     """
 
     def test_keeps_bare_custom_when_a_named_entry_exists(self, monkeypatch):
-        import hermes_cli.runtime_provider as rp_mod
+        import hades_cli.runtime_provider as rp_mod
 
         monkeypatch.setattr(rp_mod, "has_named_custom_provider", lambda name: True)
         provider, model = _resolve_model_override(
@@ -553,8 +553,8 @@ class TestResolveModelOverride:
         assert model == "gpt-5.4"
 
     def test_pins_main_provider_when_bare_custom_unresolvable(self, monkeypatch):
-        import hermes_cli.config as cfg_mod
-        import hermes_cli.runtime_provider as rp_mod
+        import hades_cli.config as cfg_mod
+        import hades_cli.runtime_provider as rp_mod
 
         monkeypatch.setattr(rp_mod, "has_named_custom_provider", lambda name: False)
         monkeypatch.setattr(
@@ -568,7 +568,7 @@ class TestResolveModelOverride:
         assert model == "gpt-5.4"
 
     def test_keeps_explicit_custom_name_unchanged(self, monkeypatch):
-        import hermes_cli.runtime_provider as rp_mod
+        import hades_cli.runtime_provider as rp_mod
 
         # Even if the resolver claims no entry, the canonical "custom:<name>"
         # form is never stripped or pinned.
@@ -669,7 +669,7 @@ class TestValidateCronBaseUrl:
 
     @staticmethod
     def _patch_named_legit(monkeypatch):
-        import hermes_cli.runtime_provider as rp
+        import hades_cli.runtime_provider as rp
         monkeypatch.setattr(rp, "has_named_custom_provider", lambda n: True)
         monkeypatch.setattr(
             rp, "_get_named_custom_provider",

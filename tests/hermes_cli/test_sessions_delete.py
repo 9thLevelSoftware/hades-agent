@@ -4,8 +4,8 @@ import pytest
 
 
 def test_sessions_delete_accepts_unique_id_prefix(monkeypatch, capsys):
-    import hermes_cli.main as main_mod
-    import hermes_state
+    import hades_cli.main as main_mod
+    import hades_state
 
     captured = {}
 
@@ -40,8 +40,8 @@ def test_sessions_delete_accepts_unique_id_prefix(monkeypatch, capsys):
 
 
 def test_sessions_delete_reports_not_found_when_prefix_is_unknown(monkeypatch, capsys):
-    import hermes_cli.main as main_mod
-    import hermes_state
+    import hades_cli.main as main_mod
+    import hades_state
 
     class FakeDB:
         def resolve_session_id(self, session_id):
@@ -68,8 +68,8 @@ def test_sessions_delete_reports_not_found_when_prefix_is_unknown(monkeypatch, c
 
 def test_sessions_delete_handles_eoferror_on_confirm(monkeypatch, capsys):
     """sessions delete should not crash when stdin is closed (non-TTY)."""
-    import hermes_cli.main as main_mod
-    import hermes_state
+    import hades_cli.main as main_mod
+    import hades_state
 
     class FakeDB:
         def resolve_session_id(self, session_id):
@@ -96,8 +96,8 @@ def test_sessions_delete_handles_eoferror_on_confirm(monkeypatch, capsys):
 
 def test_sessions_prune_handles_eoferror_on_confirm(monkeypatch, capsys):
     """sessions prune should not crash when stdin is closed (non-TTY)."""
-    import hermes_cli.main as main_mod
-    import hermes_state
+    import hades_cli.main as main_mod
+    import hades_state
 
     class FakeDB:
         def list_prune_candidates(self, **kwargs):
@@ -135,8 +135,8 @@ def test_sessions_prune_handles_eoferror_on_confirm(monkeypatch, capsys):
 def _run_prune(monkeypatch, capsys, argv_tail, candidates=None):
     """Run `hermes sessions prune <argv_tail>` against a FakeDB, capturing
     the filter kwargs passed to list_prune_candidates. Auto-confirms."""
-    import hermes_cli.main as main_mod
-    import hermes_state
+    import hades_cli.main as main_mod
+    import hades_state
 
     seen = {}
     rows = candidates if candidates is not None else [
@@ -214,7 +214,7 @@ def test_sessions_prune_source_with_explicit_time_respected(monkeypatch, capsys)
 
 def test_sessions_prune_preview_shows_oldest_newest(monkeypatch, capsys):
     """Confirmation preview surfaces count + oldest/newest session times."""
-    from hermes_cli.session_filters import format_epoch
+    from hades_cli.session_filters import format_epoch
 
     _filters, out = _run_prune(monkeypatch, capsys, ["--source", "cron"])
     assert "2 session(s) match" in out

@@ -1,4 +1,4 @@
-# OpenAI-Compatible API Server for Hermes Agent
+# OpenAI-Compatible API Server for Hades Agent
 
 ## Motivation
 
@@ -22,7 +22,7 @@ usable as a backend for all of them — no custom adapters needed.
 ```
 
 A user would:
-1. Set `API_SERVER_ENABLED=true` in `~/.hermes/.env`
+1. Set `API_SERVER_ENABLED=true` in `~/.hades/.env`
 2. Run `hermes gateway` (API server starts alongside Telegram/Discord/etc.)
 3. Point Open WebUI (or any frontend) at `http://localhost:8642/v1`
 4. Chat with hermes-agent through any OpenAI-compatible UI
@@ -69,7 +69,7 @@ Authorization: Bearer hermes-api-key-here
 Content-Type: application/json
 
 {
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "What files are in the current directory?"}
@@ -85,7 +85,7 @@ Response:
   "id": "chatcmpl-abc123",
   "object": "chat.completion",
   "created": 1710000000,
-  "model": "hermes-agent",
+  "model": "hades-agent",
   "choices": [{
     "index": 0,
     "message": {
@@ -130,10 +130,10 @@ Response:
 {
   "object": "list",
   "data": [{
-    "id": "hermes-agent",
+    "id": "hades-agent",
     "object": "model",
     "created": 1710000000,
-    "owned_by": "hermes-agent"
+    "owned_by": "hades-agent"
   }]
 }
 ```
@@ -187,7 +187,7 @@ Two modes:
 
 ### 5. Model Mapping
 
-Frontends send `"model": "hermes-agent"` (or whatever). The actual LLM model
+Frontends send `"model": "hades-agent"` (or whatever). The actual LLM model
 used is configured server-side in config.yaml. The API server maps any
 requested model name to the configured hermes-agent model.
 

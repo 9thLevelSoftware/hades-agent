@@ -1,8 +1,8 @@
 ---
 name: petdex
-description: Install and select animated petdex mascots for Hermes.
+description: Install and select animated petdex mascots for Hades.
 version: 1.0.0
-author: Hermes Agent
+author: Hades Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
@@ -17,7 +17,7 @@ metadata:
 Browse, install, and select animated "pet" mascots from the public
 [petdex](https://github.com/crafter-station/petdex) gallery. An installed pet
 reacts to agent activity (idle, running a tool, reviewing, error, done) across
-the Hermes CLI, TUI, and desktop app. This skill drives the `hermes pets` CLI
+the Hades CLI, TUI, and desktop app. This skill drives the `hermes pets` CLI
 and the `display.pet` config — it does not generate sprites.
 
 ## When to Use
@@ -60,7 +60,7 @@ Use the `terminal` tool to run `hermes pets <subcommand>`.
 4. Confirm setup: `hermes pets doctor` — shows the resolved pet, configured
    render mode, detected terminal graphics protocol, and effective mode.
 
-Pets install into `<HERMES_HOME>/pets/<slug>/` (profile-aware). Selecting a pet
+Pets install into `<HADES_HOME>/pets/<slug>/` (profile-aware). Selecting a pet
 writes `display.pet.slug` + `display.pet.enabled` to `config.yaml`.
 
 ## Configuration
@@ -81,7 +81,7 @@ Under `display.pet` in `config.yaml`:
 - A pet only shows once one is installed AND selected (`enabled: true`).
 - Inside a pipe/redirect (no TTY) terminal rendering is disabled by design.
 - The petdex npm CLI installs to `~/.codex/pets`; Hermes uses its own
-  profile-scoped `<HERMES_HOME>/pets/` instead — install through `hermes pets`.
+  profile-scoped `<HADES_HOME>/pets/` instead — install through `hermes pets`.
 
 ## Verification
 

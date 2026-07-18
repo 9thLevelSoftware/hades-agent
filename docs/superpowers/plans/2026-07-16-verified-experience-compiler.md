@@ -22,7 +22,7 @@
 - A candidate never grades itself. The actor cannot read hidden expected states or source success labels; the independent grader cannot read candidate rationale, source labels, or actor reasoning. A judge model, when a deterministic check is impossible, must use a distinct configured identity and can only lower confidence or block—it cannot override a failed deterministic check.
 - Non-secret settings live under `experience_compiler` in `config.yaml`. Provider/API credentials stay in existing secret sources or profile `.env`; no new user-facing `HERMES_*` variable is added.
 - Runtime records live in profile-local SQLite and immutable profile-local artifact files with restrictive permissions. Raw private conversation text, credentials, message bodies, recipient identifiers, unrestricted tool output, and unredacted screenshots are never copied into a compiler dataset.
-- Every state, security, filesystem, subprocess, resolution, promotion, and recovery path receives real-import E2E coverage against a temporary `HERMES_HOME`; mocks/fakes stop at external model/network/process-kill boundaries.
+- Every state, security, filesystem, subprocess, resolution, promotion, and recovery path receives real-import E2E coverage against a temporary `HADES_HOME`; mocks/fakes stop at external model/network/process-kill boundaries.
 - Profiles remain independent islands. Dataset selection, artifacts, authority, receipts, skills, backups, evaluation sandboxes, and promotion must resolve only from the active profile.
 - Truthful vocabulary is mandatory: `verified`, `completed_unverified`, `failed`, `blocked`, `unknown_effect`, `promoted`, `rolled_back`, `quarantined`, `inconclusive`, `reversible`, and `compensatable` retain their canonical meanings.
 - CLI and terminal/Ink TUI are primary. Dashboard support is secondary and inherited through the existing embedded Ink PTY. Do not modify `apps/desktop/` or create a Desktop dependency.
@@ -113,7 +113,7 @@ decision = authorize_effect(
 ### Existing seams verified in this fork
 
 - `agent/turn_ledger.py:28-118` — frozen `TurnOutcomeRecord`, safe persistence, and skill attribution; `agent/turn_ledger.py:302-336` is observability only, not proof.
-- `hermes_state.py:814-844` and `hermes_state.py:2302-2559` — `turn_outcomes`, feedback, trends, and skill-outcome queries in `SessionDB`.
+- `hades_state.py:814-844` and `hades_state.py:2302-2559` — `turn_outcomes`, feedback, trends, and skill-outcome queries in `SessionDB`.
 - `agent/background_review.py:599-626` and `agent/background_review.py:970-1010` — provenance metadata and an isolated review-thread pattern; current review may write suggestions but is not an independent promotion grader.
 - `agent/curator.py:1522-1763` and `agent/curator.py:2026-2043` — existing background maintenance/run reporting and inactivity-gated entrypoint.
 - `agent/curator_backup.py:211-288` and `agent/curator_backup.py:539-681` — profile-local skill snapshots and recoverable rollback.
@@ -148,7 +148,7 @@ decision = authorize_effect(
 
 ### Existing production files modified
 
-- `hermes_state.py` — one read-only `iter_turn_outcomes()` query needed by evidence selection; no compiler tables.
+- `hades_state.py` — one read-only `iter_turn_outcomes()` query needed by evidence selection; no compiler tables.
 - `agent/curator.py` — emit existing background-maintenance summary for a due compiler run, without merging curator and compiler decisions.
 - `cli.py` and `gateway/run.py` — call the same opt-in scheduler beside the existing curator hook.
 - `hermes_cli/commands.py`, `hermes_cli/main.py`, `hermes_cli/cli_commands_mixin.py`, and `cli.py` — register/dispatch `experience` without a new model tool.
@@ -300,7 +300,7 @@ git commit -m "test: freeze verified experience proof"
 - Modify: `agent/experience_compiler/__init__.py`
 
 **Interfaces:**
-- Consumes: Task 0 records and `get_hermes_home()`.
+- Consumes: Task 0 records and `get_hades_home()`.
 - Produces: `ExperienceStore.open_current()`, `ArtifactStore.open_current()`, `append_event()`, `claim_run()`, `renew_lease()`, `release_lease()`, `reconcile_projections()`, `write_immutable_json()`, `read_verified_json()`, and `quarantine_artifact()`.
 
 - [ ] **Step 1: Write RED persistence, immutability, lease, and profile tests**
@@ -342,7 +342,7 @@ Create profile-local `experience_compiler/experience.db` in WAL mode with tables
 class ExperienceStore:
     @classmethod
     def open_current(cls) -> "ExperienceStore":
-        root = get_hermes_home() / "experience_compiler"
+        root = get_hades_home() / "experience_compiler"
         return cls(root / "experience.db")
 
     def transition_candidate(
@@ -355,7 +355,7 @@ class ExperienceStore:
 
 - [ ] **Step 4: Implement restrictive artifact storage**
 
-Resolve paths beneath `get_hermes_home()/experience_compiler/artifacts`, reject absolute paths, `..`, symlink/reparse traversal, case-fold collisions, and any resolved path outside the root. Write bytes to a same-directory temporary file, `fsync`, chmod user-only where supported, atomically replace, and return `ArtifactRef(path, sha256, size)`. Dataset snapshots, candidate patches, trial inputs/results, gate reports, approval records, and rollback evidence are immutable. Quarantine moves only within `experience_compiler/quarantine/<id>/` and appends the reason/hash event.
+Resolve paths beneath `get_hades_home()/experience_compiler/artifacts`, reject absolute paths, `..`, symlink/reparse traversal, case-fold collisions, and any resolved path outside the root. Write bytes to a same-directory temporary file, `fsync`, chmod user-only where supported, atomically replace, and return `ArtifactRef(path, sha256, size)`. Dataset snapshots, candidate patches, trial inputs/results, gate reports, approval records, and rollback evidence are immutable. Quarantine moves only within `experience_compiler/quarantine/<id>/` and appends the reason/hash event.
 
 - [ ] **Step 5: Run GREEN and concurrency regressions**
 
@@ -378,7 +378,7 @@ git commit -m "feat: persist experience compiler provenance"
 **Files:**
 - Create: `agent/experience_compiler/evidence.py`
 - Create: `tests/agent/experience_compiler/test_evidence.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Modify: `tests/agent/test_turn_ledger_e2e.py`
 - Modify: `agent/experience_compiler/__init__.py`
 
@@ -417,7 +417,7 @@ Expected: FAIL because the evidence adapter and bounded turn iterator do not exi
 
 - [ ] **Step 3: Add the bounded read seam and canonical adapter**
 
-`SessionDB.iter_turn_outcomes()` selects scalar ledger columns in `(created_at, session_id, turn_id)` order, enforces `1 <= limit <= 1000`, and returns defensive dictionaries. Do not add compiler state to `hermes_state.py`. `CanonicalReceiptEvidenceSource` performs the one implementation-time signature check against item #12, validates content hashes/freshness/domain, and exposes only immutable receipt records.
+`SessionDB.iter_turn_outcomes()` selects scalar ledger columns in `(created_at, session_id, turn_id)` order, enforces `1 <= limit <= 1000`, and returns defensive dictionaries. Do not add compiler state to `hades_state.py`. `CanonicalReceiptEvidenceSource` performs the one implementation-time signature check against item #12, validates content hashes/freshness/domain, and exposes only immutable receipt records.
 
 ```python
 class TrajectorySelector:
@@ -445,7 +445,7 @@ Expected: PASS; exactly 100 eligible rows freeze, all private/poisoned/cross-pro
 
 ```bash
 git add agent/experience_compiler/evidence.py agent/experience_compiler/__init__.py \
-  hermes_state.py tests/agent/experience_compiler/test_evidence.py \
+  hades_state.py tests/agent/experience_compiler/test_evidence.py \
   tests/agent/test_turn_ledger_e2e.py
 git commit -m "feat: freeze redacted experience datasets"
 ```
@@ -593,7 +593,7 @@ class TrialSpec:
     cost_limit_micros: int
 ```
 
-For each trial, create a fresh temporary `HERMES_HOME`, real local Git repository/disposable non-main worktree, read-only fixture input, isolated output directory, and fresh conversation/session. Copy only approved profile configuration and the target artifact: active base content for baseline, candidate content for candidate. Disable gateway delivery, remote push, browser form submission, purchases, production DB access, unrelated skills, and source dataset mounts. Pass one canonical JSON request on stdin to `python -m agent.experience_compiler.evaluation_worker`; parse one bounded JSON response from stdout. Kill the process group on limit and retain redacted logs/hashes.
+For each trial, create a fresh temporary `HADES_HOME`, real local Git repository/disposable non-main worktree, read-only fixture input, isolated output directory, and fresh conversation/session. Copy only approved profile configuration and the target artifact: active base content for baseline, candidate content for candidate. Disable gateway delivery, remote push, browser form submission, purchases, production DB access, unrelated skills, and source dataset mounts. Pass one canonical JSON request on stdin to `python -m agent.experience_compiler.evaluation_worker`; parse one bounded JSON response from stdout. Kill the process group on limit and retain redacted logs/hashes.
 
 - [ ] **Step 4: Make replay and partial failure explicit**
 

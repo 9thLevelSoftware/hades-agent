@@ -14,7 +14,7 @@
 - TDD is mandatory. Run Python tests only through `scripts/run_tests.sh`; use the package-local npm scripts for TypeScript and documentation checks.
 - Add no model-visible core tool and do not change any existing tool JSON schema. Transaction metadata is registry-internal; user/model operation is through CLI + skill or an existing orchestrator.
 - The system prompt, effective model tool definitions, provider, and model remain byte-stable for the conversation. Do not inject synthetic user messages or mutate history outside existing compression.
-- Profiles remain isolated. Every database, checkpoint, config, cron, workflow, receipt, and benchmark artifact resolves from `get_hermes_home()`; no transaction may cross `HERMES_HOME`.
+- Profiles remain isolated. Every database, checkpoint, config, cron, workflow, receipt, and benchmark artifact resolves from `get_hades_home()`; no transaction may cross `HADES_HOME`.
 - Stable settings live under `transactions:` in `config.yaml`. Credentials stay in `.env`/secret stores. `HERMES_TRANSACTION_ID`, `HERMES_TRANSACTION_REVISION`, and `HERMES_TRANSACTION_NODE_ID` are internal subprocess-correlation values, never documented as user configuration.
 - `agent_operations` remains the durable certainty journal. Transaction tables add graph, preview, authority, adapter, evidence, revision, and compensation facts; they never replace journal states or make an unknown effect retryable.
 - An adapter cannot manufacture guarantees. Exact reversal, semantic compensation, native idempotency, query reconciliation, and irreversible boundaries are separate declared capabilities and are verified at registration.
@@ -24,7 +24,7 @@
 - Compensation walks the committed dependency graph in reverse topological order. It stops before an irreversible boundary, unknown effect, drifted resource, expired compensation window, or live uncompensated dependent; `--cascade` never means “best effort through danger.”
 - First adapter families are exactly: workspace/filesystem plus local disposable-worktree Git; Hermes-owned workflow/cron/config state; delayed outbound-message outbox. Remote push, arbitrary shell wrapping, production databases, browser/service writes, account deletion, purchases, and cross-profile writes are excluded.
 - Message send is an irreversible boundary after dispatch unless a concrete platform adapter proves edit/delete compensation for that exact message. A provider idempotency key means dedupe support, not exactly-once delivery.
-- Real-path tests use a temporary `HERMES_HOME`, real SQLite, real temp files and Git worktrees, real config/cron/workflow stores, and object-graph/process restart. Mock only the final network adapter and deterministic crash boundary.
+- Real-path tests use a temporary `HADES_HOME`, real SQLite, real temp files and Git worktrees, real config/cron/workflow stores, and object-graph/process restart. Mock only the final network adapter and deterministic crash boundary.
 - No outbound telemetry. Benchmark output is local JSON/Markdown and reports denominators, Wilson intervals, p50/p95 latency, cost source, exclusions, and safety slices separately.
 - Consume the shared immutable receipt contract owned by portfolio item #12 and introduced by the approved Missions/Transactions/Receipts vertical slice. Do not create a second receipt table, status vocabulary, scorer registry, or observation format inside `agent/effects`.
 
@@ -126,7 +126,7 @@ EligibilityCode = Literal[
 - `agent/effects/receipts.py` — transaction evidence snapshot and canonical receipt builder over the generic receipt schema.
 - `agent/effects/adapters/__init__.py` — registers the three built-in adapter families.
 - `agent/effects/adapters/workspace.py` — file/V4A/local-worktree prepare, diff, commit, verify, reconcile, restore/reset.
-- `agent/effects/adapters/hermes_state.py` — workflow, cron, and config adapters over owner-module mutation services.
+- `agent/effects/adapters/hades_state.py` — workflow, cron, and config adapters over owner-module mutation services.
 - `agent/effects/adapters/message_outbox.py` — delayed message prepare/revise/release/reconcile/optional edit-delete compensation.
 - `gateway/transaction_outbox.py` — leased outbox dispatcher over `DeliveryRouter`.
 - `hermes_cli/transactions.py` — shared top-level/classic-slash command parser, service calls, JSON/text renderers.
@@ -134,7 +134,7 @@ EligibilityCode = Literal[
 
 ### Existing production files modified
 
-- `hermes_state.py` — declarative tables/indexes only; retain schema reconciliation convention.
+- `hades_state.py` — declarative tables/indexes only; retain schema reconciliation convention.
 - `tools/registry.py` — internal effect metadata; schema generation remains byte-identical.
 - `hermes_cli/middleware.py` — terminal-handler transaction coordinator wrapper after plugin argument finalization.
 - `agent/operation_journal.py` — exact query/CAS helpers; keep unknown non-retryable.
@@ -293,7 +293,7 @@ git commit -m "test: preregister action transaction benchmark"
 - Create: `agent/effects/__init__.py`
 - Create: `agent/effects/models.py`
 - Create: `agent/effects/store.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/effects/test_store.py`
 
 **Interfaces:**
@@ -448,7 +448,7 @@ Expected: PASS on new and reopened databases; existing state schema tests remain
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/effects hermes_state.py tests/agent/effects/test_store.py
+git add agent/effects hades_state.py tests/agent/effects/test_store.py
 git commit -m "feat: persist action transaction graphs"
 ```
 
@@ -649,7 +649,7 @@ git commit -m "feat: add revisable transaction dags"
 - Create: `agent/effects/authority.py`
 - Modify: `agent/effects/models.py`
 - Modify: `agent/effects/store.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/effects/test_authority.py`
 - Modify: `tests/tools/test_approval.py`
 
@@ -757,7 +757,7 @@ Expected: PASS; stale or replayed approval never authorizes a commit.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/effects hermes_state.py tests/agent/effects/test_authority.py tests/tools/test_approval.py
+git add agent/effects hades_state.py tests/agent/effects/test_authority.py tests/tools/test_approval.py
 git commit -m "feat: bind transactions to current authority"
 ```
 
@@ -1028,7 +1028,7 @@ git commit -m "feat: add reversible workspace effects"
 ### Task 7: Implement Versioned Workflow, Cron, and Config Adapters
 
 **Files:**
-- Create: `agent/effects/adapters/hermes_state.py`
+- Create: `agent/effects/adapters/hades_state.py`
 - Modify: `hermes_cli/workflows_db.py`
 - Modify: `cron/jobs.py`
 - Modify: `hermes_cli/config.py`
@@ -1141,7 +1141,7 @@ Expected: PASS; legacy workflow/cron/config callers retain current output and lo
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/effects/adapters/hermes_state.py hermes_cli/workflows_db.py cron/jobs.py \
+git add agent/effects/adapters/hades_state.py hermes_cli/workflows_db.py cron/jobs.py \
   hermes_cli/config.py tests/agent/effects/adapters/test_hermes_state.py \
   tests/hermes_cli/test_workflows_db.py tests/cron/test_jobs.py \
   tests/cron/test_jobs_crossprocess_lock.py tests/hermes_cli/test_config.py \
@@ -1156,7 +1156,7 @@ git commit -m "feat: transact versioned hermes state"
 **Files:**
 - Create: `agent/effects/adapters/message_outbox.py`
 - Create: `gateway/transaction_outbox.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Modify: `gateway/delivery.py`
 - Modify: `gateway/platforms/base.py`
 - Modify: `gateway/run.py`
@@ -1255,7 +1255,7 @@ Expected: PASS; every ambiguous post-dispatch case is unknown, never successful 
 
 ```bash
 git add agent/effects/adapters/message_outbox.py gateway/transaction_outbox.py \
-  hermes_state.py gateway/delivery.py gateway/platforms/base.py gateway/run.py \
+  hades_state.py gateway/delivery.py gateway/platforms/base.py gateway/run.py \
   hermes_cli/workflows_spec.py hermes_cli/workflows_capabilities.py \
   hermes_cli/workflows_dispatcher.py tests/agent/effects/adapters/test_message_outbox.py \
   tests/gateway/test_transaction_outbox.py tests/gateway/test_delivery_operation_journal.py \
@@ -1271,7 +1271,7 @@ git commit -m "feat: add transactional message outbox"
 - Create: `agent/effects/eligibility.py`
 - Modify: `agent/effects/coordinator.py`
 - Modify: `agent/effects/store.py`
-- Modify: `hermes_state.py`
+- Modify: `hades_state.py`
 - Create: `tests/agent/effects/test_eligibility.py`
 - Modify: `tests/agent/effects/test_coordinator.py`
 - Modify: `tests/agent/effects/test_graph.py`
@@ -1354,7 +1354,7 @@ Expected: PASS with exact reverse dependency order and no false “undoable” c
 - [ ] **Step 7: Commit**
 
 ```bash
-git add agent/effects hermes_state.py tests/agent/effects/test_eligibility.py \
+git add agent/effects hades_state.py tests/agent/effects/test_eligibility.py \
   tests/agent/effects/test_coordinator.py tests/agent/effects/test_graph.py
 git commit -m "feat: add truthful cascade compensation"
 ```
@@ -1492,7 +1492,7 @@ Reject unknown adapters/actions, cycles, stale expected revision, cross-profile 
 
 Run: `scripts/run_tests.sh tests/hermes_cli/test_transaction_cli.py tests/hermes_cli/test_commands.py -q`
 
-Expected: FAIL importing `hermes_cli.transactions`.
+Expected: FAIL importing `hades_cli.transactions`.
 
 - [ ] **Step 3: Implement one shared argv/service surface**
 
@@ -1556,7 +1556,7 @@ git commit -m "feat: add action transaction cli"
 
 **Interfaces:**
 - Produces `transaction.exec` JSON-RPC and native `/transaction` TUI rendering.
-- Consumes `hermes_cli.transactions.run_argv()` in the live TUI gateway process so mutations never run in `_SlashWorker`.
+- Consumes `hades_cli.transactions.run_argv()` in the live TUI gateway process so mutations never run in `_SlashWorker`.
 
 - [ ] **Step 1: Write RED backend and frontend routing tests**
 
@@ -1677,7 +1677,7 @@ def test_revision_and_cascade_end_to_end(transaction_e2e):
     assert transaction_e2e.compensation_order == ["config_set", "workspace_write"]
 ```
 
-Use a temp `HERMES_HOME`, real `state.db`, real config/workflow/cron stores, real file/checkpoint/Git worktree, real CLI parser/service, and a fake final platform adapter. `after_handler_return` and `after_delivery_dispatch` kill a subprocess before the next durable confirmation, then construct new `SessionDB`, journal, store, registry, adapters, and coordinator objects.
+Use a temp `HADES_HOME`, real `state.db`, real config/workflow/cron stores, real file/checkpoint/Git worktree, real CLI parser/service, and a fake final platform adapter. `after_handler_return` and `after_delivery_dispatch` kill a subprocess before the next durable confirmation, then construct new `SessionDB`, journal, store, registry, adapters, and coordinator objects.
 
 - [ ] **Step 2: Run RED**
 
@@ -1844,7 +1844,7 @@ Validation accepts only those modes, integer batch size `1..1000`, delay `1..604
 
 - [ ] **Step 4: Write the complete operator guide**
 
-Document one copyable three-family CLI/TUI walkthrough; plan and authority YAML; create/preview/revise/commit/reconcile/eligibility/compensate/receipt/outbox commands; every status and eligibility code; exact vs semantic vs irreversible wording; approval expiry; crash/unknown recovery; profile storage paths using `display_hermes_home()` semantics; config modes; local benchmark invocation; and local data deletion/export behavior.
+Document one copyable three-family CLI/TUI walkthrough; plan and authority YAML; create/preview/revise/commit/reconcile/eligibility/compensate/receipt/outbox commands; every status and eligibility code; exact vs semantic vs irreversible wording; approval expiry; crash/unknown recovery; profile storage paths using `display_hades_home()` semantics; config modes; local benchmark invocation; and local data deletion/export behavior.
 
 State the exclusions prominently: no arbitrary shell transaction, remote push, browser/service write, production DB, account deletion, purchase, live commerce/federation, cross-profile action, gateway command, Desktop parity promise, or exactly-once claim. Dashboard receives the feature through the existing embedded Ink TUI only.
 
@@ -1913,7 +1913,7 @@ Do not call Reversible & Revisable Action Transactions complete until fresh evid
 - Cascade compensation uses reverse topological order, is idempotent, and stops before any changed/unsafe node.
 - Workspace/V4A/local-worktree Git effects restore exact state when eligible and never push or operate on primary/main checkouts.
 - Workflow/cron/config effects use version hashes and existing locks/atomic writers, preserve absent-vs-null and immutable versions, and never overwrite concurrent or managed changes.
-- Delayed messages can be revised/cancelled before release, require exact final approval, dispatch at most once at the Hermes boundary, and become truthfully irreversible unless edit/delete compensation is proven.
+- Delayed messages can be revised/cancelled before release, require exact final approval, dispatch at most once at the Hades boundary, and become truthfully irreversible unless edit/delete compensation is proven.
 - Every terminal transaction has one immutable shared receipt; later rechecks append observations; the 50 false-success seeds yield zero false `verified` results and use `completed_unverified` whenever effects completed without sufficient proof.
 - All 100 preregistered cases pass the safety floors; eligible median overhead is at most 15% against current Hermes; denominators, exclusions, Wilson intervals, p50/p95, and safety strata are reported separately.
 - System prompt, effective tool schemas, provider, model, and role alternation remain stable across preview, revision, commit, reconciliation, and compensation.

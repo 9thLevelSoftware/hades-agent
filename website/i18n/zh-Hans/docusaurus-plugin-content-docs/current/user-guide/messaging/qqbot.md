@@ -35,7 +35,7 @@ hermes gateway setup
 
 ### 手动配置
 
-在 `~/.hermes/.env` 中设置所需环境变量：
+在 `~/.hades/.env` 中设置所需环境变量：
 
 ```bash
 QQ_APP_ID=your-app-id
@@ -60,7 +60,7 @@ QQ_CLIENT_SECRET=your-app-secret
 
 ## 高级配置
 
-如需精细控制，可在 `~/.hermes/config.yaml` 中添加平台设置：
+如需精细控制，可在 `~/.hades/config.yaml` 中添加平台设置：
 
 ```yaml
 platforms:

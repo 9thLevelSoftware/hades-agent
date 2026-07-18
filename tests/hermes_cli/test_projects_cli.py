@@ -6,8 +6,8 @@ import argparse
 
 import pytest
 
-from hermes_cli import projects_cmd
-from hermes_cli import projects_db as pdb
+from hades_cli import projects_cmd
+from hades_cli import projects_db as pdb
 
 
 def _run(argv):

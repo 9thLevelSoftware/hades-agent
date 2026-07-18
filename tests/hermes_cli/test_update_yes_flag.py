@@ -12,7 +12,7 @@ import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hermes_cli.main import cmd_update
+from hades_cli.main import cmd_update
 
 
 def _make_run_side_effect(
@@ -50,10 +50,10 @@ def _make_run_side_effect(
 class TestUpdateYesConfigMigration:
     """--yes auto-answers the config-migration prompt and skips API-key prompts."""
 
-    @patch("hermes_cli.config.migrate_config")
-    @patch("hermes_cli.config.check_config_version", return_value=(1, 2))
-    @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
-    @patch("hermes_cli.config.get_missing_env_vars", return_value=["NEW_KEY"])
+    @patch("hades_cli.config.migrate_config")
+    @patch("hades_cli.config.check_config_version", return_value=(1, 2))
+    @patch("hades_cli.config.get_missing_config_fields", return_value=[])
+    @patch("hades_cli.config.get_missing_env_vars", return_value=["NEW_KEY"])
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_yes_auto_migrates_without_input(
@@ -89,10 +89,10 @@ class TestUpdateYesConfigMigration:
         # The "Would you like to configure them now?" prompt text never appears.
         assert "Would you like to configure them now?" not in out
 
-    @patch("hermes_cli.config.migrate_config")
-    @patch("hermes_cli.config.check_config_version", return_value=(1, 2))
-    @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
-    @patch("hermes_cli.config.get_missing_env_vars", return_value=["NEW_KEY"])
+    @patch("hades_cli.config.migrate_config")
+    @patch("hades_cli.config.check_config_version", return_value=(1, 2))
+    @patch("hades_cli.config.get_missing_config_fields", return_value=[])
+    @patch("hades_cli.config.get_missing_env_vars", return_value=["NEW_KEY"])
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
     def test_no_yes_flag_still_prompts_in_tty(
@@ -114,9 +114,9 @@ class TestUpdateYesConfigMigration:
         args = SimpleNamespace(yes=False)
 
         # Patch ``sys.stdin.isatty`` and ``sys.stdout.isatty`` directly on the
-        # real ``sys`` module instead of replacing ``hermes_cli.main.sys`` with
+        # real ``sys`` module instead of replacing ``hades_cli.main.sys`` with
         # a MagicMock. The MagicMock approach was flaky under ``pytest-xdist``
-        # — a sibling test that imported ``hermes_cli.main`` first could leave
+        # — a sibling test that imported ``hades_cli.main`` first could leave
         # a different ``sys`` reference resolved inside the function and the
         # mock would never be consulted, with CI then taking the
         # "Non-interactive session" branch instead of prompting.

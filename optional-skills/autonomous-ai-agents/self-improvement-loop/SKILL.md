@@ -2,7 +2,7 @@
 name: self-improvement-loop
 description: Cron reviewer files improvement tasks; kanban workers fix.
 version: 1.0.0
-author: 9thLevelSoftware, Hermes Agent
+author: 9thLevelSoftware, Hades Agent
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
@@ -100,7 +100,7 @@ Survey the improvement sources named in the cron prompt — read-only, using
 the file/web tools you have. You do not have (and must not need) terminal
 access: candidates come from reading, not from running things. Typical
 sources: repo `TODO`/`FIXME` markers, recent cron output failures under
-`~/.hermes/cron/output/`, stale or contradictory docs, gaps the user noted in
+`~/.hades/cron/output/`, stale or contradictory docs, gaps the user noted in
 memory, previously blocked-then-unblocked tasks whose follow-ups were
 deferred.
 

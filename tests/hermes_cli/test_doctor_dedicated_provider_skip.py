@@ -8,14 +8,14 @@ with HTTP 404. The dedicated check at hermes_cli/doctor.py already covers
 Anthropic with the right headers, so the pluggable profile must be
 skipped by `_build_apikey_providers_list()`.
 
-See: NousResearch/hermes-agent#22346
+See: 9thLevelSoftware/hades-agent#22346
 """
 
 from __future__ import annotations
 
 
 def test_build_apikey_providers_list_skips_dedicated_check_providers():
-    from hermes_cli import doctor
+    from hades_cli import doctor
 
     # Force a rebuild — the module caches the list on first call.
     doctor._APIKEY_PROVIDERS_CACHE = None
@@ -40,7 +40,7 @@ def test_build_apikey_providers_list_skips_dedicated_check_providers():
 
 def test_build_apikey_providers_list_includes_non_dedicated_providers():
     """Sanity guard: the skip-set must not strip every provider."""
-    from hermes_cli import doctor
+    from hades_cli import doctor
 
     doctor._APIKEY_PROVIDERS_CACHE = None
     entries = doctor._build_apikey_providers_list()

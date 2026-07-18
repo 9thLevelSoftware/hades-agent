@@ -60,7 +60,7 @@ class TestChatVerboseArg:
     """Verify chat --verbose preserves config fallback when absent."""
 
     def test_chat_without_verbose_leaves_attribute_unset(self):
-        from hermes_cli._parser import build_top_level_parser
+        from hades_cli._parser import build_top_level_parser
 
         parser, _subparsers, _chat_parser = build_top_level_parser()
         args = parser.parse_args(["chat"])
@@ -68,7 +68,7 @@ class TestChatVerboseArg:
         assert not hasattr(args, "verbose")
 
     def test_chat_verbose_sets_attribute_true(self):
-        from hermes_cli._parser import build_top_level_parser
+        from hades_cli._parser import build_top_level_parser
 
         parser, _subparsers, _chat_parser = build_top_level_parser()
         args = parser.parse_args(["chat", "--verbose"])
@@ -79,8 +79,8 @@ class TestChatVerboseArg:
         import types
         import sys
 
-        import hermes_cli.main as main_mod
-        from hermes_cli._parser import build_top_level_parser
+        import hades_cli.main as main_mod
+        from hades_cli._parser import build_top_level_parser
 
         parser, _subparsers, chat_parser = build_top_level_parser()
         chat_parser.set_defaults(func=main_mod.cmd_chat)
@@ -92,13 +92,13 @@ class TestChatVerboseArg:
             captured.update(kwargs)
 
         setattr(fake_cli, "main", fake_main)
-        fake_banner = types.ModuleType("hermes_cli.banner")
+        fake_banner = types.ModuleType("hades_cli.banner")
         setattr(fake_banner, "prefetch_update_check", lambda: None)
         fake_skills_sync = types.ModuleType("tools.skills_sync")
         setattr(fake_skills_sync, "sync_skills", lambda quiet=True: None)
 
         monkeypatch.setitem(sys.modules, "cli", fake_cli)
-        monkeypatch.setitem(sys.modules, "hermes_cli.banner", fake_banner)
+        monkeypatch.setitem(sys.modules, "hades_cli.banner", fake_banner)
         monkeypatch.setitem(sys.modules, "tools.skills_sync", fake_skills_sync)
         monkeypatch.setattr(main_mod, "_has_any_provider_configured", lambda: True)
         monkeypatch.setattr(main_mod, "_pin_kanban_board_env", lambda: None)
@@ -124,25 +124,25 @@ class TestYoloEnvVar:
     def _simulate_cmd_chat_yolo_check(self, args):
         """Replicate the exact check from cmd_chat in main.py."""
         if getattr(args, "yolo", False):
-            os.environ["HERMES_YOLO_MODE"] = "1"
+            os.environ["HADES_YOLO_MODE"] = "1"
 
     def test_yolo_before_chat_sets_env(self):
         parser = _build_parser()
         args = parser.parse_args(["--yolo", "chat"])
         self._simulate_cmd_chat_yolo_check(args)
-        assert os.environ.get("HERMES_YOLO_MODE") == "1"
+        assert os.environ.get("HADES_YOLO_MODE") == "1"
 
     def test_yolo_after_chat_sets_env(self):
         parser = _build_parser()
         args = parser.parse_args(["chat", "--yolo"])
         self._simulate_cmd_chat_yolo_check(args)
-        assert os.environ.get("HERMES_YOLO_MODE") == "1"
+        assert os.environ.get("HADES_YOLO_MODE") == "1"
 
     def test_no_yolo_no_env(self):
         parser = _build_parser()
         args = parser.parse_args(["chat"])
         self._simulate_cmd_chat_yolo_check(args)
-        assert os.environ.get("HERMES_YOLO_MODE") is None
+        assert os.environ.get("HADES_YOLO_MODE") is None
 
 
 class TestAcceptHooksOnAgentSubparsers:
@@ -167,8 +167,8 @@ class TestAcceptHooksOnAgentSubparsers:
         ["acp", "--accept-hooks", "--help"],
     ]
 
-    # One driver subprocess parses ALL argvs: hermes_cli.main is a very heavy
-    # import (previously 11 separate `python -m hermes_cli.main` spawns with a
+    # One driver subprocess parses ALL argvs: hades_cli.main is a very heavy
+    # import (previously 11 separate `python -m hades_cli.main` spawns with a
     # 15s timeout each — a cold import on a loaded CI worker regularly blew
     # that deadline, making this test flaky). Importing once and parsing 11
     # times removes the repeated-import cost entirely; the generous timeout
@@ -178,7 +178,7 @@ class TestAcceptHooksOnAgentSubparsers:
 import io, json, sys
 from contextlib import redirect_stdout, redirect_stderr
 
-import hermes_cli.main as main_mod
+import hades_cli.main as main_mod
 
 argvs = json.loads(sys.argv[1])
 results = []
@@ -230,14 +230,14 @@ class TestChatSubparserInheritedValueFlags:
     `default=None`, which clobbered the top-level parser's value during
     subparser dispatch.
 
-    Uses the real `hermes_cli._parser.build_top_level_parser()` rather than
+    Uses the real `hades_cli._parser.build_top_level_parser()` rather than
     the hand-rolled replica above so this also fails if the production
     parser drifts back to `default=None` on these flags.
     """
 
     @pytest.fixture
     def real_parser(self):
-        from hermes_cli._parser import build_top_level_parser
+        from hades_cli._parser import build_top_level_parser
         parser, _subparsers, _chat = build_top_level_parser()
         return parser
 
@@ -313,7 +313,7 @@ class TestChatSubparserInheritedValueFlags:
         subparser silently overwrites the top-level value with its own
         default during dispatch. This is the structural class behind #28780.
         """
-        from hermes_cli._parser import build_top_level_parser
+        from hades_cli._parser import build_top_level_parser
         parser, _subparsers, chat_parser = build_top_level_parser()
 
         top_level_dests = {

@@ -12,10 +12,10 @@ metadata:
 
 # Hermes Desktop Plugins Skill
 
-Write plugins for the Hermes desktop app: statusbar items, layout panes,
+Write plugins for the Hades desktop app: statusbar items, layout panes,
 command-palette commands, keybinds, routes, and themes. A plugin is a single
 plain-JavaScript ESM file the app loads at runtime — no build step, no repo
-changes. This skill does not cover backend plugins (`~/.hermes/plugins/`);
+changes. This skill does not cover backend plugins (`~/.hades/plugins/`);
 those are Python and documented separately.
 
 ## When to Use
@@ -27,14 +27,14 @@ those are Python and documented separately.
 ## Prerequisites
 
 - The Hermes desktop app (it loads plugins; the CLI/gateway alone does not).
-- Write access to `$HERMES_HOME/desktop-plugins/` (usually
-  `~/.hermes/desktop-plugins/`).
+- Write access to `$HADES_HOME/desktop-plugins/` (usually
+  `~/.hades/desktop-plugins/`).
 
 ## How to Run
 
-1. Create `$HERMES_HOME/desktop-plugins/<name>/plugin.js` from
+1. Create `$HADES_HOME/desktop-plugins/<name>/plugin.js` from
    `templates/plugin.js` (relative to this skill directory) — that's
-   `~/.hermes/...` by default, or `~/.hermes/profiles/<profile>/...` under a
+   `~/.hades/...` by default, or `~/.hades/profiles/<profile>/...` under a
    named profile. Keep `<name>` equal to the plugin `id`.
 2. The desktop app watches that directory: the plugin loads within a few
    seconds of the file landing, and every later save hot-reloads it in

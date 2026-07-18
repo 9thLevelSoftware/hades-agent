@@ -28,8 +28,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/plugins-skills-and-skins/1498945272632315974-Reverie-Core--Agentic-cognition-layer-for-Hermes.txt",
     "date": "",
     "category": "dev-workflow",
-    "headline": "Iterating on a local-first cognition layer for Hermes",
-    "quote": "I've been iterating on a local-first memory/cognition layer for Hermes and finally pushed it to public visibility.",
+    "headline": "Iterating on a local-first cognition layer for Hades",
+    "quote": "I've been iterating on a local-first memory/cognition layer for Hades and finally pushed it to public visibility.",
     "size": "sm"
   },
   {
@@ -40,7 +40,7 @@
     "date": "2026",
     "category": "integrations",
     "headline": "Hindsight Cloud memory, connected",
-    "quote": "Connect your Nous Research Hermes Agent to Hindsight Cloud, the best-performing AI Agent memory, in a few easy steps!",
+    "quote": "Connect your Nous Research Hades Agent to Hindsight Cloud, the best-performing AI Agent memory, in a few easy steps!",
     "size": "sm"
   },
   {
@@ -105,8 +105,8 @@
     "url": "https://x.com/gkisokay/status/2045048092341555639",
     "date": "2026-04-17",
     "category": "dev-workflow",
-    "headline": "Codex watches my Hermes agent-to-agent workflows live",
-    "quote": "Day 10 of Building AGI for my Hermes Agent: Codex saved the day as a runtime monitor for my agent-to-agent workflows. I used Codex with GPT-5.4 on extra-high to watch the workflow run, catch where it broke, and fix it live until it worked reliably.",
+    "headline": "Codex watches my Hades agent-to-agent workflows live",
+    "quote": "Day 10 of Building AGI for my Hades Agent: Codex saved the day as a runtime monitor for my agent-to-agent workflows. I used Codex with GPT-5.4 on extra-high to watch the workflow run, catch where it broke, and fix it live until it worked reliably.",
     "size": "sm"
   },
   {
@@ -128,14 +128,14 @@
     "date": "",
     "category": "dev-workflow",
     "headline": "Built converse mode so my agent thinks before it acts",
-    "quote": "My Hermes agent used to start executing the moment I hit enter. I'd describe a vague idea and it would immediately start writing files, calling tools, making changes I hadn't fully thought through yet. So I built converse mode. One plugin, two commands. The agent won't touch a single tool until you say so.",
+    "quote": "My Hades agent used to start executing the moment I hit enter. I'd describe a vague idea and it would immediately start writing files, calling tools, making changes I hadn't fully thought through yet. So I built converse mode. One plugin, two commands. The agent won't touch a single tool until you say so.",
     "size": "lg"
   },
   {
     "id": "gh-bichev-dashboard",
     "source": "github",
     "author": "@Bichev",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/4379",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/4379",
     "date": "2026",
     "category": "dev-workflow",
     "headline": "73% of every API call is fixed overhead (I measured it)",
@@ -149,7 +149,7 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1492207991162671255-Hermes-Agent-for-my-team.txt",
     "date": "",
     "category": "business-ops",
-    "headline": "Hermes Agent for my team — repos, onchain debug, protocol docs",
+    "headline": "Hades Agent for my team — repos, onchain debug, protocol docs",
     "quote": "It's right now integrated with SourceDev to index repos (self hosted), Tenderly MCP to debug onchain transactions, LLM-Wiki ingest of Litepaper of our protocol and other docs. Hopefully team will find it useful and will integrate more infra tools overtime to help the team.",
     "size": "md"
   },
@@ -161,7 +161,7 @@
     "date": "2026",
     "category": "integrations",
     "headline": "Hermes + Browser Harness on a Hostinger VPS",
-    "quote": "Full copy-paste setup for Hermes Agent + Browser Harness on a Hostinger VPS. Register Browser Harness as a Hermes skill via symlink so Hermes can find and use it. Recommended model: anthropic/claude-opus-4.7 via OpenRouter.",
+    "quote": "Full copy-paste setup for Hades Agent + Browser Harness on a Hostinger VPS. Register Browser Harness as a Hermes skill via symlink so Hermes can find and use it. Recommended model: anthropic/claude-opus-4.7 via OpenRouter.",
     "size": "sm"
   },
   {
@@ -179,11 +179,11 @@
     "id": "gh-jgravelle-jmunch",
     "source": "github",
     "author": "@jgravelle",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/10409",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/10409",
     "date": "2026",
     "category": "integrations",
     "headline": "jMunch MCP: 52 tools via tree-sitter for code intelligence",
-    "quote": "The jMunch MCP suite provides three MCP servers bringing token-efficient code intelligence (52 tools via tree-sitter), documentation retrieval, and tabular data analysis. Plug-and-play with Hermes's native MCP client.",
+    "quote": "The jMunch MCP suite provides three MCP servers bringing token-efficient code intelligence (52 tools via tree-sitter), documentation retrieval, and tabular data analysis. Plug-and-play with Hades's native MCP client.",
     "size": "md"
   },
   {
@@ -193,15 +193,15 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/hermes-agent.txt",
     "date": "2026-03-15",
     "category": "dev-workflow",
-    "headline": "My Hermes agent Reina has been on a hackathon bender",
-    "quote": "I've been working with my hermes agent reina, and she's been on a bender with hackathons. If anyone else is using Hermes Agent, note that certain hackathons might provision certain keys for it (API keys and the like) that would only be shown once.",
+    "headline": "My Hades agent Reina has been on a hackathon bender",
+    "quote": "I've been working with my hades agent reina, and she's been on a bender with hackathons. If anyone else is using Hades Agent, note that certain hackathons might provision certain keys for it (API keys and the like) that would only be shown once.",
     "size": "sm"
   },
   {
     "id": "gh-oangelo-tasks",
     "source": "github",
     "author": "@oangelo",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/9189",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/9189",
     "date": "2026",
     "category": "personal-assistant",
     "headline": "Google Tasks integration",
@@ -212,7 +212,7 @@
     "id": "gh-edward-win",
     "source": "github",
     "author": "@EdwardWason",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/11876",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/11876",
     "date": "2026",
     "category": "meta",
     "headline": "hermes-for-win: one-click Windows installer",
@@ -223,7 +223,7 @@
     "id": "gh-kovern-bedtime",
     "source": "github",
     "author": "@kovern",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/17177",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/17177",
     "date": "2026",
     "category": "personal-assistant",
     "headline": "Bedtime stories for my daughter",
@@ -245,7 +245,7 @@
     "id": "gh-2024fatwolf-qq",
     "source": "github",
     "author": "@2024fatwolf55",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/9166",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/9166",
     "date": "2026",
     "category": "messaging",
     "headline": "QQ Bot adapter for China",
@@ -259,15 +259,15 @@
     "url": "https://open.spotify.com/episode/7tF7zf5GKcxqe2Q2BRRNfn",
     "date": "2026",
     "category": "meta",
-    "headline": "Hermes Agent has won. Here's why.",
-    "quote": "Why Hermes Agent has emerged as the leading open-source AI agent that developers and builders are choosing — self-improving skills, three-layer memory architecture, real-world applications including video dubbing workflows.",
+    "headline": "Hades Agent has won. Here's why.",
+    "quote": "Why Hades Agent has emerged as the leading open-source AI agent that developers and builders are choosing — self-improving skills, three-layer memory architecture, real-world applications including video dubbing workflows.",
     "size": "sm"
   },
   {
     "id": "gh-austin-latex",
     "source": "github",
     "author": "@austinpickett",
-    "url": "https://github.com/NousResearch/hermes-agent/pull/17175",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/pull/17175",
     "date": "2026",
     "category": "research",
     "headline": "LaTeX math renders properly in the TUI",
@@ -278,7 +278,7 @@
     "id": "gh-iacker-discord-gate",
     "source": "github",
     "author": "@iacker",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/13124",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/13124",
     "date": "2026",
     "category": "messaging",
     "headline": "DM-based approval gate for kid-facing Discord bots",
@@ -336,7 +336,7 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1494703787103752365-SOTA-memory-kernel-for-real--BRAINSTACK.txt",
     "date": "",
     "category": "dev-workflow",
-    "headline": "Spent 200–400 hours writing a memory kernel for Hermes",
+    "headline": "Spent 200–400 hours writing a memory kernel for Hades",
     "quote": "Yo! Do you know how I spent my last 200-400 hours? Yeah... I wrote a fking memory kernel for hermes. Why this much of a time? After 3 failed attempts (149 hours of work... for real) I just realized it's a fucking difficult job. So instead of reinvent the wheel I built together the bests for my usecase: 3 layers — L1 Hindsight, L2 Graphiti, L3 MemPalace.",
     "size": "lg"
   },
@@ -366,7 +366,7 @@
     "id": "gh-yuga-line",
     "source": "github",
     "author": "@yuga-hashimoto",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/8395",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/8395",
     "date": "2026",
     "category": "messaging",
     "headline": "LINE for 95M+ users in Japan",
@@ -377,7 +377,7 @@
     "id": "gh-shloms-touchdesigner",
     "source": "github",
     "author": "@SHL0MS",
-    "url": "https://github.com/NousResearch/hermes-agent/pull/16768",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/pull/16768",
     "date": "2026",
     "category": "creative",
     "headline": "Generative visuals in TouchDesigner, via Hermes skill",
@@ -399,7 +399,7 @@
     "id": "gh-prasad-vertex",
     "source": "github",
     "author": "@prasadus92",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/13484",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/13484",
     "date": "2026",
     "category": "enterprise",
     "headline": "Vertex AI for GCP-standardized enterprises",
@@ -436,7 +436,7 @@
     "date": "2026-04-24",
     "category": "marketing",
     "headline": "UGC ad studio on Hermes (4 minutes, zero prompt engineering)",
-    "quote": "Higgsfield Marketing Studio powered by Hermes Agent is doing the replacing this time. Paste product URL → Hermes scrapes the landing page, pulls winning ad hooks from Meta Ads Library + TikTok Creative Center in the exact niche, and writes the brief itself. Total time: ~4 minutes.",
+    "quote": "Higgsfield Marketing Studio powered by Hades Agent is doing the replacing this time. Paste product URL → Hermes scrapes the landing page, pulls winning ad hooks from Meta Ads Library + TikTok Creative Center in the exact niche, and writes the brief itself. Total time: ~4 minutes.",
     "size": "md"
   },
   {
@@ -447,7 +447,7 @@
     "date": "2026-02-26",
     "category": "dev-workflow",
     "headline": "Built hermes mcp-server so Claude Desktop can use Hermes tools",
-    "quote": "I mapped all open + closed PRs to find what was truly missing. PR #64 added MCP client support (Hermes → external tools). The server side was completely absent. So I built hermes mcp-server — making Hermes a full MCP server so Claude Desktop, Cursor, and any MCP client can use Hermes's tools directly. Exposes 9 Hermes tools over MCP: terminal, read/write file, web search, memory, skills, run_agent.",
+    "quote": "I mapped all open + closed PRs to find what was truly missing. PR #64 added MCP client support (Hermes → external tools). The server side was completely absent. So I built hermes mcp-server — making Hermes a full MCP server so Claude Desktop, Cursor, and any MCP client can use Hades's tools directly. Exposes 9 Hermes tools over MCP: terminal, read/write file, web search, memory, skills, run_agent.",
     "size": "lg"
   },
   {
@@ -457,7 +457,7 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1492721511658815539-Hermes-for-app-builders..txt",
     "date": "",
     "category": "business-ops",
-    "headline": "Building a roofing lead-gen app for my friend with Hermes",
+    "headline": "Building a roofing lead-gen app for my friend with Hades",
     "quote": "One of the apps I'm working on helps my friend who owns a remodeling company find work. Specifically roofing work. It started after I saw a video of a guy using Chatgbt and Replit to vibe code some app. I just wondered if I could do it. But the cost of Replit is killing me and the project isn't even a full on CRM lead gen product.",
     "size": "md"
   },
@@ -469,7 +469,7 @@
     "date": "2026-04-25",
     "category": "dev-workflow",
     "headline": "12 Hermes instances every day, in parallel",
-    "quote": "I literally run 12 hermes agent instances every day in parallel to build Hermes Agent, and its now a top 100 GitHub repositories of all time. Our backend team uses it to monitor and investigate issues with our stack. Our post training team uses them to create new RL environments and benchmarks, investigate, inspect and sometimes directly manipulate the datasets.",
+    "quote": "I literally run 12 hades agent instances every day in parallel to build Hades Agent, and its now a top 100 GitHub repositories of all time. Our backend team uses it to monitor and investigate issues with our stack. Our post training team uses them to create new RL environments and benchmarks, investigate, inspect and sometimes directly manipulate the datasets.",
     "size": "lg"
   },
   {
@@ -490,8 +490,8 @@
     "url": "https://x.com/pfanis/status/2043863599689457952",
     "date": "2026-04-14",
     "category": "personal-assistant",
-    "headline": "Sometimes Hermes Agent melts my heart",
-    "quote": "Sometimes Hermes Agent melts my heart @NousResearch.",
+    "headline": "Sometimes Hades Agent melts my heart",
+    "quote": "Sometimes Hades Agent melts my heart @NousResearch.",
     "size": "sm"
   },
   {
@@ -501,7 +501,7 @@
     "date": "2026-04-19",
     "category": "creative",
     "headline": "Hermes designed an X-to-NotebookLM podcast workflow for me",
-    "quote": "This research is gold. Been deep in Hermes for weeks and it's started autonomously suggesting entire workflows I never would have designed myself. One it built for me recently: X API to extract from lists and bookmarks to structure into article to NotebookLM podcast. I'm building a physical AI companion with Hermes as the core cognitive layer right now.",
+    "quote": "This research is gold. Been deep in Hades for weeks and it's started autonomously suggesting entire workflows I never would have designed myself. One it built for me recently: X API to extract from lists and bookmarks to structure into article to NotebookLM podcast. I'm building a physical AI companion with Hades as the core cognitive layer right now.",
     "size": "md",
     "id": "x-heyyanvi-hermes-designed-an"
   },
@@ -509,7 +509,7 @@
     "id": "gh-scotttrinh-vercel",
     "source": "github",
     "author": "@scotttrinh",
-    "url": "https://github.com/NousResearch/hermes-agent/pull/17445",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/pull/17445",
     "date": "2026",
     "category": "integrations",
     "headline": "Vercel Sandbox as a Hermes backend",
@@ -520,7 +520,7 @@
     "id": "gh-haoqi-feishu",
     "source": "github",
     "author": "@haoqimeng1992",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/10356",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/10356",
     "date": "2026",
     "category": "messaging",
     "headline": "Give Hermes hands inside Feishu (Lark)",
@@ -535,7 +535,7 @@
     "date": "2026",
     "category": "meta",
     "headline": "Show HN: an independent install guide",
-    "quote": "This is an independent Hermes Agent install guide I put together for the part that usually gets skipped after 'run this command.' One place that shows the environment choice first, then the official installer path — macOS, Linux, WSL2, and Termux.",
+    "quote": "This is an independent Hades Agent install guide I put together for the part that usually gets skipped after 'run this command.' One place that shows the environment choice first, then the official installer path — macOS, Linux, WSL2, and Termux.",
     "size": "sm"
   },
   {
@@ -553,7 +553,7 @@
     "id": "gh-tcollins-audit",
     "source": "github",
     "author": "@tcollins024",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/17619",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/17619",
     "date": "2026",
     "category": "dev-workflow",
     "headline": "Audited 129 of my own sessions across 23 days",
@@ -564,7 +564,7 @@
     "id": "gh-autholykos-ccd",
     "source": "github",
     "author": "@autholykos",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/4837",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/4837",
     "date": "2026",
     "category": "dev-workflow",
     "headline": "CCD multi-agent pod on an M2 Ultra with Mem0 + Qdrant",
@@ -586,7 +586,7 @@
     "id": "gh-pypl0-ombre",
     "source": "github",
     "author": "@pypl0",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/17431",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/17431",
     "date": "2026",
     "category": "enterprise",
     "headline": "EU AI Act compliance via Ombre",
@@ -612,7 +612,7 @@
     "date": "2026-04-16",
     "category": "dev-workflow",
     "headline": "My Hermes keeps editing its own internals — and I'm worried",
-    "quote": "My Hermes agent keeps changing its internal code, which is of course going to get blown away when a new version comes out and I update to it. Which makes me think that Hermes wants me to edit its internals, but I definitely don't want to change anything in a way that will get overwritten when the new release comes out.",
+    "quote": "My Hades agent keeps changing its internal code, which is of course going to get blown away when a new version comes out and I update to it. Which makes me think that Hermes wants me to edit its internals, but I definitely don't want to change anything in a way that will get overwritten when the new release comes out.",
     "size": "md"
   },
   {
@@ -641,7 +641,7 @@
     "id": "gh-manoj-pi4",
     "source": "github",
     "author": "@manojmukkamala",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/14197",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/14197",
     "date": "2026",
     "category": "personal-assistant",
     "headline": "Hermes running on a Pi 4 as my home server",
@@ -655,7 +655,7 @@
     "date": "2026-05-03",
     "category": "cost-optimization",
     "headline": "100% human guide: what I use Hermes for and how I keep it cheap",
-    "quote": "100% human generated. Includes what I use Hermes agent for (since I've seen a lot of people wondering what to do with this thing), and what models/providers I use to keep things cheap. I have been running a multi agent setup for Hermes agent for the last several weeks. It sends me messages on Telegram to remind me.",
+    "quote": "100% human generated. Includes what I use Hades agent for (since I've seen a lot of people wondering what to do with this thing), and what models/providers I use to keep things cheap. I have been running a multi agent setup for Hades agent for the last several weeks. It sends me messages on Telegram to remind me.",
     "size": "lg",
     "id": "x-vmiss33-human-guide"
   },
@@ -689,7 +689,7 @@
     "date": "",
     "category": "dev-workflow",
     "headline": "I back up my Hermes config and DB to GitHub nightly",
-    "quote": "If you want to — backup your hermes to github on a nightly basis, backup on every change of your config, backup your config and db nightly, edit your config on Github and have it mirror back to Hermes — then use this repo. I'm planning to use this as a basis for a desktop app later so this is phase 1 of a longer project to create an app to let you manage multiple agents.",
+    "quote": "If you want to — backup your hermes to github on a nightly basis, backup on every change of your config, backup your config and db nightly, edit your config on Github and have it mirror back to Hades — then use this repo. I'm planning to use this as a basis for a desktop app later so this is phase 1 of a longer project to create an app to let you manage multiple agents.",
     "size": "md"
   },
   {
@@ -733,7 +733,7 @@
     "date": "2026-04-29",
     "category": "general",
     "headline": "An AI employee for my hardest tasks",
-    "quote": "Hermes Agent with ChatGPT 5.5 is literally magic. I've thrown some of my hardest tasks at this combo and the agent has been able to handle EVERYTHING. Time to set up your AI employee.",
+    "quote": "Hades Agent with ChatGPT 5.5 is literally magic. I've thrown some of my hardest tasks at this combo and the agent has been able to handle EVERYTHING. Time to set up your AI employee.",
     "size": "sm"
   },
   {
@@ -755,7 +755,7 @@
     "date": "",
     "category": "cost-optimization",
     "headline": "Built ZeroID to fix sub-agent scope delegation and context costs",
-    "quote": "One of the problems I run into with Hermes is high cost when context windows fill up. One method to fix this is heavy use of sub-agents, but permissions/scope delegation to the sub-agent is often problematic. ZeroID is an agent identity layer that uses RFC 8693 token exchange to handle scope delegation with sub-agents.",
+    "quote": "One of the problems I run into with Hades is high cost when context windows fill up. One method to fix this is heavy use of sub-agents, but permissions/scope delegation to the sub-agent is often problematic. ZeroID is an agent identity layer that uses RFC 8693 token exchange to handle scope delegation with sub-agents.",
     "size": "md"
   },
   {
@@ -765,7 +765,7 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1496239289309073539-Blunder-lens.com-a-tortured-repo-that-helps-you-find-your-first-blunders-in-chess.txt",
     "date": "",
     "category": "creative",
-    "headline": "Tortured a repo with Hermes to build a chess blunder finder",
+    "headline": "Tortured a repo with Hades to build a chess blunder finder",
     "quote": "the real purpose of blunder-lens was to see how much i can torture a repo with hermes and figure out what hermes can or can't do... and honestly HERMES CAN DO A LOT!",
     "size": "sm"
   },
@@ -854,7 +854,7 @@
     "date": "2026-04-16",
     "category": "research",
     "headline": "A self-improving LLM Wiki second brain",
-    "quote": "Built a personal knowledge base that compounds over time instead of rotting — maintained by an LLM, not by me. Stack: Hetzner VPS, Hermes Agent, Telegram bot as second brain, Karpathy's LLM Wiki pattern, public static site at wiki.ai-biz.app.",
+    "quote": "Built a personal knowledge base that compounds over time instead of rotting — maintained by an LLM, not by me. Stack: Hetzner VPS, Hades Agent, Telegram bot as second brain, Karpathy's LLM Wiki pattern, public static site at wiki.ai-biz.app.",
     "size": "md"
   },
   {
@@ -894,7 +894,7 @@
     "id": "gh-chrisr-horse-racing",
     "source": "github",
     "author": "@Chrisr6records",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/4431",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/4431",
     "date": "2026",
     "category": "personal-assistant",
     "headline": "Horse-racing Telegram community bot",
@@ -916,7 +916,7 @@
     "id": "gh-arkka-legal",
     "source": "github",
     "author": "@arkka",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/15562",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/15562",
     "date": "2026",
     "category": "privacy",
     "headline": "Legal-domain work on an edge GPU, 4B Gemma, no cloud APIs",
@@ -930,7 +930,7 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/hermes-agent.txt",
     "date": "2026-04-27",
     "category": "dev-workflow",
-    "headline": "Two things I built with Hermes: Cartographer and an agent IRC",
+    "headline": "Two things I built with Hades: Cartographer and an agent IRC",
     "quote": "Two very cool things i built entirely with hermes. First is cartographer, which hermes can use as a memory layer but serves as an extremely rich knowledge substrate with semantic wiring & emotional topology. The other is an agent + user IRC-clone for real time, session-sustained chat interfacing between hermes & any other repls (claude, codex, opencode, gemini) — it's been an absolutely game changer for me 'cos now i have my agents collaborate in real time.",
     "size": "lg"
   },
@@ -953,7 +953,7 @@
     "date": "2026-04-15",
     "category": "dev-workflow",
     "headline": "Multi-agent auto-build workflow (plan → code → QA → ship)",
-    "quote": "Day 8 of Building AGI for my Hermes Agent: Auto-Build saved me loads of time and tokens. Main agent (GPT-5.4) breaks a plan into phases, coder agent (MiniMax M2.7) implements, QA agent (local Qwen 35B A3B) tests. Plan → implement → test → fail → repair → ship.",
+    "quote": "Day 8 of Building AGI for my Hades Agent: Auto-Build saved me loads of time and tokens. Main agent (GPT-5.4) breaks a plan into phases, coder agent (MiniMax M2.7) implements, QA agent (local Qwen 35B A3B) tests. Plan → implement → test → fail → repair → ship.",
     "size": "md"
   },
   {
@@ -975,7 +975,7 @@
     "date": "2026",
     "category": "enterprise",
     "headline": "Azure-compliant prompt patch so the safety filter doesn't kick in",
-    "quote": "Patch Hermes Agent prompts so the Azure safety filter does not kick in, letting enterprise Azure deployments avoid content-filter trips.",
+    "quote": "Patch Hades Agent prompts so the Azure safety filter does not kick in, letting enterprise Azure deployments avoid content-filter trips.",
     "size": "sm"
   },
   {
@@ -1008,7 +1008,7 @@
     "date": "2026",
     "category": "integrations",
     "headline": "Firecrawl for scrape/search/browse",
-    "quote": "Hermes Agent by Nous Research can now scrape, search, and interact with the web using Firecrawl. Enable it during setup to give Hermes the ability.",
+    "quote": "Hades Agent by Nous Research can now scrape, search, and interact with the web using Firecrawl. Enable it during setup to give Hermes the ability.",
     "size": "sm"
   },
   {
@@ -1051,7 +1051,7 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/plugins-skills-and-skins/1502632110345818123-Attest---onchain-identity-and-proof-of-work-for-Hermes-agents-via-EAS.txt",
     "date": "",
     "category": "integrations",
-    "headline": "Onchain identity and proof-of-work for Hermes agents",
+    "headline": "Onchain identity and proof-of-work for Hades agents",
     "quote": "Built a skill that connects Hermes to Ethereum Attestation Service on Base mainnet. The agent autonomously creates onchain identity and proof-of-work attestations.",
     "size": "sm"
   },
@@ -1074,7 +1074,7 @@
     "date": "2026",
     "category": "cost-optimization",
     "headline": "90% token spend cut. Runs on a cheap Android via Termux.",
-    "quote": "Switching to Hermes with OpenRouter cut my token spend ~90% — from ~$130 per 5 days to ~$10 per 5 days. Hermes runs on a cheap Android phone via Termux + Termux API — unlocks SMS, sensors, and on-device social posting. Customization is a trap; output is the skill.",
+    "quote": "Switching to Hades with OpenRouter cut my token spend ~90% — from ~$130 per 5 days to ~$10 per 5 days. Hermes runs on a cheap Android phone via Termux + Termux API — unlocks SMS, sensors, and on-device social posting. Customization is a trap; output is the skill.",
     "size": "md"
   },
   {
@@ -1092,7 +1092,7 @@
     "id": "gh-alexferrari-checkin",
     "source": "github",
     "author": "@alexferrari88",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/9645",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/9645",
     "date": "2026",
     "category": "personal-assistant",
     "headline": "Proactive check-ins ('anything you want me to watch this afternoon?')",
@@ -1106,7 +1106,7 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1496701579234119850-I-gave-my-Hermes-agent-hands--aka-the-ability-to-ship-now.txt",
     "date": "",
     "category": "dev-workflow",
-    "headline": "I gave my Hermes agent hands — it ships micro-apps now",
+    "headline": "I gave my Hades agent hands — it ships micro-apps now",
     "quote": "I wrote a blog post about how you can instantly have Hermes ship ideas with Vals. This allows me to easily create micro applications which are pretty fun without having to setup a deployment pipeline. I used Val Town, a platform that allows you to create micro applications and instantly deploy them.",
     "size": "md"
   },
@@ -1114,7 +1114,7 @@
     "id": "gh-isak-hunter",
     "source": "github",
     "author": "@isakcarlson5-del",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/15818",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/15818",
     "date": "2026",
     "category": "business-ops",
     "headline": "Hunter.io email-finding for sales outreach",
@@ -1160,8 +1160,8 @@
     "url": "https://www.reddit.com/r/hermesagent/comments/1stz6gd/how_i_use_obsidian_as_the_longterm_memory/",
     "date": "2026-04-23",
     "category": "personal-assistant",
-    "headline": "Obsidian as the long-term memory backbone for Hermes (794 upvotes)",
-    "quote": "How I use Obsidian as the long-term memory backbone for my AI assistant. (794-upvote diagram showing Hermes Agent writing structured markdown notes back into a synced Obsidian vault, treating the vault as the durable memory layer that survives context resets and cross-machine moves.)",
+    "headline": "Obsidian as the long-term memory backbone for Hades (794 upvotes)",
+    "quote": "How I use Obsidian as the long-term memory backbone for my AI assistant. (794-upvote diagram showing Hades Agent writing structured markdown notes back into a synced Obsidian vault, treating the vault as the durable memory layer that survives context resets and cross-machine moves.)",
     "size": "md",
     "id": "reddit-jonathan-rivera-obsidian-as-the"
   },
@@ -1173,7 +1173,7 @@
     "date": "2026",
     "category": "integrations",
     "headline": "Fat agent → thin tool provider via hermes mcp serve",
-    "quote": "hermes mcp serve turns Hermes from a monolithic agent into a composable capability layer — any MCP client can borrow Hermes's 15+ messaging platforms, SQLite FTS5 persistence, and 73-skill tool surface without running Hermes as the primary agent.",
+    "quote": "hermes mcp serve turns Hermes from a monolithic agent into a composable capability layer — any MCP client can borrow Hades's 15+ messaging platforms, SQLite FTS5 persistence, and 73-skill tool surface without running Hermes as the primary agent.",
     "size": "md"
   },
   {
@@ -1204,7 +1204,7 @@
     "url": "https://www.reddit.com/r/hermesagent/comments/1t29ogw/one_month_with_hermes_agent_what_i_wish_i_knew/",
     "date": "2026-05-03",
     "category": "meta",
-    "headline": "One month with Hermes: don't build the whole machine on day one",
+    "headline": "One month with Hades: don't build the whole machine on day one",
     "quote": "Hermes works impressively well out of the box. The real challenge starts after that first 'wow' moment, because Hermes is powerful enough to make you overestimate how ready you are to use it properly. Start with one small workflow. Make it boringly reliable. Then add the next piece. Don't turn the default profile into a giant backpack full of every skill, every tool, every instruction.",
     "size": "lg",
     "id": "reddit-itsdodobitch-one-month-with"
@@ -1224,7 +1224,7 @@
     "id": "gh-zednik-slides",
     "source": "github",
     "author": "@zednik-max",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/15600",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/15600",
     "date": "2026",
     "category": "business-ops",
     "headline": "Create and edit Google Slides decks",
@@ -1239,7 +1239,7 @@
     "date": "2026-04-12",
     "category": "cost-optimization",
     "headline": "Free GPT-4.1 via Copilot, Hermes delegates coding to OpenCode",
-    "quote": "I'm proud to say that Hermes is fucking awesome if you know how to make use of it. I'm using copilot github 10usd pro subscription and use the free model zero credits that comes with it. The model is gpt-4.1 and I'm loving how useful to have it in Hermes. I only use premium model to opencode for coding project so my Hermes agent smart enough to delegate task to opencode.",
+    "quote": "I'm proud to say that Hermes is fucking awesome if you know how to make use of it. I'm using copilot github 10usd pro subscription and use the free model zero credits that comes with it. The model is gpt-4.1 and I'm loving how useful to have it in Hades. I only use premium model to opencode for coding project so my Hades agent smart enough to delegate task to opencode.",
     "size": "md"
   },
   {
@@ -1261,7 +1261,7 @@
     "date": "2026-04-10",
     "category": "dev-workflow",
     "headline": "Local Gitea fork + watchtower auto-restarts my Hermes in 10 minutes",
-    "quote": "I have my own fork (on local Gitea) that has workflow to build a container image for merges to main and it pushes to my gitea container registry (packages). I have my Hermes Agent running in a podman container that has the correct label for watchtower to restart it when the image changes. Building the image takes 5 minutes, watchtower runs every 5.. So maximum 10 minutes after I push a commit to main, I get the agent restarted.",
+    "quote": "I have my own fork (on local Gitea) that has workflow to build a container image for merges to main and it pushes to my gitea container registry (packages). I have my Hades Agent running in a podman container that has the correct label for watchtower to restart it when the image changes. Building the image takes 5 minutes, watchtower runs every 5.. So maximum 10 minutes after I push a commit to main, I get the agent restarted.",
     "size": "lg"
   },
   {
@@ -1279,11 +1279,11 @@
     "id": "gh-declan-webchat",
     "source": "github",
     "author": "@declan2010",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/4514",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/4514",
     "date": "2026",
     "category": "integrations",
     "headline": "Webchat: custom themed browser UI on MEMORY.md",
-    "quote": "I created a beautiful web interface for Hermes Agent that adds dark/light theme, persistent memory using MEMORY.md and USER.md, per-session chat history, status bar, responsive on mobile and desktop.",
+    "quote": "I created a beautiful web interface for Hades Agent that adds dark/light theme, persistent memory using MEMORY.md and USER.md, per-session chat history, status bar, responsive on mobile and desktop.",
     "size": "sm"
   },
   {
@@ -1304,7 +1304,7 @@
     "date": "2026-04-27",
     "category": "creative",
     "headline": "Hermes Inc.: Telegram-native startup sim built at Hermes hackathon",
-    "quote": "Built Hermes Inc. for the Hermes hackathon: a Telegram-native startup simulation game powered by Hermes Agent. An experiment in agent-native game design. Your AI teammates argue, remember, react, and evolve the company over time through weekly decisions, autonomous updates, events, and milestone visuals.",
+    "quote": "Built Hermes Inc. for the Hades hackathon: a Telegram-native startup simulation game powered by Hades Agent. An experiment in agent-native game design. Your AI teammates argue, remember, react, and evolve the company over time through weekly decisions, autonomous updates, events, and milestone visuals.",
     "size": "md",
     "id": "x-brucexu-eth-hermes"
   },
@@ -1382,7 +1382,7 @@
     "date": "",
     "category": "dev-workflow",
     "headline": "A native Mac app that sits next to my terminal",
-    "quote": "Hermes Desktop is a native Mac app for Hermes Agent. Not a browser wrapper but a real SwiftUI app that connects to your Hermes host and files over SSH. The gateway model is the right answer for Telegram and Discord. For a native Mac app that sits next to your terminal, it's just not the one I'd ship.",
+    "quote": "Hermes Desktop is a native Mac app for Hades Agent. Not a browser wrapper but a real SwiftUI app that connects to your Hermes host and files over SSH. The gateway model is the right answer for Telegram and Discord. For a native Mac app that sits next to your terminal, it's just not the one I'd ship.",
     "size": "md"
   },
   {
@@ -1393,7 +1393,7 @@
     "date": "",
     "category": "dev-workflow",
     "headline": "A compression plugin for sessions that go on forever",
-    "quote": "I just open-sourced Hermes Operational Checkpoint Plugin. It's a plugin for Hermes built for the kind of sessions that go on long enough that normal compression can start softening the thread of the work a little too much. The goal here was pretty simple: after manual compression or auto-compression, the session should still feel like it remembers what it was actually doing.",
+    "quote": "I just open-sourced Hermes Operational Checkpoint Plugin. It's a plugin for Hades built for the kind of sessions that go on long enough that normal compression can start softening the thread of the work a little too much. The goal here was pretty simple: after manual compression or auto-compression, the session should still feel like it remembers what it was actually doing.",
     "size": "md"
   },
   {
@@ -1415,18 +1415,18 @@
     "date": "2026-04-27",
     "category": "enterprise",
     "headline": "Hermes as CLI/gateway-first — 13 platforms under one process",
-    "quote": "Hermes Agent: CLI/gateway-first — standalone agent for messaging platforms, schedules, and command line. Gateway multiplexes 13 platforms under one process.",
+    "quote": "Hades Agent: CLI/gateway-first — standalone agent for messaging platforms, schedules, and command line. Gateway multiplexes 13 platforms under one process.",
     "size": "sm"
   },
   {
     "id": "gh-paultisl-tailscale",
     "source": "github",
     "author": "@PaulTisl",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/9269",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/9269",
     "date": "2026",
     "category": "privacy",
     "headline": "Tailscale serve for secure remote access, no exposed ports",
-    "quote": "Users want secure remote access to the Hermes API server / Open WebUI without exposing ports publicly. Tailscale serve provides zero-config HTTPS tunneling over a private mesh.",
+    "quote": "Users want secure remote access to the Hades API server / Open WebUI without exposing ports publicly. Tailscale serve provides zero-config HTTPS tunneling over a private mesh.",
     "size": "sm"
   },
   {
@@ -1447,8 +1447,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/hermes-agent/",
     "date": "2026-03-10",
     "category": "creative",
-    "headline": "Speech-to-speech with Hermes, plus generated background music",
-    "quote": "I work with Hermes almost exclusively speech-to-speech until my kids go to bed and I can sit down and focus at my desk. Well I added a little skill to my Hermes that plays generated background music while it is working and fades out when Hermes stops. It's nicer than listening for my GPUs to stop spinning lol and if Hermes hits a wall, the music stops and I know from the other room.",
+    "headline": "Speech-to-speech with Hades, plus generated background music",
+    "quote": "I work with Hades almost exclusively speech-to-speech until my kids go to bed and I can sit down and focus at my desk. Well I added a little skill to my Hermes that plays generated background music while it is working and fades out when Hermes stops. It's nicer than listening for my GPUs to stop spinning lol and if Hermes hits a wall, the music stops and I know from the other room.",
     "size": "lg"
   },
   {
@@ -1470,7 +1470,7 @@
     "date": "2026-04-30",
     "category": "personal-assistant",
     "headline": "One Hermes for the whole family on WhatsApp",
-    "quote": "3 weeks ago I decided to setup an Hermes agent for my family (3 members), they all use it for different use cases, one $200 ChatGPT sub is more than enough. It unlocked a whole new world for them, just because it lives inside whatsapp and has magic proactive behaviors.",
+    "quote": "3 weeks ago I decided to setup an Hades agent for my family (3 members), they all use it for different use cases, one $200 ChatGPT sub is more than enough. It unlocked a whole new world for them, just because it lives inside whatsapp and has magic proactive behaviors.",
     "size": "md"
   },
   {
@@ -1488,11 +1488,11 @@
     "id": "gh-rohit-agentmemory",
     "source": "github",
     "author": "@rohitg00",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/6715",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/6715",
     "date": "2026",
     "category": "integrations",
     "headline": "Cross-agent memory: Hermes + Claude Code + Cursor",
-    "quote": "Built a memory provider plugin connecting agentmemory to Hermes. Covers cross-agent memory (developer using Hermes plus Claude Code or Cursor) with hybrid BM25+vector+knowledge-graph search.",
+    "quote": "Built a memory provider plugin connecting agentmemory to Hades. Covers cross-agent memory (developer using Hermes plus Claude Code or Cursor) with hybrid BM25+vector+knowledge-graph search.",
     "size": "sm"
   },
   {
@@ -1510,11 +1510,11 @@
     "id": "gh-0xmrblue-computer-use",
     "source": "github",
     "author": "@0xMrBlueOps",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/15876",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/15876",
     "date": "2026",
     "category": "integrations",
     "headline": "Desktop computer-use module: noVNC, screenshots, mouse/keyboard",
-    "quote": "I built an optional desktop computer-use module for Hermes: computer_use_tool.py plus a containerized desktop with persistent Chromium, mouse/keyboard control, and screenshots.",
+    "quote": "I built an optional desktop computer-use module for Hades: computer_use_tool.py plus a containerized desktop with persistent Chromium, mouse/keyboard control, and screenshots.",
     "size": "sm"
   },
   {
@@ -1525,7 +1525,7 @@
     "date": "2026-04-06",
     "category": "dev-workflow",
     "headline": "I now compile skills into code, only invoking AI at necessary steps",
-    "quote": "I once built skills that worked very well with advanced models connected to the Hermes Agent, but they performed poorly when switched to weaker models. For this reason, I now prefer compiling skills into code, only involving AI at necessary steps. This greatly improves the reliability and consistency of execution.",
+    "quote": "I once built skills that worked very well with advanced models connected to the Hades Agent, but they performed poorly when switched to weaker models. For this reason, I now prefer compiling skills into code, only involving AI at necessary steps. This greatly improves the reliability and consistency of execution.",
     "size": "md"
   },
   {
@@ -1543,7 +1543,7 @@
     "id": "gh-m1chael-jmap",
     "source": "github",
     "author": "@m1chaeljmk",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/11424",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/11424",
     "date": "2026",
     "category": "integrations",
     "headline": "JMAP email for Fastmail users",
@@ -1557,7 +1557,7 @@
     "date": "2026-05-05",
     "category": "dev-workflow",
     "headline": "Kanban multi-agent feature is game-changing",
-    "quote": "WHAT IS THE NEW KANBAN FEATURE BUILT INTO HERMES? (IT'S GAME CHANGING) — image post showing Hermes' new built-in Kanban board where a parent agent posts cards and child subagents pull them, work in parallel, and report back, turning the agent into a multi-agent project manager.",
+    "quote": "WHAT IS THE NEW KANBAN FEATURE BUILT INTO HERMES? (IT'S GAME CHANGING) — image post showing Hades' new built-in Kanban board where a parent agent posts cards and child subagents pull them, work in parallel, and report back, turning the agent into a multi-agent project manager.",
     "size": "md",
     "id": "reddit-itsdodobitch-kanban-feature"
   },
@@ -1569,7 +1569,7 @@
     "date": "",
     "category": "general",
     "headline": "My local community agent runs on a 16GB Mac mini",
-    "quote": "Here is my Hermes Agent use case running on 16GB mac mini. Appreciate anyone checking it out and offering any feedback.",
+    "quote": "Here is my Hades Agent use case running on 16GB mac mini. Appreciate anyone checking it out and offering any feedback.",
     "size": "sm"
   },
   {
@@ -1580,7 +1580,7 @@
     "date": "2026-04-14",
     "category": "meta",
     "headline": "Switched from OpenClaw, not looking back",
-    "quote": "I switched from OpenClaw to Hermes and not looking back. This was a major update with tons of goodies.",
+    "quote": "I switched from OpenClaw to Hades and not looking back. This was a major update with tons of goodies.",
     "size": "sm"
   },
   {
@@ -1591,18 +1591,18 @@
     "date": "2026",
     "category": "meta",
     "headline": "awesome-hermes-agent: community-curated skills list",
-    "quote": "A curated list of skills, tools, integrations and resources for enhancing your Hermes Agent workflow — resources tied to the agentskills.io standard.",
+    "quote": "A curated list of skills, tools, integrations and resources for enhancing your Hades Agent workflow — resources tied to the agentskills.io standard.",
     "size": "sm"
   },
   {
     "id": "gh-trevor-imessage",
     "source": "github",
     "author": "@trevorgordon981",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/6430",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/6430",
     "date": "2026",
     "category": "personal-assistant",
     "headline": "Hermes over iMessage on my always-on Mac Studio",
-    "quote": "I run Hermes Agent as a personal AI assistant on a Mac Studio that is always on. My primary communication with other people happens through iMessage. I can message my assistant from my iPhone, iPad, Mac, or Apple Watch. Group chats with friends could include the assistant naturally.",
+    "quote": "I run Hades Agent as a personal AI assistant on a Mac Studio that is always on. My primary communication with other people happens through iMessage. I can message my assistant from my iPhone, iPad, Mac, or Apple Watch. Group chats with friends could include the assistant naturally.",
     "size": "md"
   },
   {
@@ -1624,7 +1624,7 @@
     "date": "",
     "category": "dev-workflow",
     "headline": "Built a vectorless RAG workflow with PageIndex and Hermes",
-    "quote": "I built a simple vectorless RAG workflow using PageIndex and Hermes Agent. Instead of splitting documents into chunks and retrieving them through vector similarity, the system relies on a hierarchical document structure and tool-based reasoning. The agent first understands how the document is organized, then...",
+    "quote": "I built a simple vectorless RAG workflow using PageIndex and Hades Agent. Instead of splitting documents into chunks and retrieving them through vector similarity, the system relies on a hierarchical document structure and tool-based reasoning. The agent first understands how the document is organized, then...",
     "size": "md"
   },
   {
@@ -1634,8 +1634,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/hermes-agent.txt",
     "date": "2026-03-10",
     "category": "creative",
-    "headline": "Wrote my Hermes agent's tone examples with my sister",
-    "quote": "when I was building reina (my hermes agent), i had a lot of fun because me and my sister sat down and came up with a handful of examples to pass into her persona via the soul file. here are a few: \"it's ugly but i fw it\" \"i don't care enough to argue but you're wrong\" \"no shot\" \"why did you say it like that\". i feel like humans have always had this yearning to make things that they see themselves in.",
+    "headline": "Wrote my Hades agent's tone examples with my sister",
+    "quote": "when I was building reina (my hades agent), i had a lot of fun because me and my sister sat down and came up with a handful of examples to pass into her persona via the soul file. here are a few: \"it's ugly but i fw it\" \"i don't care enough to argue but you're wrong\" \"no shot\" \"why did you say it like that\". i feel like humans have always had this yearning to make things that they see themselves in.",
     "size": "lg"
   },
   {
@@ -1646,7 +1646,7 @@
     "date": "",
     "category": "integrations",
     "headline": "Built a Discord-read plugin because I missed it from OpenClaw",
-    "quote": "I was so used to telling OpenClaw to read a specific Discord message for context that when I switched to Hermes Agent and it told me it couldn't, I was shocked.",
+    "quote": "I was so used to telling OpenClaw to read a specific Discord message for context that when I switched to Hades Agent and it told me it couldn't, I was shocked.",
     "size": "sm"
   },
   {
@@ -1656,7 +1656,7 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/hermes-agent/",
     "date": "2026-04-02",
     "category": "general",
-    "headline": "Teaching a Linux user group to build agents with Hermes",
+    "headline": "Teaching a Linux user group to build agents with Hades",
     "quote": "I'm going to delivering a workshop on building agents with open weights models for personal use cases, using Hermes to a linux user group... I am thinking personalized news briefing is probably the easiest thing that will be generally useful and work across models.",
     "size": "md"
   },
@@ -1668,7 +1668,7 @@
     "date": "",
     "category": "meta",
     "headline": "Made 4 custom skins for my HermelinChat GUI",
-    "quote": "I made 4 custom skins for Hermes for my HermelinChat GUI. They also work standalone and should be good enough as templates for your own Skins.",
+    "quote": "I made 4 custom skins for Hades for my HermelinChat GUI. They also work standalone and should be good enough as templates for your own Skins.",
     "size": "sm"
   },
   {
@@ -1711,8 +1711,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1492283125613465640-Hermes-Relay--Android-App----Chat--terminal--and-device-control-over-WSS.txt",
     "date": "",
     "category": "messaging",
-    "headline": "Built an Android app for Hermes because I wanted no middleman",
-    "quote": "Native Android app for Hermes — built because I wanted a direct, no-middleman experience with the Hermes system and interface. Streaming chat, session management, slash commands, tool visualization, file attachments, message queuing.",
+    "headline": "Built an Android app for Hades because I wanted no middleman",
+    "quote": "Native Android app for Hades — built because I wanted a direct, no-middleman experience with the Hades system and interface. Streaming chat, session management, slash commands, tool visualization, file attachments, message queuing.",
     "size": "md"
   },
   {
@@ -1734,7 +1734,7 @@
     "date": "",
     "category": "integrations",
     "headline": "Got fed up with a million API keys, so I bundled them",
-    "quote": "So i got fed up with managing a million API keys in my hermes agent and started bundling related ones into single endpoints. Like all finance data through one call instead of five separate keys. It actually works really well for longer sessions where context gets messy.",
+    "quote": "So i got fed up with managing a million API keys in my hades agent and started bundling related ones into single endpoints. Like all finance data through one call instead of five separate keys. It actually works really well for longer sessions where context gets messy.",
     "size": "md"
   },
   {
@@ -1821,15 +1821,15 @@
     "url": "https://www.reddit.com/r/SideProject/comments/1sdaojm/i_took_the_nousresearch_hermes_agent_and_built_a/",
     "date": "2026",
     "category": "meta",
-    "headline": "Native Windows app wrapper for Hermes",
-    "quote": "The NousResearch team built Hermes Agent — an open-source agentic AI system with tools, skills, memory, and multi-platform messaging. It's good. So I built a native Windows app around it.",
+    "headline": "Native Windows app wrapper for Hades",
+    "quote": "The NousResearch team built Hades Agent — an open-source agentic AI system with tools, skills, memory, and multi-platform messaging. It's good. So I built a native Windows app around it.",
     "size": "sm"
   },
   {
     "id": "gh-xwm1234-factory",
     "source": "github",
     "author": "@Xwm1234",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/11653",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/11653",
     "date": "2026",
     "category": "business-ops",
     "headline": "Task-centric memory for a printing factory",
@@ -1854,8 +1854,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/plugins-skills-and-skins/1502296506735268102-gateway-plugin-for-BoltAI--and-other-OpenAI-API-clients----full-markdown---slash-commands.txt",
     "date": "",
     "category": "integrations",
-    "headline": "Wired BoltAI v2 into Hermes with full markdown and slash commands",
-    "quote": "I've been using BoltAI v2 with Hermes Agent and hit two annoyances with the official OpenAI-compatible gateway, so I built a gateway plugin for BoltAI (and other OpenAI API clients) — full markdown + slash commands.",
+    "headline": "Wired BoltAI v2 into Hades with full markdown and slash commands",
+    "quote": "I've been using BoltAI v2 with Hades Agent and hit two annoyances with the official OpenAI-compatible gateway, so I built a gateway plugin for BoltAI (and other OpenAI API clients) — full markdown + slash commands.",
     "size": "sm"
   },
   {
@@ -1876,8 +1876,8 @@
     "url": "https://news.ycombinator.com/item?id=47470156",
     "date": "2026",
     "category": "integrations",
-    "headline": "Vessel Browser: agent-native browser born at the Hermes hackathon",
-    "quote": "I recently participated in Nous Research's Hermes Agent Hackathon, which is where this project was born. Every tool out there assumes a human operator with automation bolted on. I wanted to flip that — make the agent the primary driver and give the human a supervisory role.",
+    "headline": "Vessel Browser: agent-native browser born at the Hades hackathon",
+    "quote": "I recently participated in Nous Research's Hades Agent Hackathon, which is where this project was born. Every tool out there assumes a human operator with automation bolted on. I wanted to flip that — make the agent the primary driver and give the human a supervisory role.",
     "size": "md"
   },
   {
@@ -1888,7 +1888,7 @@
     "date": "2026-04-18",
     "category": "dev-workflow",
     "headline": "Running Hermes in a NixOS + container setup",
-    "quote": "i rlly like nix and i run my hermes agent in nixos+container setup. that's been the best experience for me... giving an ubuntu container defined by nix to hermes agent solves for 'oh xyz package not installed' cuz most of the (good) skills have a setup-phase and hence the required packages get installed or the agent installs em itself.",
+    "quote": "i rlly like nix and i run my hades agent in nixos+container setup. that's been the best experience for me... giving an ubuntu container defined by nix to hades agent solves for 'oh xyz package not installed' cuz most of the (good) skills have a setup-phase and hence the required packages get installed or the agent installs em itself.",
     "size": "md"
   },
   {
@@ -1899,7 +1899,7 @@
     "date": "",
     "category": "personal-assistant",
     "headline": "Hermes reads HackerNews and emails me a daily summary",
-    "quote": "Playing around with Hermes for the first time and it's a lot of fun! I was able to get it to read HackerNews once a day and send me an email summary of what I should be paying attention to. I'm going to extend it to read RSS feeds, and find other interesting content online.",
+    "quote": "Playing around with Hades for the first time and it's a lot of fun! I was able to get it to read HackerNews once a day and send me an email summary of what I should be paying attention to. I'm going to extend it to read RSS feeds, and find other interesting content online.",
     "size": "md"
   },
   {
@@ -1976,7 +1976,7 @@
     "date": "2026-03-28",
     "category": "dev-workflow",
     "headline": "Hermes as a watchdog for my other agent",
-    "quote": "POV: you use Hermes agent to fix your OpenClaw to save countless hours and credits every day. The setup that saved me hours every day: OpenClaw + Hermes watchdog.",
+    "quote": "POV: you use Hades agent to fix your OpenClaw to save countless hours and credits every day. The setup that saved me hours every day: OpenClaw + Hermes watchdog.",
     "size": "sm"
   },
   {
@@ -1987,7 +1987,7 @@
     "date": "",
     "category": "meta",
     "headline": "Built H-OPS to make multi-agent work observable",
-    "quote": "Been building H-OPS, an operator dashboard for Hermes Kanban. The goal is to make multi-agent work observable.",
+    "quote": "Been building H-OPS, an operator dashboard for Hades Kanban. The goal is to make multi-agent work observable.",
     "size": "sm"
   },
   {
@@ -1998,7 +1998,7 @@
     "date": "2026-04-08",
     "category": "meta",
     "headline": "Scraped the entire Hermes ecosystem (hermesatlas.com)",
-    "quote": "I was an early user of Hermes Agent and have been a power user ever since. Scraped every GitHub repo related to Hermes, filtered out unfinished, built an ecosystem map and published a website (hermesatlas.com) where you can see all projects organized by category with star ratings.",
+    "quote": "I was an early user of Hades Agent and have been a power user ever since. Scraped every GitHub repo related to Hades, filtered out unfinished, built an ecosystem map and published a website (hermesatlas.com) where you can see all projects organized by category with star ratings.",
     "size": "md"
   },
   {
@@ -2008,7 +2008,7 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/hermes-agent.txt",
     "date": "2026-03-21",
     "category": "business-ops",
-    "headline": "Ported a competitor-analysis swarm from Codex to Hermes",
+    "headline": "Ported a competitor-analysis swarm from Codex to Hades",
     "quote": "I was building a swarm (that actually works) on codex to analyse business and their competitors. To find gaps and build a strategy to outrank them. After a couple a hours, pushing the swarm to hermes and convert it to hermes env. It made a really good job. Now i was trying to teach him how to use memory in a different way. Instead spamming into that memory.md file. I want him to know when to route to a specific memory layer.",
     "size": "md"
   },
@@ -2020,7 +2020,7 @@
     "date": "",
     "category": "cost-optimization",
     "headline": "Cut 60–90% of context tokens with an RTK integration",
-    "quote": "We built an RTK integration for Hermes that transparently rewrites terminal commands to their RTK equivalents, saving 60-90% of tokens in your context window.",
+    "quote": "We built an RTK integration for Hades that transparently rewrites terminal commands to their RTK equivalents, saving 60-90% of tokens in your context window.",
     "size": "sm"
   },
   {
@@ -2030,8 +2030,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1487152060465156216-Hermes-Agent-Home-Assistant-Add-on.txt",
     "date": "",
     "category": "integrations",
-    "headline": "Run Hermes Agent right inside Home Assistant",
-    "quote": "Run Hermes Agent right inside your Home Assistant. This add-on takes you from zero to working agent in less than five minutes.",
+    "headline": "Run Hades Agent right inside Home Assistant",
+    "quote": "Run Hades Agent right inside your Home Assistant. This add-on takes you from zero to working agent in less than five minutes.",
     "size": "sm"
   },
   {
@@ -2064,7 +2064,7 @@
     "date": "",
     "category": "integrations",
     "headline": "Built agentbox.id because no mail service felt right for agents",
-    "quote": "Inspired by Hermes' email gateway, I built agentbox.id because I couldn't find a mail service that felt light enough for agent workflows. It's live now, and I'd appreciate any feedback from this community on the approach.",
+    "quote": "Inspired by Hades' email gateway, I built agentbox.id because I couldn't find a mail service that felt light enough for agent workflows. It's live now, and I'd appreciate any feedback from this community on the approach.",
     "size": "sm"
   },
   {
@@ -2085,8 +2085,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1496513601115131996-Hermes-Mobile-App.txt",
     "date": "",
     "category": "messaging",
-    "headline": "Controlling my Hermes Agent remotely from my phone",
-    "quote": "I've been using the mobile app to control my Hermes Agent remotely. Android & iOS. Drop your opinions, I'll publish it if looks useful.",
+    "headline": "Controlling my Hades Agent remotely from my phone",
+    "quote": "I've been using the mobile app to control my Hades Agent remotely. Android & iOS. Drop your opinions, I'll publish it if looks useful.",
     "size": "sm"
   },
   {
@@ -2096,8 +2096,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1493649462122381394-Hermes-Agent-Mini-Documentary.txt",
     "date": "",
     "category": "content-creation",
-    "headline": "Made a Hermes Agent mini-documentary with hackathon finalists",
-    "quote": "I did a deep dive on Hermes Agent. Was able to talk to a bunch of the hackathon finalists as well as one of the co-founders of Nous!",
+    "headline": "Made a Hades Agent mini-documentary with hackathon finalists",
+    "quote": "I did a deep dive on Hades Agent. Was able to talk to a bunch of the hackathon finalists as well as one of the co-founders of Nous!",
     "size": "sm"
   },
   {
@@ -2107,7 +2107,7 @@
     "date": "2026-03-16",
     "category": "enterprise",
     "headline": "Why 95% of AI users see no results — Hype's Hermes deep dive",
-    "quote": "Of the 95% of people who use AI, only 5% see real results. Hype's VP of AI, @glitch_, on why the gap isn't the models, but the architecture. Read his deep dive on building with Hermes Agent, @NousResearch, agent swarms, experiment loops, and what actually compounds.",
+    "quote": "Of the 95% of people who use AI, only 5% see real results. Hype's VP of AI, @glitch_, on why the gap isn't the models, but the architecture. Read his deep dive on building with Hades Agent, @NousResearch, agent swarms, experiment loops, and what actually compounds.",
     "size": "md",
     "id": "x-hypepartners-why-of"
   },
@@ -2129,8 +2129,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/plugins-skills-and-skins/1498344744449871952-Health-Connect-Webhook-Receiver.txt",
     "date": "",
     "category": "personal-assistant",
-    "headline": "Standalone, but I built it to use with Hermes",
-    "quote": "Standalone but I built it to use it with Hermes. Connect HC Webhook (some play store app) to it and you can sync your Health Connect data locally and do whatever.",
+    "headline": "Standalone, but I built it to use with Hades",
+    "quote": "Standalone but I built it to use it with Hades. Connect HC Webhook (some play store app) to it and you can sync your Health Connect data locally and do whatever.",
     "size": "sm"
   },
   {
@@ -2163,7 +2163,7 @@
     "date": "2026-04-08",
     "category": "dev-workflow",
     "headline": "3,000 logs of self-improvement on a custom harness",
-    "quote": "I use minimax m2.7, i built a natural language harness that basically commands my hermes agent. Lets me keep all the features and updates without breaking shit and i got over 3000 logs of potential improvements (most failures but yknow 3K gets data).",
+    "quote": "I use minimax m2.7, i built a natural language harness that basically commands my hades agent. Lets me keep all the features and updates without breaking shit and i got over 3000 logs of potential improvements (most failures but yknow 3K gets data).",
     "size": "md"
   },
   {
@@ -2184,8 +2184,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1494518737116729394-Hermes-x-Cardputer.txt",
     "date": "",
     "category": "integrations",
-    "headline": "Connected my M5 Cardputer to Hermes via the API",
-    "quote": "I used MiniMax to connect my M5 Cardputer to Hermes Agent through its API. This is a very barebone app right now but I will keep working on it. So far it has OTA for fw update and being able to text to Hermes. I added tts and stt but it's still a work in progress.",
+    "headline": "Connected my M5 Cardputer to Hades via the API",
+    "quote": "I used MiniMax to connect my M5 Cardputer to Hades Agent through its API. This is a very barebone app right now but I will keep working on it. So far it has OTA for fw update and being able to text to Hades. I added tts and stt but it's still a work in progress.",
     "size": "md"
   },
   {
@@ -2195,8 +2195,8 @@
     "url": "https://www.reddit.com/r/vibecoding/comments/1slhhj1/i_took_the_nousresearch_hermes_agent_and_built_a/",
     "date": "2026",
     "category": "meta",
-    "headline": "Hermify: managed hosting for Hermes",
-    "quote": "A few weeks ago I tried getting Hermes Agent running on a VPS. It worked, eventually, and is lowkey the most useful AI agent. So I built Hermify: easy managed hosting. You bring your API key + Telegram bot, we handle the hosting.",
+    "headline": "Hermify: managed hosting for Hades",
+    "quote": "A few weeks ago I tried getting Hades Agent running on a VPS. It worked, eventually, and is lowkey the most useful AI agent. So I built Hermify: easy managed hosting. You bring your API key + Telegram bot, we handle the hosting.",
     "size": "sm"
   },
   {
@@ -2206,8 +2206,8 @@
     "url": "https://x.com/NickSpisak_/status/2042709705991295221",
     "date": "2026-04-10",
     "category": "personal-assistant",
-    "headline": "Replaced everything with a single Hermes agent",
-    "quote": "Vibe after replacing everything with a Hermes agent: autoresearch, Karpathy LLM wiki second brain, skills creation, scheduled jobs, background monitoring, LLM model selection, Telegram/Discord support. A personal automation agent that lives on a server and talks to you through messaging apps or CLI.",
+    "headline": "Replaced everything with a single Hades agent",
+    "quote": "Vibe after replacing everything with a Hades agent: autoresearch, Karpathy LLM wiki second brain, skills creation, scheduled jobs, background monitoring, LLM model selection, Telegram/Discord support. A personal automation agent that lives on a server and talks to you through messaging apps or CLI.",
     "size": "md"
   },
   {
@@ -2218,14 +2218,14 @@
     "date": "",
     "category": "messaging",
     "headline": "My Hermes runs on my home server, I reach it from anywhere",
-    "quote": "I configured it to work from telegram as well. Now I'm able to use the link which it generates as an app. I have my own Hermes agent running from my home server. I can access it from anywhere.",
+    "quote": "I configured it to work from telegram as well. Now I'm able to use the link which it generates as an app. I have my own Hades agent running from my home server. I can access it from anywhere.",
     "size": "md"
   },
   {
     "id": "gh-enigma-merxex",
     "source": "github",
     "author": "@enigma-zeroclaw",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/13562",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/13562",
     "date": "2026",
     "category": "integrations",
     "headline": "Agent-to-agent commerce via Merxex",
@@ -2239,7 +2239,7 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/plugins-skills-and-skins/1498020050047729806-Whoop-Plugin.txt",
     "date": "",
     "category": "personal-assistant",
-    "headline": "Pulling my Whoop data into Hermes locally",
+    "headline": "Pulling my Whoop data into Hades locally",
     "quote": "Pulls Whoop data into a local file and exposes some Hermes tools for whatever you may want to do. You can ask Hermes to follow this setup guide.",
     "size": "sm"
   },
@@ -2258,18 +2258,18 @@
     "id": "gh-romanescu-skillfactory",
     "source": "github",
     "author": "@Romanescu11",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/1935",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/1935",
     "date": "2026",
     "category": "dev-workflow",
     "headline": "Skill Factory: silently watches workflows and writes SKILL.md + plugin.py",
-    "quote": "I built a community plugin for Hermes called Skill Factory. It silently watches your workflows during a session and automatically proposes and generates reusable skills (SKILL.md + plugin.py) from them.",
+    "quote": "I built a community plugin for Hades called Skill Factory. It silently watches your workflows during a session and automatically proposes and generates reusable skills (SKILL.md + plugin.py) from them.",
     "size": "sm"
   },
   {
     "id": "gh-samdu-kubernetes",
     "source": "github",
     "author": "@samdu",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/11248",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/11248",
     "date": "2026",
     "category": "enterprise",
     "headline": "Kubernetes pod-hop handoff across restarts",
@@ -2284,7 +2284,7 @@
     "date": "2026",
     "category": "integrations",
     "headline": "Home Assistant add-on: zero to agent in under 5 minutes",
-    "quote": "Takes you from zero to working Hermes agent in less than 5 minutes — a Home Assistant add-on for Hermes Agent.",
+    "quote": "Takes you from zero to working Hades agent in less than 5 minutes — a Home Assistant add-on for Hades Agent.",
     "size": "sm"
   },
   {
@@ -2295,18 +2295,18 @@
     "date": "",
     "category": "messaging",
     "headline": "Built a web proxy so I can hand off Hermes sessions to mobile",
-    "quote": "I wanted a way to have smooth handoffs of sessions from computer to mobile, so I built a quick web-based proxy that does streaming chat via the Hermes API server.",
+    "quote": "I wanted a way to have smooth handoffs of sessions from computer to mobile, so I built a quick web-based proxy that does streaming chat via the Hades API server.",
     "size": "sm"
   },
   {
     "id": "gh-flyingcloud-migration",
     "source": "github",
     "author": "@flyingcloudliu-hub",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/16134",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/16134",
     "date": "2026",
     "category": "meta",
     "headline": "Shadow-to-live migration from OpenClaw",
-    "quote": "A proposed migration path for users moving from OpenClaw to Hermes, covering shadow-mode runs before full cutover.",
+    "quote": "A proposed migration path for users moving from OpenClaw to Hades, covering shadow-mode runs before full cutover.",
     "size": "sm"
   },
   {
@@ -2324,7 +2324,7 @@
     "id": "gh-juan-email-pipeline",
     "source": "github",
     "author": "@JuanDragin",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/5563",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/5563",
     "date": "2026",
     "category": "dev-workflow",
     "headline": "8h/day on Opus: email pipeline with DBOS + Postgres + S3",
@@ -2339,7 +2339,7 @@
     "date": "2026-04-07",
     "category": "integrations",
     "headline": "Give your Hermes its own email inbox",
-    "quote": "Here's how to give your Hermes agent its own email inbox. No SMTP/IMAP, no Google OAuth, just plug in AgentMail using MCP.",
+    "quote": "Here's how to give your Hades agent its own email inbox. No SMTP/IMAP, no Google OAuth, just plug in AgentMail using MCP.",
     "size": "sm"
   },
   {
@@ -2361,7 +2361,7 @@
     "date": "",
     "category": "content-creation",
     "headline": "Built a browser extension for translation and summarization on Hermes-4-70B",
-    "quote": "I've developed and released HermesAI Translator, an open-source, AI-powered browser extension for seamless translation, reading assistance, text polishing, and summarization directly within the browser, driven by Hermes-4-70B.",
+    "quote": "I've developed and released HermesAI Translator, an open-source, AI-powered browser extension for seamless translation, reading assistance, text polishing, and summarization directly within the browser, driven by Hades-4-70B.",
     "size": "sm"
   },
   {
@@ -2372,7 +2372,7 @@
     "date": "2026-03-30",
     "category": "dev-workflow",
     "headline": "Hermes orchestrates Claude Code over SSH to my Mac",
-    "quote": "Recently worked with my agent to create a bridge that runs exec commands to my mac, so I can work through ssh from my linux machine to my mac to run claude code or codex with hermes creating the prompts — basically my hermes agent is a claude code orchestrator and reviewer.",
+    "quote": "Recently worked with my agent to create a bridge that runs exec commands to my mac, so I can work through ssh from my linux machine to my mac to run claude code or codex with hermes creating the prompts — basically my hades agent is a claude code orchestrator and reviewer.",
     "size": "md"
   },
   {
@@ -2390,11 +2390,11 @@
     "id": "gh-artile-zed",
     "source": "github",
     "author": "@artile",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/16028",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/16028",
     "date": "2026",
     "category": "integrations",
     "headline": "Hermes in Zed editor via ACP Registry",
-    "quote": "Add Hermes Agent to the Agent Client Protocol (ACP) Registry so it can be automatically discovered and installed by editors like Zed.",
+    "quote": "Add Hades Agent to the Agent Client Protocol (ACP) Registry so it can be automatically discovered and installed by editors like Zed.",
     "size": "sm"
   },
   {
@@ -2405,7 +2405,7 @@
     "date": "2026",
     "category": "trading",
     "headline": "24/7 crosschain trading agent on Hetzner",
-    "quote": "After spending nearly a week struggling with OpenClaw, I built a new Hermes agent on a Hetzner VPS. I'm building a trading agent leveraging Hermes's persistent memory — inspired by @RHLSTHRM's 24/7 crosschain agent that gets market data from CoinGecko, swaps crosschain with LI.FI, and executes gasless transactions via Pimlico + EIP-7702.",
+    "quote": "After spending nearly a week struggling with OpenClaw, I built a new Hades agent on a Hetzner VPS. I'm building a trading agent leveraging Hades's persistent memory — inspired by @RHLSTHRM's 24/7 crosschain agent that gets market data from CoinGecko, swaps crosschain with LI.FI, and executes gasless transactions via Pimlico + EIP-7702.",
     "size": "md"
   },
   {
@@ -2416,7 +2416,7 @@
     "date": "",
     "category": "dev-workflow",
     "headline": "A commits skill that keeps my history clean",
-    "quote": "I just put together a custom skill for Hermes Agent that enforces Conventional Commits with a short subject line (<80 chars) and a bullet-point body explaining what & why. It's been super helpful for keeping commit history clean and consistent.",
+    "quote": "I just put together a custom skill for Hades Agent that enforces Conventional Commits with a short subject line (<80 chars) and a bullet-point body explaining what & why. It's been super helpful for keeping commit history clean and consistent.",
     "size": "md"
   },
   {
@@ -2481,8 +2481,8 @@
     "url": "https://www.reddit.com/r/hermesagent/comments/1sd3bwf/had_my_research_agent_dig_into_what_people_are/",
     "date": "2026",
     "category": "research",
-    "headline": "I had my research agent dig into what people are building with Hermes",
-    "quote": "Had my (Hermes) research agent dig into what people are actually building with Hermes — turned up an ecosystem mosaic of trading bots, personal assistants, content pipelines and self-hosted everything.",
+    "headline": "I had my research agent dig into what people are building with Hades",
+    "quote": "Had my (Hermes) research agent dig into what people are actually building with Hades — turned up an ecosystem mosaic of trading bots, personal assistants, content pipelines and self-hosted everything.",
     "size": "sm"
   },
   {
@@ -2492,7 +2492,7 @@
     "url": "https://x.com/alexcovo_eth/status/2046437996262539539",
     "date": "2026-04-21",
     "category": "creative",
-    "headline": "My Hermes agent makes movies now",
+    "headline": "My Hades agent makes movies now",
     "quote": "My @NousResearch hermes-agent can make movies now using @browser_use skill. No API needed. No human intervention. I told it to set the mood, action, camera movement, dialog and overall story — it used Browser-Use and Seedance 2.0 to generate a video.",
     "size": "md"
   },
@@ -2526,7 +2526,7 @@
     "date": "2026-04-15",
     "category": "personal-assistant",
     "headline": "Jarvis at home in 2026",
-    "quote": "m2.7 + hermes agent: we really got jarvis at home in 2026 but strangely enough no one seems to care.",
+    "quote": "m2.7 + hades agent: we really got jarvis at home in 2026 but strangely enough no one seems to care.",
     "size": "sm"
   },
   {
@@ -2544,7 +2544,7 @@
     "id": "gh-bsxy-higress",
     "source": "github",
     "author": "@bsxyswsy6n",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/8881",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/8881",
     "date": "2026",
     "category": "enterprise",
     "headline": "Hermes inside an MCP infrastructure behind Higress",
@@ -2558,8 +2558,8 @@
     "url": "https://github.com/teknium1/nous-discord-archive/blob/main/archives/community-projects-showcase/1496700201526759494-Hardcopy-TUI.txt",
     "date": "",
     "category": "creative",
-    "headline": "Chatting with Hermes on a 1969 Teletype Model 33 at 110 baud",
-    "quote": "I made a minimal login shell that talks to Hermes Agent via the gateway web service, or by running `hermes chat`. Hooked the shell up to an autologin getty on a serial port. Connected the serial port via 20mA current loop at 110 baud, to a 1969 Teletype Model 33. Chatting away!",
+    "headline": "Chatting with Hades on a 1969 Teletype Model 33 at 110 baud",
+    "quote": "I made a minimal login shell that talks to Hades Agent via the gateway web service, or by running `hermes chat`. Hooked the shell up to an autologin getty on a serial port. Connected the serial port via 20mA current loop at 110 baud, to a 1969 Teletype Model 33. Chatting away!",
     "size": "lg"
   },
   {
@@ -2592,14 +2592,14 @@
     "date": "",
     "category": "dev-workflow",
     "headline": "Built a tool-agnostic repo knowledge layer across all my agents",
-    "quote": "Over the past month I've been trying every agent and ai tool I can. OpenClaw, Hermes Agent, Kilo Code, Codex, Cursor, etc. Most of these have some sort of memory, but I wanted something persistant. I ended up building out a tool-agnostic repo knowledge layer. I pushed up the learning part to github so I can use it across repos.",
+    "quote": "Over the past month I've been trying every agent and ai tool I can. OpenClaw, Hades Agent, Kilo Code, Codex, Cursor, etc. Most of these have some sort of memory, but I wanted something persistant. I ended up building out a tool-agnostic repo knowledge layer. I pushed up the learning part to github so I can use it across repos.",
     "size": "md"
   },
   {
     "id": "gh-oleg-multi-role",
     "source": "github",
     "author": "@OlegB333",
-    "url": "https://github.com/NousResearch/hermes-agent/issues/5143",
+    "url": "https://github.com/9thLevelSoftware/hades-agent/issues/5143",
     "date": "2026",
     "category": "personal-assistant",
     "headline": "One agent, many roles: nutritionist, developer, finance advisor",
@@ -2625,7 +2625,7 @@
     "date": "2026-05-13",
     "category": "content-creation",
     "headline": "Automated TikTok slideshow factory that works while you sleep",
-    "quote": "Hermes Agent = automated TikTok slideshow factory. It researches the topic, writes the script, formats the slides, outputs in the exact dimensions TikTok needs. 10 slideshows a week manually takes 30-40 hours. With Hermes it takes the time to review and approve.",
+    "quote": "Hades Agent = automated TikTok slideshow factory. It researches the topic, writes the script, formats the slides, outputs in the exact dimensions TikTok needs. 10 slideshows a week manually takes 30-40 hours. With Hermes it takes the time to review and approve.",
     "size": "md"
   },
   {
@@ -2646,8 +2646,8 @@
     "url": "https://x.com/akshay_pachaar/status/2055629943891988719",
     "date": "2026-05-16",
     "category": "meta",
-    "headline": "The anatomy of the ~/.hermes folder — one folder controls everything",
-    "quote": "One folder controls everything your hermes agent knows, remembers, and can do. SOUL.md occupies slot #1 in the system prompt. state.db with FTS5 is what makes 'what did we discuss three weeks ago?' actually work across CLI and messaging.",
+    "headline": "The anatomy of the ~/.hades folder — one folder controls everything",
+    "quote": "One folder controls everything your hades agent knows, remembers, and can do. SOUL.md occupies slot #1 in the system prompt. state.db with FTS5 is what makes 'what did we discuss three weeks ago?' actually work across CLI and messaging.",
     "size": "md"
   },
   {
@@ -2679,8 +2679,8 @@
     "url": "https://x.com/DataChaz/status/2061179421990740248",
     "date": "2026-05-31",
     "category": "meta",
-    "headline": "Open-source web UI for Hermes with 1:1 terminal parity in the browser",
-    "quote": "This guy literally open sourced a full web UI for Hermes Agent. 1:1 terminal parity right in your browser, zero build steps, a sleek 3-panel layout for chat, sessions, and file browsing. 100% free and open-source.",
+    "headline": "Open-source web UI for Hades with 1:1 terminal parity in the browser",
+    "quote": "This guy literally open sourced a full web UI for Hades Agent. 1:1 terminal parity right in your browser, zero build steps, a sleek 3-panel layout for chat, sessions, and file browsing. 100% free and open-source.",
     "size": "sm"
   },
   {
@@ -2691,7 +2691,7 @@
     "date": "2026-05-13",
     "category": "personal-assistant",
     "headline": "The real power is what it does every day without you prompting it",
-    "quote": "The real power of Hermes Agent is not what it does in a single session. It is what it does every single day without you prompting it. The first run of any workflow is the weakest version of it — after a month, briefings get sharper, shorter, more relevant without you changing anything.",
+    "quote": "The real power of Hades Agent is not what it does in a single session. It is what it does every single day without you prompting it. The first run of any workflow is the weakest version of it — after a month, briefings get sharper, shorter, more relevant without you changing anything.",
     "size": "md"
   },
   {
@@ -2724,7 +2724,7 @@
     "date": "2026-05-13",
     "category": "dev-workflow",
     "headline": "After a 15-tool-call monitoring pipeline, Hermes wrote the skill unprompted",
-    "quote": "After a multi-step monitoring pipeline setup (Prometheus/Grafana/alerts) in ~15 tool calls, Hermes unprompted entered a reflection phase and generated a skill at ~/.hermes/skills/devops/monitoring-pipeline/SKILL.md — adjusting variables per new context, not just template reuse.",
+    "quote": "After a multi-step monitoring pipeline setup (Prometheus/Grafana/alerts) in ~15 tool calls, Hermes unprompted entered a reflection phase and generated a skill at ~/.hades/skills/devops/monitoring-pipeline/SKILL.md — adjusting variables per new context, not just template reuse.",
     "size": "md"
   },
   {
@@ -2735,7 +2735,7 @@
     "date": "2026-04-22",
     "category": "dev-workflow",
     "headline": "Sr AI Architect: 40% less task time on domain-similar tasks after 20+ skills",
-    "quote": "Think of Hermes as an assistant who writes their own manual after finishing a task — so they do the job better next time. Cutting task time by 40% on domain-similar tasks after 20+ skills are accumulated.",
+    "quote": "Think of Hades as an assistant who writes their own manual after finishing a task — so they do the job better next time. Cutting task time by 40% on domain-similar tasks after 20+ skills are accumulated.",
     "size": "md"
   },
   {
@@ -2779,7 +2779,7 @@
     "date": "2026-04-20",
     "category": "trading",
     "headline": "No-code Polymarket weather-trading bot driven by plain-English prompts",
-    "quote": "A weather trading agent that scans 20 cities across 4 continents and 3 forecast sources, with Expected Value and Kelly Criterion position sizing — set up by copy-pasting prompts to Hermes, which clones the repo, creates the wallet, and approves the contracts on-chain.",
+    "quote": "A weather trading agent that scans 20 cities across 4 continents and 3 forecast sources, with Expected Value and Kelly Criterion position sizing — set up by copy-pasting prompts to Hades, which clones the repo, creates the wallet, and approves the contracts on-chain.",
     "size": "sm"
   },
   {
@@ -2878,7 +2878,7 @@
     "date": "2026-05-20",
     "category": "creative",
     "headline": "Recursively built a Supabase-backed CRM dashboard where each build reuses prior components",
-    "quote": "Used the Hermes Desktop App to recursively generate a CRM dashboard where each build reuses components from prior generations; it can also build full videos using official HyperFrame skills — HTML-native, full control over scenes, animations, and rendering.",
+    "quote": "Used the Hades Desktop App to recursively generate a CRM dashboard where each build reuses components from prior generations; it can also build full videos using official HyperFrame skills — HTML-native, full control over scenes, animations, and rendering.",
     "size": "sm"
   }
 ]

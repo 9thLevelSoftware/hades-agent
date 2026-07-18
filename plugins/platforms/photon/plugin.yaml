@@ -3,7 +3,7 @@ label: iMessage via Photon
 kind: platform
 version: 0.3.0
 description: >
-  Photon Spectrum gateway adapter for Hermes Agent.
+  Photon Spectrum gateway adapter for Hades Agent.
   Connects to iMessage (and other Spectrum interfaces) through Photon's
   managed Spectrum platform. Both directions run over the `spectrum-ts`
   SDK's long-lived gRPC stream via a small supervised Node sidecar —
@@ -13,9 +13,9 @@ description: >
 
   The plugin ships with a `hermes photon` CLI for the one-time device
   login + project + user setup. Runtime credentials are written to
-  ``~/.hermes/.env`` (``PHOTON_PROJECT_ID`` = the Spectrum project id,
+  ``~/.hades/.env`` (``PHOTON_PROJECT_ID`` = the Spectrum project id,
   ``PHOTON_PROJECT_SECRET``) like every other channel, with management
-  metadata (device token, dashboard project id) in ``~/.hermes/auth.json``.
+  metadata (device token, dashboard project id) in ``~/.hades/auth.json``.
   Photon's free shared-line model lets users get started without a paid plan.
 author: NousResearch
 requires_env:
@@ -63,7 +63,7 @@ optional_env:
     prompt: "Require a mention in group chats?"
     password: false
   - name: PHOTON_MENTION_PATTERNS
-    description: "Mention wake-word regexes for group chats (JSON list or comma/newline-separated; defaults to Hermes wake words)"
+    description: "Mention wake-word regexes for group chats (JSON list or comma/newline-separated; defaults to Hades wake words)"
     prompt: "Group mention patterns"
     password: false
   - name: PHOTON_HOME_CHANNEL

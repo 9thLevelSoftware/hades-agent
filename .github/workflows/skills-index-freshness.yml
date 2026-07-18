@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   check-freshness:
-    if: github.repository == 'NousResearch/hermes-agent'
+    if: github.repository == '9thLevelSoftware/hades-agent'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

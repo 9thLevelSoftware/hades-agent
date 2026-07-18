@@ -8,7 +8,7 @@ description: "Use your Nous Portal subscription (or other OAuth provider) as an 
 
 The subscription proxy is a local HTTP server that lets external apps —
 OpenViking, Karakeep, Open WebUI, anything that speaks OpenAI-compatible
-chat completions — use your Hermes-managed provider subscription as their
+chat completions — use your Hades-managed provider subscription as their
 LLM endpoint. The proxy attaches the right credentials (refreshing them
 automatically) so the app never needs a static API key.
 
@@ -33,7 +33,7 @@ hermes portal
 ```
 
 This opens your browser for the Nous Portal OAuth flow. Hermes stores
-the refresh token in `~/.hermes/auth.json` — the same place all Hermes
+the refresh token in `~/.hades/auth.json` — the same place all Hermes
 provider logins live.
 
 ### 2. Start the proxy

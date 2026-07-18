@@ -496,7 +496,7 @@ git commit -m "fix: preserve workflow graph identity"
 
 ```python
 def test_draft_publish_is_immutable_and_conflict_checked(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     spec = _demo_spec().model_copy(update={"version": 1})
     with wfdb.connect() as conn:
@@ -518,7 +518,7 @@ def test_draft_publish_is_immutable_and_conflict_checked(tmp_path, monkeypatch):
 
 ```python
 def test_closed_feed_is_terminal_and_rejects_writes(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -531,7 +531,7 @@ def test_closed_feed_is_terminal_and_rejects_writes(tmp_path, monkeypatch):
 
 
 def test_paused_feed_rejects_item_writes(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
     with wfdb.connect() as conn:
         wfdb.deploy_definition(conn, _continuous_demo_spec(), created_by="test")
@@ -1264,7 +1264,7 @@ Use buttons inside headings. Implement Escape close and focus return for sheets/
 
 The script must:
 
-1. create a temporary `HERMES_HOME`;
+1. create a temporary `HADES_HOME`;
 2. start `uv run --extra dev hermes dashboard --port 9148 --no-open --skip-build` in the background;
 3. wait for HTTP 200;
 4. use an isolated `agent-browser --session workflows-e2e`;
@@ -1464,7 +1464,7 @@ Expected: all commands pass; worktree is clean after committing generated assets
 
 - [ ] **Step 9: Run a live real-provider smoke test**
 
-Using an isolated `HERMES_HOME` that links only existing provider configuration, verify:
+Using an isolated `HADES_HOME` that links only existing provider configuration, verify:
 
 1. Generate a workflow draft from a prompt.
 2. Refine it.
