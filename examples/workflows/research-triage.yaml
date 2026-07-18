@@ -1,0 +1,187 @@
+id: research-triage
+name: Research Triage
+version: 1
+enabled: true
+max_node_runs: 80
+triggers:
+  - type: manual
+    id: manual
+  - type: schedule
+    id: weekday_research
+    cron: "0 9 * * 1-5"
+    input:
+      topic: "AI agent research"
+      freshness: "last 24 hours"
+      min_score: 0.75
+nodes:
+  normalize:
+    type: pass
+    output:
+      topic: "${ input.topic }"
+      freshness: "${ input.freshness }"
+      min_score: "${ input.min_score }"
+
+  fork:
+    type: parallel
+
+  gather:
+    type: agent_task
+    profile: researcher
+    # Optional per-cell routing:
+    # provider: openai-codex
+    # model: gpt-5.5
+    title: "Gather research sources"
+    result_contract:
+      sources: array
+      summary: string
+    prompt: |
+      You are the `researcher` profile executing workflow cell `gather`.
+
+      Workflow goal:
+      Gather, risk-scan, and summarize research for triage.
+
+      Cell objective:
+      Gather current, citable sources for topic `${ input.topic }` with freshness `${ input.freshness }`.
+
+      Context:
+      - Topic: `${ input.topic }`
+      - Freshness requirement: `${ input.freshness }`
+
+      Constraints:
+      - Prefer primary or highly credible sources.
+      - Include URLs suitable for citation.
+      - Avoid stale or duplicate coverage when better sources exist.
+      - Complete the Kanban task with JSON only.
+
+      Return JSON matching this contract:
+      {
+        "sources": [
+          {
+            "title": "Source title",
+            "url": "https://example.com",
+            "why_it_matters": "One sentence"
+          }
+        ],
+        "summary": "Short source summary"
+      }
+
+  risk_scan:
+    type: agent_task
+    profile: researcher
+    title: "Scan research risks and duplicates"
+    result_contract:
+      risks: array
+      exclusions: array
+      confidence: number
+    prompt: |
+      You are the `researcher` profile executing workflow cell `risk_scan`.
+
+      Workflow goal:
+      Gather, risk-scan, and summarize research for triage.
+
+      Cell objective:
+      Look for duplicate coverage, stale claims, and weak sources for topic `${ input.topic }` with freshness `${ input.freshness }`.
+
+      Context:
+      - Topic: `${ input.topic }`
+      - Freshness requirement: `${ input.freshness }`
+
+      Constraints:
+      - Flag claims that need stronger evidence.
+      - Exclude weak, redundant, or stale sources and angles.
+      - Calibrate confidence to the quality and freshness of available evidence.
+      - Complete the Kanban task with JSON only.
+
+      Return JSON matching this contract:
+      {
+        "risks": ["risk or caveat"],
+        "exclusions": ["source or angle to skip"],
+        "confidence": 0.0
+      }
+
+  merge:
+    type: join
+
+  summarize:
+    type: agent_task
+    profile: analyst
+    title: "Summarize and score research"
+    result_contract:
+      score: number
+      summary: string
+      recommendation: publish|watch|ignore
+      next_actions: array
+    prompt: |
+      You are the `analyst` profile executing workflow cell `summarize`.
+
+      Workflow goal:
+      Gather, risk-scan, and summarize research for triage.
+
+      Cell objective:
+      Synthesize the gathered research and risk scan for topic `${ input.topic }`.
+
+      Gathered research:
+      ${ node.merge.output.branches.gather }
+
+      Risk scan:
+      ${ node.merge.output.branches.risks }
+
+      Constraints:
+      - Weigh source quality, freshness, and risk caveats before scoring.
+      - Make the summary decision-ready and concise.
+      - Recommend exactly one of `publish`, `watch`, or `ignore`.
+      - Complete the Kanban task with JSON only.
+
+      Return JSON matching this contract:
+      {
+        "score": 0.0,
+        "summary": "Decision-ready summary",
+        "recommendation": "publish, watch, or ignore",
+        "next_actions": ["action"]
+      }
+
+  triage:
+    type: switch
+    cases:
+      - name: high_value
+        when:
+          op: gte
+          left: {path: "$.node.summarize.output.score"}
+          right: {path: "$.input.min_score"}
+
+  publish_ready:
+    type: pass
+    output:
+      status: ready_for_review
+      summary: "${ node.summarize.output }"
+
+  cooldown:
+    type: wait
+    seconds: 300
+
+  archive_low_value:
+    type: pass
+    output:
+      status: archived_low_value
+      summary: "${ node.summarize.output }"
+edges:
+  - from: normalize
+    to: fork
+  - from: fork.gather
+    to: gather
+  - from: fork.risks
+    to: risk_scan
+  - from: gather
+    to: merge
+  - from: risk_scan
+    to: merge
+  - from: merge
+    to: summarize
+  - from: summarize
+    to: triage
+  - from: triage.high_value
+    to: publish_ready
+  - from: triage.default
+    to: cooldown
+  - from: cooldown
+    to: archive_low_value
