@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { shouldExitForSignal } from '../lib/gracefulExit.js'
 
@@ -61,6 +61,7 @@ describe('setupGracefulExit — callback error protection', () => {
     const { setupGracefulExit } = await import('../lib/gracefulExit.js')
 
     const cleanup = vi.fn()
+
     const throwingOnSignal = vi.fn(() => {
       throw new Error('write EIO')
     })
