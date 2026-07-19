@@ -57,10 +57,12 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from hades_constants import get_hades_home
 from hades_cli._subprocess_compat import windows_hide_flags
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from utils import env_int
 
@@ -75,9 +77,42 @@ CHECKPOINT_BASE = get_hades_home() / "checkpoints"
 # Single shared store directory under CHECKPOINT_BASE.
 _STORE_DIRNAME = "store"
 _REFS_PREFIX = "refs/hermes"
+# Pin refs live under a SEPARATE namespace (``refs/hermes-pin/``) so the
+# project-history pruners (``_prune``, ``_enforce_size_cap``,
+# ``prune_checkpoints``) — which iterate ``_REFS_PREFIX`` — never treat
+# pins as project refs to be deleted. The pin keeps the target commit
+# reachable across ``max_snapshots`` pruning so a Task 4
+# ``CheckpointRef`` can be restored after retention invalidates the
+# project history.
+_PIN_REFS_PREFIX = "refs/hermes-pin"
 _INDEXES_DIRNAME = "indexes"
 _PROJECTS_DIRNAME = "projects"
 _LEGACY_PREFIX = "legacy-"
+
+
+# ponytail: ONE module/class-level RLock shared across all CheckpointManager
+# instances and all store-touching operations. The legacy
+# ``_checkpoint_state_lock`` was per-instance — two managers could race
+# the membership-check → prune → restore sequence. RLock permits
+# restore_checkpoint→restore re-entry without deadlocking. Per-project
+# lock frameworks would be cleaner but add a new abstraction the
+# caller-side code does not need; module-level is the smallest change
+# that closes the cross-call race window.
+_checkpoint_state_lock = threading.RLock()
+
+# ---------------------------------------------------------------------------
+# CheckpointRef — immutable reference to a forced checkpoint
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CheckpointRef:
+    """Immutable, deterministic reference to a specific checkpoint commit."""
+
+    checkpoint_id: str
+    working_dir: str
+    commit_hash: str
+    created_at: int
 
 DEFAULT_EXCLUDES = [
     # Dependency / build output
@@ -190,6 +225,75 @@ def _validate_file_path(file_path: str, working_dir: str) -> Optional[str]:
     return None
 
 
+def _verify_project_ref_membership(
+    store: Path, abs_dir: str, commit_hash: str,
+    checkpoint_id: str = "",
+) -> Optional[str]:
+    """Verify that *commit_hash* belongs to *abs_dir*'s checkpoint history.
+
+    Returns ``None`` on success (commit is ancestor of, or equal to,
+    the project's current ref tip OR an exact match of the project's
+    pin ref for ``checkpoint_id``).  Returns an error string on
+    failure: the caller raises or wraps it as appropriate.
+
+    Single shared guard for ``restore()`` and ``restore_checkpoint()``
+    so the cross-project forge check fires BEFORE any workspace
+    mutation.  Uses ``merge-base --is-ancestor`` only for the project
+    history branch — no additional store/table/framework.
+
+    When ``checkpoint_id`` is provided (Task 4 ``CheckpointRef`` path),
+    the verifier ALSO accepts an exact match against the durable pin
+    ref ``refs/hermes-pin/<dirhash>/<checkpoint_id>``. The pin lets a
+    ``CheckpointRef`` survive ``max_snapshots`` pruning — the project
+    ref may no longer contain the commit but the pin ref still
+    resolves to it. A foreign pin (wrong dirhash or wrong checkpoint_id)
+    is NOT accepted.
+    """
+    dir_hash = _project_hash(abs_dir)
+    ref = _ref_name(dir_hash)
+    ok_ref, ref_tip, _ = _run_git(
+        ["rev-parse", "--verify", ref + "^{commit}"],
+        store, abs_dir,
+        allowed_returncodes={128},
+    )
+    # Pin-ref branch: an exact matching pin counts as membership so a
+    # CheckpointRef whose project history has been pruned can still be
+    # restored. The pin ref lives outside ``_REFS_PREFIX`` so it is
+    # never swept by project-history pruners.
+    if checkpoint_id:
+        pin_ref = _pin_ref_name(dir_hash, checkpoint_id)
+        ok_pin, pin_tip, _ = _run_git(
+            ["rev-parse", "--verify", pin_ref + "^{commit}"],
+            store, abs_dir,
+            allowed_returncodes={128},
+        )
+        if ok_pin and pin_tip == commit_hash:
+            # Exact pin match for this project+checkpoint_id. Membership
+            # satisfied — never accept a foreign pin (different dirhash
+            # or different checkpoint_id) since the pin_ref path
+            # explicitly scopes by both.
+            return None
+    if not ok_ref or not ref_tip:
+        return (
+            f"Checkpoint {commit_hash[:8]!r} does not belong to "
+            f"this project: no checkpoint history exists for "
+            f"{abs_dir}; restore blocked"
+        )
+    ok_anc, _, _ = _run_git(
+        ["merge-base", "--is-ancestor", commit_hash, ref_tip],
+        store, abs_dir,
+        allowed_returncodes={1, 128},
+    )
+    if not ok_anc:
+        return (
+            f"Checkpoint {commit_hash[:8]!r} is not an ancestor "
+            f"of this project's checkpoint ref {ref_tip[:8]!r}; "
+            f"forged or unrelated history would clobber "
+            f"{abs_dir}; restore blocked"
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Path / hash helpers
 # ---------------------------------------------------------------------------
@@ -227,6 +331,19 @@ def _index_path(store: Path, dir_hash: str) -> Path:
 
 def _ref_name(dir_hash: str) -> str:
     return f"{_REFS_PREFIX}/{dir_hash}"
+
+
+def _pin_ref_name(dir_hash: str, checkpoint_id: str) -> str:
+    """Pin ref name: ``refs/hermes-pin/<dirhash>/<checkpoint_id>``.
+
+    Pinned refs sit OUTSIDE ``_REFS_PREFIX`` so the project-history
+    pruners (``_prune``, ``_enforce_size_cap``, ``prune_checkpoints``)
+    never treat them as project refs to be deleted. Each Task 4
+    ``CheckpointRef`` carries a durable pin so the target commit
+    remains restorable even after ``max_snapshots`` rewrites the
+    project history.
+    """
+    return f"{_PIN_REFS_PREFIX}/{dir_hash}/{checkpoint_id}"
 
 
 def _project_meta_path(store: Path, dir_hash: str) -> Path:
@@ -641,7 +758,12 @@ class CheckpointManager:
         self.max_file_size_mb = max(0, int(max_file_size_mb))
         self._checkpointed_dirs: Set[str] = set()
         self._checkpointing_dirs: Set[str] = set()
-        self._checkpoint_state_lock = threading.Lock()
+        # ponytail: instance attribute still exists (back-compat with
+        # callers / tests that touched ``mgr._checkpoint_state_lock``)
+        # but it MUST be the shared module-level RLock so two managers
+        # serialise on the same lock and a forced concurrent
+        # checkpoint cannot invalidate a restore mid-flight.
+        self._checkpoint_state_lock = _checkpoint_state_lock
         self._git_available: Optional[bool] = None  # lazy probe
 
     # ------------------------------------------------------------------
@@ -687,19 +809,239 @@ class CheckpointManager:
             ):
                 return False
             self._checkpointing_dirs.add(abs_dir)
-
-        success = False
-        try:
-            success = self._take(abs_dir, reason)
-        except Exception as e:
-            logger.debug("Checkpoint failed (non-fatal): %s", e)
-        finally:
-            with self._checkpoint_state_lock:
+            success = False
+            try:
+                success = self._take(abs_dir, reason)[0]
+            except Exception as e:
+                logger.debug("Checkpoint failed (non-fatal): %s", e)
+            finally:
                 self._checkpointing_dirs.discard(abs_dir)
                 if success:
                     self._checkpointed_dirs.add(abs_dir)
 
         return success
+
+    # ------------------------------------------------------------------
+    # Task 4 — Forced per-transaction checkpoints
+    # ------------------------------------------------------------------
+
+    def create_checkpoint(
+        self,
+        working_dir: str,
+        *,
+        reason: str,
+        force: bool = False,
+    ) -> CheckpointRef:
+        """Create a distinct checkpoint and return an immutable
+        CheckpointRef. When *force=True*, the dedup set is bypassed so
+        every call produces a new checkpoint — used for per-transaction
+        forced snapshots in missions.
+
+        The legacy one-per-turn path (ensure_checkpoint) is
+        preserved for callers outside missions.
+
+        Spec: holds the shared module-level RLock across the full
+        state-check → ``_take`` → bookkeeping path so a concurrent
+        ``restore_checkpoint`` for the same project cannot have its
+        ref invalidated mid-restore. The Task 4 ``CheckpointRef`` is
+        also pinned via ``refs/hermes-pin/<dirhash>/<checkpoint_id>``
+        before any pruning runs, so the commit survives
+        ``max_snapshots`` rewriting of the project history.
+        """
+        if not self.enabled:
+            raise RuntimeError("checkpoints disabled")
+        abs_dir = str(_normalize_path(working_dir))
+
+        # Spec: broad-path guard — never snapshot filesystem roots
+        # whose destruction would be catastrophic. Mirrors the
+        # guarantee in ``ensure_checkpoint`` so an authoritative
+        # caller of the forced-transaction path is never surprised
+        # by a ``/`` or ``$HOME`` commit.
+        if abs_dir in {"/", str(Path.home())}:
+            raise PermissionError(
+                f"checkpoint creation refused for broad path {abs_dir!r}"
+            )
+
+        # ponytail: transaction pins remain until higher-level finalization
+        # owns cleanup; no cleanup is implemented here.
+        checkpoint_id = uuid.uuid4().hex[:16]
+        pin_ref = _pin_ref_name(_project_hash(abs_dir), checkpoint_id)
+
+        # Serialize by resolved workspace path (shared module lock so
+        # cross-instance restore↔checkpoint races are also covered).
+        # The lock MUST span the entire state-check → ``_take`` →
+        # bookkeeping → pin-write sequence so a concurrent
+        # ``restore_checkpoint`` cannot have its membership check
+        # race against ``_prune`` rewriting the project ref.
+        ok = False
+        commit_sha: Optional[str] = None
+        with self._checkpoint_state_lock:
+            if (
+                not force
+                and (
+                    abs_dir in self._checkpointed_dirs
+                    or abs_dir in self._checkpointing_dirs
+                )
+            ):
+                # Non-forced: one-per-turn dedup still applies.
+                raise RuntimeError(
+                    f"checkpoint already taken this turn for {abs_dir}"
+                )
+            self._checkpointing_dirs.add(abs_dir)
+
+            # Spec: forced checkpoints skip the no-change dedup so a
+            # single unchanged tree still produces a distinct commit
+            # hash per call (commit metadata, not tree content, is what
+            # differs). Previously a marker-file workaround was used
+            # that leaked ``.hades-checkpoint-marker`` into restored
+            # trees. ``_take`` runs INSIDE the lock so a concurrent
+            # ``restore_checkpoint`` for the same project cannot see a
+            # half-pruned ref mid-restore.
+            try:
+                ok, commit_sha = self._take(
+                    abs_dir, reason, force=force, pin_ref=pin_ref,
+                )
+            finally:
+                self._checkpointing_dirs.discard(abs_dir)
+                if force is False and ok:
+                    self._checkpointed_dirs.add(abs_dir)
+
+        if not ok or commit_sha is None:
+            raise RuntimeError(f"checkpoint creation failed for {abs_dir}")
+
+        return CheckpointRef(
+            checkpoint_id=checkpoint_id,
+            working_dir=abs_dir,
+            commit_hash=commit_sha,
+            created_at=int(time.time()),
+        )
+
+    def restore_checkpoint(
+        self,
+        ref: CheckpointRef,
+        *,
+        current_root: str,
+        file_paths: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Restore the workspace to the state recorded in *ref*.
+
+        Fail-closed: if the ref's resolved working_dir does NOT match
+        *current_root*, the restore is refused to prevent silent
+        cross-checkout clobbering.
+
+        If *file_paths* is provided, restore ONLY those normalized
+        target paths (file/symlink targets under *current_root*):
+        paths present in the checkpoint tree are restored; paths
+        absent in the checkpoint tree are deleted on disk so the
+        mission's creation/deletion state matches the checkpoint.
+        Without *file_paths*, the historical full-root behavior is
+        preserved — used by rollback flows that own the entire root.
+
+        Spec: holds the shared module-level RLock from membership
+        validation through checkout/unlink so a forced concurrent
+        checkpoint+prune on the same project cannot invalidate the
+        ref between membership check and per-path restore.
+        """
+        resolved_root = str(_normalize_path(current_root))
+        ref_root = str(_normalize_path(ref.working_dir))
+
+        # Fail-closed: root mismatch → refuse.
+        if ref_root != resolved_root:
+            raise PermissionError(
+                f"CheckpointRef working_dir {ref_root!r} does not match "
+                f"current workspace root {resolved_root!r}; restore blocked"
+            )
+
+        store = _store_path(CHECKPOINT_BASE)
+
+        # ponytail: hold the shared lock across the entire restore
+        # so a concurrent ``create_checkpoint`` (which can prune +
+        # rewrite the project ref) cannot invalidate membership
+        # between this check and the per-path checkout/unlink
+        # below. RLock permits the inner ``self.restore(...)`` call
+        # to re-enter without deadlocking.
+        with self._checkpoint_state_lock:
+            # Spec: validate project-ref membership BEFORE any
+            # workspace mutation. Pass ``checkpoint_id`` so a Task 4
+            # ``CheckpointRef`` whose commit has been pruned off the
+            # project ref is still honoured via the durable pin ref.
+            ref_err = _verify_project_ref_membership(
+                store, resolved_root, ref.commit_hash,
+                checkpoint_id=ref.checkpoint_id,
+            )
+            if ref_err is not None:
+                raise RuntimeError(ref_err)
+
+            if file_paths is None:
+                # Whole-root restore (legacy behavior, used by rollback).
+                result = self.restore(
+                    resolved_root, ref.commit_hash,
+                    checkpoint_id=ref.checkpoint_id,
+                )
+                if not result.get("success"):
+                    raise RuntimeError(
+                        f"restore failed: {result.get('error', 'unknown')}"
+                    )
+                return
+
+            # Per-path restore: each declared target under current_root
+            # is restored from the checkpoint, or deleted if absent
+            # in the checkpoint tree.
+            normalized_paths: List[Path] = []
+            for raw in file_paths:
+                if not raw or not raw.strip():
+                    raise ValueError("file_paths entries must be non-empty")
+                abs_target = Path(raw).expanduser().resolve()
+                try:
+                    abs_target.relative_to(Path(resolved_root))
+                except ValueError as exc:
+                    raise PermissionError(
+                        f"file_paths entry {raw!r} resolves outside the "
+                        f"current workspace root {resolved_root!r}; "
+                        f"restore blocked"
+                    ) from exc
+                if abs_target.is_dir():
+                    raise ValueError(
+                        f"file_paths entry {raw!r} resolves to a directory; "
+                        f"file/symlink targets only"
+                    )
+                normalized_paths.append(abs_target)
+
+            for abs_target in normalized_paths:
+                rel = abs_target.relative_to(Path(resolved_root))
+                rel_str = rel.as_posix()
+                # Whether the checkpoint tree contains the target
+                # determines restore-vs-delete semantics.
+                ok_has, _, _ = _run_git(
+                    ["cat-file", "-e", f"{ref.commit_hash}:{rel_str}"],
+                    store, resolved_root,
+                    allowed_returncodes={1, 128},
+                )
+                if ok_has:
+                    # Restore target from checkpoint.
+                    file_result = self.restore(
+                        resolved_root, ref.commit_hash,
+                        file_path=rel_str,
+                        checkpoint_id=ref.checkpoint_id,
+                    )
+                    if not file_result.get("success"):
+                        raise RuntimeError(
+                            f"per-path restore failed for {rel_str}: "
+                            f"{file_result.get('error', 'unknown')}"
+                        )
+                else:
+                    # Target absent in checkpoint → delete it on disk
+                    # to undo a mission-created file.
+                    try:
+                        if abs_target.is_symlink() or abs_target.exists():
+                            abs_target.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        raise RuntimeError(
+                            f"per-path delete failed for {rel_str}: {exc}"
+                        ) from exc
+        return
 
     def list_checkpoints(self, working_dir: str) -> List[Dict]:
         """List available checkpoints for a directory (most recent first)."""
@@ -805,8 +1147,16 @@ class CheckpointManager:
             "diff": diff_out if ok_diff else "",
         }
 
-    def restore(self, working_dir: str, commit_hash: str, file_path: str = None) -> Dict:
-        """Restore files to a checkpoint state."""
+    def restore(self, working_dir: str, commit_hash: str, file_path: str = None,
+             *, checkpoint_id: str = "") -> Dict:
+        """Restore files to a checkpoint state.
+
+        ``checkpoint_id`` is an optional forward to
+        ``_verify_project_ref_membership`` — when provided, the verifier
+        ALSO honours an exact matching pin ref, so a Task 4
+        ``CheckpointRef`` whose commit has been pruned off the project
+        ref is still restored via its durable pin.
+        """
         hash_err = _validate_commit_hash(commit_hash)
         if hash_err:
             return {"success": False, "error": hash_err}
@@ -829,6 +1179,23 @@ class CheckpointManager:
         if not ok:
             return {"success": False, "error": f"Checkpoint '{commit_hash}' not found",
                     "debug": err or None}
+
+        # Spec: a commit must belong to THIS project's checkpoint
+        # ref. Single helper used by both ``restore()`` and
+        # ``restore_checkpoint()`` so the cross-project forge guard
+        # fires BEFORE any workspace mutation (including the
+        # ``unlink()`` branch when a per-path target is absent in
+        # the checkpoint tree). Pass ``checkpoint_id`` so a Task 4
+        # CheckpointRef is honoured via the pin ref when the project
+        # history has pruned the commit.
+        ref_membership_err = _verify_project_ref_membership(
+            store, abs_dir, commit_hash, checkpoint_id=checkpoint_id,
+        )
+        if ref_membership_err is not None:
+            return {
+                "success": False,
+                "error": ref_membership_err,
+            }
 
         # Take a pre-rollback snapshot so you can undo the undo.
         self._take(abs_dir, f"pre-rollback snapshot (restoring to {commit_hash[:8]})")
@@ -884,21 +1251,37 @@ class CheckpointManager:
     # Internal
     # ------------------------------------------------------------------
 
-    def _take(self, working_dir: str, reason: str) -> bool:
-        """Take a snapshot.  Returns True on success."""
+    def _take(
+        self,
+        working_dir: str,
+        reason: str,
+        *,
+        force: bool = False,
+        pin_ref: str | None = None,
+    ) -> tuple[bool, str | None]:
+        """Take a snapshot.  Returns (success, commit_hash_or_None).
+
+        Spec: when ``force=True`` the no-change guard is bypassed so a
+        forced checkpoint against an unchanged tree still emits a commit.
+
+        Every failure path returns ``(False, None)`` — callers can
+        always trust the two-tuple shape regardless of which guard
+        fired. ``create_checkpoint`` raises ``RuntimeError`` on
+        ``(False, None)``; ``ensure_checkpoint`` silently returns False.
+        """
         store = _store_path(CHECKPOINT_BASE)
 
         err = _init_store(store, working_dir)
         if err:
             logger.debug("Checkpoint store init failed: %s", err)
-            return False
+            return False, None
 
         _touch_project(store, working_dir)
 
         # Quick size guard — don't try to snapshot enormous directories
         if _dir_file_count(working_dir) > _MAX_FILES:
             logger.debug("Checkpoint skipped: >%d files in %s", _MAX_FILES, working_dir)
-            return False
+            return False, None
 
         dir_hash = _project_hash(working_dir)
         index_file = _index_path(store, dir_hash)
@@ -940,7 +1323,7 @@ class CheckpointManager:
         )
         if not ok:
             logger.debug("Checkpoint git-add failed: %s", err)
-            return False
+            return False, None
 
         if self.max_file_size_mb > 0:
             self._drop_oversize_from_index(store, working_dir, index_file)
@@ -962,9 +1345,11 @@ class CheckpointManager:
                 allowed_returncodes={1},
                 index_file=index_file,
             )
-            if ok_diff:
+            if ok_diff and not force:
+                # Spec: forced checkpoints skip the no-change dedup —
+                # caller wants a per-transaction commit regardless.
                 logger.debug("Checkpoint skipped: no changes in %s", working_dir)
-                return False
+                return False, None
         else:
             # No ref yet — skip only if the index is empty.
             ok_ls, ls_out, _ = _run_git(
@@ -972,9 +1357,9 @@ class CheckpointManager:
                 store, working_dir,
                 index_file=index_file,
             )
-            if ok_ls and not ls_out.strip():
+            if ok_ls and not ls_out.strip() and not force:
                 logger.debug("Checkpoint skipped: empty tree in %s", working_dir)
-                return False
+                return False, None
 
         # Write tree from per-project index.
         ok_tree, tree_sha, err = _run_git(
@@ -983,7 +1368,7 @@ class CheckpointManager:
         )
         if not ok_tree or not tree_sha:
             logger.debug("Checkpoint write-tree failed: %s", err)
-            return False
+            return False, None
 
         # Build commit (parent = current ref tip, if any).
         commit_args = ["commit-tree", tree_sha, "-m", reason, "--no-gpg-sign"]
@@ -995,7 +1380,7 @@ class CheckpointManager:
         )
         if not ok_commit or not new_sha:
             logger.debug("Checkpoint commit-tree failed: %s", err)
-            return False
+            return False, None
 
         # Update the per-project ref.
         update_args = ["update-ref", ref, new_sha]
@@ -1006,7 +1391,15 @@ class CheckpointManager:
         )
         if not ok_update:
             logger.debug("Checkpoint update-ref failed: %s", err)
-            return False
+            return False, None
+
+        if pin_ref is not None:
+            ok_pin, _, err = _run_git(
+                ["update-ref", pin_ref, new_sha], store, working_dir,
+            )
+            if not ok_pin:
+                logger.debug("Checkpoint pin update-ref failed: %s", err)
+                return False, None
 
         logger.debug("Checkpoint taken in %s: %s (%s)", working_dir, reason, new_sha[:8])
 
@@ -1016,7 +1409,7 @@ class CheckpointManager:
         # Enforce global size cap.
         self._enforce_size_cap(store)
 
-        return True
+        return True, new_sha
 
     def _drop_oversize_from_index(
         self, store: Path, working_dir: str, index_file: Path,

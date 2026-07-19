@@ -2330,6 +2330,16 @@ class BasePlatformAdapter(ABC):
     # set this to False to stay correct-by-default.
     supports_async_delivery: bool = True
 
+    # Whether a transport can safely accept the same delivery identity again
+    # after a process crash.  Unknown adapters default to False: a response
+    # timeout or cancellation must never be treated as replay-safe.
+    supports_idempotent_delivery: bool = False
+
+    # Whether an adapter can query/verify a previously ambiguous delivery
+    # without sending it again.  Unknown adapters default to False, so an
+    # ambiguous post-dispatch outcome becomes an explicit unknown effect.
+    supports_delivery_reconciliation: bool = False
+
     # Whether this adapter's ``send()`` splits long content into multiple
     # messages via ``truncate_message()``.  When True, the delivery router
     # (gateway/delivery.py) skips gateway-level truncation and lets the

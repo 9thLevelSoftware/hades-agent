@@ -13,7 +13,12 @@ from hades_cli.workflows_capabilities import (
     require_implemented_primitives,
     workflow_capabilities,
 )
-from hades_cli.workflows_spec import NodeType, TriggerType, WorkflowSpec
+from hades_cli.workflows_spec import (
+    NodeType,
+    TriggerType,
+    WorkflowSpec,
+    validate_graph,
+)
 
 
 def test_capabilities_implemented_subset_of_declared():
@@ -42,13 +47,16 @@ def test_capabilities_payload_is_dashboard_friendly():
 
 
 def _spec_with_node(node_type: str) -> WorkflowSpec:
+    node = {"type": node_type, "output": {}}
+    if node_type == "send_message":
+        node.update({"platform": "local", "target": "test-target", "message": "hi"})
     return WorkflowSpec.model_validate(
         {
             "id": "unsupported_demo",
             "name": "Unsupported Demo",
             "version": 1,
             "triggers": [{"type": "manual"}],
-            "nodes": {"start": {"type": node_type, "output": {}}},
+            "nodes": {"start": node},
             "edges": [],
         }
     )
@@ -61,6 +69,14 @@ def test_implemented_primitive_errors_reports_unsupported_node():
     assert implemented_primitive_errors(spec) == [
         f"unsupported node type: {sample} on node start"
     ]
+
+
+def test_send_message_is_schema_valid_and_runtime_implemented():
+    spec = _spec_with_node("send_message")
+
+    validate_graph(spec)
+
+    assert implemented_primitive_errors(spec) == []
 
 
 def test_require_implemented_primitives_raises_actionable_error():

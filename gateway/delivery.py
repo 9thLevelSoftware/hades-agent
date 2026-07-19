@@ -745,8 +745,26 @@ class DeliveryRouter:
             except Exception as journal_exc:  # noqa: BLE001
                 logger.warning(
                     "journal transition to dispatched/unknown failed for %s: %s",
-                    delivery_id, journal_exc,
+                    delivery_id,
+                    journal_exc,
                 )
+                try:
+                    journal.transition(
+                        delivery_id,
+                        from_states={"running"},
+                        to_state="unknown",
+                        effect_disposition="unknown",
+                        error=f"dispatch journal transition failed: {journal_exc}",
+                    )
+                except Exception as quarantine_exc:  # noqa: BLE001
+                    logger.warning(
+                        "journal quarantine to unknown/unknown failed for %s: %s",
+                        delivery_id,
+                        quarantine_exc,
+                    )
+                raise RuntimeError(
+                    f"journal transition to dispatched failed for {delivery_id!r}"
+                ) from journal_exc
 
         try:
             result = await adapter.send(target.chat_id, content, metadata=send_metadata or None)

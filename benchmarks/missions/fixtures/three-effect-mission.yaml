@@ -1,0 +1,70 @@
+# Three-effect vertical-slice fixture.
+#
+# This mission exercises every effect type in the vertical slice in a
+# single chain: workspace mutation, hades_state write, and a delayed
+# delivery. The transaction wrapper MUST commit all-or-none, and a
+# replay MUST NOT double-deliver.
+#
+# Delayed delivery is materialized through the authorized mission outbox.
+id: three-effect-mission
+name: Three-Effect Vertical Slice
+version: 1
+enabled: true
+max_node_runs: 20
+description: |
+  Benchmark metadata for the three-effect vertical slice:
+  - artifact_path: benchmarks/missions/artifacts/three-effect/output.md
+  - verification_command: test -s benchmarks/missions/artifacts/three-effect/output.md
+  - delivery_channel: hermes-test-channel (no real credentials)
+triggers:
+  - type: manual
+    id: manual
+nodes:
+  agent_task:
+    type: agent_task
+    profile: implementer
+    title: "Produce artifact and update hades_state"
+    result_contract:
+      summary: string
+      changed_files: array
+      verification: array
+      artifact_path: string
+    prompt: |
+      You are the `implementer` profile executing workflow cell `agent_task`.
+
+      Workflow goal:
+      Exercise the three-effect vertical slice end to end.
+
+      Cell objective:
+      Produce a small artifact and update hades_state.
+
+      Constraints:
+      - Write the artifact to `benchmarks/missions/artifacts/three-effect/output.md`.
+      - Verify with: `test -s benchmarks/missions/artifacts/three-effect/output.md`.
+      - Touch hades_state via the supported write primitive.
+      - Do not dispatch the delayed message yourself — the workflow's
+        downstream `send_message` node owns delivery.
+
+      Return JSON matching this contract:
+      {
+        "summary": "What was produced",
+        "changed_files": ["path/to/file"],
+        "verification": ["command and result"],
+        "artifact_path": "benchmarks/missions/artifacts/three-effect/output.md"
+      }
+
+  wait:
+    type: wait
+    seconds: 30
+
+  send_message:
+    type: send_message
+    platform: local
+    target: hermes-test-channel
+    message: "Vertical-slice delivery for three-effect mission."
+    not_before_seconds: 30
+edges:
+  - from: agent_task
+    to: wait
+  - from: wait
+    to: send_message

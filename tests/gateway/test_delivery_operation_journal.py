@@ -592,13 +592,14 @@ async def test_dispatch_transition_failure_still_records_unknown(tmp_path, monke
         GatewayConfig(), adapters={Platform.TELEGRAM: adapter}, journal=journal
     )
 
-    with pytest.raises(RuntimeError, match="adapter failed"):
+    with pytest.raises(RuntimeError, match="journal transition to dispatched"):
         await router._deliver_to_platform(
             DeliveryTarget.parse("telegram:123"),
             "hello",
             metadata={"delivery_id": "delivery-dispatch-transition"},
         )
 
+    assert adapter.calls == []
     record = journal.get("delivery-dispatch-transition")
     assert record.state == "unknown"
     assert record.effect_disposition == "unknown"

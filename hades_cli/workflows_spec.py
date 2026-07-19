@@ -8,7 +8,15 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from croniter import croniter
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 from hades_cli.workflows_expr import validate_condition_shape
 
@@ -141,6 +149,18 @@ class NodeSpec(BaseModel):
     workspace: WorkspaceSpec | None = None
     seconds: int = Field(default=0, ge=0)
     description: str | None = None
+    platform: str | None = None
+    target: str | None = None
+    message: Any = None
+    not_before_seconds: StrictInt = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Minimum authored delay before delivery. The runtime dispatcher "
+            "cap missions.outbox.max_delay_seconds is configuration-owned and "
+            "enforced during materialization, not by this schema."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -363,6 +383,30 @@ def _validate_path_string(path: str, *, where: str) -> None:
         raise ValueError(f"{where}: {exc}") from exc
 
 
+def _validate_send_message_node(node: NodeSpec) -> None:
+    """Validate authored send_message data without rendering or delivering it.
+
+    ``missions.outbox.max_delay_seconds`` is a runtime dispatcher config cap;
+    it is enforced during materialization rather than schema validation.
+    """
+    node.platform = _optional_clean_string(node.platform, "platform")
+    node.target = _optional_clean_string(node.target, "target")
+    if node.platform is None:
+        raise ValueError("platform is required for send_message")
+    if node.target is None:
+        raise ValueError("target is required for send_message")
+    if node.message is None:
+        raise ValueError("message is required for send_message")
+    if isinstance(node.message, str):
+        if not node.message.strip():
+            raise ValueError("message is required for send_message")
+    elif isinstance(node.message, Mapping):
+        if not node.message:
+            raise ValueError("message must be a non-empty mapping for send_message")
+    else:
+        raise ValueError("message must be a non-blank string or non-empty mapping for send_message")
+
+
 def _cycle_path(spec: WorkflowSpec) -> list[str] | None:
     adjacency: dict[str, list[str]] = {node_id: [] for node_id in spec.nodes}
     for edge in spec.edges:
@@ -495,6 +539,8 @@ def validate_graph(spec: WorkflowSpec) -> None:
             if _blank_prompt(node.prompt):
                 raise ValueError(f"agent_task node {node_id} requires a non-empty prompt")
             _validate_result_contract_spec(node.result_contract, node_id=node_id)
+        if node.type == "send_message":
+            _validate_send_message_node(node)
 
     cycle = _cycle_path(spec)
     if cycle:

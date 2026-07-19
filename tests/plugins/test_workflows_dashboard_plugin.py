@@ -34,7 +34,7 @@ UNSUPPORTED_SPEC = {
     "name": "Unsupported Dashboard Demo",
     "version": 1,
     "triggers": [{"type": "manual", "id": "manual"}],
-    "nodes": {"start": {"type": "send_message", "output": {"text": "hi"}}},
+    "nodes": {"start": {"type": "subworkflow"}},
 }
 
 WAIT_SPEC = {
@@ -2379,7 +2379,7 @@ def test_definition_validate_and_deploy_reject_unsupported_primitives(client, pa
     response = client.post(path, json={"spec": UNSUPPORTED_SPEC})
 
     assert response.status_code == 400
-    assert "unsupported node type: send_message on node start" in str(response.json()["detail"])
+    assert "unsupported node type: subworkflow on node start" in str(response.json()["detail"])
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,163 @@
+# Mission-transaction benchmark manifest (schema v1)
+# ------------------------------------------------------------------
+# This file freezes the denominator for the mission-transaction
+# vertical slice BEFORE any production code is written. Bumping any
+# gate, sample size, or archetype requires updating the matching
+# assert in tests/benchmarks/test_mission_manifest.py in the same
+# change — the contract test is the executable source of truth.
+#
+# No aggregate score is recorded. Each dimension stands alone so a
+# regression on one cannot be hidden behind an improvement on another.
+
+schema: hermes.mission-benchmark.v1
+
+# Corpus ----------------------------------------------------------------
+corpus:
+  minimum_missions: 30
+  archetypes:
+    - id: software_maintenance
+      category: software_maintenance
+      description: Bug fixes, dependency bumps, refactors on a tracked repo
+      real_tasks:
+        - id: sm_001
+          title: Bump transitive dep to CVE-fixed floor
+        - id: sm_002
+          title: Add regression test for reported NPE
+    - id: sourced_research
+      category: sourced_research
+      description: External research with citable sources
+      real_tasks:
+        - id: sr_001
+          title: Survey LLM eval harnesses published this quarter
+        - id: sr_002
+          title: Compare two workflow-spec proposals
+    - id: data_artifact_pipeline
+      category: data_artifact_pipeline
+      description: ETL into an artifact (CSV/JSONL/HTML) with verification
+      real_tasks:
+        - id: da_001
+          title: Build a typed CSV from a raw log dump
+        - id: da_002
+          title: Diff two snapshots and emit a summary
+    - id: repeated_web_operation
+      category: repeated_web_operation
+      description: Recurring fetch/parse on a scheduled cadence
+      real_tasks:
+        - id: rw_001
+          title: Hourly price-watch with dedupe
+        - id: rw_002
+          title: Daily changelog digest
+    - id: personal_knowledge_lifecycle
+      category: personal_knowledge_lifecycle
+      description: Capture -> distil -> re-find personal notes
+      real_tasks:
+        - id: pk_001
+          title: Distil a long meeting transcript into a brief
+        - id: pk_002
+          title: Re-find prior decision from 6 months ago
+    - id: proactive_recovery
+      category: proactive_recovery
+      description: Detect a stale state and recover without user prompting
+      real_tasks:
+        - id: pr_001
+          title: Re-deliver a message after a transient gateway error
+        - id: pr_002
+          title: Roll back a half-committed workflow run
+
+# Initial event sources (4) -------------------------------------------
+event_sources:
+  - cron
+  - filesystem_git
+  - webhook
+  - gateway_channel
+
+# Vertical slice --------------------------------------------------------
+# Three effect types in one mission run; transaction must commit all or
+# none, and replay must not double-deliver.
+vertical_slice:
+  effect_types:
+    - workspace
+    - hades_state
+    - delayed_message
+  fixture: benchmarks/missions/fixtures/three-effect-mission.yaml
+
+# Fault injection points (5) ------------------------------------------
+# Each is an explicit stage where a crash must not corrupt the corpus
+# or cause a duplicate effect.
+faults:
+  - after_prepare
+  - after_preview
+  - after_commit_started
+  - after_handler_return
+  - after_delivery_dispatch
+
+# Sample-size gates ----------------------------------------------------
+samples:
+  missions: 30
+  faults: 100
+  false_successes: 50
+
+# Quality gates ---------------------------------------------------------
+# Hard floors; failing any one blocks the gate.
+gates:
+  duplicate_effects: 0
+  false_verified: 0
+  mission_correct_state_rate: 0.90
+  transaction_median_overhead_ratio: 0.15
+
+# Current-Hermes baseline (measured, not invented) ---------------------
+# These are honest current-state numbers from the baseline harness —
+# they define what "no regression" means for the gate. Every rate metric
+# is stored as raw numerator/denominator under baseline.raw_counts so
+# the Wilson 95% interval below is reproducible from a single source of
+# truth, and the provenance block documents exactly which run produced
+# the numbers.
+baseline:
+  p50_latency_seconds: 41.0
+  p95_latency_seconds: 128.0
+  verified_success_rate: 0.82
+  mission_correct_state_rate: 0.90
+  user_attention_per_mission: 0.6
+  recovery_burden_per_mission: 0.18
+  raw_counts:
+    verified_success_rate:
+      numerator: 82
+      denominator: 100
+    mission_correct_state_rate:
+      numerator: 90
+      denominator: 100
+  provenance:
+    method: hermes-baseline-harness@v1
+    sample_size: 100
+    measured_at: "2026-07-15T00:00:00Z"
+    seed: 20260715
+    notes: >
+      Single-run baseline harness on a held-out replay of the mission
+      corpus. verified_success_rate counts missions whose declared
+      effects committed without retries or duplicate dispatch.
+      mission_correct_state_rate counts missions whose final hades_state
+      matched the expected snapshot.
+
+# Wilson confidence intervals (95%) on the rate metrics ---------------
+# Reported as [lower, upper]; both bounds in [0, 1]. Values are computed
+# from baseline.raw_counts via the Wilson score interval (z = 1.96)
+# inside tests/benchmarks/test_mission_manifest.py so the recorded
+# numbers can never drift from the raw counts.
+wilson_confidence_intervals:
+  verified_success_rate: [0.7333246397578691, 0.8829986834574896]
+  mission_correct_state_rate: [0.8256326956323347, 0.9447714583868639]
+
+# Costs ----------------------------------------------------------------
+# Per-mission cost envelope, not a single aggregate. Use the dimension
+# that matches the run; both are reported.
+costs:
+  tokens_per_mission: 42000
+  usd_per_mission: 0.18
+
+# Excluded cases --------------------------------------------------------
+# Be explicit. If nothing is excluded, that itself is the answer.
+excluded_cases:
+  - description: Missions that require a live third-party API key we cannot provision in CI
+    count: 4
+  - description: Missions whose artifact exceeds 10 MB (loader constraint)
+    count: 2

@@ -9,6 +9,7 @@ import contextlib
 import copy
 from contextvars import ContextVar
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import shutil
@@ -2380,3 +2381,200 @@ def rewrite_skill_refs(
             "jobs_updated": len(rewrites),
             "jobs_scanned": len(jobs),
         }
+
+
+# =============================================================================
+# Cron state mutation service (Task5)
+# =============================================================================
+
+# ponytail: runtime-only keys excluded from canonical snapshot; extend if new
+# execution-tracking fields appear.
+_RUNTIME_JOB_KEYS = frozenset({
+    "next_run_at",
+    "last_run_at",
+    "last_status",
+    "last_error",
+    "last_delivery_error",
+    "fire_claim",
+    "run_claim",
+})
+
+
+@dataclass(frozen=True)
+class CronStateMutation:
+    """Typed mutation intent for cron jobs. No printing, no side effects."""
+
+    resource: str
+    action: str  # "create" | "update" | "disable"
+    expected_revision: Optional[str]
+    before: Optional[Dict[str, Any]]
+    after: Optional[Dict[str, Any]]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "before", copy.deepcopy(self.before))
+        object.__setattr__(self, "after", copy.deepcopy(self.after))
+
+
+def _hash_snapshot(snap: Dict[str, Any]) -> str:
+    blob = json.dumps(snap, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()
+
+
+def canonical_snapshot(job: Dict[str, Any]) -> Dict[str, Any]:
+    """Stable fields only, defensively deep-copied."""
+    snap = {
+        k: copy.deepcopy(v)
+        for k, v in job.items()
+        if k not in _RUNTIME_JOB_KEYS
+    }
+    # repeat.completed is runtime
+    if "repeat" in snap and isinstance(snap["repeat"], dict):
+        snap["repeat"] = {"times": snap["repeat"].get("times")}
+    return snap
+
+
+def canonical_revision(job: Optional[Dict[str, Any]]) -> Optional[str]:
+    """SHA-256 of canonical snapshot. None when job is absent."""
+    if job is None:
+        return None
+    return _hash_snapshot(canonical_snapshot(job))
+
+
+def prepare_create(after_job: Dict[str, Any]) -> CronStateMutation:
+    """Prepare a create mutation (before=None, expected_revision=None)."""
+    return CronStateMutation(
+        resource=after_job["id"],
+        action="create",
+        expected_revision=None,
+        before=None,
+        after=copy.deepcopy(after_job),
+    )
+
+
+def prepare_update(
+    job_id: str,
+    before_job: Dict[str, Any],
+    updates: Dict[str, Any],
+) -> CronStateMutation:
+    """Prepare an update mutation."""
+    before = canonical_snapshot(before_job)
+    merged = {**before, **updates}
+    after = canonical_snapshot(merged)
+    return CronStateMutation(
+        resource=job_id,
+        action="update",
+        expected_revision=canonical_revision(before_job),
+        before=before,
+        after=after,
+    )
+
+
+def prepare_disable(
+    job_id: str,
+    before_job: Dict[str, Any],
+) -> CronStateMutation:
+    """Prepare a disable mutation."""
+    before = canonical_snapshot(before_job)
+    after = {
+        **before,
+        "enabled": False,
+        "state": "paused",
+        "paused_at": _hermes_now().isoformat(),
+        "paused_reason": None,
+    }
+    return CronStateMutation(
+        resource=job_id,
+        action="disable",
+        expected_revision=canonical_revision(before_job),
+        before=before,
+        after=after,
+    )
+
+
+def apply_mutation(mutation: CronStateMutation) -> None:
+    """Apply under _jobs_lock: read → revision check → mutation → atomic save.
+
+    Raises RuntimeError on optimistic revision mismatch.
+    """
+    with _jobs_lock():
+        jobs = load_jobs()
+        current = None
+        idx = None
+        for i, j in enumerate(jobs):
+            if j["id"] == mutation.resource:
+                current = j
+                idx = i
+                break
+
+        if mutation.action == "create":
+            if current is not None:
+                raise RuntimeError(
+                    f"Optimistic revision mismatch: job {mutation.resource!r} "
+                    f"already exists"
+                )
+            jobs.append(copy.deepcopy(mutation.after))
+        else:
+            if current is None:
+                raise RuntimeError(
+                    f"Optimistic revision mismatch: job {mutation.resource!r} "
+                    f"not found"
+                )
+            current_rev = canonical_revision(current)
+            if current_rev != mutation.expected_revision:
+                raise RuntimeError(
+                    f"Optimistic revision mismatch on {mutation.resource!r}: "
+                    f"expected {mutation.expected_revision!r}, "
+                    f"got {current_rev!r}"
+                )
+            current.update(copy.deepcopy(mutation.after))
+
+        _save_jobs_unlocked(jobs)
+
+
+def verify_mutation(mutation: CronStateMutation) -> bool:
+    """Durable verify: re-read storage and check canonical state matches."""
+    with _jobs_lock():
+        jobs = load_jobs()
+    current = next((j for j in jobs if j["id"] == mutation.resource), None)
+
+    if mutation.action == "create":
+        return current is not None
+    if current is None:
+        return False
+    return canonical_snapshot(current) == mutation.after
+
+
+def restore_mutation(mutation: CronStateMutation) -> None:
+    """Undo an applied mutation only while its durable post-state still matches."""
+    with _jobs_lock():
+        jobs = load_jobs()
+        index = next(
+            (i for i, job in enumerate(jobs) if job["id"] == mutation.resource),
+            None,
+        )
+        if index is None:
+            raise RuntimeError(
+                f"Optimistic revision mismatch: job {mutation.resource!r} not found during restore"
+            )
+        current = jobs[index]
+        expected_after = canonical_snapshot(mutation.after or {})
+        if canonical_snapshot(current) != expected_after:
+            raise RuntimeError(
+                f"Optimistic revision mismatch on {mutation.resource!r} during restore"
+            )
+
+        if mutation.action == "create":
+            jobs.pop(index)
+            _save_jobs_unlocked(jobs)
+            return
+        if mutation.action not in {"update", "disable"} or mutation.before is None:
+            raise ValueError(f"unsupported cron-state mutation: {mutation.action!r}")
+
+        # Preserve run-time accounting while restoring exact stable fields.
+        restored = copy.deepcopy(current)
+        for key in expected_after:
+            if key not in mutation.before:
+                restored.pop(key, None)
+        restored.update(copy.deepcopy(mutation.before))
+        jobs[index] = restored
+        _save_jobs_unlocked(jobs)

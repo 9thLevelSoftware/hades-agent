@@ -616,3 +616,22 @@ def verification_status(
         "session_id": sid,
         "changed_paths": changed_paths,
     }
+
+
+def receipt_verification_observation(
+    *,
+    session_id: str | None,
+    cwd: str | Path | None,
+) -> dict[str, Any]:
+    """Normalize existing ledger state for a receipt without duplicating it."""
+    status = verification_status(session_id=session_id, cwd=cwd)
+    evidence = status.get("evidence")
+    evidence_mapping = dict(evidence) if isinstance(evidence, dict) else None
+    return {
+        "status": status.get("status", "unverified"),
+        "timestamp": evidence_mapping.get("created_at") if evidence_mapping else None,
+        "source": "verification_evidence",
+        "evidence": evidence_mapping,
+        "root": status.get("root"),
+        "session_id": status.get("session_id", str(session_id or "default")),
+    }

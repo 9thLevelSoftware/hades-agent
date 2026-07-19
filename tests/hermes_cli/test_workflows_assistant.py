@@ -162,16 +162,20 @@ def test_parse_assistant_payload_returns_validated_draft_result():
     assert result.spec.nodes["implement"].type == "agent_task"
 
 
-def test_parse_assistant_payload_rejects_unsupported_runtime_primitives():
+def test_parse_assistant_payload_accepts_schema_valid_delayed_message():
     payload = _valid_payload()
-    payload["spec"]["nodes"]["notify"] = {"type": "send_message", "output": {}}
+    payload["spec"]["nodes"]["notify"] = {
+        "type": "send_message",
+        "platform": "local",
+        "target": "hermes-test-channel",
+        "message": "Workflow completion notification.",
+        "not_before_seconds": 30,
+    }
     payload["spec"]["edges"].append({"from": "done", "to": "notify"})
 
-    with pytest.raises(
-        AssistantValidationError,
-        match="unsupported node type: send_message on node notify",
-    ):
-        parse_assistant_payload(payload)
+    result = parse_assistant_payload(payload)
+
+    assert result.spec.nodes["notify"].type == "send_message"
 
 
 @pytest.mark.parametrize("contract", [None, {}])
