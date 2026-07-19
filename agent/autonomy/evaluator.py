@@ -331,12 +331,25 @@ def _evidence_union(
 # ── Public matching helpers ─────────────────────────────────────────────────
 
 
-def _partition_rules(contract, ctx: ActionContext, now_ms: int):
+def _partition_rules(
+    contract,
+    ctx: ActionContext,
+    now_ms: int,
+    lapsed_rules: Sequence[AutonomyRule] = (),
+):
     """Split contract rules into active / expired / consumed, discarding
-    suggestions and wrong-profile rules outright (evaluation steps 2-3)."""
+    suggestions and wrong-profile rules outright (evaluation steps 2-3).
+
+    ``lapsed_rules`` are terminally consumed/expired temporary mandates
+    that are (by definition) OUTSIDE the compiled contract and its hash;
+    they can never authorize, but they let the evaluator explain a
+    replay/expiry conservatively (``mandate_consumed`` /
+    ``authority_expired``) instead of falling to the generic default.
+    """
     active: list[AutonomyRule] = []
     expired: list[AutonomyRule] = []
     consumed: list[AutonomyRule] = []
+    seen: set[str] = set()
     for rule in tuple(getattr(contract, "rules", ()) or ()):
         if not isinstance(rule, AutonomyRule):
             continue
@@ -346,12 +359,32 @@ def _partition_rules(contract, ctx: ActionContext, now_ms: int):
             continue
         if rule.scope.profile_id is not None and ctx.profile_id != rule.scope.profile_id:
             continue  # profile isolation: silently out of scope
+        seen.add(rule.rule_id)
         if rule.remaining_uses is not None and rule.remaining_uses <= 0:
             consumed.append(rule)
         elif rule.expires_at_ms is not None and rule.expires_at_ms <= now_ms:
             expired.append(rule)
         else:
             active.append(rule)
+    for rule in tuple(lapsed_rules or ()):
+        if not isinstance(rule, AutonomyRule):
+            continue
+        if rule.source != "temporary_mandate" or rule.rule_id in seen:
+            continue  # only mandates lapse; revoked authority never resurfaces
+        if rule.state not in ("active", "consumed", "expired"):
+            continue
+        if rule.scope.profile_id is not None and ctx.profile_id != rule.scope.profile_id:
+            continue
+        seen.add(rule.rule_id)
+        if rule.state == "consumed" or (
+            rule.remaining_uses is not None and rule.remaining_uses <= 0
+        ):
+            consumed.append(rule)
+        elif rule.state == "expired" or (
+            rule.expires_at_ms is not None and rule.expires_at_ms <= now_ms
+        ):
+            expired.append(rule)
+        # a still-live rule outside the contract never joins evaluation
     key = lambda r: r.rule_id  # noqa: E731 — canonical ordering everywhere
     return sorted(active, key=key), sorted(expired, key=key), sorted(consumed, key=key)
 
@@ -496,6 +529,7 @@ def evaluate_contract(
     budget_usage: Optional[BudgetUsage] = None,
     default_known_reversible: str = "ask",
     default_unknown_or_irreversible: str = "deny",
+    lapsed_rules: Sequence[AutonomyRule] = (),
 ) -> AuthorityDecisionDraft:
     """Deterministically decide allow/ask/deny for *context* under *contract*.
 
@@ -503,6 +537,10 @@ def evaluate_contract(
     ``budget_usage`` micros snapshot) always produce an identical draft,
     independent of rule ordering. Conflict order is deny > ask > allow and
     the no-match default is configurable but can never be ``allow``.
+
+    ``lapsed_rules`` carries terminally consumed/expired mandates that
+    live outside the contract snapshot; they never authorize but allow
+    exact ``mandate_consumed`` / ``authority_expired`` explanations.
     """
     if not isinstance(context, ActionContext):
         raise ValueError("context must be an ActionContext")
@@ -527,7 +565,7 @@ def evaluate_contract(
         usage[key] = value
 
     active, expired_rules, consumed_rules = _partition_rules(
-        contract, context, now_ms
+        contract, context, now_ms, lapsed_rules
     )
     considered = active + expired_rules + consumed_rules
 

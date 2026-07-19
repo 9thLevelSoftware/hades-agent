@@ -356,6 +356,47 @@ class TestFailClosed:
         assert payload["autonomy"]["verdict"] == "deny"
         assert terminal.calls == []
 
+    def test_sqlite_busy_audit_error_fails_closed_in_enforce_mode(
+        self, monkeypatch, terminal
+    ):
+        """Task 10: a busy/locked audit DB never becomes an allow."""
+        import sqlite3
+
+        from agent.autonomy.store import AutonomyStore
+
+        write_autonomy_config("enforce", (send_allow_rule(),))
+
+        def busy(self, record, rule_ids):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(
+            AutonomyStore, "consume_rules_and_record_decision", busy
+        )
+        result = run_gate(TOOL_SEND, {"recipient": "safe"}, terminal)
+        payload = json.loads(result)
+        assert payload["autonomy"]["verdict"] == "deny"
+        assert terminal.calls == []
+
+    def test_sqlite_busy_in_shadow_mode_preserves_current_behavior(
+        self, monkeypatch, terminal
+    ):
+        """Task 10: shadow mode never changes execution on audit failure."""
+        import sqlite3
+
+        from agent.autonomy.store import AutonomyStore
+
+        write_autonomy_config("shadow", (send_allow_rule(),))
+
+        def busy(self, record, rule_ids):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(
+            AutonomyStore, "consume_rules_and_record_decision", busy
+        )
+        result = run_gate(TOOL_SEND, {"recipient": "safe"}, terminal)
+        assert result == "terminal-result"
+        assert terminal.calls == [{"recipient": "safe"}]
+
     def test_read_only_calls_bypass_gate_and_gain_no_authority(self, terminal):
         from agent.autonomy.runtime import consume_exact_authority_grant
 

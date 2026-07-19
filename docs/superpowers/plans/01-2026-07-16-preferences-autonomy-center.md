@@ -1067,7 +1067,7 @@ git commit -m "feat: add dashboard autonomy center"
 - Consumes the complete service/runtime/UI-independent API and item #2's `TransactionCoordinator`/effect authority adapter when that plan is present.
 - Produces no new production interface; this is the release safety gate.
 
-- [ ] **Step 1: Write real-path E2E scenarios**
+- [x] **Step 1: Write real-path E2E scenarios**
 
 Use a temporary `HERMES_HOME`, real `SessionDB`, real config reads/writes, real registry imports, real middleware, and a fake terminal effect callback only at the outward-effect boundary. Cover:
 
@@ -1084,7 +1084,7 @@ Use a temporary `HERMES_HOME`, real `SessionDB`, real config reads/writes, real 
 11. gateway/CLI/TUI approval identity rejects changed args/requester/channel/expiry/replay;
 12. an `ask` clarification is bounded and produces no synthetic user message.
 
-- [ ] **Step 2: Add adversarial security cases**
+- [x] **Step 2: Add adversarial security cases**
 
 ```python
 @pytest.mark.parametrize("attack", [
@@ -1102,17 +1102,17 @@ def test_attack_never_expands_authority(security_harness, attack):
 
 Threat-model prompt injection, confused delegation, replay, privilege drift, secret/derived-memory leakage, malicious plugin metadata, compromised extension context resolvers, SSRF-shaped recipients, and cross-profile multiplexing. Context resolvers are trusted code boundaries: resolver exceptions/invalid output become unknown mutation, never allow. User/model text cannot provide `profile_id`, trusted data labels, authority version, or an approval grant.
 
-- [ ] **Step 3: Add cache and conversation invariants**
+- [x] **Step 3: Add cache and conversation invariants**
 
 Run a multi-turn real agent harness, independently hash system message, effective tool definitions, provider, and model before/after rule apply, mandate consumption, suggestion confirmation, deny, ask, and audit purge. Assert all four unchanged, strict role alternation, no history mutation outside compression, and no synthetic user message. Assert registry `authority_context_fn` never appears in serialized tool definitions.
 
-- [ ] **Step 4: Run RED before completing fault hooks/bridges**
+- [x] **Step 4: Run RED before completing fault hooks/bridges**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_e2e.py tests/agent/autonomy/test_security.py tests/agent/autonomy/test_runtime.py tests/tools/test_approval.py tests/hermes_cli/test_profiles.py -q`
 
 Expected: FAIL at injected crash/replay/cache/profile cases until the production recovery and exact-grant paths from Tasks 3–6 handle every boundary.
 
-- [ ] **Step 5: Make the smallest production corrections and run GREEN**
+- [x] **Step 5: Make the smallest production corrections and run GREEN**
 
 Apply corrections only in files owned by Tasks 2–6; preserve the public types and decision order. For item #2 integration, its `agent/effects/authority.py` imports/re-exports `AuthorityProvider`, `StoredAuthorityProvider`, `AuthorityDecision`, and `authorize_effect`, maps adapter-normalized resources/destinations/finality into `ActionContext`, and retains only `request_bound_approval()` / `consume_bound_approval()` for exact transaction identity. The coordinator reloads the provider immediately before commit/compensate.
 
@@ -1120,7 +1120,7 @@ Run: `scripts/run_tests.sh tests/agent/autonomy tests/tools/test_approval.py tes
 
 Expected: PASS; all attacks fail closed, restarts converge, profiles isolate, and commit-time authority drift invokes no effect.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agent/autonomy hermes_state.py hermes_cli/config.py hermes_cli/middleware.py tools/approval.py tools/registry.py tests/agent/autonomy tests/tools/test_approval.py tests/hermes_cli/test_profiles.py

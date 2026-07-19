@@ -340,6 +340,26 @@ class AutonomyService:
             return (now // window_ms) * window_ms
         return 0
 
+    @staticmethod
+    def _lapsed_mandates(
+        db: "SessionDB", contract: AutonomyContract
+    ) -> tuple[AutonomyRule, ...]:
+        """Consumed/expired mandates outside the contract snapshot.
+
+        They can never authorize; the evaluator uses them only to explain
+        a replay/expiry exactly (``mandate_consumed``/``authority_expired``)
+        instead of falling back to the generic no-match default.
+        """
+        contract_ids = {r.rule_id for r in contract.rules}
+        return tuple(
+            stored.rule
+            for stored in db.autonomy.list_runtime_rules(
+                source="temporary_mandate",
+                states=("active", "consumed", "expired"),
+            )
+            if stored.rule.rule_id not in contract_ids
+        )
+
     def _decide(
         self, db: "SessionDB", context: ActionContext, now: int
     ) -> tuple[StoredContractVersion, Mapping[str, Any], AuthorityDecisionDraft]:
@@ -353,6 +373,7 @@ class AutonomyService:
             default_unknown_or_irreversible=section.get(
                 "default_unknown_or_irreversible", "deny"
             ),
+            lapsed_rules=self._lapsed_mandates(db, stored.contract),
         )
         return stored, section, draft
 

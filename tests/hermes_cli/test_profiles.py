@@ -1968,3 +1968,173 @@ class TestAutonomyProfileIsolation:
 
         monkeypatch.setenv("HADES_HOME", str(default_home))
         assert config_apply.journal_path().parent == default_home
+
+
+# ===================================================================
+# TestAutonomyProfileIsolationEndToEnd (Preferences & Autonomy, Task 10)
+# ===================================================================
+
+class TestAutonomyProfileIsolationEndToEnd:
+    """Default/named profiles with OPPOSITE rules never see each other.
+
+    Exercised through the real service over real profile homes: config,
+    temporary mandates, decision audit, keyed recipient hashes, and the
+    budget ledger are all islands — no dimension leaks in either
+    direction.
+    """
+
+    NOW_MS = 1_800_000_000_000
+    DAY_MS = 86_400_000
+
+    def _write_config(self, home, effect, with_cost=True):
+        rule = {
+            "rule_id": "buy-rule",
+            "effect": effect,
+            "action_classes": ["purchase.prepare"],
+            "data_classes": ["internal"],
+            "recipient_classes": ["merchant"],
+            "allowed_reversibility": ["reversible"],
+        }
+        if with_cost:
+            rule["cost"] = {
+                "max_per_action_cents": 500,
+                "max_per_window_cents": 1000,
+                "window_ms": self.DAY_MS,
+            }
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "autonomy": {
+                        "schema_version": 1,
+                        "mode": "enforce",
+                        "stable_rules": [rule],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def _context(self, operation_key):
+        from agent.autonomy import ActionContext
+
+        return ActionContext(
+            operation_key=operation_key,
+            stage="execute",
+            action_class="purchase.prepare",
+            data_classes=("internal",),
+            reversibility="reversible",
+            recipient_class="merchant",
+            estimated_cost_cents=200,
+        )
+
+    def _mandate(self, rule_id):
+        from agent.autonomy import AutonomyRule, RuleProvenance
+
+        return AutonomyRule(
+            rule_id=rule_id,
+            source="temporary_mandate",
+            state="active",
+            effect="allow",
+            action_classes=("workspace.delete",),
+            data_classes=("internal",),
+            allowed_reversibility=("reversible",),
+            provenance=RuleProvenance(
+                actor_kind="user",
+                actor_id="user-1",
+                source_ref="cli",
+                observed_at_ms=100,
+                confirmed_at_ms=200,
+                confidence_ppm=1_000_000,
+            ),
+            created_at_ms=self.NOW_MS,
+            max_uses=1,
+            remaining_uses=1,
+        )
+
+    def test_opposite_rules_isolate_every_dimension(
+        self, profile_env, monkeypatch
+    ):
+        from agent.autonomy import AutonomyService
+        from agent.autonomy.evaluator import MICROS_PER_CENT
+        from hades_state import SessionDB
+
+        default_home = profile_env / ".hades"
+        named_home = default_home / "profiles" / "work"
+        self._write_config(default_home, "allow")
+        self._write_config(named_home, "deny", with_cost=False)
+
+        # Default profile: allow, mandate, reservation, recipient hash.
+        monkeypatch.setenv("HADES_HOME", str(default_home))
+        allow = AutonomyService().evaluate(
+            self._context("op-iso-1"), consume=True, now_ms=self.NOW_MS
+        )
+        assert allow.verdict == "allow"
+        assert allow.budget_reservation is not None
+        AutonomyService().create_mandate(
+            self._mandate("default-mandate"), now_ms=self.NOW_MS
+        )
+        default_db = SessionDB(default_home / "state.db")
+        try:
+            default_hash = default_db.autonomy.hash_recipient("alice@example.test")
+            default_spend = default_db.autonomy.window_spend_micros(
+                "buy-rule",
+                (self.NOW_MS // self.DAY_MS) * self.DAY_MS,
+            )
+        finally:
+            default_db.close()
+        assert default_spend == 200 * MICROS_PER_CENT
+
+        # Named profile: the SAME context is denied by ITS config, and no
+        # runtime state from the default home is visible.
+        monkeypatch.setenv("HADES_HOME", str(named_home))
+        deny = AutonomyService().evaluate(
+            self._context("op-iso-1"), consume=True, now_ms=self.NOW_MS
+        )
+        assert deny.verdict == "deny"
+
+        named_db = SessionDB(named_home / "state.db")
+        try:
+            # 1. mandates never leak
+            assert named_db.autonomy.list_runtime_rules() == ()
+            # 2. audit never leaks: only the named profile's own decision
+            records = named_db.autonomy.list_decisions()
+            assert {r.operation_key for r in records} == {"op-iso-1"}
+            assert all(r.verdict == "deny" for r in records)
+            # 3. recipient hashes are keyed per profile
+            named_hash = named_db.autonomy.hash_recipient("alice@example.test")
+            # 4. the budget ledger never leaks
+            named_spend = named_db.autonomy.window_spend_micros(
+                "buy-rule",
+                (self.NOW_MS // self.DAY_MS) * self.DAY_MS,
+            )
+        finally:
+            named_db.close()
+        assert named_hash != default_hash
+        assert named_spend == 0
+
+        # And in reverse: the named profile's deny decision, hash key,
+        # and empty ledger never contaminated the default home.
+        monkeypatch.setenv("HADES_HOME", str(default_home))
+        default_db = SessionDB(default_home / "state.db")
+        try:
+            rules = default_db.autonomy.list_runtime_rules()
+            assert [r.rule_id for r in rules] == ["default-mandate"]
+            records = default_db.autonomy.list_decisions()
+            assert {r.verdict for r in records} == {"allow"}
+            assert (
+                default_db.autonomy.hash_recipient("alice@example.test")
+                == default_hash
+            )
+        finally:
+            default_db.close()
+
+        # 5. config never leaks: each home still holds only its own rule.
+        default_cfg = yaml.safe_load(
+            (default_home / "config.yaml").read_text(encoding="utf-8")
+        )
+        named_cfg = yaml.safe_load(
+            (named_home / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert default_cfg["autonomy"]["stable_rules"][0]["effect"] == "allow"
+        assert named_cfg["autonomy"]["stable_rules"][0]["effect"] == "deny"
