@@ -193,9 +193,6 @@ export default function AutonomyPage() {
   const suggestions = (rules ?? []).filter(
     (r) => r.source === "learned_suggestion",
   );
-  const contractRules = (rules ?? []).filter(
-    (r) => r.source !== "learned_suggestion",
-  );
 
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-6 p-4">

@@ -204,8 +204,16 @@ def test_materialize_contract_is_idempotent_by_content_hash(db):
     again = store.materialize_contract(contract_fixture(), now_ms=NOW_MS + 1)
     assert again.version == first.version
     assert again.content_hash == first.content_hash
-    changed = store.materialize_contract(
+    # compiled_at_ms is excluded from identity — same rules, different timestamp
+    # still returns the same version (no spurious version churn).
+    same_rules_new_time = store.materialize_contract(
         contract_fixture(compiled_at_ms=20_000), now_ms=NOW_MS + 2
+    )
+    assert same_rules_new_time.version == first.version
+    # Actual rule change creates a new version.
+    changed = store.materialize_contract(
+        contract_fixture(rules=(stable_rule(rule_id="r-deny-delete", effect="deny"),)),
+        now_ms=NOW_MS + 3,
     )
     assert changed.version == first.version + 1
     assert store.get_head().version == changed.version

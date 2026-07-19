@@ -153,11 +153,19 @@ class ContractDraft:
             "rules": [rule_to_dict(rule) for rule in self.rules],
         }
 
+    def identity_body(self) -> dict[str, Any]:
+        """Fields that define contract identity (excludes compiled_at_ms)."""
+        return {
+            "schema": self.schema_id,
+            "profile_id": self.profile_id,
+            "rules": [rule_to_dict(rule) for rule in self.rules],
+        }
+
     def body_json(self) -> str:
         return canonical_json(self.body())
 
     def content_hash(self) -> str:
-        return contract_hash(self.body())
+        return contract_hash(self.identity_body())
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -385,7 +393,9 @@ class AutonomyStore:
                 version = int(row[0])
                 stored_json = row[1]
                 row_created_at = int(row[2])
-            if content_hash(json.loads(stored_json)) != body_hash:
+            stored_body = json.loads(stored_json)
+            identity = {k: v for k, v in stored_body.items() if k != "compiled_at_ms"}
+            if content_hash(identity) != body_hash:
                 raise AutonomyIntegrityError(
                     f"stored contract bytes for version {version} do not "
                     f"match content hash {body_hash}"
@@ -423,7 +433,8 @@ class AutonomyStore:
     def _load_contract_row(self, row: sqlite3.Row) -> StoredContractVersion:
         stored_json = row["contract_json"]
         body = json.loads(stored_json)
-        if content_hash(body) != row["content_hash"]:
+        identity = {k: v for k, v in body.items() if k != "compiled_at_ms"}
+        if content_hash(identity) != row["content_hash"]:
             raise AutonomyIntegrityError(
                 f"contract version {row['contract_version']} failed hash "
                 "verification; refusing to use tampered/corrupt authority"

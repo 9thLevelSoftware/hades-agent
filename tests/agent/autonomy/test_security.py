@@ -48,7 +48,7 @@ NOW_MS = 1_800_000_000_000
 DAY_MS = 86_400_000
 
 #: Canary secret. It must never appear in state.db, logs, or output.
-SECRET = "sk-canary-9f8e7d6c5b4a3210"
+SECRET = "CANARY_TOKEN_9f8e7d6c5b4a3210_NOT_A_REAL_KEY"
 
 ATTACKS = [
     "prompt_claims_user_approved",

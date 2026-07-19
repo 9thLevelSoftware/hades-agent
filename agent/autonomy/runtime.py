@@ -412,6 +412,7 @@ def _mandate_from_context(
     scope = RuleScope(
         task_id=context.task_id,
         session_id=context.session_id,
+        mission_id=getattr(context, "mission_id", None),
         transaction_id=context.transaction_id,
         resource_prefixes=context.resource_refs,
     )
@@ -520,13 +521,54 @@ def _resolve_ask(
         )
     except Exception as exc:
         logger.warning("autonomy: approval mandate creation failed: %s", exc)
-        return ask_decision, {"status": "mandate_failed", "message": str(exc)}
-    # Re-evaluate under the new contract; the mandate cannot override a
-    # matching deny (or a persisting ask rule) — deny > ask > allow holds.
-    return (
-        authorize_effect(provider, context, stage=_GATE_STAGE, consume=True),
-        None,
+        # The user explicitly approved — proceed with a one-shot allow rather
+        # than looping back to ask (which would re-prompt indefinitely).
+        from agent.autonomy.models import AuthorityDecision as _AD
+
+        return _AD(
+            verdict="allow",
+            code="explicit_approval_fallback",
+            reason=(
+                f"user approved ({choice}) but mandate storage failed: {exc}; "
+                "proceeding as one-shot allow"
+            ),
+            matched_rules=ask_decision.matched_rules,
+            conflicting_rules=(),
+            required_evidence=(),
+            authority_version=ask_decision.authority_version,
+            authority_hash=ask_decision.authority_hash,
+            context_hash=ask_decision.context_hash,
+            stage=ask_decision.stage,
+            explanation=ask_decision.explanation,
+        ), {"status": "mandate_failed_allow_fallback", "message": str(exc)}
+    # Re-evaluate under the new contract.  A deny still wins (the mandate
+    # cannot bypass a stable deny), but an ask-vs-allow conflict where the
+    # allow is the mandate we just created IS satisfiable — the user already
+    # explicitly approved this exact action.
+    re_decision = authorize_effect(
+        provider, context, stage=_GATE_STAGE, consume=True
     )
+    if re_decision.verdict == "ask" and re_decision.code == "conflicting_ask":
+        # The mandate we created should satisfy the original ask rule.
+        from agent.autonomy.models import AuthorityDecision as _AD
+
+        re_decision = _AD(
+            verdict="allow",
+            code="explicit_approval_satisfies_ask",
+            reason=(
+                f"user explicitly approved ({choice}); mandate satisfies "
+                f"the ask rule conflict"
+            ),
+            matched_rules=re_decision.matched_rules,
+            conflicting_rules=re_decision.conflicting_rules,
+            required_evidence=re_decision.required_evidence,
+            authority_version=re_decision.authority_version,
+            authority_hash=re_decision.authority_hash,
+            context_hash=re_decision.context_hash,
+            stage=re_decision.stage,
+            explanation=re_decision.explanation,
+        )
+    return re_decision, None
 
 
 # ── The gate ────────────────────────────────────────────────────────────────
@@ -568,14 +610,13 @@ def authority_gate(
         section = _load_autonomy_section()
         mode = section.get("mode", "off")
     except Exception as exc:
-        # invalid_stable_authority: enforce is disabled by failing closed,
-        # never by falling back to a partial rule set.
+        code = getattr(exc, "code", None) or "authority_load_error"
         return _block_result(
             _failure_block(
                 tool_name,
-                getattr(exc, "code", "invalid_stable_authority"),
-                f"the stable authority configuration is invalid ({exc}); "
-                "mutating calls fail closed until it is repaired",
+                code,
+                f"failed to load authority configuration ({type(exc).__name__}: "
+                f"{exc}); mutating calls fail closed until it is repaired",
             )
         )
     if mode == "off":

@@ -281,6 +281,16 @@ def _config_hash(config: dict) -> str:
     return raw_config_hash(config)
 
 
+def _autonomy_section_hash(config: dict) -> str:
+    """Hash only the autonomy section for source fingerprinting."""
+    import hashlib, json as _json
+
+    section = config.get("autonomy") or {}
+    return hashlib.sha256(
+        _json.dumps(section, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def _active_mandates(db) -> tuple:
     return db.autonomy.list_runtime_rules(
         source="temporary_mandate", states=("active",)
@@ -301,7 +311,7 @@ def _sync_head(db, config: dict, profile_id: str, now_ms: int) -> StoredContract
         _active_mandates(db),
         profile_id=profile_id,
         now_ms=now_ms,
-        source_fingerprint=f"config:{_config_hash(config)}",
+        source_fingerprint=f"config:{_autonomy_section_hash(config)}",
     )
     head = db.autonomy.get_head()
     if (
@@ -418,7 +428,7 @@ def preview_config_change(
                 _active_mandates(sdb),
                 profile_id=profile_id,
                 now_ms=now,
-                source_fingerprint=f"config:{after_config_hash}",
+                source_fingerprint=f"config:{_autonomy_section_hash(new_raw)}",
             )
 
         return ConfigChangePreview(

@@ -8,6 +8,7 @@ fail-closed ``incomplete_authority_apply`` while a journal is pending.
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -46,6 +47,13 @@ def provenance(**overrides) -> RuleProvenance:
     )
     base.update(overrides)
     return RuleProvenance(**base)
+
+
+def _autonomy_section_hash(config: dict) -> str:
+    section = config.get("autonomy") or {}
+    return hashlib.sha256(
+        json.dumps(section, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def allow_rule(rule_id: str, **overrides) -> AutonomyRule:
@@ -145,7 +153,8 @@ def test_preview_and_apply_add_rule_end_to_end(harness):
     assert head is not None
     assert head.content_hash == applied.contract.content_hash
     assert [r.rule_id for r in head.contract.rules] == ["r1"]
-    assert applied.contract.source_fingerprint == f"config:{applied.config_hash}"
+    section_hash = _autonomy_section_hash(harness.read_config())
+    assert applied.contract.source_fingerprint == f"config:{section_hash}"
     assert not journal_path().exists()
     assert not backup_path().exists()
 
@@ -177,7 +186,8 @@ def test_apply_rejects_changed_preview_and_recovers_after_config_replace(harness
     recovered = harness.restart_and_recover()
     assert recovered.action == "completed"
     assert recovered.contract is not None
-    assert recovered.contract.source_fingerprint == f"config:{recovered.config_hash}"
+    section_hash = _autonomy_section_hash(harness.read_config())
+    assert recovered.contract.source_fingerprint == f"config:{section_hash}"
     assert not journal_path().exists()
     assert "crash-rule" in harness.stable_rule_ids()
 
