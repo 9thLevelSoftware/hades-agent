@@ -1042,6 +1042,142 @@ CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
     ON sessions(handoff_state, started_at);
 """
 
+# ── Verified Outcome & Artifact Receipts (agent/receipt_store.py) ──
+# Canonical receipt tables are deliberately NOT part of SCHEMA_SQL:
+# _init_receipt_schema() must first inspect any pre-existing provisional
+# vertical-slice `receipts` table and atomically migrate it. If the DDL
+# lived in SCHEMA_SQL, `CREATE TABLE IF NOT EXISTS receipts` would adopt
+# the old v1 shape and _reconcile_columns() would then bolt canonical
+# columns onto it — destroying the "untouched v1 or fully canonical,
+# never half-migrated" invariant. Statements are individual strings so
+# the migration can execute them inside one BEGIN IMMEDIATE transaction
+# (executescript() would auto-commit and break atomicity).
+#
+# ReceiptStatus is frozen at exactly these five values; the CHECK
+# constraints are the storage-level enforcement of that contract.
+# Receipts, observations, and attestations are immutable: triggers abort
+# every UPDATE, and DELETE is permitted only after the retention service
+# has appended a receipt_deletion_tombstones row in the same transaction.
+RECEIPT_SCHEMA_STATEMENTS: tuple = (
+    """CREATE TABLE IF NOT EXISTS receipts (
+    receipt_id TEXT PRIMARY KEY,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    session_id TEXT,
+    turn_id TEXT,
+    mission_id TEXT,
+    transaction_id TEXT,
+    requested_outcome_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+      'verified','completed_unverified','failed','blocked','unknown_effect')),
+    claims_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    artifacts_json TEXT NOT NULL,
+    uncertainty_json TEXT NOT NULL,
+    scorer_id TEXT NOT NULL,
+    scorer_version TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    inserted_at REAL NOT NULL,
+    UNIQUE(source_kind, source_id)
+)""",
+    """CREATE TABLE IF NOT EXISTS receipt_observations (
+    observation_id TEXT PRIMARY KEY,
+    receipt_id TEXT NOT NULL REFERENCES receipts(receipt_id) ON DELETE CASCADE,
+    previous_observation_id TEXT REFERENCES receipt_observations(observation_id),
+    status TEXT NOT NULL CHECK(status IN (
+      'verified','completed_unverified','failed','blocked','unknown_effect')),
+    claims_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    artifacts_json TEXT NOT NULL,
+    uncertainty_json TEXT NOT NULL,
+    scorer_id TEXT NOT NULL,
+    scorer_version TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    inserted_at REAL NOT NULL,
+    UNIQUE(receipt_id, previous_observation_id, content_hash)
+)""",
+    """CREATE TABLE IF NOT EXISTS receipt_attestations (
+    attestation_id TEXT PRIMARY KEY,
+    target_kind TEXT NOT NULL CHECK(target_kind IN ('receipt','observation')),
+    target_id TEXT NOT NULL,
+    target_content_hash TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    algorithm TEXT NOT NULL,
+    signature_b64 TEXT NOT NULL,
+    signed_at TEXT NOT NULL,
+    verification_state TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE
+)""",
+    """CREATE TABLE IF NOT EXISTS receipt_deletion_tombstones (
+    receipt_id TEXT PRIMARY KEY,
+    receipt_content_hash TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_receipts_subject
+    ON receipts(subject_kind, subject_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_receipts_status_decided
+    ON receipts(status, decided_at)""",
+    """CREATE INDEX IF NOT EXISTS idx_receipts_session_turn
+    ON receipts(session_id, turn_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_receipts_mission
+    ON receipts(mission_id) WHERE mission_id IS NOT NULL""",
+    """CREATE INDEX IF NOT EXISTS idx_receipts_transaction
+    ON receipts(transaction_id) WHERE transaction_id IS NOT NULL""",
+    """CREATE INDEX IF NOT EXISTS idx_receipt_observations_order
+    ON receipt_observations(receipt_id, inserted_at)""",
+    """CREATE INDEX IF NOT EXISTS idx_receipt_attestations_target
+    ON receipt_attestations(target_kind, target_id)""",
+    """CREATE TRIGGER IF NOT EXISTS receipts_immutable_update
+    BEFORE UPDATE ON receipts
+    BEGIN
+        SELECT RAISE(ABORT, 'receipts rows are immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS receipt_observations_immutable_update
+    BEFORE UPDATE ON receipt_observations
+    BEGIN
+        SELECT RAISE(ABORT, 'receipt observations are immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS receipt_attestations_immutable_update
+    BEFORE UPDATE ON receipt_attestations
+    BEGIN
+        SELECT RAISE(ABORT, 'receipt attestations are immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS receipt_tombstones_immutable_update
+    BEFORE UPDATE ON receipt_deletion_tombstones
+    BEGIN
+        SELECT RAISE(ABORT, 'receipt deletion tombstones are immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS receipts_delete_requires_tombstone
+    BEFORE DELETE ON receipts
+    WHEN NOT EXISTS (
+        SELECT 1 FROM receipt_deletion_tombstones t
+        WHERE t.receipt_id = OLD.receipt_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT,
+            'receipt deletion requires a retention tombstone');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS receipt_observations_delete_requires_tombstone
+    BEFORE DELETE ON receipt_observations
+    WHEN NOT EXISTS (
+        SELECT 1 FROM receipt_deletion_tombstones t
+        WHERE t.receipt_id = OLD.receipt_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT,
+            'receipt observation deletion requires a retention tombstone');
+    END""",
+)
+
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content
@@ -1170,6 +1306,10 @@ class SessionDB:
         # (see the `autonomy` property; import deferred to avoid a
         # module-level hades_state <-> agent.autonomy cycle).
         self._autonomy_store = None
+        # True once the canonical receipt tables are known-present for this
+        # handle. Stays False on read-only attaches (schema init skipped)
+        # and when a v1 receipt-table migration failed and rolled back.
+        self._receipt_schema_ready = False
         self._conn = None
         try:
             if read_only:
@@ -1735,6 +1875,69 @@ class SessionDB:
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
 
+    @staticmethod
+    def _receipt_table_shape(cursor: sqlite3.Cursor) -> str:
+        """Classify any existing ``receipts`` table.
+
+        Returns ``"absent"`` (no table — clean create), ``"canonical"``
+        (current schema), ``"v1"`` (provisional vertical-slice shape that
+        must be migrated atomically), or ``"unknown"`` (leave untouched
+        and keep receipt storage disabled rather than guess).
+        """
+        rows = cursor.execute('PRAGMA table_info("receipts")').fetchall()
+        if not rows:
+            return "absent"
+        cols = {row[1] for row in rows}
+        if {"source_kind", "source_id", "requested_outcome_json",
+                "decided_at"} <= cols:
+            return "canonical"
+        if {"objective", "before_after_json", "freshness_json",
+                "signature_json"} <= cols:
+            return "v1"
+        return "unknown"
+
+    def _init_receipt_schema(self, cursor: sqlite3.Cursor) -> None:
+        """Create canonical receipt tables, migrating any v1 tables first.
+
+        The provisional vertical-slice ``receipts``/``receipt_observations``
+        tables are migration input, not a second schema. Migration is one
+        BEGIN IMMEDIATE transaction inside
+        :func:`agent.receipt_store.migrate_v1_receipt_tables`; any failure
+        rolls back to the untouched v1 tables and receipt storage stays
+        disabled for this process (``_receipt_schema_ready`` False) so a
+        later, fixed build can retry. There is never a half-migrated state.
+        """
+        self._receipt_schema_ready = False
+        shape = self._receipt_table_shape(cursor)
+        if shape == "v1":
+            # Deferred import: hades_state must stay importable without the
+            # receipt layer, and agent.receipt_store imports hades_state's
+            # RECEIPT_SCHEMA_STATEMENTS at call time.
+            from agent.receipt_store import migrate_v1_receipt_tables
+            try:
+                report = migrate_v1_receipt_tables(self._conn)
+            except Exception:
+                logger.exception(
+                    "provisional receipt-table migration failed for %s; the "
+                    "original v1 tables are preserved untouched and receipt "
+                    "storage is disabled for this process.", self.db_path,
+                )
+                return
+            logger.info(
+                "migrated provisional receipt tables in %s: %s",
+                self.db_path, report,
+            )
+        elif shape == "unknown":
+            logger.error(
+                "existing 'receipts' table in %s has an unrecognized shape; "
+                "leaving it untouched and disabling receipt storage.",
+                self.db_path,
+            )
+            return
+        for statement in RECEIPT_SCHEMA_STATEMENTS:
+            cursor.execute(statement)
+        self._receipt_schema_ready = True
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1758,6 +1961,11 @@ class SessionDB:
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
+
+        # ── Canonical receipt tables (with atomic v1 migration) ────────
+        # Runs after SCHEMA_SQL (state_meta must exist) and outside it
+        # deliberately — see the RECEIPT_SCHEMA_STATEMENTS comment.
+        self._init_receipt_schema(cursor)
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL

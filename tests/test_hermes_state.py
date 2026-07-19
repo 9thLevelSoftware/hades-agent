@@ -6248,3 +6248,114 @@ class TestGetMessagesPagination:
         self._seed(db, n=5)
         rows = db.get_messages("s1", offset=3)
         assert [m["content"] for m in rows] == ["msg-3", "msg-4"]
+
+
+# =========================================================================
+# Canonical receipt schema (Verified Outcome & Artifact Receipts, Task 2)
+# =========================================================================
+
+class TestCanonicalReceiptSchema:
+    """Clean-database creation of the immutable canonical receipt tables."""
+
+    _MINIMAL_RECEIPT = (
+        "INSERT INTO receipts (receipt_id, source_kind, source_id, "
+        "subject_kind, subject_id, requested_outcome_json, status, "
+        "claims_json, evidence_json, artifacts_json, uncertainty_json, "
+        "scorer_id, scorer_version, decided_at, content_hash, inserted_at) "
+        "VALUES (?, 'turn', ?, 'turn', 's1:t1', '{}', ?, '[]', '[]', '[]', "
+        "'[]', 'scorer', '1', '2026-07-16T12:00:00Z', ?, 0)"
+    )
+
+    def _insert_receipt(self, db, receipt_id="rct_a", source_id="s1:t1",
+                        status="completed_unverified"):
+        db._conn.execute(
+            self._MINIMAL_RECEIPT,
+            (receipt_id, source_id, status, f"sha256:hash-{receipt_id}"),
+        )
+
+    def test_clean_db_creates_canonical_receipt_tables(self, db):
+        names = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assert {
+            "receipts",
+            "receipt_observations",
+            "receipt_attestations",
+            "receipt_deletion_tombstones",
+        } <= names
+        cols = {
+            row[1]
+            for row in db._conn.execute('PRAGMA table_info("receipts")')
+        }
+        assert {"source_kind", "source_id", "requested_outcome_json",
+                "status", "content_hash", "decided_at"} <= cols
+        assert db._receipt_schema_ready is True
+
+    def test_status_check_enforces_exact_five_values(self, db):
+        for status in ("verified", "completed_unverified", "failed",
+                       "blocked", "unknown_effect"):
+            self._insert_receipt(
+                db, receipt_id=f"rct_{status}", source_id=f"s:{status}",
+                status=status,
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            self._insert_receipt(
+                db, receipt_id="rct_bad", source_id="s:bad", status="done"
+            )
+
+    def test_receipt_rows_reject_update_and_bare_delete(self, db):
+        self._insert_receipt(db)
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            db._conn.execute(
+                "UPDATE receipts SET status = 'verified' "
+                "WHERE receipt_id = 'rct_a'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="tombstone"):
+            db._conn.execute("DELETE FROM receipts WHERE receipt_id = 'rct_a'")
+
+    def test_delete_allowed_only_after_tombstone(self, db):
+        self._insert_receipt(db)
+        db._conn.execute(
+            "INSERT INTO receipt_deletion_tombstones (receipt_id, "
+            "receipt_content_hash, source_kind, source_id, deleted_at, "
+            "reason, content_hash) VALUES ('rct_a', 'sha256:hash-rct_a', "
+            "'turn', 's1:t1', '2026-07-16T12:00:00Z', 'retention', "
+            "'sha256:tomb-a')"
+        )
+        db._conn.execute("DELETE FROM receipts WHERE receipt_id = 'rct_a'")
+        remaining = db._conn.execute(
+            "SELECT COUNT(*) FROM receipts WHERE receipt_id = 'rct_a'"
+        ).fetchone()[0]
+        assert remaining == 0
+
+    def test_observation_and_attestation_updates_are_aborted(self, db):
+        self._insert_receipt(db)
+        db._conn.execute(
+            "INSERT INTO receipt_observations (observation_id, receipt_id, "
+            "previous_observation_id, status, claims_json, evidence_json, "
+            "artifacts_json, uncertainty_json, scorer_id, scorer_version, "
+            "observed_at, content_hash, inserted_at) VALUES ('obs_a', "
+            "'rct_a', NULL, 'failed', '[]', '[]', '[]', '[]', 'scorer', "
+            "'1', '2026-07-16T13:00:00Z', 'sha256:hash-obs-a', 0)"
+        )
+        db._conn.execute(
+            "INSERT INTO receipt_attestations (attestation_id, target_kind, "
+            "target_id, target_content_hash, provider_id, key_id, "
+            "algorithm, signature_b64, signed_at, verification_state, "
+            "content_hash) VALUES ('att_a', 'receipt', 'rct_a', "
+            "'sha256:hash-rct_a', 'p', 'k', 'ed25519', 'c2ln', "
+            "'2026-07-16T12:00:00Z', 'unverified_import', 'sha256:att-a')"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            db._conn.execute(
+                "UPDATE receipt_observations SET status = 'verified' "
+                "WHERE observation_id = 'obs_a'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            db._conn.execute(
+                "UPDATE receipt_attestations SET verification_state = "
+                "'trusted' WHERE attestation_id = 'att_a'"
+            )
