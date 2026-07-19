@@ -8743,6 +8743,24 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self._handle_curator_command(cmd_original)
         elif canonical == "kanban":
             self._handle_kanban_command(cmd_original)
+        elif canonical == "autonomy":
+            # /autonomy (alias /authority) — delegate to the shared
+            # autonomy CLI surface; same parser/service as `hades autonomy`.
+            from hades_cli.autonomy import run_slash as _autonomy_run_slash
+
+            _auto_rest = cmd_original.strip()
+            if _auto_rest.startswith("/"):
+                _auto_rest = _auto_rest.lstrip("/")
+            for _auto_prefix in ("autonomy", "authority"):
+                if _auto_rest.startswith(_auto_prefix):
+                    _auto_rest = _auto_rest[len(_auto_prefix):].lstrip()
+                    break
+            try:
+                _auto_out = _autonomy_run_slash(_auto_rest)
+            except Exception as _auto_exc:  # pragma: no cover - defensive
+                _auto_out = f"(._.) autonomy error: {_auto_exc}"
+            if _auto_out:
+                print(_auto_out)
         elif canonical == "workflow":
             self._handle_workflow_command(cmd_original)
         elif canonical == "skills":

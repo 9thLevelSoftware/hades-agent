@@ -831,7 +831,7 @@ git commit -m "feat: enforce autonomy at tool execution"
 - Produces `build_parser(parent_subparsers)`, `autonomy_command(args)`, and `run_argv(argv, *, output_mode="text")`.
 - Consumes `AutonomyService` only; all three entry points use the same parser/service/renderers.
 
-- [ ] **Step 1: Write RED parser, preview/apply, explain/edit, and output tests**
+- [x] **Step 1: Write RED parser, preview/apply, explain/edit, and output tests**
 
 ```python
 def test_rule_change_previews_by_default_and_requires_exact_apply_hash(cli):
@@ -857,13 +857,13 @@ def test_suggestion_accept_is_explicit_and_destination_is_required(cli):
     assert "--stable or --temporary" in result.output
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `scripts/run_tests.sh tests/hermes_cli/test_autonomy.py -q`
 
 Expected: FAIL importing `hermes_cli.autonomy`.
 
-- [ ] **Step 3: Implement the exact command grammar**
+- [x] **Step 3: Implement the exact command grammar**
 
 ```text
 hermes autonomy status [--json]
@@ -888,20 +888,20 @@ Input files are UTF-8 YAML/JSON capped at 1 MiB; audit limit is 1–500; duratio
 
 Add `CommandDef("autonomy", "Explain and edit what Hermes may do", "Configuration", aliases=("authority",), args_hint="[status|list|rule|evaluate|suggestion|mandate|audit|doctor]")`. Top-level `main.py`, classic `cli.py`, and slash path delegate to `run_argv`; no shell subprocess or separate behavior.
 
-- [ ] **Step 4: Write the operating skill**
+- [x] **Step 4: Write the operating skill**
 
 The skill contains copyable rule/action YAML for recipients, data sharing, workspace deletion, outbound messages, model privacy routing, cost/time/uncertainty/reversibility, and required evidence. It instructs: inspect/explain before changing; preview stable edits; apply with exact hash; use mandates for task-bound authority; never accept a learned suggestion without user confirmation; re-evaluate after conflicts; stop on deny/unknown/audit failure; never edit another profile implicitly; start a new conversation only when a separate change also alters prompt/tool/provider/model identity. It states that allow is authorization, not completion proof.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 Run: `scripts/run_tests.sh tests/hermes_cli/test_autonomy.py tests/hermes_cli/test_commands.py -q`
 
 Expected: PASS; top-level and classic slash outputs agree and every effective rule exposes explain/edit controls.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
-git add hermes_cli/autonomy.py hermes_cli/commands.py hermes_cli/main.py cli.py skills/autonomy-center/SKILL.md tests/hermes_cli/test_autonomy.py
+git add hades_cli/autonomy.py hades_cli/commands.py hades_cli/main.py cli.py skills/autonomy-center/SKILL.md tests/hermes_cli/test_autonomy.py
 git commit -m "feat: add autonomy center cli controls"
 ```
 
