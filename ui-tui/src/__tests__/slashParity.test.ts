@@ -13,7 +13,17 @@ interface CommandRegistryLoad {
   names: string[]
 }
 
-const NATIVE_MUTATING_COMMANDS = new Set(['autonomy', 'browser', 'busy', 'fast', 'reload-mcp', 'rollback', 'stop'])
+const NATIVE_MUTATING_COMMANDS = new Set([
+  'autonomy',
+  'browser',
+  'busy',
+  'fast',
+  'receipt',
+  'receipts',
+  'reload-mcp',
+  'rollback',
+  'stop'
+])
 
 const MUTATING_COMMANDS = [
   'autonomy',
@@ -29,6 +39,7 @@ const MUTATING_COMMANDS = [
   'personality',
   'queue',
   'reasoning',
+  'receipt',
   'reload-mcp',
   'retry',
   'rollback',
@@ -98,6 +109,7 @@ describe('slash parity matrix', () => {
 
     expect(routes['model']).toBe('local')
     expect(routes['autonomy']).toBe('native')
+    expect(routes['receipt']).toBe('native')
     expect(routes['browser']).toBe('native')
     expect(routes['reload-mcp']).toBe('native')
     expect(routes['rollback']).toBe('native')
@@ -112,6 +124,20 @@ describe('slash parity matrix', () => {
     expect(NATIVE_MUTATING_COMMANDS.has('autonomy')).toBe(true)
     expect(classifyRoute('autonomy')).toBe('native')
     expect(findSlashCommand('autonomy'), '/autonomy must have a native local handler').toBeDefined()
+  })
+
+  it('keeps /receipt off slash.exec even without the local handler registry', () => {
+    // recheck/prune write observations/tombstones, so typed or
+    // catalog-discovered receipt commands must never fall through to the
+    // slash worker. NATIVE_MUTATING_COMMANDS classification is name-based
+    // and checked BEFORE the local slash registry, so this holds even when
+    // the local handler registry is temporarily absent (e.g. mid-reload).
+    expect(NATIVE_MUTATING_COMMANDS.has('receipt')).toBe(true)
+    expect(NATIVE_MUTATING_COMMANDS.has('receipts')).toBe(true)
+    expect(classifyRoute('receipt')).toBe('native')
+    expect(classifyRoute('receipts')).toBe('native')
+    expect(findSlashCommand('receipt'), '/receipt must have a native local handler').toBeDefined()
+    expect(findSlashCommand('receipts')?.name).toBe('receipt')
   })
 
   registryIt('keeps every mutating command off slash-worker fallback', () => {
