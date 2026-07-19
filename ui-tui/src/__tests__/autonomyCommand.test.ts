@@ -30,9 +30,8 @@ const guarded =
 
 /** Build a SlashRunCtx double whose native rpc and slash-worker request are both observable. */
 const buildCtx = (result: Partial<AutonomyExecResponse> = {}) => {
-  const rpc = vi.fn((_method: string, _params?: Record<string, unknown>) =>
-    Promise.resolve(autonomyResponse(result))
-  )
+  const rpc = vi.fn((_method: string, _params?: Record<string, unknown>) => Promise.resolve(autonomyResponse(result)))
+
   const request = vi.fn(() => Promise.resolve({}))
   const sys = vi.fn()
   const page = vi.fn()
