@@ -569,6 +569,29 @@ def test_bare_and_help_invocations_return_help(cli):
     assert helped.exit_code == 0
 
 
+#: Task 12 — the exact subcommand set the operator documentation
+#: (website/docs/user-guide/features/outcome-receipts.md and the command
+#: references) promises.  The check runs the real ``--help`` surface at
+#: runtime rather than reading the parser source text.
+DOCUMENTED_RECEIPT_SUBCOMMANDS = (
+    "list",
+    "show",
+    "claims",
+    "recheck",
+    "export",
+    "verify-signature",
+    "retention-plan",
+    "prune",
+)
+
+
+def test_help_lists_every_documented_subcommand(cli):
+    helped = cli.run(["--help"])
+    assert helped.exit_code == 0
+    for verb in DOCUMENTED_RECEIPT_SUBCOMMANDS:
+        assert verb in helped.stdout
+
+
 def test_top_level_and_classic_output_parity(cli, seeded_receipt, capsys):
     root = argparse.ArgumentParser(prog="hades")
     sub = root.add_subparsers(dest="command")

@@ -76,6 +76,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/features/skins',
             'user-guide/features/plugins',
             'user-guide/features/built-in-plugins',
+            'user-guide/features/outcome-receipts',
           ],
         },
         {
@@ -769,6 +770,7 @@ const sidebars: SidebarsConfig = {
             },
             'developer-guide/creating-skills',
             'developer-guide/extending-the-cli',
+            'developer-guide/receipt-contract',
           ],
         },
         {

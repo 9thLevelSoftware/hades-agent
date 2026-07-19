@@ -115,6 +115,7 @@ Type `/` in the CLI to open the autocomplete menu. Built-in commands are case-in
 | `/credits` | Show your Nous credit balance and a top-up handoff link. |
 | `/billing` | CLI terminal-billing flow for Nous — view balance, buy credits, and manage auto-reload / monthly limits. |
 | `/insights` | Show usage insights and analytics (last 30 days) |
+| `/receipt <subcommand>` (alias: `/receipts`) | Inspect verified outcome & artifact receipts — same grammar as `hermes receipt`: `list`, `show`, `claims`, `recheck`, `export`, `verify-signature`, `retention-plan`, `prune`. Available in the classic CLI and the native TUI. See [Outcome Receipts](/user-guide/features/outcome-receipts). |
 | `/platforms` (alias: `/gateway`) | Show gateway/messaging platform status (CLI-only summary view). |
 | `/paste` | Attach a clipboard image |
 | `/copy [number]` | Copy the last assistant response to clipboard (or the Nth-from-last with a number). CLI-only. |

@@ -81,10 +81,12 @@ from hades_state import SessionDB
 __all__ = [
     "ReceiptBenchmarkReport",
     "ReceiptCaseResult",
+    "ReceiptRolloutGate",
     "StratumAccuracy",
     "main",
     "recheck_case",
     "render_receipt_report",
+    "rollout_gate",
     "run_receipt_benchmark",
     "run_single_case",
     "wilson_interval",
@@ -125,6 +127,55 @@ class ReceiptCaseResult:
     baseline_cost_usd: float
     candidate_cost_usd: float
     excluded_reason: str | None
+
+
+@dataclass(frozen=True)
+class ReceiptRolloutGate:
+    """Runtime-reported staged-rollout gate.
+
+    The exact floors the rollout is judged against — the 50-case
+    denominator, the zero false-verified floor, the 45/50 correct
+    classification floor, the 50/50 traceability and recheckability
+    floors, and the named stop conditions.  Derived only from the
+    preregistered manifest and embedded verbatim in every emitted
+    report so documentation can never drift from what the runner
+    actually enforces.
+    """
+
+    denominator: int
+    max_false_verified: int
+    min_correct_classifications: int
+    require_full_traceability: bool
+    require_full_recheckability: bool
+    stop_conditions: tuple[str, ...]
+
+    def to_json(self) -> dict:
+        return {
+            "denominator": self.denominator,
+            "max_false_verified": self.max_false_verified,
+            "min_correct_classifications": self.min_correct_classifications,
+            "require_full_traceability": self.require_full_traceability,
+            "require_full_recheckability": self.require_full_recheckability,
+            "stop_conditions": list(self.stop_conditions),
+        }
+
+
+def rollout_gate(manifest: ReceiptBenchmarkManifest) -> ReceiptRolloutGate:
+    """The rollout gate the runner enforces for *manifest* at runtime."""
+    return ReceiptRolloutGate(
+        denominator=manifest.denominator,
+        max_false_verified=manifest.gates.max_false_verified,
+        min_correct_classifications=(
+            manifest.gates.min_correct_classifications
+        ),
+        require_full_traceability=(
+            manifest.gates.min_traceable_claims_ratio >= 1.0
+        ),
+        require_full_recheckability=(
+            manifest.gates.min_recheckable_receipts_ratio >= 1.0
+        ),
+        stop_conditions=manifest.stop_conditions,
+    )
 
 
 @dataclass(frozen=True)
@@ -174,6 +225,8 @@ class ReceiptBenchmarkReport:
     candidate_cost_per_verified_success: float | None
     # ── Environment ──
     environment: dict
+    # ── Rollout gate the report was judged against (runtime-reported) ──
+    rollout: ReceiptRolloutGate
     gates_passed: bool
     generated_at: str
 
@@ -239,6 +292,7 @@ class ReceiptBenchmarkReport:
                 ),
             },
             "environment": dict(self.environment),
+            "rollout": self.rollout.to_json(),
             "gates_passed": self.gates_passed,
             "generated_at": self.generated_at,
             "results": [
@@ -1136,8 +1190,9 @@ def _build_report(
             )
         )
 
+    gate = rollout_gate(manifest)
     triggered: list[str] = []
-    if false_verified > manifest.gates.max_false_verified:
+    if false_verified > gate.max_false_verified:
         triggered.append("any_seeded_failure_verified")
     if traceable_ratio < manifest.gates.min_traceable_claims_ratio:
         triggered.append("any_effect_claim_without_existing_evidence")
@@ -1152,7 +1207,7 @@ def _build_report(
     candidate_latencies = [r.candidate_latency_ms for r in results]
     gates_passed = (
         not triggered
-        and correct >= manifest.gates.min_correct_classifications
+        and correct >= gate.min_correct_classifications
     )
     excluded = tuple(
         r.case_id for r in results if r.excluded_reason is not None
@@ -1188,6 +1243,7 @@ def _build_report(
         baseline_cost_per_verified_success=None,
         candidate_cost_per_verified_success=None,
         environment=_environment_facts(),
+        rollout=gate,
         gates_passed=gates_passed,
         generated_at=_now_iso(),
     )
@@ -1240,6 +1296,17 @@ def render_receipt_report(report: ReceiptBenchmarkReport) -> str:
         f"  candidate total USD: {report.candidate_cost_usd_total:.2f} "
         f"(per verified success: "
         f"{report.candidate_cost_per_verified_success})",
+        "",
+        "rollout gate:",
+        f"  denominator: {report.rollout.denominator}",
+        f"  max false verified: {report.rollout.max_false_verified}",
+        "  min correct classifications: "
+        f"{report.rollout.min_correct_classifications}",
+        "  full traceability required: "
+        f"{report.rollout.require_full_traceability}",
+        "  full recheckability required: "
+        f"{report.rollout.require_full_recheckability}",
+        f"  stop conditions: {list(report.rollout.stop_conditions)}",
         "",
         f"environment: {json.dumps(report.environment, sort_keys=True)}",
         f"gates passed: {report.gates_passed}",

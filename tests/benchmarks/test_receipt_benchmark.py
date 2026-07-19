@@ -734,5 +734,72 @@ def test_benchmark_runner_cli_writes_local_report_and_exits_zero(tmp_path, capsy
     assert payload["accuracy"]["correct_classifications"] >= 45
     assert payload["baseline"] == "current_hermes_turn_outcome_and_prose"
     assert payload["excluded"] == []
+    # Task 12: the emitted report carries the rollout gate it was judged
+    # against — denominator, floors, and stop conditions — verbatim.
+    assert payload["rollout"] == {
+        "denominator": 50,
+        "max_false_verified": 0,
+        "min_correct_classifications": 45,
+        "require_full_traceability": True,
+        "require_full_recheckability": True,
+        "stop_conditions": payload["safety"]["stop_conditions"],
+    }
     summary = capsys.readouterr().out
     assert "gates passed: True" in summary
+
+
+# ---------------------------------------------------------------------------
+# Task 12: the staged-rollout gate is runtime-reported metadata, not doc
+# prose — it must match the preregistered manifest exactly.
+# ---------------------------------------------------------------------------
+
+from benchmarks.receipts.runner import ReceiptRolloutGate, rollout_gate
+
+
+@pytest.fixture()
+def manifest():
+    loaded, _ = load_receipt_cases(MANIFEST)
+    return loaded
+
+
+@pytest.fixture()
+def runtime_rollout(manifest):
+    return rollout_gate(manifest)
+
+
+def test_rollout_gate_matches_preregistered_manifest(runtime_rollout, manifest):
+    assert runtime_rollout.denominator == manifest.denominator == 50
+    assert runtime_rollout.max_false_verified == 0
+    assert runtime_rollout.min_correct_classifications == 45
+    assert runtime_rollout.require_full_traceability
+    assert runtime_rollout.require_full_recheckability
+    # Stop conditions ship inside the runtime gate, verbatim from the
+    # preregistered manifest — never re-derived from scorer output.
+    assert runtime_rollout.stop_conditions == manifest.stop_conditions == (
+        "any_seeded_failure_verified",
+        "any_effect_claim_without_existing_evidence",
+        "any_receipt_not_recheckable_after_process_restart",
+        "any_signature_changes_truth_status",
+        "any_cross_profile_read_or_write",
+    )
+
+
+def test_rollout_gate_is_immutable_and_reportable(runtime_rollout):
+    assert isinstance(runtime_rollout, ReceiptRolloutGate)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        runtime_rollout.max_false_verified = 1  # type: ignore[misc]
+    payload = runtime_rollout.to_json()
+    assert payload == {
+        "denominator": 50,
+        "max_false_verified": 0,
+        "min_correct_classifications": 45,
+        "require_full_traceability": True,
+        "require_full_recheckability": True,
+        "stop_conditions": [
+            "any_seeded_failure_verified",
+            "any_effect_claim_without_existing_evidence",
+            "any_receipt_not_recheckable_after_process_restart",
+            "any_signature_changes_truth_status",
+            "any_cross_profile_read_or_write",
+        ],
+    }
