@@ -4376,6 +4376,13 @@ def cmd_workflow(args):
     sys.exit(int(workflow_command(args) or 0))
 
 
+def cmd_receipt(args):
+    """Verified outcome & artifact receipt viewer."""
+    from hades_cli.receipts import receipt_command
+
+    sys.exit(int(receipt_command(args) or 0))
+
+
 def cmd_project(args):
     """Manage projects (named, multi-folder workspaces)."""
     from hades_cli.projects_cmd import projects_command
@@ -12729,6 +12736,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
         "project", "proxy",
         "prompt-size",
+        "receipt", "receipts",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
@@ -13563,6 +13571,14 @@ def main():
 
     workflow_parser = _build_workflow_parser(subparsers)
     workflow_parser.set_defaults(func=cmd_workflow)
+
+    # =========================================================================
+    # receipt command — verified outcome & artifact receipt viewer
+    # =========================================================================
+    from hades_cli.receipts import build_parser as _build_receipt_parser
+
+    receipt_parser = _build_receipt_parser(subparsers)
+    receipt_parser.set_defaults(func=cmd_receipt)
 
     # =========================================================================
     # project command — named, multi-folder workspaces
