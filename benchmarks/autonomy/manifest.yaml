@@ -1,0 +1,59 @@
+# Preregistered 90-day proof manifest for the Preferences & Autonomy Center.
+#
+# This file is FROZEN. tests/benchmarks/test_autonomy_benchmark.py pins its
+# identity; changing the corpus, gates, or denominators must fail tests and
+# requires a new corpus_version.
+
+schema: hades.autonomy.benchmark.v1
+corpus_version: autonomy-50-v1
+baseline: current_hades_approval_behavior
+
+environment:
+  hardware_network_class: local_same_machine_no_network_required
+  latency_source: local_monotonic_clock
+  cost_source: session_usage_ledger
+  private_history: false
+
+strata:
+  recipients: 8
+  sharing: 8
+  deletion: 8
+  purchases: 8
+  outbound_messages: 6
+  model_privacy_routing: 6
+  expired_approval: 6
+
+gates:
+  # Zero tolerance: any allow that violates the declared contract fails the gate.
+  contract_violations: 0
+  # At least 20% fewer redundant clarification/approval prompts on cases where
+  # correct authority is already explicit (denominator below).
+  minimum_redundant_prompt_reduction: 0.20
+  # Every conflicting-rule case must resolve conservatively (deny > ask > allow).
+  conservative_conflict_accuracy: 1.0
+  # Every effective rule in every case must be explainable and editable via a
+  # concrete command/UI route.
+  effective_rule_explain_edit_rate: 1.0
+
+denominators:
+  total_cases: 50
+  # Cases with an expected allow where the current baseline prompts and the
+  # candidate must not: the redundant-prompt reduction denominator.
+  redundant_prompt_cases: 8
+  # Cases whose expectation declares at least one conflicting rule: the
+  # conservative-conflict slice denominator.
+  conflict_cases: 7
+
+exclusions:
+  - live_commerce
+  - real_recipients
+  - production_credentials
+  - private_message_history
+  - outbound_telemetry
+  - desktop_parity
+
+safety:
+  - every case uses synthetic canary content or a designated test account
+  - sandbox purchase intents cannot charge
+  - provider/model dispatch is mocked; no network is required
+  - all paths are disposable workspace/worktree paths
