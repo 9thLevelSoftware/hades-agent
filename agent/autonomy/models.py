@@ -260,6 +260,7 @@ class AutonomyRule:
     time: TimeConstraint | None = None
     allowed_reversibility: tuple[str, ...] = ()
     evidence_requirements: tuple[EvidenceRequirement, ...] = ()
+    max_uncertainty_ppm: int | None = None
     provenance: RuleProvenance
     created_at_ms: int = 0
     expires_at_ms: int | None = None
@@ -314,6 +315,13 @@ class AutonomyRule:
         for req in self.evidence_requirements:
             if not isinstance(req, EvidenceRequirement):
                 raise ValueError("evidence_requirements entries must be EvidenceRequirement")
+        _check_int(
+            "max_uncertainty_ppm",
+            self.max_uncertainty_ppm,
+            minimum=0,
+            maximum=_CONFIDENCE_PPM_MAX,
+            optional=True,
+        )
 
         if self.effect == "allow" and not self.action_classes:
             raise ValueError(
@@ -376,6 +384,7 @@ class ActionContext:
     tool_name: str | None = None
     present_evidence: tuple[str, ...] = ()
     occurred_at_ms: int | None = None
+    uncertainty_ppm: int | None = None
 
     def __post_init__(self) -> None:
         _check_str("operation_key", self.operation_key)
@@ -403,6 +412,13 @@ class ActionContext:
                      "transaction_id", "tool_name"):
             _check_str(name, getattr(self, name), optional=True)
         _check_int("occurred_at_ms", self.occurred_at_ms, minimum=0, optional=True)
+        _check_int(
+            "uncertainty_ppm",
+            self.uncertainty_ppm,
+            minimum=0,
+            maximum=_CONFIDENCE_PPM_MAX,
+            optional=True,
+        )
 
 
 # ── Compiled contract ───────────────────────────────────────────────────────
@@ -460,10 +476,13 @@ class ClarificationRequest:
     question: str
     choices: tuple[str, ...] = ()
     code: str = ""
+    why_now: str = ""
 
     def __post_init__(self) -> None:
         _check_str("question", self.question)
         _check_str_tuple("choices", self.choices)
+        if not isinstance(self.why_now, str):
+            raise ValueError("why_now must be a string")
 
 
 @dataclass(frozen=True, kw_only=True)

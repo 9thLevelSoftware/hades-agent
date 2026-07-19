@@ -414,6 +414,60 @@ def test_reserve_budget_is_unique_per_operation(store):
         )
 
 
+def test_window_spend_snapshot_drives_evaluator_budget_decisions(store):
+    """The store's micros snapshot is the evaluator's ``budget_usage`` input."""
+    from agent.autonomy import AutonomyContract, CostConstraint
+    from agent.autonomy.canonical import content_hash, rule_to_dict
+    from agent.autonomy.evaluator import evaluate_contract
+
+    buy_rule = stable_rule(
+        rule_id="r-buy",
+        action_classes=("purchase.prepare",),
+        data_classes=("financial",),
+        recipient_classes=("designated_test",),
+        cost=CostConstraint(max_per_window_cents=1_000, window_ms=86_400_000),
+    )
+    contract = AutonomyContract(
+        version=1,
+        contract_hash=content_hash([rule_to_dict(buy_rule)]),
+        profile_id="default",
+        compiled_at_ms=NOW_MS,
+        rules=(buy_rule,),
+    )
+    context = context_fixture(
+        operation_key="op-b3",
+        action_class="purchase.prepare",
+        data_classes=("financial",),
+        recipient_class="designated_test",
+        resource_refs=(),
+        estimated_cost_cents=400,
+    )
+
+    fresh_usage = {"r-buy": store.window_spend_micros("r-buy", 0)}
+    fresh = evaluate_contract(
+        contract, context, now_ms=NOW_MS, budget_usage=fresh_usage
+    )
+    assert (fresh.verdict, fresh.code) == ("allow", "explicit_allow")
+    assert fresh.budget_rule_id == "r-buy"
+
+    # $8 held in the window; the same $4 request now exceeds the $10 cap.
+    store.record_decision(decision_fixture(decision_id="d-b3", operation_key="op-b3"))
+    store.reserve_budget(
+        rule_id="r-buy",
+        operation_key="op-b3",
+        decision_id="d-b3",
+        amount_micros=8_000_000,
+        window_started_at_ms=0,
+        now_ms=NOW_MS,
+    )
+    held_usage = {"r-buy": store.window_spend_micros("r-buy", 0)}
+    assert held_usage == {"r-buy": 8_000_000}
+    held = evaluate_contract(
+        contract, context, now_ms=NOW_MS, budget_usage=held_usage
+    )
+    assert (held.verdict, held.code) == ("deny", "cost_budget_exceeded")
+
+
 def test_release_budget_frees_the_window(store):
     store.record_decision(decision_fixture(decision_id="d-b1", operation_key="op-b1"))
     store.reserve_budget(

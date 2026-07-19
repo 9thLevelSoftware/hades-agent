@@ -584,7 +584,7 @@ git commit -m "feat: compile profile-local autonomy contracts"
 - Produces `matching_rules()`, `explain_conflict()`, and `required_pre_action_evidence()`.
 - Consumes Task 1 models and Task 2 budget-usage snapshots; performs no I/O.
 
-- [ ] **Step 1: Write RED table-driven decision tests**
+- [x] **Step 1: Write RED table-driven decision tests**
 
 ```python
 @pytest.mark.parametrize(("case", "verdict", "code"), [
@@ -610,29 +610,29 @@ def test_decision_matrix(case, verdict, code):
 
 Also test recipient selector kinds `self`, `same_conversation`, `profile_local`, exact recipient hash, exact domain hash, `external`, and `unknown`; data-scope prefix boundary safety; timezone/DST windows; zero cost; fixed-point comparisons; evidence unions; exhausted uses; profile/task/session/mission/transaction scope; canonical ordering; and deterministic results across 1,000 shuffled rule orders.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_evaluator.py -q`
 
 Expected: FAIL importing `agent.autonomy.evaluator`.
 
-- [ ] **Step 3: Implement the pure evaluator**
+- [x] **Step 3: Implement the pure evaluator**
 
 Rules match by intersection only when every declared dimension accepts the context. Empty selectors mean the rule does not constrain that dimension, except unknown values require an explicit `unknown` selector and credential/financial/health data require explicit data class plus recipient class. Normalize resource prefixes with segment boundaries, never raw string prefix. Cost uses integer USD micros; time uses UTC milliseconds plus an IANA timezone only for declared local windows; uncertainty uses ppm. `required_evidence` is sorted and deduplicated by `(evidence_id, stage)`.
 
 `ClarificationRequest` is emitted only when one bounded user answer can change the verdict and expected value is high: unknown recipient class, missing cost ceiling, choice between reversible and irreversible method, or conflicting active rules. It contains a question, at most four finite choices, `why_now`, and edit targets. Low-stakes missing details use the configured conservative default without interrupting.
 
-- [ ] **Step 4: Prove conservative conflict explanations**
+- [x] **Step 4: Prove conservative conflict explanations**
 
 For every deny/ask conflict return all conflicting rule IDs, their source/provenance labels, the winning precedence, and exact commands such as `hermes autonomy rule explain <id>` and `hermes autonomy rule edit <id> ...`. Never tell the user that a higher-confidence suggestion overrode an assertion; confidence is display-only until confirmation.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_evaluator.py tests/agent/autonomy/test_store.py -q`
 
 Expected: PASS; shuffled input is deterministic and all sensitive/unknown/conflicting cases resolve conservatively.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agent/autonomy/evaluator.py tests/agent/autonomy/test_evaluator.py tests/agent/autonomy/test_store.py
