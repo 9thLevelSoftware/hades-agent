@@ -1721,9 +1721,12 @@ class TestCoordinatorRepeatOperations:
 # chain runner) and the effect-transactions coordinator (which consumes
 # the ``operation_key`` that middleware injects). They exercise the real
 # ``run_tool_execution_middleware`` so the contract — operation_key is
-# generated only at the terminal path, plugin short-circuits stay
-# transparent, and the post-plugin args are what the handler sees — is
-# pinned against real middleware execution, not source-text inspection.
+# computed once, before any registered tool_execution middleware runs
+# (so a callback can read it from its kwargs, a pre-existing hades-agent
+# contract), the coordinator only sees it at the terminal call, plugin
+# short-circuits skip the coordinator, and the post-plugin args are what
+# the handler sees — is pinned against real middleware execution, not
+# source-text inspection.
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -1792,15 +1795,19 @@ class TestMiddlewareFinalArgs:
         assert terminal_calls == [{"path": "x", "rewritten": True}]
 
 
-# ── operation_key_factory executes only at terminal path ──────────────
+# ── operation_key_factory visibility to tool_execution middleware ─────
 
 
 class TestOperationKeyFactoryTerminalOnly:
-    def test_factory_not_called_when_plugin_short_circuits(self, monkeypatch):
-        """When a plugin short-circuits the chain (doesn't call
-        ``next_call``), the terminal handler is skipped and therefore
-        ``operation_key_factory`` must NOT be called. The factory is
-        meant to be evaluated at terminal-execution time only."""
+    def test_factory_called_before_chain_when_plugin_short_circuits(
+        self, monkeypatch
+    ):
+        """When any ``tool_execution`` middleware is registered, the key
+        must be evaluated up front — a callback may short-circuit the
+        chain (never call ``next_call``), so the key can't wait for a
+        terminal call that might not happen. This is also what lets a
+        callback read ``kwargs['operation_key']`` at all, a pre-existing
+        hades-agent middleware contract real plugins rely on."""
         _plugin_manager_with(monkeypatch, {
             "tool_execution": [lambda **kw: "intercepted-result"],
         })
@@ -1809,7 +1816,7 @@ class TestOperationKeyFactoryTerminalOnly:
 
         def factory():
             factory_calls.append(1)
-            return "opk-never-used"
+            return "opk-precomputed"
 
         terminal_calls: List[dict] = []
 
@@ -1823,22 +1830,61 @@ class TestOperationKeyFactoryTerminalOnly:
         )
         assert result == "intercepted-result"
         assert terminal_calls == []
-        # No-observer path: factory was never called because the
-        # short-circuit took precedence over terminal execution.
-        assert factory_calls == []
+        # The key is computed once, before the chain runs, regardless of
+        # whether a callback goes on to short-circuit.
+        assert factory_calls == [1]
 
-    def test_factory_called_when_no_observer_plugin_present(self, monkeypatch):
-        """No middleware registered: the terminal handler is invoked
-        directly. ``operation_key_factory`` must still be evaluated
-        exactly once so the operation_key is available for downstream
-        mission-transaction logic that has no observer of its own."""
+    def test_factory_called_when_no_observer_plugin_present_but_coordinator_is(
+        self, monkeypatch,
+    ):
+        """No middleware registered, but an effect_coordinator is wired
+        in: the terminal handler is invoked directly, and
+        ``operation_key_factory`` must still be evaluated exactly once so
+        the operation_key is available for the coordinator's
+        mission-transaction logic, which has no plugin observer of its
+        own."""
+        _plugin_manager_with(monkeypatch, {})
+
+        factory_calls: List[int] = []
+        coord_calls: List[dict] = []
+
+        def factory():
+            factory_calls.append(1)
+            return "opk-fresh"
+
+        def fake_coord_execute(**kwargs):
+            coord_calls.append(kwargs)
+            return kwargs["handler"](kwargs["args"])
+
+        coord = types.SimpleNamespace(execute=fake_coord_execute)
+
+        def terminal(args):
+            return {"ok": True}
+
+        result = run_tool_execution_middleware(
+            "writer", {"path": "x"}, terminal,
+            effect_coordinator=coord,
+            operation_key_factory=factory,
+        )
+        assert result == {"ok": True}
+        assert factory_calls == [1]
+        assert coord_calls[0]["operation_key"] == "opk-fresh"
+
+    def test_factory_not_called_when_no_observer_and_no_coordinator(
+        self, monkeypatch,
+    ):
+        """No middleware and no coordinator: nothing will ever read the
+        key, so ``operation_key_factory`` must stay unevaluated. This is
+        a real pre-existing hades-agent contract — some callers derive
+        the key from large/expensive-to-hash arguments and rely on it
+        never being computed when there's no consumer."""
         _plugin_manager_with(monkeypatch, {})
 
         factory_calls: List[int] = []
 
         def factory():
             factory_calls.append(1)
-            return "opk-fresh"
+            return "opk-never-used"
 
         def terminal(args):
             return {"ok": True}
@@ -1848,7 +1894,7 @@ class TestOperationKeyFactoryTerminalOnly:
             operation_key_factory=factory,
         )
         assert result == {"ok": True}
-        assert factory_calls == [1]
+        assert factory_calls == []
 
     def test_factory_called_when_observer_passes_through(self, monkeypatch):
         """A pass-through middleware (calls ``next_call`` exactly once)
@@ -2218,11 +2264,14 @@ class TestSpec3TerminalMiddlewareBridge:
         assert calls[0]["operation_key"] == "opk-mw-1"
         assert calls[0]["mission_id"] == "m-mw"
 
-    def test_plugin_short_circuit_skips_coordinator_and_factory(
+    def test_plugin_short_circuit_skips_coordinator(
         self, monkeypatch,
     ):
-        """A short-circuiting plugin must NOT trigger the coordinator
-        or the operation_key_factory."""
+        """A short-circuiting plugin must NOT trigger the coordinator.
+        The operation_key_factory IS still evaluated up front (before the
+        chain runs) since a registered tool_execution callback needs the
+        key available in its kwargs regardless of whether it goes on to
+        short-circuit."""
         _plugin_manager_with(monkeypatch, {
             "tool_execution": [lambda **kw: "intercepted"],
         })
@@ -2232,7 +2281,7 @@ class TestSpec3TerminalMiddlewareBridge:
 
         def factory():
             factory_calls.append(1)
-            return "opk-never"
+            return "opk-precomputed"
 
         def fake_coord_execute(**kwargs):
             coord_calls.append(kwargs)
@@ -2249,7 +2298,7 @@ class TestSpec3TerminalMiddlewareBridge:
             operation_key_factory=factory,
         )
         assert result == "intercepted"
-        assert factory_calls == []
+        assert factory_calls == [1]
         assert coord_calls == []
 
     def test_no_coordinator_passes_through_unchanged(self, monkeypatch):

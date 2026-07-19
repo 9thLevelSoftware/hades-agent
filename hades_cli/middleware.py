@@ -234,12 +234,6 @@ def run_tool_execution_middleware(
     }
 
     def _coordinated_call(payload):
-        # Generate the operation key exactly once, only when the handler
-        # will actually execute (i.e. the authority gate already allowed
-        # it). This is the single boundary where the key needs to exist
-        # for the coordinator.
-        if callable(operation_key_factory):
-            context["operation_key"] = operation_key_factory()
         # Spec 3: hand off to the coordinator when one is wired in. The
         # coordinator decides whether to invoke ``next_call`` (the real
         # handler) under mission / authority / approval rules.
@@ -256,13 +250,22 @@ def run_tool_execution_middleware(
     def _gated_terminal(final_args: Any) -> Any:
         from agent.autonomy.runtime import authority_gate
 
-        # The operation key for the authority decision is derived from the
-        # final arguments at this boundary (inside the gate); the legacy
-        # operation_key_factory below remains the middleware-payload key.
         return authority_gate(tool_name, final_args, _coordinated_call, **gate_kwargs)
 
     if not callbacks:
+        # No tool_execution middleware is registered, so no callback needs
+        # to observe the key. Only evaluate the factory when a coordinator
+        # is wired in to actually consume it — otherwise stay lazy (some
+        # callers pass large/expensive-to-hash arguments and rely on the
+        # key never being computed when nothing will read it).
+        if effect_coordinator is not None and callable(operation_key_factory):
+            context["operation_key"] = operation_key_factory()
         return _gated_terminal(args)
+    # Callbacks are registered: the key must exist before the chain runs
+    # so tool_execution middleware can read it from its kwargs (a
+    # pre-existing contract real plugins rely on) — evaluated once, here.
+    if callable(operation_key_factory):
+        context["operation_key"] = operation_key_factory()
     return _run_execution_chain(
         TOOL_EXECUTION_MIDDLEWARE,
         callbacks,

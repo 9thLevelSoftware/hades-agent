@@ -596,7 +596,11 @@ def test_implemented_primitive_errors_accepts_send_message() -> None:
 
 
 def test_three_effect_fixture_materializes_one_replay_safe_outbox_row(tmp_path, monkeypatch) -> None:
-    home = tmp_path / ".hades"
+    # The mission is created with profile="implementer"; _active_profile_name()
+    # derives the active profile from HADES_HOME's layout (<home>/profiles/<name>),
+    # so the fixture home must follow that convention for the profile check in
+    # _materialize_send_message to match.
+    home = tmp_path / ".hades" / "profiles" / "implementer"
     monkeypatch.setenv("HADES_HOME", str(home))
     state_db_path = home / "state.db"
     spec = _load_spec()
