@@ -16,6 +16,16 @@ from agent.autonomy.canonical import (
     hash_resource,
     normalize_action_class,
 )
+from agent.autonomy.service import (
+    AuthorityProvider,
+    AutonomyService,
+    AutonomyServiceError,
+    RuleExplanation,
+    StoredAuthorityProvider,
+    SuggestionConfirmation,
+    UnknownRuleError,
+    authorize_effect,
+)
 from agent.autonomy.models import (
     ACTION_CLASSES,
     AUTONOMY_CONTRACT_SCHEMA,
@@ -52,7 +62,15 @@ __all__ = [
     "hash_recipient",
     "hash_resource",
     "normalize_action_class",
+    "authorize_effect",
     "ActionContext",
+    "AuthorityProvider",
+    "AutonomyService",
+    "AutonomyServiceError",
+    "RuleExplanation",
+    "StoredAuthorityProvider",
+    "SuggestionConfirmation",
+    "UnknownRuleError",
     "AuthorityDecision",
     "AuthorityDecisionDraft",
     "AutonomyContract",

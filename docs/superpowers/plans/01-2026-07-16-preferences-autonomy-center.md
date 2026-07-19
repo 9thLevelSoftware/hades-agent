@@ -653,7 +653,7 @@ git commit -m "feat: evaluate autonomy authority deterministically"
 - Consumes compiler/store/evaluator/config-apply APIs from Tasks 2–4.
 - Provides the canonical authority names consumed by portfolio item #2; transaction-specific approval bindings stay in `agent/effects/authority.py`.
 
-- [ ] **Step 1: Write RED lifecycle and atomic-authorize tests**
+- [x] **Step 1: Write RED lifecycle and atomic-authorize tests**
 
 ```python
 def test_suggestion_never_authorizes_until_explicit_confirmation(service):
@@ -680,13 +680,13 @@ def test_cost_reservation_is_released_or_settled_once(service):
     assert service.budget_usage(rule_id="purchase-cap") == 1_500_000
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_service.py -q`
 
 Expected: FAIL importing `agent.autonomy.service`.
 
-- [ ] **Step 3: Implement provider and lifecycle services**
+- [x] **Step 3: Implement provider and lifecycle services**
 
 ```python
 class AuthorityProvider(Protocol):
@@ -711,17 +711,17 @@ def authorize_effect(
 
 `propose_suggestion()` accepts finite rule fields plus provenance and confidence, forces `source=learned_suggestion/state=awaiting_confirmation`, and rejects self-confirmation. `confirm_suggestion()` requires actor kind `user`, creates a new ID/provenance event, and either returns a stable config preview or creates an expiring/consumable mandate. It never mutates the suggestion into authority in place.
 
-- [ ] **Step 4: Implement explain/export/delete boundaries**
+- [x] **Step 4: Implement explain/export/delete boundaries**
 
 Every rule explanation includes source, status, provenance source label, confidence, expiry, uses, all selectors/constraints/evidence, current matchability, conflicts, and exact edit/revoke route. Redacted export includes stable rule documents and runtime lifecycle metadata but replaces recipient/resource hashes with opaque local labels and excludes the profile hash key, raw audit context, and decisions by default. `purge_runtime_history(before_ms)` deletes settled decisions/events/cost entries only after the retention boundary; it never deletes active rules or stable config.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_service.py tests/agent/autonomy/test_evaluator.py tests/agent/autonomy/test_store.py -q`
 
 Expected: PASS; suggestions require confirmation, one-use mandates are race-safe, budget settlement is idempotent, and every rule is explainable/editable.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agent/autonomy/service.py agent/autonomy/__init__.py tests/agent/autonomy/test_service.py
