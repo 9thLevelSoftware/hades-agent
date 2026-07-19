@@ -1100,6 +1100,18 @@ def test_concurrent_recheck_cas_conflict_retries(receipt_issuer):
     ]
 
 
+def test_identical_observation_replay_returns_stored_observation(receipt_issuer):
+    """Task 11: a crash-retry replaying the identical observation append
+    returns the stored observation and never duplicates the chain."""
+    original = receipt_issuer.issue(ReceiptSourceKey("mission", "m1"))
+    observation = receipt_issuer.recheck(original.receipt_id)
+    assert receipt_issuer.store.append_observation(observation) == observation
+    chain = receipt_issuer.store.observations(original.receipt_id)
+    assert [o.observation_id for o in chain] == [observation.observation_id]
+    # The original receipt is untouched by the replay.
+    assert receipt_issuer.store.get(original.receipt_id) == original
+
+
 def test_recheck_missing_artifact_file_is_failed(receipt_issuer):
     original = receipt_issuer.issue(ReceiptSourceKey("mission", "m1"))
     receipt_issuer.fixture.delete_artifact()

@@ -379,6 +379,54 @@ def test_export_verification_detects_tampering(security_harness):
     assert not verify_export_hashes(exported)
 
 
+def test_export_with_observation_chain_and_attestation_validates_every_hash(
+    security_harness, signing_service
+):
+    """Task 11: the full export (receipt + observation chain + signed
+    attestation) independently validates every canonical content hash,
+    and tampering with any observation byte is detected."""
+    receipt = security_harness.receipt
+    observation = build_observation(
+        receipt_id=receipt.receipt_id,
+        previous_observation_id=None,
+        status="failed",
+        evidence=receipt.evidence,
+        uncertainty=("artifact hash changed on recheck",),
+        scorer_id="hades.receipts.default",
+        scorer_version="1.0",
+        observed_at=RECENT_DECIDED_AT,
+    )
+    security_harness.store.append_observation(observation)
+    attestation = signing_service.sign(receipt)
+    assert attestation is not None
+
+    exported = security_harness.exporter.export(
+        receipt.receipt_id,
+        security_harness.out_dir / "chain.json",
+        redaction="public",
+    )
+    data = json.loads(exported.read_text("utf-8"))
+    assert [o["observation_id"] for o in data["observations"]] == [
+        observation.observation_id
+    ]
+    assert [a["attestation_id"] for a in data["attestations"]] == [
+        attestation.attestation_id
+    ]
+    assert verify_export_hashes(exported)
+    # The signature travels as provenance and never changes the exported
+    # or stored truth status.
+    assert data["receipt"]["status"] == "completed_unverified"
+    assert (
+        security_harness.store.get(receipt.receipt_id).status
+        == "completed_unverified"
+    )
+
+    # Tampering with an observation byte fails independent validation.
+    data["observations"][0]["status"] = "verified"
+    exported.write_text(json.dumps(data), encoding="utf-8")
+    assert not verify_export_hashes(exported)
+
+
 def test_local_export_includes_profile_relative_locators_only(security_harness):
     exported = security_harness.export_local()
     text = exported.read_text("utf-8")

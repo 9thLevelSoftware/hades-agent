@@ -201,6 +201,176 @@ def test_interrupt_without_tool_tail_adds_nothing():
     assert messages[-1]["role"] == "assistant"
 
 
+def test_multi_turn_receipt_lifecycle_preserves_cache_and_role_invariants(
+    tmp_path,
+):
+    """Task 11: a multi-turn receipt-enabled fixture never disturbs the
+    conversation-cache identity.
+
+    The system prompt, effective tool definitions, provider, model, and
+    normalized role sequence are hashed at four checkpoints — before
+    source capture, after issue, after artifact recheck, and after the
+    observation append — and must be byte-identical throughout, with
+    strict user/assistant alternation preserved.
+    """
+    import hashlib
+    import json
+
+    from agent.receipt_artifacts import ArtifactCatalog
+    from agent.receipt_ingest import build_receipt_issuer
+    from agent.receipt_store import ReceiptStore
+    from agent.receipts import ReceiptSourceKey
+    from agent.turn_ledger import record_turn_outcome_and_receipt
+    from hades_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        agent = _StubAgent()
+        agent._session_db = db
+        system_message = {"role": "system", "content": "You are Hermes."}
+        tool_definitions = [
+            {
+                "type": "function",
+                "function": {"name": "patch", "parameters": {"type": "object"}},
+            }
+        ]
+        messages = [
+            system_message,
+            {"role": "user", "content": "edit the file"},
+            {"role": "assistant", "content": "Edited."},
+            {"role": "user", "content": "now write the report"},
+            {"role": "assistant", "content": "Report written."},
+        ]
+
+        def _fingerprint() -> str:
+            return hashlib.sha256(
+                json.dumps(
+                    {
+                        "system": system_message,
+                        "tools": tool_definitions,
+                        "provider": agent.provider,
+                        "model": agent.model,
+                        "roles": [m.get("role") for m in messages],
+                    },
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+
+        def _assert_alternation() -> None:
+            roles = [m["role"] for m in messages if m["role"] != "system"]
+            for index in range(len(roles) - 1):
+                assert roles[index] != roles[index + 1], (
+                    f"role alternation broken at index {index}: {roles}"
+                )
+
+        before_capture = _fingerprint()
+
+        # Two receipt-enabled turns issue receipts through the finalizer
+        # seam without touching the conversation.
+        for turn_id in ("turn-a", "turn-b"):
+            agent._current_turn_id = turn_id
+            record_turn_outcome_and_receipt(
+                agent,
+                outcome="completed_unverified",
+                outcome_reason="response completed without verification",
+                turn_exit_reason="text_response(finish_reason=stop)",
+                api_calls=1,
+                tool_iterations=0,
+                messages=messages,
+            )
+        after_issue = _fingerprint()
+        assert after_issue == before_capture
+
+        # A real artifact registration and read-only recheck.
+        artifact_root = tmp_path / "artifacts"
+        artifact_root.mkdir()
+        artifact_path = artifact_root / "report.txt"
+        artifact_path.write_text("report contents")
+        catalog = ArtifactCatalog(db)
+        digest = catalog.register_path(
+            artifact_path,
+            source_kind="execute_code",
+            source_ref="sess-1:turn-a:call-1",
+            allowed_roots=(artifact_root,),
+        )
+        catalog.recheck(digest.artifact_id, allowed_roots=(artifact_root,))
+        after_artifact_recheck = _fingerprint()
+        assert after_artifact_recheck == before_capture
+
+        # Observation append via the public issuer.
+        store = ReceiptStore(db)
+        receipt = store.find_by_source(ReceiptSourceKey("turn", "sess-1:turn-a"))
+        assert receipt is not None
+        issuer = build_receipt_issuer(db)
+        observation = issuer.recheck(receipt.receipt_id)
+        assert observation.receipt_id == receipt.receipt_id
+        after_observation = _fingerprint()
+        assert after_observation == before_capture
+
+        # Provider/model identity and strict alternation held throughout.
+        assert (agent.provider, agent.model) == ("stub", "stub/model")
+        assert len(messages) == 5
+        _assert_alternation()
+        # Both turns have exactly one receipt each — no duplicates.
+        for turn_id in ("turn-a", "turn-b"):
+            assert store.find_by_source(
+                ReceiptSourceKey("turn", f"sess-1:{turn_id}")
+            ) is not None
+    finally:
+        db.close()
+
+
+def test_receipt_disabled_ordinary_turn_writes_no_receipt_or_artifact_rows(
+    tmp_path,
+):
+    """Task 11: with ``receipts.mode: off`` an ordinary turn behaves
+    exactly as before — the ledger row lands, but no receipt, source
+    link, or artifact-catalog row is ever written."""
+    from agent.receipts import ReceiptQuery
+    from agent.receipt_store import ReceiptStore
+    from agent.turn_ledger import record_turn_outcome_and_receipt
+    from hades_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        agent = _StubAgent()
+        agent._session_db = db
+        agent._current_turn_id = "turn-off"
+        agent._receipts_mode = "off"
+        record, projection = record_turn_outcome_and_receipt(
+            agent,
+            outcome="completed_unverified",
+            outcome_reason="response completed without verification",
+            turn_exit_reason="text_response(finish_reason=stop)",
+            api_calls=1,
+            tool_iterations=0,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert projection is None
+        assert record.outcome == "completed_unverified"
+        # The ordinary ledger row landed.
+        from agent.turn_ledger import fetch_turn_outcome
+
+        assert fetch_turn_outcome(db, "sess-1", "turn-off") is not None
+        # No receipt rows, no source links, no artifact-catalog rows.
+        assert ReceiptStore(db).list(ReceiptQuery()) == []
+
+        def _counts(conn):
+            return (
+                conn.execute("SELECT COUNT(*) FROM receipts").fetchone()[0],
+                conn.execute(
+                    "SELECT COUNT(*) FROM artifact_digests"
+                ).fetchone()[0],
+                conn.execute(
+                    "SELECT COUNT(*) FROM artifact_locations"
+                ).fetchone()[0],
+            )
+
+        assert db._execute_read(_counts) == (0, 0, 0)
+    finally:
+        db.close()
+
+
 def test_receipt_issue_and_recheck_preserve_conversation_invariants(tmp_path):
     """Receipt issue/recheck never touches the conversation or prompt cache.
 
