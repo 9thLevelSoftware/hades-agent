@@ -3158,6 +3158,23 @@ def _handle_terminal(args, **kw):
     )
 
 
+def _terminal_authority_context(args: dict) -> dict:
+    """Authority-context resolver for the terminal tool (Autonomy Center).
+
+    ``data.read`` applies only to registry-proven read-only operations —
+    the terminal tool is not one. Every arbitrary command is therefore an
+    ``unknown.mutation`` with unknown payload and reversibility, and the
+    existing hardline/dangerous-command guardrails still run inside the
+    handler as the stronger boundary. Receives arguments only; never
+    inspects command output or secret values.
+    """
+    return {
+        "action_class": "unknown.mutation",
+        "data_classes": ("unknown",),
+        "reversibility": "unknown",
+    }
+
+
 registry.register(
     name="terminal",
     toolset="terminal",
@@ -3166,4 +3183,5 @@ registry.register(
     check_fn=check_terminal_requirements,
     emoji="💻",
     max_result_size_chars=100_000,
+    authority_context_fn=_terminal_authority_context,
 )

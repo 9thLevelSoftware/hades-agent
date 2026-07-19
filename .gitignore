@@ -161,3 +161,8 @@ apps/desktop/demo/
 # PR body is the archive. See the hermes-agent-dev skill's
 # pr-infographic-workflow reference (storage rule + lapse #8 / #COMMIT-1).
 infographic/
+
+# Autonomy benchmark result directories are local artifacts (see
+# benchmarks/autonomy/README.md); only the frozen corpus and harness are
+# committed.
+benchmarks/autonomy/results/

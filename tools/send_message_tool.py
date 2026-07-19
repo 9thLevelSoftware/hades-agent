@@ -1961,6 +1961,63 @@ async def _send_yuanbao(chat_id, message, media_files=None):
 # --- Registry ---
 from tools.registry import tool_error
 
+
+def send_message_authority_context(args: dict) -> dict:
+    """Authority-context resolver for outbound sends (Autonomy Center).
+
+    Shared by the non-model transport callers (cron delivery, ``hades
+    send``, gateway notifier, MCP surface) and any future registry
+    binding. Normalizes the delivery target via
+    ``DeliveryTarget.to_string()`` and returns it as ``recipient_ref``
+    so the runtime can apply the profile-keyed recipient hash — the raw
+    identifier never enters the action context or audit trail.
+
+    - ``origin`` targets are the same conversation; ``local`` stays
+      profile-local; everything else is an external recipient.
+    - ``data_classes`` come only from caller-declared trusted labels
+      (never model text); anything undeclared is ``("unknown",)``.
+    - Sends are ``irreversible`` unless a concrete adapter proves
+      edit/delete compensation, which none does through this args-only
+      resolver. Receives arguments only; never reads message bodies as
+      classification input or secret values.
+    """
+    action = {
+        "action_class": "message.send",
+        "reversibility": "irreversible",
+        "recipient_class": None,
+        "recipient_ref": None,
+    }
+
+    declared = args.get("data_classes")
+    if isinstance(declared, str):
+        declared = (declared,)
+    labels = tuple(
+        label for label in (declared or ())
+        if isinstance(label, str) and label.strip()
+    )
+    action["data_classes"] = labels or ("unknown",)
+
+    target_raw = args.get("target")
+    if isinstance(target_raw, str) and target_raw.strip():
+        try:
+            from gateway.delivery import DeliveryTarget, Platform
+
+            target = DeliveryTarget.parse(target_raw)
+            normalized = target.to_string()
+            if target.is_origin:
+                action["recipient_class"] = "same_conversation"
+            elif target.platform == Platform.LOCAL:
+                action["recipient_class"] = "profile_local"
+            else:
+                action["recipient_class"] = "external"
+                action["recipient_ref"] = normalized
+        except Exception:
+            # Unresolvable target: leave the recipient explicitly unknown
+            # (None class, no ref) so outbound evaluation fails closed.
+            pass
+    return action
+
+
 # NOTE: ``send_message`` is intentionally NOT registered as an agent-callable
 # model tool. The agent should not decide on its own to fire off cross-platform
 # messages or reactions. The send engine in this module (``_send_to_platform``,

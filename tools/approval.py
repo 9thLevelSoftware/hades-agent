@@ -3122,6 +3122,7 @@ def _run_approval_gate(
     fail_closed_when_no_human: bool = False,
     no_human_block_message: str = "",
     approval_metadata: Optional[dict] = None,
+    allow_permanent: bool = True,
 ) -> dict:
     """Shared human-approval gate for a flagged action (command or tool).
 
@@ -3158,6 +3159,11 @@ def _run_approval_gate(
             plugin-flagged action never runs ungated without a human.
         no_human_block_message: Message returned when
             ``fail_closed_when_no_human`` blocks.
+        allow_permanent: When False, the [a]lways option is hidden and an
+            "always" answer is downgraded to session scope — nothing is
+            written to the permanent allowlist. Used by autonomy asks,
+            whose durable authority must come from an explicit contract
+            edit, never from a generic approval prompt.
 
     Returns:
         ``{"approved": bool, "message": str|None, ...}`` — shape shared with
@@ -3201,8 +3207,37 @@ def _run_approval_gate(
     if stale:
         return _stale_pending_approval_result(pending_operation, description)
 
+    # Autonomy Center authority grant: when the execution-stage gate just
+    # decided ``allow`` for THIS exact tool call (same tool name and final
+    # argument hash), the recoverable generic prompt is redundant — consume
+    # the one-use grant instead of asking again. This runs only after the
+    # caller's hardline/deny checks (which precede this gate) and the pending
+    # exact-approval replay checks above; a mismatched, expired, or
+    # exact-irreversible-only grant never satisfies anything.
+    try:
+        from agent.autonomy.runtime import consume_exact_authority_grant
+
+        _grant = consume_exact_authority_grant(
+            tool_name=expected_identity.get("tool_name") or pending_operation,
+            arguments=pending_arguments,
+        )
+    except Exception:
+        _grant = None
+    if _grant is not None:
+        logger.info(
+            "Approval gate satisfied by autonomy authority grant "
+            "(decision %s, contract v%s) for pattern %s",
+            _grant.decision_id, _grant.contract_version, pattern_key,
+        )
+        return {
+            "approved": True,
+            "message": None,
+            "choice": "authority_grant",
+            "authority_decision_id": _grant.decision_id,
+        }
+
     if is_approved(session_key, pattern_key):
-        return {"approved": True, "message": None}
+        return {"approved": True, "message": None, "choice": "session"}
 
     if approval_callback is None:
         try:
@@ -3270,7 +3305,7 @@ def _run_approval_gate(
                 "pattern_key": pattern_key,
                 "pattern_keys": [pattern_key],
                 "description": redact_sensitive_text(description),
-                "allow_permanent": True,
+                "allow_permanent": allow_permanent,
             }
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface="gateway"
@@ -3313,9 +3348,12 @@ def _run_approval_gate(
                 approve_session(session_key, pattern_key)
             elif choice == "always":
                 approve_session(session_key, pattern_key)
-                approve_permanent(pattern_key)
-                save_permanent_allowlist(_permanent_approved)
-            return {"approved": True, "message": None}
+                if allow_permanent:
+                    approve_permanent(pattern_key)
+                    save_permanent_allowlist(_permanent_approved)
+                else:
+                    choice = "session"
+            return {"approved": True, "message": None, "choice": choice}
 
         # No notify callback (e.g. API server without an attached chat):
         # queue for /approve /deny review, agent sees approval_required.
@@ -3352,6 +3390,7 @@ def _run_approval_gate(
         }
 
     choice = prompt_dangerous_approval(display_target, description,
+                                       allow_permanent=allow_permanent,
                                        approval_callback=approval_callback)
 
     if choice == "deny":
@@ -3370,10 +3409,13 @@ def _run_approval_gate(
         approve_session(session_key, pattern_key)
     elif choice == "always":
         approve_session(session_key, pattern_key)
-        approve_permanent(pattern_key)
-        save_permanent_allowlist(_permanent_approved)
+        if allow_permanent:
+            approve_permanent(pattern_key)
+            save_permanent_allowlist(_permanent_approved)
+        else:
+            choice = "session"
 
-    return {"approved": True, "message": None}
+    return {"approved": True, "message": None, "choice": choice}
 
 
 def _should_skip_container_guards(env_type: str, has_host_access: bool = False) -> bool:
@@ -3470,6 +3512,7 @@ def request_tool_approval(
     requester: str = "",
     channel: str = "",
     request_id: str = "",
+    allow_permanent: bool = True,
 ) -> dict:
     """Escalate an arbitrary tool call to the human-approval gate.
 
@@ -3497,6 +3540,9 @@ def request_tool_approval(
             on the same tool).
         approval_callback: Optional CLI callback for interactive prompts
             (same contract as ``check_dangerous_command``).
+        allow_permanent: When False, the [a]lways option is hidden and no
+            permanent allowlist entry is ever written (autonomy asks:
+            durable authority requires an explicit contract edit).
 
     Returns:
         ``{"approved": True, "message": None}`` when allowed, or
@@ -3556,6 +3602,7 @@ def request_tool_approval(
             "channel": channel,
             "request_id": request_id,
         },
+        allow_permanent=allow_permanent,
     )
 
 

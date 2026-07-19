@@ -1050,3 +1050,99 @@ class TestHealthAwareDispatch:
         assert reg_b.get_runtime_health() == {}
         # health_a saw the failure
         assert reg_a.get_runtime_health()["toolset:flaky"]["state"] == "degraded"
+
+
+class TestAuthorityContext:
+    """Task 6: optional non-model authority metadata on tool entries."""
+
+    def _reg_with(self, name="gated", *, resolver=None, read_only=False):
+        reg = ToolRegistry()
+        reg.register(
+            name=name,
+            toolset="core",
+            schema=_make_schema(name),
+            handler=_dummy_handler,
+            read_only=read_only,
+            authority_context_fn=resolver,
+        )
+        return reg
+
+    def test_authority_metadata_never_changes_model_schema(self):
+        plain = ToolRegistry()
+        plain.register(
+            name="gated",
+            toolset="core",
+            schema=_make_schema("gated"),
+            handler=_dummy_handler,
+        )
+        before = plain.get_definitions({"gated"})
+
+        gated = self._reg_with(
+            resolver=lambda args: {"action_class": "message.send"}
+        )
+        assert gated.get_definitions({"gated"}) == before
+
+        gated.set_authority_context(
+            "gated", lambda args: {"action_class": "workspace.write"}
+        )
+        assert gated.get_definitions({"gated"}) == before
+
+    def test_unknown_tool_maps_to_conservative_unknown_mutation(self):
+        reg = ToolRegistry()
+        ctx = reg.get_authority_context("nope", {})
+        assert ctx["action_class"] == "unknown.mutation"
+        assert tuple(ctx["data_classes"]) == ("unknown",)
+        assert ctx["reversibility"] == "unknown"
+
+    def test_missing_resolver_uses_registry_operation_metadata(self):
+        reg = self._reg_with()
+        ctx = reg.get_authority_context("gated", {})
+        assert ctx["action_class"] == "unknown.mutation"
+        assert tuple(ctx["data_classes"]) == ("unknown",)
+        assert ctx["reversibility"] == "unknown"
+
+        ro = self._reg_with(name="probe", read_only=True)
+        ctx = ro.get_authority_context("probe", {})
+        assert ctx["action_class"] == "data.read"
+
+    def test_resolver_merges_over_conservative_defaults(self):
+        reg = self._reg_with(
+            resolver=lambda args: {
+                "action_class": "message.send",
+                "recipient_class": "colleague" if args.get("to") == "safe" else None,
+            }
+        )
+        ctx = reg.get_authority_context("gated", {"to": "safe"})
+        assert ctx["action_class"] == "message.send"
+        assert ctx["recipient_class"] == "colleague"
+        # unset dimensions stay conservative, never wildcard
+        assert tuple(ctx["data_classes"]) == ("unknown",)
+        assert ctx["reversibility"] == "unknown"
+
+    def test_resolver_failure_falls_back_to_conservative_context(self):
+        def boom(args):
+            raise RuntimeError("resolver exploded")
+
+        reg = self._reg_with(resolver=boom)
+        ctx = reg.get_authority_context("gated", {})
+        assert ctx["action_class"] == "unknown.mutation"
+        assert tuple(ctx["data_classes"]) == ("unknown",)
+
+    def test_resolver_result_is_a_defensive_copy(self):
+        shared = {"action_class": "message.send", "resource_refs": ["a"]}
+        reg = self._reg_with(resolver=lambda args: shared)
+        first = reg.get_authority_context("gated", {})
+        first["action_class"] = "tampered"
+        first["resource_refs"].append("b")
+        second = reg.get_authority_context("gated", {})
+        assert second["action_class"] == "message.send"
+        assert list(second["resource_refs"]) == ["a"]
+
+    def test_set_authority_context_requires_existing_tool(self):
+        reg = ToolRegistry()
+        try:
+            reg.set_authority_context("nope", lambda args: {})
+        except KeyError:
+            pass
+        else:  # pragma: no cover - defensive
+            raise AssertionError("expected KeyError for unknown tool")

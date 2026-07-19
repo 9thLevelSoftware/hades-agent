@@ -926,6 +926,95 @@ CREATE TABLE IF NOT EXISTS async_delegations (
 CREATE INDEX IF NOT EXISTS idx_async_delegations_delivery
     ON async_delegations(delivery_state, completed_at);
 
+-- ── Preferences & Autonomy Center (agent/autonomy/store.py) ──
+-- Additive tables; no SCHEMA_VERSION bump required. Runtime authority
+-- only: durable user assertions live in profile config.yaml. Audit rows
+-- carry labels/identifiers/hashes, never raw sensitive values.
+CREATE TABLE IF NOT EXISTS autonomy_contract_versions (
+    contract_version INTEGER PRIMARY KEY AUTOINCREMENT,
+    schema_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    source_fingerprint TEXT NOT NULL,
+    contract_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_contract_head (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    contract_version INTEGER NOT NULL REFERENCES autonomy_contract_versions(contract_version),
+    content_hash TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_runtime_rules (
+    rule_id TEXT PRIMARY KEY,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('learned_suggestion','temporary_mandate')),
+    state TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    rule_json TEXT NOT NULL,
+    provenance_json TEXT NOT NULL,
+    confidence_ppm INTEGER NOT NULL CHECK (confidence_ppm BETWEEN 0 AND 1000000),
+    expires_at_ms INTEGER,
+    maximum_uses INTEGER,
+    remaining_uses INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_rule_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    actor_kind TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_decisions (
+    decision_id TEXT PRIMARY KEY,
+    operation_key TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    contract_version INTEGER NOT NULL REFERENCES autonomy_contract_versions(contract_version),
+    contract_hash TEXT NOT NULL,
+    context_hash TEXT NOT NULL,
+    verdict TEXT NOT NULL CHECK (verdict IN ('allow','ask','deny')),
+    code TEXT NOT NULL,
+    matched_rule_ids_json TEXT NOT NULL,
+    conflicting_rule_ids_json TEXT NOT NULL,
+    required_evidence_json TEXT NOT NULL,
+    explanation_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    UNIQUE(operation_key, stage, contract_version, context_hash)
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_consumptions (
+    rule_id TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    decision_id TEXT NOT NULL REFERENCES autonomy_decisions(decision_id),
+    consumed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY(rule_id, operation_key, stage)
+);
+
+CREATE TABLE IF NOT EXISTS autonomy_cost_ledger (
+    entry_id TEXT PRIMARY KEY,
+    rule_id TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('reserve','settle','release')),
+    amount_micros INTEGER NOT NULL CHECK (amount_micros >= 0),
+    window_started_at_ms INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    UNIQUE(operation_key, kind)
+);
+
+CREATE INDEX IF NOT EXISTS idx_autonomy_decisions_created
+    ON autonomy_decisions(created_at_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_autonomy_rule_events_rule
+    ON autonomy_rule_events(rule_id, event_id);
+CREATE INDEX IF NOT EXISTS idx_autonomy_cost_rule_window
+    ON autonomy_cost_ledger(rule_id, window_started_at_ms);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
@@ -1077,6 +1166,10 @@ class SessionDB:
         self._fts_enabled = False
         self._trigram_available = False
         self._fts_unavailable_warned = False
+        # Lazily-built typed facade over the autonomy authority tables
+        # (see the `autonomy` property; import deferred to avoid a
+        # module-level hades_state <-> agent.autonomy cycle).
+        self._autonomy_store = None
         self._conn = None
         try:
             if read_only:
@@ -7343,6 +7436,21 @@ class SessionDB:
                 (key, value),
             )
         self._execute_write(_do)
+
+    # ── Preferences & Autonomy Center facade ──
+
+    @property
+    def autonomy(self) -> "agent.autonomy.store.AutonomyStore":
+        """Typed facade over the profile-local autonomy authority tables.
+
+        Lazily imported so ``hades_state`` never depends on
+        ``agent.autonomy`` at module load (``agent.autonomy.store`` type-
+        checks against SessionDB, which would otherwise be a cycle).
+        """
+        if self._autonomy_store is None:
+            from agent.autonomy.store import AutonomyStore
+            self._autonomy_store = AutonomyStore(self)
+        return self._autonomy_store
 
     def apply_telegram_topic_migration(self) -> None:
         """Create Telegram DM topic-mode tables on explicit /topic opt-in.

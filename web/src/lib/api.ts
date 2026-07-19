@@ -80,6 +80,7 @@ const PROFILE_SCOPED_PREFIXES = [
   "/api/model/auxiliary",
   "/api/model/moa",
   "/api/model/options",
+  "/api/autonomy",
 ];
 
 function withManagementProfile(url: string): string {
@@ -1268,7 +1269,263 @@ export const api = {
     fetchJSON<SkillHubScan>(
       `/api/skills/hub/scan?identifier=${encodeURIComponent(identifier)}`,
     ),
+
+  // ── Autonomy (Preferences & Autonomy Center) ─────────────────────────
+  // Secondary management surface over the profile-scoped autonomy
+  // endpoints. GET requests inherit the global management-profile scope
+  // via PROFILE_SCOPED_PREFIXES; mutating requests carry the profile in
+  // the body so reads and writes always target the same profile.
+  getAutonomyStatus: () => fetchJSON<AutonomyStatus>("/api/autonomy/status"),
+  getAutonomyRules: (params?: {
+    source?: string;
+    state?: string;
+    effective?: boolean;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.source) query.set("source", params.source);
+    if (params?.state) query.set("state", params.state);
+    if (params?.effective) query.set("effective", "true");
+    const qs = query.toString();
+    return fetchJSON<AutonomyRulesResponse>(
+      `/api/autonomy/rules${qs ? `?${qs}` : ""}`,
+    );
+  },
+  explainAutonomyRule: (ruleId: string) =>
+    fetchJSON<AutonomyRuleExplanation>(
+      `/api/autonomy/rules/${encodeURIComponent(ruleId)}`,
+    ),
+  previewAutonomyChange: (change: AutonomyChangeRequest) =>
+    fetchJSON<AutonomyPreviewResponse>("/api/autonomy/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profile: getManagementProfile() || undefined,
+        ...change,
+      }),
+    }),
+  applyAutonomyPreview: (change: AutonomyApplyRequest) =>
+    fetchJSON<AutonomyApplyResponse>("/api/autonomy/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profile: getManagementProfile() || undefined,
+        ...change,
+      }),
+    }),
+  acceptAutonomySuggestion: (
+    suggestionId: string,
+    body: AutonomySuggestionAcceptRequest,
+  ) =>
+    fetchJSON<AutonomySuggestionAcceptResponse>(
+      `/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/accept`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile: getManagementProfile() || undefined,
+          ...body,
+        }),
+      },
+    ),
+  rejectAutonomySuggestion: (suggestionId: string, reason = "") =>
+    fetchJSON<AutonomySuggestionRejectResponse>(
+      `/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/reject`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile: getManagementProfile() || undefined,
+          reason,
+        }),
+      },
+    ),
+  getAutonomyMandates: (state?: string) =>
+    fetchJSON<AutonomyMandatesResponse>(
+      `/api/autonomy/mandates${state ? `?state=${encodeURIComponent(state)}` : ""}`,
+    ),
+  revokeAutonomyMandate: (ruleId: string, reason = "") =>
+    fetchJSON<AutonomyMandateRevokeResponse>(
+      `/api/autonomy/mandates/${encodeURIComponent(ruleId)}/revoke`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile: getManagementProfile() || undefined,
+          reason,
+        }),
+      },
+    ),
+  getAutonomyAudit: (limit = 100, verdict?: string) =>
+    fetchJSON<AutonomyAuditResponse>(
+      `/api/autonomy/audit?limit=${limit}${verdict ? `&verdict=${encodeURIComponent(verdict)}` : ""}`,
+    ),
 };
+
+// ── Autonomy (Preferences & Autonomy Center) types ───────────────────────
+// Mirrors the bounded structured renderer shared by CLI/TUI/dashboard:
+// labels, identifiers, and profile-local hashes only — never raw
+// recipients, rule text, secrets, or message bodies.
+
+export interface AutonomyStatus {
+  profile_id: string;
+  mode: string;
+  contract_version: number;
+  contract_hash: string;
+  stable_rules: number;
+  active_mandates: number;
+  pending_suggestions: number;
+  pending_apply: boolean;
+}
+
+export interface AutonomyRuleDoc {
+  rule_id: string;
+  source: "user_assertion" | "learned_suggestion" | "temporary_mandate";
+  state: string;
+  effect: "allow" | "ask" | "deny";
+  action_classes: string[];
+  data_classes: string[];
+  recipient_classes: string[];
+  recipient_hashes: string[];
+  resource_prefixes: string[];
+  scope: Record<string, string>;
+  allowed_reversibility: string[];
+  cost: {
+    currency: string;
+    max_per_action_cents: number | null;
+    max_per_window_cents: number | null;
+    window_ms: number | null;
+  } | null;
+  time: {
+    window_start_minute: number;
+    window_end_minute: number;
+    timezone: string;
+  } | null;
+  evidence_requirements: { kind: string; stage: string }[];
+  max_uncertainty_ppm: number | null;
+  provenance: string;
+  confidence_ppm: number;
+  created_at_ms: number | null;
+  expires_at_ms: number | null;
+  max_uses: number | null;
+  remaining_uses: number | null;
+  description: string;
+  edit_command: string;
+}
+
+export interface AutonomyRulesResponse {
+  effective: boolean;
+  contract_version?: number;
+  contract_hash?: string;
+  rules: AutonomyRuleDoc[];
+}
+
+export interface AutonomyRuleExplanation extends AutonomyRuleDoc {
+  layer: string;
+  revision: number | null;
+  in_current_contract: boolean;
+  conflicts_with: string[];
+  edit_route: string[];
+  revoke_route: string[];
+}
+
+export interface AutonomyChangeRequest {
+  set_rules?: Record<string, unknown>[];
+  remove_rule_ids?: string[];
+}
+
+export interface AutonomyApplyRequest extends AutonomyChangeRequest {
+  expected_contract_hash: string;
+}
+
+export interface AutonomyPreviewResponse {
+  applied: false;
+  profile_id: string;
+  before_contract_hash: string;
+  after_contract_hash: string;
+  added_rule_ids: string[];
+  removed_rule_ids: string[];
+  changed_rule_ids: string[];
+  warnings: string[];
+}
+
+export interface AutonomyApplyResponse {
+  applied: true;
+  config_hash: string;
+  contract_version: number;
+  contract_hash: string;
+}
+
+export interface AutonomySuggestionAcceptRequest {
+  destination: "stable" | "mandate";
+  expected_contract_hash?: string;
+  expires_in_ms?: number;
+  max_uses?: number;
+}
+
+export type AutonomySuggestionAcceptResponse =
+  | (AutonomyPreviewResponse & {
+      suggestion_id: string;
+      destination: "stable";
+      new_rule_id: string;
+    })
+  | (AutonomyApplyResponse & {
+      suggestion_id: string;
+      destination: "stable";
+      new_rule_id: string;
+    })
+  | {
+      suggestion_id: string;
+      destination: "mandate";
+      applied: true;
+      new_rule_id: string;
+      expires_at_ms: number | null;
+      max_uses: number | null;
+    };
+
+export interface AutonomySuggestionRejectResponse {
+  suggestion_id: string;
+  state: string;
+  reason: string;
+}
+
+export interface AutonomyMandatesResponse {
+  mandates: AutonomyRuleDoc[];
+}
+
+export interface AutonomyMandateRevokeResponse {
+  rule_id: string;
+  state: string;
+  reason: string;
+}
+
+export interface AutonomyDecisionDoc {
+  decision_id: string;
+  operation_key: string;
+  created_at_ms: number;
+  verdict: "allow" | "ask" | "deny";
+  code: string;
+  reason: string;
+  stage: string;
+  authority_version: number;
+  authority_hash: string;
+  context_hash: string;
+  matched_rule_ids: string[];
+  conflicting_rule_ids: string[];
+  required_evidence: { kind: string; stage: string }[];
+  clarification: {
+    question: string;
+    choices: string[];
+    code: string;
+  } | null;
+  expires_at_ms: number | null;
+  edit_targets: string[];
+}
+
+export interface AutonomyAuditResponse {
+  decisions: AutonomyDecisionDoc[];
+  count: number;
+  limit: number;
+}
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).
  *

@@ -131,6 +131,12 @@ COMMAND_REGISTRY: list[CommandDef] = [
     # Configuration
     CommandDef("config", "Show current configuration", "Configuration",
                cli_only=True),
+    CommandDef("autonomy", "Explain and edit what Hades may do", "Configuration",
+               aliases=("authority",),
+               args_hint="[status|list|rule|evaluate|suggestion|mandate|audit|doctor]",
+               subcommands=("status", "list", "rule", "evaluate", "suggestion",
+                            "mandate", "audit", "export", "purge-audit", "doctor"),
+               cli_only=True),
     CommandDef("model", "Switch model (persists by default)", "Configuration",
                args_hint="[model] [--provider name] [--global|--session] [--refresh]"),
     CommandDef("codex-runtime", "Toggle codex app-server runtime for OpenAI/Codex models",

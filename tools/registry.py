@@ -113,13 +113,14 @@ class ToolEntry:
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
-        "read_only", "destructive", "idempotent",
+        "read_only", "destructive", "idempotent", "authority_context_fn",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
                  max_result_size_chars=None, dynamic_schema_overrides=None,
-                 read_only=False, destructive=True, idempotent=False):
+                 read_only=False, destructive=True, idempotent=False,
+                 authority_context_fn=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -141,6 +142,13 @@ class ToolEntry:
         self.read_only = bool(read_only)
         self.destructive = bool(destructive) and not self.read_only
         self.idempotent = bool(idempotent)
+        # Optional non-model authority-context resolver (Preferences &
+        # Autonomy Center). Receives a copy of the final tool arguments and
+        # returns declared ActionContext facts (action_class, data_classes,
+        # reversibility, recipient/resource refs). NEVER serialized into the
+        # model-visible schema; consumed only by agent.autonomy.runtime via
+        # get_authority_context().
+        self.authority_context_fn = authority_context_fn
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +335,78 @@ class ToolRegistry:
             "idempotent": entry.idempotent,
         }
 
+    # Conservative authority context for tools that declare nothing: an
+    # unclassified mutation with unknown payload/recipient/reversibility and
+    # unknown cost/uncertainty. Missing high-risk facts are declared as
+    # explicit "unknown" labels, never omitted fields a wildcard could match.
+    _CONSERVATIVE_AUTHORITY_CONTEXT: Dict[str, object] = {
+        "action_class": "unknown.mutation",
+        "data_classes": ("unknown",),
+        "reversibility": "unknown",
+        "recipient_class": None,
+        "recipient_hash": None,
+        "resource_refs": (),
+        "estimated_cost_cents": None,
+        "uncertainty_ppm": None,
+    }
+
+    def set_authority_context(self, name: str, fn: Optional[Callable]) -> None:
+        """Bind (or clear) a tool's authority-context resolver post-hoc.
+
+        Never touches the model-visible schema; raises ``KeyError`` for an
+        unknown tool so a typo cannot silently leave a mutation ungated
+        under its conservative default without the caller noticing.
+        """
+        with self._lock:
+            entry = self._tools.get(name)
+            if entry is None:
+                raise KeyError(f"Unknown tool: {name}")
+            entry.authority_context_fn = fn
+
+    def get_authority_context(self, name: str, args: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+        """Return declared authority facts for one candidate call.
+
+        Defensive by construction: the resolver receives a shallow copy of
+        *args*, its result is deep-copied, and any failure (missing tool,
+        raising resolver, non-dict result) maps to the conservative
+        ``unknown.mutation`` context — never to a wildcard match. Tools
+        registered ``read_only`` with no resolver map to ``data.read``.
+        ``get_definitions()`` output is never affected.
+        """
+        import copy
+
+        conservative = dict(self._CONSERVATIVE_AUTHORITY_CONTEXT)
+        entry = self.get_entry(name)
+        if entry is None:
+            return conservative
+        if entry.authority_context_fn is None:
+            if entry.read_only:
+                conservative.update(
+                    {"action_class": "data.read", "reversibility": "reversible"}
+                )
+            return conservative
+        try:
+            resolved = entry.authority_context_fn(dict(args or {}))
+        except Exception as exc:
+            logger.warning(
+                "authority_context_fn for tool %s raised %s; using the "
+                "conservative unknown.mutation context",
+                name, exc,
+            )
+            return conservative
+        if not isinstance(resolved, dict):
+            logger.warning(
+                "authority_context_fn for tool %s returned %s (expected dict); "
+                "using the conservative unknown.mutation context",
+                name, type(resolved).__name__,
+            )
+            return conservative
+        try:
+            conservative.update(copy.deepcopy(resolved))
+        except Exception:
+            return dict(self._CONSERVATIVE_AUTHORITY_CONTEXT)
+        return conservative
+
     @staticmethod
     def operation_key(
         name: str,
@@ -454,6 +534,7 @@ class ToolRegistry:
         read_only: bool = False,
         destructive: Optional[bool] = None,
         idempotent: bool = False,
+        authority_context_fn: Optional[Callable] = None,
     ):
         """Register a tool.  Called at module-import time by each tool file.
 
@@ -526,6 +607,7 @@ class ToolRegistry:
                 read_only=read_only,
                 destructive=(not read_only if destructive is None else destructive),
                 idempotent=idempotent,
+                authority_context_fn=authority_context_fn,
             )
             # Availability is now derived per-tool (_toolset_has_exposable_tools),
             # so this map no longer gates a toolset. It is still consumed by

@@ -4362,6 +4362,13 @@ def cmd_kanban(args):
     return kanban_command(args)
 
 
+def cmd_autonomy(args):
+    """Preferences & Autonomy Center — explain and edit authority."""
+    from hades_cli.autonomy import autonomy_command
+
+    return autonomy_command(args)
+
+
 def cmd_workflow(args):
     """Workflow graph definitions and executions."""
     from hades_cli.workflows import workflow_command
@@ -12713,7 +12720,7 @@ def _build_provider_choices() -> list[str]:
 # to parse.
 _BUILTIN_SUBCOMMANDS = frozenset(
     {
-        "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
+        "acp", "auth", "authority", "autonomy", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
         "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
@@ -13540,6 +13547,14 @@ def main():
 
     kanban_parser = _build_kanban_parser(subparsers)
     kanban_parser.set_defaults(func=cmd_kanban)
+
+    # =========================================================================
+    # autonomy command — Preferences & Autonomy Center authority controls
+    # =========================================================================
+    from hades_cli.autonomy import build_parser as _build_autonomy_parser
+
+    autonomy_parser = _build_autonomy_parser(subparsers)
+    autonomy_parser.set_defaults(func=cmd_autonomy)
 
     # =========================================================================
     # workflow command — workflow graph definitions and executions

@@ -7949,3 +7949,534 @@ class TestDesktopCronTicker:
 
         with self._client():
             assert not called.wait(0.5), "ticker must not run outside the desktop app"
+
+
+# ---------------------------------------------------------------------------
+# Autonomy (Preferences & Autonomy Center) endpoints — secondary Dashboard
+# management surface (Task 9).  Profile-scoped REST over the SAME
+# AutonomyService as CLI/TUI; never raw table/YAML access.
+# ---------------------------------------------------------------------------
+
+
+def _autonomy_stable_entry(rule_id="allow-send", effect="allow", **overrides):
+    entry = {
+        "rule_id": rule_id,
+        "effect": effect,
+        "action_classes": ["message.send"],
+        "data_classes": ["public"],
+        "recipient_classes": ["designated_test"],
+        "description": "allow public sends to the designated test recipient",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _write_autonomy_config(home, stable_rules, mode="enforce"):
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "autonomy": {
+                    "schema_version": 1,
+                    "mode": mode,
+                    "stable_rules": stable_rules,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class TestAutonomyEndpoints:
+    """Profile-scoped dashboard autonomy management endpoints."""
+
+    RAW_RECIPIENT = "alice@example.test"
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch, _isolate_hermes_home):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+
+        import hades_state
+        from hades_constants import get_hades_home
+        from hades_cli import profiles
+        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+        monkeypatch.setattr(
+            hades_state, "DEFAULT_DB_PATH", get_hades_home() / "state.db"
+        )
+        self.home = get_hades_home()
+        self.home.mkdir(parents=True, exist_ok=True)
+        _write_autonomy_config(self.home, [])
+        profiles_root = self.home / "profiles"
+        self.other_home = profiles_root / "other"
+        self.other_home.mkdir(parents=True, exist_ok=True)
+        _write_autonomy_config(self.other_home, [])
+        monkeypatch.setattr(profiles, "_get_default_hermes_home", lambda: self.home)
+        monkeypatch.setattr(profiles, "_get_profiles_root", lambda: profiles_root)
+
+        self.client = TestClient(app)
+        self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+
+    # ── Seeding helpers (service-level, per-profile) ───────────────────
+
+    def _seed_suggestion(self, rule_id="suggest-1"):
+        import time as _time
+
+        from agent.autonomy import AutonomyRule, AutonomyService, RuleProvenance
+
+        AutonomyService().propose_suggestion(
+            AutonomyRule(
+                rule_id=rule_id,
+                source="learned_suggestion",
+                state="awaiting_confirmation",
+                effect="allow",
+                action_classes=("message.send",),
+                data_classes=("internal",),
+                recipient_classes=("colleague",),
+                provenance=RuleProvenance(
+                    actor_kind="learner",
+                    actor_id="pattern-miner",
+                    source_ref="observed-behavior",
+                    observed_at_ms=100,
+                    confirmed_at_ms=None,
+                    confidence_ppm=990_000,
+                ),
+                created_at_ms=int(_time.time() * 1000),
+                description="observed repeated sends to a colleague",
+            )
+        )
+
+    def _seed_mandate(self, rule_id="mandate-1"):
+        import time as _time
+
+        from agent.autonomy import AutonomyRule, AutonomyService, RuleProvenance
+
+        now = int(_time.time() * 1000)
+        AutonomyService().create_mandate(
+            AutonomyRule(
+                rule_id=rule_id,
+                source="temporary_mandate",
+                state="active",
+                effect="allow",
+                action_classes=("workspace.delete",),
+                data_classes=("internal",),
+                allowed_reversibility=("reversible",),
+                provenance=RuleProvenance(
+                    actor_kind="user",
+                    actor_id="user-1",
+                    source_ref="dashboard",
+                    observed_at_ms=now,
+                    confirmed_at_ms=now,
+                    confidence_ppm=1_000_000,
+                ),
+                created_at_ms=now,
+                expires_at_ms=now + 365 * 86_400_000,
+                max_uses=3,
+                remaining_uses=3,
+                description="bounded checkpointed delete",
+            )
+        )
+
+    # ── Auth middleware (session token / CSRF posture) ─────────────────
+
+    def test_autonomy_endpoints_require_session_token(self):
+        from starlette.testclient import TestClient
+        from hades_cli.web_server import app
+
+        unauth = TestClient(app)
+        assert unauth.get("/api/autonomy/status").status_code == 401
+        assert unauth.get("/api/autonomy/rules").status_code == 401
+        assert (
+            unauth.post("/api/autonomy/preview", json={"set_rules": []}).status_code
+            == 401
+        )
+        assert (
+            unauth.post(
+                "/api/autonomy/apply",
+                json={"set_rules": [], "expected_contract_hash": "x"},
+            ).status_code
+            == 401
+        )
+        assert unauth.get("/api/autonomy/audit").status_code == 401
+
+    # ── Status / rules ─────────────────────────────────────────────────
+
+    def test_status_reports_contract_and_rule_counts(self):
+        _write_autonomy_config(self.home, [_autonomy_stable_entry("stable-allow")])
+        resp = self.client.get("/api/autonomy/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["mode"] == "enforce"
+        assert data["stable_rules"] == 1
+        assert data["active_mandates"] == 0
+        assert data["pending_suggestions"] == 0
+        assert data["pending_apply"] is False
+        assert data["contract_hash"]
+        assert isinstance(data["contract_version"], int)
+
+    def test_rules_lists_every_source_with_redacted_docs_and_edit_routes(self):
+        recipient_hash = "ab" * 32
+        _write_autonomy_config(
+            self.home,
+            [
+                _autonomy_stable_entry(
+                    "stable-deny", effect="deny", recipient_hashes=[recipient_hash]
+                )
+            ],
+        )
+        self._seed_mandate("mandate-1")
+        self._seed_suggestion("suggest-1")
+
+        resp = self.client.get("/api/autonomy/rules")
+        assert resp.status_code == 200
+        data = resp.json()
+        by_id = {r["rule_id"]: r for r in data["rules"]}
+        assert set(by_id) == {"stable-deny", "mandate-1", "suggest-1"}
+        assert by_id["stable-deny"]["source"] == "user_assertion"
+        assert by_id["mandate-1"]["source"] == "temporary_mandate"
+        assert by_id["suggest-1"]["source"] == "learned_suggestion"
+        assert by_id["suggest-1"]["state"] == "awaiting_confirmation"
+        for doc in by_id.values():
+            assert doc["edit_command"]
+            assert "recipient_hashes" in doc
+            # Redaction: hashes only, never a raw recipient identifier field.
+            assert "recipient" not in doc
+            assert "recipients" not in doc
+        assert by_id["stable-deny"]["recipient_hashes"] == [recipient_hash]
+        assert self.RAW_RECIPIENT not in resp.text
+
+    def test_rule_explanation_names_layer_conflicts_and_edit_route(self):
+        _write_autonomy_config(
+            self.home,
+            [
+                _autonomy_stable_entry("stable-allow", effect="allow"),
+                _autonomy_stable_entry("stable-deny", effect="deny"),
+            ],
+        )
+        resp = self.client.get("/api/autonomy/rules/stable-deny")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["layer"] == "stable_config"
+        assert data["in_current_contract"] is True
+        assert "stable-allow" in data["conflicts_with"]
+        assert data["edit_route"]
+        assert data["revoke_route"]
+
+        assert self.client.get("/api/autonomy/rules/no-such-rule").status_code == 404
+
+    # ── Profile scoping ────────────────────────────────────────────────
+
+    def test_rules_scope_to_requested_profile(self):
+        _write_autonomy_config(self.home, [_autonomy_stable_entry("default-rule")])
+        _write_autonomy_config(
+            self.other_home, [_autonomy_stable_entry("other-rule")]
+        )
+
+        own = self.client.get("/api/autonomy/rules")
+        assert own.status_code == 200
+        assert {r["rule_id"] for r in own.json()["rules"]} == {"default-rule"}
+
+        other = self.client.get("/api/autonomy/rules", params={"profile": "other"})
+        assert other.status_code == 200
+        assert {r["rule_id"] for r in other.json()["rules"]} == {"other-rule"}
+
+    def test_invalid_or_unknown_profile_is_rejected(self):
+        bad = self.client.get(
+            "/api/autonomy/status", params={"profile": "../escape"}
+        )
+        assert bad.status_code == 400
+        missing = self.client.get(
+            "/api/autonomy/status", params={"profile": "ghost"}
+        )
+        assert missing.status_code == 404
+
+    # ── Preview / exact-hash apply ─────────────────────────────────────
+
+    def test_preview_then_exact_hash_apply_persists_the_rule(self):
+        entry = _autonomy_stable_entry("allow-send")
+        preview = self.client.post(
+            "/api/autonomy/preview", json={"set_rules": [entry]}
+        )
+        assert preview.status_code == 200
+        pdata = preview.json()
+        assert pdata["applied"] is False
+        assert pdata["added_rule_ids"] == ["allow-send"]
+        assert pdata["before_contract_hash"]
+        assert pdata["after_contract_hash"]
+
+        applied = self.client.post(
+            "/api/autonomy/apply",
+            json={
+                "set_rules": [entry],
+                "expected_contract_hash": pdata["before_contract_hash"],
+            },
+        )
+        assert applied.status_code == 200
+        adata = applied.json()
+        assert adata["applied"] is True
+        # The contract hash covers compiled_at_ms, so the informational
+        # after-hash from preview time need not byte-match the minted head;
+        # the compare-and-set anchor is the exact BEFORE hash.
+        assert adata["contract_hash"]
+        assert adata["contract_version"] >= 1
+
+        rules = self.client.get("/api/autonomy/rules").json()["rules"]
+        assert "allow-send" in {r["rule_id"] for r in rules}
+        raw = yaml.safe_load((self.home / "config.yaml").read_text())
+        assert [r["rule_id"] for r in raw["autonomy"]["stable_rules"]] == [
+            "allow-send"
+        ]
+
+    def test_stale_hash_apply_conflicts_and_writes_nothing(self):
+        entry = _autonomy_stable_entry("allow-send")
+        before = (self.home / "config.yaml").read_text()
+        resp = self.client.post(
+            "/api/autonomy/apply",
+            json={"set_rules": [entry], "expected_contract_hash": "0" * 64},
+        )
+        assert resp.status_code == 409
+        assert (self.home / "config.yaml").read_text() == before
+
+    def test_cross_profile_hash_apply_conflicts_and_writes_nothing(self):
+        """A hash previewed against one profile can never apply to another."""
+        _write_autonomy_config(
+            self.other_home, [_autonomy_stable_entry("other-rule")]
+        )
+        entry = _autonomy_stable_entry("allow-send")
+        default_preview = self.client.post(
+            "/api/autonomy/preview", json={"set_rules": [entry]}
+        ).json()
+
+        other_before = (self.other_home / "config.yaml").read_text()
+        resp = self.client.post(
+            "/api/autonomy/apply",
+            json={
+                "profile": "other",
+                "set_rules": [entry],
+                "expected_contract_hash": default_preview["before_contract_hash"],
+            },
+        )
+        assert resp.status_code == 409
+        assert (self.other_home / "config.yaml").read_text() == other_before
+
+    def test_managed_config_is_a_stronger_boundary(self):
+        entry = _autonomy_stable_entry("allow-send")
+        pdata = self.client.post(
+            "/api/autonomy/preview", json={"set_rules": [entry]}
+        ).json()
+        (self.home / ".managed").write_text("nix", encoding="utf-8")
+        before = (self.home / "config.yaml").read_text()
+        try:
+            resp = self.client.post(
+                "/api/autonomy/apply",
+                json={
+                    "set_rules": [entry],
+                    "expected_contract_hash": pdata["before_contract_hash"],
+                },
+            )
+            assert resp.status_code == 403
+            assert (self.home / "config.yaml").read_text() == before
+        finally:
+            (self.home / ".managed").unlink()
+
+    # ── Bounds ─────────────────────────────────────────────────────────
+
+    def test_request_size_and_audit_limit_bounds(self):
+        huge = _autonomy_stable_entry("huge", description="x" * (1_048_576 + 1))
+        resp = self.client.post(
+            "/api/autonomy/preview", json={"set_rules": [huge]}
+        )
+        assert resp.status_code == 413
+
+        empty = self.client.post("/api/autonomy/preview", json={})
+        assert empty.status_code == 400
+
+        assert (
+            self.client.get("/api/autonomy/audit", params={"limit": 501}).status_code
+            == 400
+        )
+        assert (
+            self.client.get("/api/autonomy/audit", params={"limit": 0}).status_code
+            == 400
+        )
+
+    # ── Suggestions ────────────────────────────────────────────────────
+
+    def test_suggestion_accept_stable_previews_then_applies_exact_hash(self):
+        self._seed_suggestion("suggest-1")
+        preview = self.client.post(
+            "/api/autonomy/suggestions/suggest-1/accept",
+            json={"destination": "stable"},
+        )
+        assert preview.status_code == 200
+        pdata = preview.json()
+        assert pdata["applied"] is False
+        assert pdata["destination"] == "stable"
+        assert pdata["suggestion_id"] == "suggest-1"
+        assert pdata["new_rule_id"]
+
+        stale = self.client.post(
+            "/api/autonomy/suggestions/suggest-1/accept",
+            json={"destination": "stable", "expected_contract_hash": "0" * 64},
+        )
+        assert stale.status_code == 409
+
+        applied = self.client.post(
+            "/api/autonomy/suggestions/suggest-1/accept",
+            json={
+                "destination": "stable",
+                "expected_contract_hash": pdata["before_contract_hash"],
+            },
+        )
+        assert applied.status_code == 200
+        assert applied.json()["applied"] is True
+
+        rules = self.client.get("/api/autonomy/rules").json()["rules"]
+        by_id = {r["rule_id"]: r for r in rules}
+        assert by_id[pdata["new_rule_id"]]["source"] == "user_assertion"
+        # The origin suggestion is resolved — it never becomes authority.
+        assert by_id["suggest-1"]["state"] == "rejected"
+
+    def test_suggestion_accept_temporary_requires_bounds_and_creates_mandate(self):
+        self._seed_suggestion("suggest-2")
+        unbounded = self.client.post(
+            "/api/autonomy/suggestions/suggest-2/accept",
+            json={"destination": "mandate"},
+        )
+        assert unbounded.status_code == 400
+
+        resp = self.client.post(
+            "/api/autonomy/suggestions/suggest-2/accept",
+            json={
+                "destination": "mandate",
+                "expires_in_ms": 3_600_000,
+                "max_uses": 2,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["destination"] == "mandate"
+        mandates = self.client.get("/api/autonomy/mandates").json()["mandates"]
+        by_id = {m["rule_id"]: m for m in mandates}
+        assert data["new_rule_id"] in by_id
+        assert by_id[data["new_rule_id"]]["max_uses"] == 2
+        assert by_id[data["new_rule_id"]]["expires_at_ms"] is not None
+
+    def test_suggestion_reject_is_terminal_and_unknown_is_404(self):
+        self._seed_suggestion("suggest-3")
+        resp = self.client.post(
+            "/api/autonomy/suggestions/suggest-3/reject",
+            json={"reason": "not wanted"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "rejected"
+
+        missing = self.client.post(
+            "/api/autonomy/suggestions/no-such/reject", json={}
+        )
+        assert missing.status_code == 404
+
+    # ── Mandates ───────────────────────────────────────────────────────
+
+    def test_mandates_list_and_revoke(self):
+        self._seed_mandate("mandate-1")
+        listed = self.client.get("/api/autonomy/mandates")
+        assert listed.status_code == 200
+        assert {m["rule_id"] for m in listed.json()["mandates"]} == {"mandate-1"}
+
+        revoked = self.client.post(
+            "/api/autonomy/mandates/mandate-1/revoke", json={"reason": "done"}
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["state"] == "revoked"
+
+        missing = self.client.post(
+            "/api/autonomy/mandates/no-such/revoke", json={}
+        )
+        assert missing.status_code == 404
+
+    # ── Audit ──────────────────────────────────────────────────────────
+
+    def test_audit_returns_bounded_redacted_decisions(self):
+        from agent.autonomy import ActionContext, AutonomyService
+
+        recipient_hash = "cd" * 32
+        AutonomyService().evaluate(
+            ActionContext(
+                operation_key="op-dash-1",
+                stage="execute",
+                action_class="message.send",
+                data_classes=("public",),
+                reversibility="reversible",
+                recipient_hash=recipient_hash,
+            ),
+            consume=True,
+        )
+        resp = self.client.get("/api/autonomy/audit", params={"limit": 10})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["limit"] == 10
+        assert data["count"] >= 1
+        doc = data["decisions"][0]
+        assert doc["verdict"] in {"allow", "ask", "deny"}
+        assert doc["context_hash"]
+        assert doc["decision_id"]
+        # Redacted: hashes and identifiers only, never raw context fields.
+        assert "recipient_hash" not in doc
+        assert self.RAW_RECIPIENT not in resp.text
+
+    # ── Event-loop safety ──────────────────────────────────────────────
+
+    def test_profile_scope_is_never_held_on_the_event_loop(self, monkeypatch):
+        """Every autonomy endpoint enters _profile_scope in a worker thread
+        (where no asyncio loop is running), so the process-global scope can
+        never be held across an await on the event loop."""
+        from contextlib import contextmanager
+
+        import hades_cli.web_server as web_server
+
+        real_scope = web_server._profile_scope
+        observed = []
+
+        @contextmanager
+        def recording_scope(profile):
+            try:
+                asyncio.get_running_loop()
+                observed.append("event-loop")
+            except RuntimeError:
+                observed.append("worker")
+            with real_scope(profile) as scoped:
+                yield scoped
+
+        monkeypatch.setattr(web_server, "_profile_scope", recording_scope)
+
+        self._seed_suggestion("suggest-loop")
+        self._seed_mandate("mandate-loop")
+        entry = _autonomy_stable_entry("allow-send")
+
+        self.client.get("/api/autonomy/status")
+        self.client.get("/api/autonomy/rules")
+        self.client.get("/api/autonomy/rules/mandate-loop")
+        self.client.get("/api/autonomy/mandates")
+        self.client.get("/api/autonomy/audit")
+        pdata = self.client.post(
+            "/api/autonomy/preview", json={"set_rules": [entry]}
+        ).json()
+        self.client.post(
+            "/api/autonomy/apply",
+            json={
+                "set_rules": [entry],
+                "expected_contract_hash": pdata["before_contract_hash"],
+            },
+        )
+        self.client.post(
+            "/api/autonomy/suggestions/suggest-loop/reject", json={}
+        )
+        self.client.post(
+            "/api/autonomy/mandates/mandate-loop/revoke", json={}
+        )
+
+        assert observed, "autonomy endpoints must resolve through _profile_scope"
+        assert set(observed) == {"worker"}

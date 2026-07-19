@@ -2130,7 +2130,38 @@ def _handle_search_files(args, **kw):
         output_mode=args.get("output_mode", "content"), context=args.get("context", 0), task_id=tid)
 
 
+def _file_authority_context(action_class: str):
+    """Authority-context resolver factory for file mutations (Autonomy Center).
+
+    Declares the canonical resolved workspace resource, a profile-local
+    recipient, ``unknown`` data class (model-supplied content is never
+    trusted metadata), and ``unknown`` reversibility — file writes carry
+    no provable checkpoint here, so reversibility stays fail-closed until
+    an adapter can attest it. Receives arguments only; never reads file
+    contents or secret values.
+    """
+
+    def resolver(args: dict) -> dict:
+        resource_refs: tuple = ()
+        path = args.get("path")
+        if isinstance(path, str) and path.strip():
+            try:
+                resolved = Path(path).expanduser().resolve()
+                resource_refs = (f"workspace:{resolved.as_posix()}",)
+            except Exception:
+                resource_refs = ()
+        return {
+            "action_class": action_class,
+            "data_classes": ("unknown",),
+            "reversibility": "unknown",
+            "recipient_class": "profile_local",
+            "resource_refs": resource_refs,
+        }
+
+    return resolver
+
+
 registry.register(name="read_file", toolset="file", schema=READ_FILE_SCHEMA, handler=_handle_read_file, check_fn=_check_file_reqs, emoji="📖", max_result_size_chars=100_000, read_only=True)
-registry.register(name="write_file", toolset="file", schema=WRITE_FILE_SCHEMA, handler=_handle_write_file, check_fn=_check_file_reqs, emoji="✍️", max_result_size_chars=100_000)
-registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000)
+registry.register(name="write_file", toolset="file", schema=WRITE_FILE_SCHEMA, handler=_handle_write_file, check_fn=_check_file_reqs, emoji="✍️", max_result_size_chars=100_000, authority_context_fn=_file_authority_context("workspace.write"))
+registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000, authority_context_fn=_file_authority_context("workspace.write"))
 registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000, read_only=True)

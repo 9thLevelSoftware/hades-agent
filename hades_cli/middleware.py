@@ -195,17 +195,43 @@ def run_tool_execution_middleware(
     next_call: Callable[[Dict[str, Any]], Any],
     **context: Any,
 ) -> Any:
-    """Run tool execution through registered tool execution middleware."""
+    """Run tool execution through registered tool execution middleware.
+
+    The TRUE terminal call is always wrapped in the Autonomy Center's
+    execution-stage authority gate (``agent.autonomy.runtime.authority_gate``)
+    AFTER plugin argument finalization, so the gate sees the final
+    effective arguments — a plugin rewrite is the authorized identity.
+    With no registered middleware the same gated closure runs directly; a
+    plugin short-circuit (returning without calling ``next_call``) never
+    reaches the gate and creates no autonomy decision. Mode/config lookup
+    happens inside the gate at execution time and never mutates the
+    prompt or the model-visible tool schemas.
+    """
     callbacks = _get_middleware_callbacks(TOOL_EXECUTION_MIDDLEWARE)
+    gate_kwargs = {
+        "operation_metadata": context.get("operation_metadata"),
+        "task_id": context.get("task_id") or "",
+        "session_id": context.get("session_id") or "",
+        "tool_call_id": context.get("tool_call_id") or "",
+    }
+
+    def _gated_terminal(final_args: Any) -> Any:
+        from agent.autonomy.runtime import authority_gate
+
+        # The operation key for the authority decision is derived from the
+        # final arguments at this boundary (inside the gate); the legacy
+        # operation_key_factory below remains the middleware-payload key.
+        return authority_gate(tool_name, final_args, next_call, **gate_kwargs)
+
     if not callbacks:
-        return next_call(args)
+        return _gated_terminal(args)
     operation_key_factory = context.pop("operation_key_factory", None)
     if callable(operation_key_factory):
         context["operation_key"] = operation_key_factory()
     return _run_execution_chain(
         TOOL_EXECUTION_MIDDLEWARE,
         callbacks,
-        next_call,
+        _gated_terminal,
         tool_name=tool_name,
         args=args,
         original_args=context.pop("original_args", args),

@@ -2522,3 +2522,63 @@ class TestDispatchToolWithoutCliRef:
             assert calls[0][1].get("parent_agent") is None
         finally:
             registry.deregister("_test_dispatch_probe")
+
+
+class TestAutonomyExecutionGate:
+    """Task 6: the tool-execution chain terminal always runs the gate."""
+
+    def _spy(self, monkeypatch):
+        import agent.autonomy.runtime as runtime_module
+
+        calls = []
+
+        def fake_gate(tool_name, effective_args, terminal_call, **context):
+            calls.append((tool_name, dict(effective_args)))
+            return terminal_call(effective_args)
+
+        monkeypatch.setattr(runtime_module, "authority_gate", fake_gate)
+        return calls
+
+    def test_no_middleware_call_still_passes_through_gate(self, monkeypatch):
+        calls = self._spy(monkeypatch)
+        manager = types.SimpleNamespace(_middleware={})
+        monkeypatch.setattr("hades_cli.plugins.get_plugin_manager", lambda: manager)
+
+        args = {"command": "printf ok"}
+        result = run_tool_execution_middleware("terminal", args, lambda payload: payload)
+
+        assert result is args
+        assert calls == [("terminal", {"command": "printf ok"})]
+
+    def test_gate_sees_final_plugin_rewritten_args(self, monkeypatch):
+        calls = self._spy(monkeypatch)
+
+        def rewriting(**kwargs):
+            return kwargs["next_call"]({**kwargs["args"], "rewritten": True})
+
+        manager = types.SimpleNamespace(_middleware={"tool_execution": [rewriting]})
+        monkeypatch.setattr("hades_cli.plugins.get_plugin_manager", lambda: manager)
+
+        run_tool_execution_middleware(
+            "terminal", {"command": "printf ok"}, lambda payload: payload
+        )
+
+        assert calls == [("terminal", {"command": "printf ok", "rewritten": True})]
+
+    def test_plugin_short_circuit_never_reaches_gate(self, monkeypatch):
+        calls = self._spy(monkeypatch)
+
+        def short_circuit(**kwargs):
+            return "short-circuited"
+
+        manager = types.SimpleNamespace(
+            _middleware={"tool_execution": [short_circuit]}
+        )
+        monkeypatch.setattr("hades_cli.plugins.get_plugin_manager", lambda: manager)
+
+        result = run_tool_execution_middleware(
+            "terminal", {"command": "printf ok"}, lambda payload: payload
+        )
+
+        assert result == "short-circuited"
+        assert calls == []

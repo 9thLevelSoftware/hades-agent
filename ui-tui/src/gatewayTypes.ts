@@ -1,4 +1,4 @@
-import type { UsageModelData } from '@hermes/shared/billing'
+import type { UsageModelData } from '@hades/shared/billing'
 
 import type { SessionInfo, SlashCategory, SubagentStatus, Usage } from './types.js'
 
@@ -45,6 +45,85 @@ export interface SlashExecResponse {
   warning?: string
 }
 
+// ── Autonomy (Preferences & Autonomy Center) ─────────────────────────
+// Native `autonomy.exec` RPC: the bounded structured envelope over the
+// shared `hades autonomy ...` parser/service. Mutating /autonomy verbs
+// must use this route, never slash.exec.
+
+export interface AutonomyRuleDoc {
+  action_classes?: string[]
+  confidence_ppm?: number
+  data_classes?: string[]
+  description?: string
+  edit_command?: string
+  effect: string
+  expires_at_ms?: null | number
+  max_uses?: null | number
+  provenance?: string
+  recipient_classes?: string[]
+  remaining_uses?: null | number
+  rule_id: string
+  source: string
+  state: string
+}
+
+export interface AutonomyDecisionDoc {
+  authority_hash?: string
+  authority_version?: number
+  clarification?: null | { choices: string[]; code?: string; question: string }
+  code: string
+  conflicting_rule_ids?: string[]
+  context_hash?: string
+  edit_targets?: string[]
+  expires_at_ms?: null | number
+  matched_rule_ids?: string[]
+  reason?: string
+  required_evidence?: { kind: string; stage: string }[]
+  stage?: string
+  verdict: 'allow' | 'ask' | 'deny'
+}
+
+export interface AutonomyPreviewDoc {
+  added_rule_ids?: string[]
+  after_contract_hash: string
+  applied: false
+  before_contract_hash: string
+  changed_rule_ids?: string[]
+  profile_id?: string
+  removed_rule_ids?: string[]
+  warnings?: string[]
+}
+
+export interface AutonomyAppliedDoc {
+  applied: true
+  config_hash?: string
+  contract_hash: string
+  contract_version: number
+}
+
+export interface AutonomyContractDoc {
+  hash?: string
+  mode?: string
+  profile_id?: string
+  version?: number
+}
+
+export interface AutonomyExecResponse {
+  action: string
+  applied: AutonomyAppliedDoc | null
+  approval_pending: boolean
+  audit: Record<string, unknown>[]
+  contract: AutonomyContractDoc | null
+  decision: AutonomyDecisionDoc | null
+  exit_code: number
+  ok: boolean
+  output: string
+  preview: AutonomyPreviewDoc | null
+  profile_home: string
+  rules: AutonomyRuleDoc[]
+  suggestions: AutonomyRuleDoc[]
+}
+
 // ── Terminal billing (Phase 2b) ──────────────────────────────────────
 
 // Wire shapes now live in @hermes/shared for reuse by TypeScript clients.
@@ -63,7 +142,7 @@ export type {
   SubscriptionUpgradeResponse,
   UsageBarData,
   UsageModelData
-} from '@hermes/shared/billing'
+} from '@hades/shared/billing'
 
 export type CommandDispatchResponse =
   | { output?: string; type: 'exec' | 'plugin' }

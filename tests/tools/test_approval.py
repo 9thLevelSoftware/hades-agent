@@ -2638,3 +2638,266 @@ class TestApprovalPromptRedaction:
         # The script's credential must not appear in the user-facing message.
         assert "sk-proj-abc123xyz4567890abcdef" not in result["message"]
         assert "sk-proj-abc123xyz4567890abcdef" not in result["command"]
+
+
+class TestAutonomyAuthorityGrant:
+    """Task 6: exact autonomy allow grants satisfy the recoverable gate."""
+
+    def _grant(self, tool_name, arguments, **overrides):
+        from agent.autonomy.runtime import AuthorityGrant, argument_hash
+
+        base = dict(
+            operation_key="op-grant-1",
+            tool_name=tool_name,
+            argument_hash=argument_hash(arguments),
+            decision_id="dec-1",
+            contract_version=1,
+            contract_hash="hash-1",
+            expires_at_ms=None,
+            satisfies_generic_approval=True,
+        )
+        base.update(overrides)
+        return AuthorityGrant(**base)
+
+    def _clean_env(self, monkeypatch):
+        for var in ("HERMES_INTERACTIVE", "HERMES_GATEWAY_SESSION",
+                    "HERMES_CRON_SESSION", "HERMES_SESSION_PLATFORM"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_matching_grant_satisfies_plugin_escalation_once(self, monkeypatch):
+        from agent.autonomy.runtime import set_authority_grant
+        from tools.approval import request_tool_approval
+
+        self._clean_env(monkeypatch)
+        args = {"path": "/tmp/canary.txt"}
+        token = set_authority_grant(self._grant("write_file", args))
+        try:
+            first = request_tool_approval(
+                "write_file", "grant test rule", arguments=dict(args)
+            )
+            second = request_tool_approval(
+                "write_file", "grant test rule", arguments=dict(args)
+            )
+        finally:
+            from agent.autonomy.runtime import clear_authority_grant
+            clear_authority_grant(token)
+
+        assert first["approved"] is True
+        # one-use: the second identical call is NOT satisfied and, with no
+        # human present, the plugin escalation fails closed
+        assert second["approved"] is False
+
+    def test_mismatched_grant_never_satisfies(self, monkeypatch):
+        from agent.autonomy.runtime import (
+            clear_authority_grant,
+            set_authority_grant,
+        )
+        from tools.approval import request_tool_approval
+
+        self._clean_env(monkeypatch)
+        token = set_authority_grant(
+            self._grant("write_file", {"path": "/tmp/canary.txt"})
+        )
+        try:
+            wrong_args = request_tool_approval(
+                "write_file", "grant mismatch rule",
+                arguments={"path": "/tmp/other.txt"},
+            )
+            wrong_tool = request_tool_approval(
+                "patch", "grant mismatch rule",
+                arguments={"path": "/tmp/canary.txt"},
+            )
+        finally:
+            clear_authority_grant(token)
+
+        assert wrong_args["approved"] is False
+        assert wrong_tool["approved"] is False
+
+    def test_expired_or_non_generic_grant_never_satisfies(self, monkeypatch):
+        from agent.autonomy.runtime import (
+            clear_authority_grant,
+            set_authority_grant,
+        )
+        from tools.approval import request_tool_approval
+
+        self._clean_env(monkeypatch)
+        args = {"path": "/tmp/canary.txt"}
+        token = set_authority_grant(
+            self._grant("write_file", args, expires_at_ms=1)
+        )
+        try:
+            expired = request_tool_approval(
+                "write_file", "expired grant rule", arguments=dict(args)
+            )
+        finally:
+            clear_authority_grant(token)
+        assert expired["approved"] is False
+
+        token = set_authority_grant(
+            self._grant("write_file", args, satisfies_generic_approval=False)
+        )
+        try:
+            exact_only = request_tool_approval(
+                "write_file", "irreversible grant rule", arguments=dict(args)
+            )
+        finally:
+            clear_authority_grant(token)
+        assert exact_only["approved"] is False
+
+
+class TestRequestToolApprovalAllowPermanent:
+    def test_allow_permanent_false_hides_always_and_never_persists(
+        self, monkeypatch
+    ):
+        from tools.approval import request_tool_approval
+
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        seen = {}
+
+        def callback(command, description, **kwargs):
+            seen.update(kwargs)
+            return "always"
+
+        with mock_patch.object(approval_module, "approve_permanent") as perm, \
+                mock_patch.object(approval_module, "save_permanent_allowlist") as save:
+            result = request_tool_approval(
+                "write_file",
+                "allow-permanent-false rule",
+                approval_callback=callback,
+                arguments={"path": "/tmp/x"},
+                allow_permanent=False,
+            )
+
+        assert result["approved"] is True
+        assert seen.get("allow_permanent") is False
+        perm.assert_not_called()
+        save.assert_not_called()
+
+
+class TestAutonomyApprovalIdentityRecheck:
+    """Task 10: bound approval identity re-verifies at consume time.
+
+    A resolved fallback approval binds the exact operation, argument
+    hash, requester, channel, and expiry. Changed args, a different
+    requester or channel, an expired record, or a replay of a consumed
+    approval must all be rejected — regardless of the surface (gateway,
+    CLI, TUI) the resolution arrived from.
+    """
+
+    SESSION = "autonomy-identity-recheck"
+
+    def setup_method(self):
+        self._clear()
+
+    def teardown_method(self):
+        self._clear()
+
+    def _clear(self):
+        with approval_module._lock:
+            approval_module._pending.clear()
+            approval_module._pending_by_session.clear()
+            approval_module._pending_loaded_home = None
+            path = approval_module._pending_path()
+            if path.exists():
+                path.unlink()
+
+    def _submit_resolved(self, arguments=None, **extra):
+        request = approval_module.submit_pending(
+            self.SESSION,
+            {
+                "operation": "send_message",
+                "tool_name": "send_message",
+                "policy_key": "autonomy:hash:ctx",
+                "arguments": dict(arguments or {"recipient": "safe"}),
+                "requester": "user-1",
+                "channel": "tui",
+                **extra,
+            },
+        )
+        assert request is not None
+        assert (
+            approval_module.resolve_gateway_approval(
+                self.SESSION,
+                "once",
+                request_id=request["request_id"],
+                request_hash=request["argument_hash"],
+            )
+            == 1
+        )
+        return request
+
+    def _consume(self, arguments, *, requester="user-1", channel="tui"):
+        return approval_module._consume_matching_pending_approval(
+            self.SESSION,
+            "send_message",
+            dict(arguments),
+            expected_identity={
+                "operation": "send_message",
+                "tool_name": "send_message",
+                "policy_key": "autonomy:hash:ctx",
+                "requester": requester,
+                "channel": channel,
+            },
+        )
+
+    def test_changed_arguments_never_consume(self):
+        self._submit_resolved({"recipient": "safe"})
+        consumed, stale = self._consume({"recipient": "attacker@evil.test"})
+        assert consumed is None
+        assert stale is True  # same identity, drifted hash — surfaced as stale
+
+    def test_changed_requester_never_consumes(self):
+        self._submit_resolved({"recipient": "safe"})
+        consumed, stale = self._consume({"recipient": "safe"}, requester="user-2")
+        assert consumed is None
+        assert stale is False  # different identity: not this caller's approval
+
+    def test_changed_channel_never_consumes(self):
+        self._submit_resolved({"recipient": "safe"})
+        consumed, stale = self._consume({"recipient": "safe"}, channel="gateway")
+        assert consumed is None
+        assert stale is False
+
+    def test_expired_resolved_approval_never_consumes(self):
+        request = self._submit_resolved({"recipient": "safe"})
+        with approval_module._lock:
+            approval_module._pending[request["request_id"]]["expires_at"] = (
+                time.time() - 60
+            )
+        consumed, _ = self._consume({"recipient": "safe"})
+        assert consumed is None
+
+    def test_consumed_approval_replay_is_rejected(self):
+        self._submit_resolved({"recipient": "safe"})
+        first, _ = self._consume({"recipient": "safe"})
+        assert first is not None
+        assert first["status"] == "consumed"
+        replay, stale = self._consume({"recipient": "safe"})
+        assert replay is None
+
+    def test_direct_consume_revalidates_argument_hash(self):
+        request = self._submit_resolved({"recipient": "safe"})
+        drifted = approval_module.consume_pending_approval(
+            self.SESSION,
+            request["request_id"],
+            request_hash="0" * 64,
+        )
+        assert drifted is None
+        # The hash-mismatched attempt marks the request stale: the exact
+        # original consumer cannot be satisfied afterwards either.
+        exact = approval_module.consume_pending_approval(
+            self.SESSION,
+            request["request_id"],
+            request_hash=request["argument_hash"],
+        )
+        assert exact is None
+
+    def test_wrong_session_never_consumes(self):
+        request = self._submit_resolved({"recipient": "safe"})
+        other = approval_module.consume_pending_approval(
+            "another-session",
+            request["request_id"],
+            request_hash=request["argument_hash"],
+        )
+        assert other is None

@@ -13832,6 +13832,491 @@ def _config_profile_scope(profile: Optional[str]):
         reset_hades_home_override(token)
 
 
+# ---------------------------------------------------------------------------
+# Autonomy (Preferences & Autonomy Center) endpoints — secondary Dashboard
+# management surface.  Every route resolves/validates the requested profile
+# synchronously, then executes the SAME ``AutonomyService`` the CLI and the
+# native Ink TUI use, in a worker thread inside a short ``_profile_scope``
+# that is never held across an ``await`` (the scope swaps process-global
+# module state under an RLock — see ``_profile_scope``'s docstring).
+# Responses reuse the CLI/TUI bounded structured renderers
+# (``hades_cli.autonomy._rule_doc`` and friends), so only labels,
+# identifiers, and profile-local hashes — never raw recipients, prompt
+# text, secrets, or message bodies — reach the wire.  The Dashboard never
+# reads or writes the autonomy tables or ``config.yaml`` directly.
+# ---------------------------------------------------------------------------
+
+_AUTONOMY_MAX_DOC_BYTES = 1_048_576  # 1 MiB per rule document (CLI parity)
+_AUTONOMY_MAX_RULES_PER_CHANGE = 100
+_AUTONOMY_MAX_AUDIT_LIMIT = 500
+_AUTONOMY_MAX_ID_LEN = 200
+_AUTONOMY_MIN_MANDATE_MS = 60_000  # 1 minute (CLI duration floor)
+_AUTONOMY_MAX_MANDATE_MS = 365 * 86_400_000  # 365 days (CLI duration cap)
+_AUTONOMY_MAX_USES = 1_000
+_AUTONOMY_ACTOR_ID = "dashboard-user"
+_AUTONOMY_SOURCES = ("user_assertion", "learned_suggestion", "temporary_mandate")
+
+
+class AutonomyChangeBody(BaseModel):
+    """A stable-rule change: full rule documents to set, rule IDs to remove."""
+
+    profile: Optional[str] = None
+    set_rules: Optional[List[Dict[str, Any]]] = None
+    remove_rule_ids: Optional[List[str]] = None
+
+
+class AutonomyApplyBody(AutonomyChangeBody):
+    expected_contract_hash: str
+
+
+class AutonomySuggestionAcceptBody(BaseModel):
+    profile: Optional[str] = None
+    destination: str = "stable"  # "stable" | "mandate"
+    # Stable destination: absent → preview only; present → exact-hash apply.
+    expected_contract_hash: Optional[str] = None
+    # Mandate destination: at least one bound is required.
+    expires_in_ms: Optional[int] = None
+    max_uses: Optional[int] = None
+
+
+class AutonomyReasonBody(BaseModel):
+    profile: Optional[str] = None
+    reason: str = ""
+
+
+def _autonomy_cli():
+    """The shared CLI/TUI module whose bounded renderers we reuse."""
+    from hades_cli import autonomy as autonomy_cli
+
+    return autonomy_cli
+
+
+def _autonomy_http_error(exc: Exception) -> HTTPException:
+    """Map autonomy service/saga failures to bounded HTTP errors.
+
+    Details are clipped; the underlying messages carry labels, rule IDs,
+    and hashes only (never raw recipients or rule text), matching the
+    CLI/TUI redaction posture.
+    """
+    from agent.autonomy.compiler import InvalidStableAuthority
+    from agent.autonomy.config_apply import (
+        AuthorityConflict,
+        IncompleteAuthorityApply,
+    )
+    from agent.autonomy.service import AutonomyServiceError, UnknownRuleError
+
+    detail = str(exc)[:500]
+    if isinstance(exc, UnknownRuleError):
+        return HTTPException(status_code=404, detail=detail or "unknown rule")
+    if isinstance(exc, (AuthorityConflict, IncompleteAuthorityApply)):
+        # Stale/cross-profile hash or an unrecovered apply journal: the
+        # change is refused and authority fails closed.
+        return HTTPException(status_code=409, detail=detail or "authority conflict")
+    if isinstance(exc, AutonomyServiceError):
+        return HTTPException(status_code=400, detail=detail or "invalid request")
+    if isinstance(exc, (InvalidStableAuthority, ValueError)):
+        return HTTPException(status_code=400, detail=detail or "invalid request")
+    if isinstance(exc, RuntimeError) and "managed" in str(exc).lower():
+        # Managed configuration is a stronger boundary than any authority
+        # edit; surface it as forbidden rather than a generic failure.
+        return HTTPException(status_code=403, detail=detail or "managed configuration")
+    _log.exception("autonomy endpoint failed")
+    return HTTPException(status_code=500, detail="autonomy: internal failure")
+
+
+def _autonomy_validate_profile(profile: Optional[str]) -> None:
+    """Synchronously validate the requested profile (400 invalid, 404 absent)."""
+    requested = (profile or "").strip()
+    if requested and requested.lower() != "current":
+        _resolve_profile_dir(requested)
+
+
+async def _autonomy_call(profile: Optional[str], fn):
+    """Run ``fn(AutonomyService())`` scoped to ``profile`` in a worker thread.
+
+    The profile is validated synchronously first; the ``_profile_scope``
+    context is entered and exited entirely inside the worker function, so
+    it is never held across an ``await`` on the event loop.
+    """
+    _autonomy_validate_profile(profile)
+
+    def _run():
+        with _profile_scope(profile):
+            from agent.autonomy import AutonomyService
+
+            return fn(AutonomyService())
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - mapped to bounded HTTP errors
+        raise _autonomy_http_error(exc)
+
+
+def _autonomy_require_id(value: str, label: str) -> str:
+    value = (value or "").strip()
+    if not value or len(value) > _AUTONOMY_MAX_ID_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} must be a non-empty string of at most "
+            f"{_AUTONOMY_MAX_ID_LEN} characters",
+        )
+    return value
+
+
+def _autonomy_parse_change(body: AutonomyChangeBody):
+    """Validate a bounded change body into a ``ConfigChange`` (fail closed)."""
+    from agent.autonomy.config_apply import ConfigChange
+
+    set_entries = body.set_rules or []
+    remove_ids = body.remove_rule_ids or []
+    if not set_entries and not remove_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="a change requires set_rules and/or remove_rule_ids",
+        )
+    if (
+        len(set_entries) > _AUTONOMY_MAX_RULES_PER_CHANGE
+        or len(remove_ids) > _AUTONOMY_MAX_RULES_PER_CHANGE
+    ):
+        raise HTTPException(
+            status_code=413,
+            detail=f"a change is capped at {_AUTONOMY_MAX_RULES_PER_CHANGE} "
+            "rule documents / rule IDs",
+        )
+    rules = []
+    for entry in set_entries:
+        if not isinstance(entry, dict):
+            raise HTTPException(
+                status_code=400, detail="each rule document must be a mapping"
+            )
+        doc_bytes = len(
+            json.dumps(entry, ensure_ascii=False, default=str).encode("utf-8")
+        )
+        if doc_bytes > _AUTONOMY_MAX_DOC_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"rule document is {doc_bytes} bytes; documents are "
+                f"capped at {_AUTONOMY_MAX_DOC_BYTES} bytes (1 MiB)",
+            )
+        try:
+            # Same validated parse as `hades autonomy rule add --file` —
+            # non-user sources, runtime counters, and unknown keys are
+            # rejected here before any service call.
+            from agent.autonomy.compiler import parse_stable_rules
+
+            rules.append(parse_stable_rules({"stable_rules": [entry]})[0])
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 - mapped to bounded HTTP errors
+            raise _autonomy_http_error(exc)
+    for rule_id in remove_ids:
+        if not isinstance(rule_id, str):
+            raise HTTPException(
+                status_code=400, detail="remove_rule_ids must be strings"
+            )
+        _autonomy_require_id(rule_id, "remove_rule_ids entry")
+    return ConfigChange(set_rules=tuple(rules), remove_rule_ids=tuple(remove_ids))
+
+
+@app.get("/api/autonomy/status")
+async def get_autonomy_status(profile: Optional[str] = None):
+    """Contract identity plus rule/suggestion/mandate counts for one profile."""
+
+    def _status(service):
+        from agent.autonomy.config_apply import pending_apply
+
+        cli = _autonomy_cli()
+        stored = service.current_contract()
+        section = cli._autonomy_section()
+        return {
+            "profile_id": stored.contract.profile_id,
+            "mode": section.get("mode", "off"),
+            "contract_version": stored.version,
+            "contract_hash": stored.content_hash,
+            "stable_rules": len(service.list_rules(source="user_assertion")),
+            "active_mandates": len(
+                service.list_rules(source="temporary_mandate", states=("active",))
+            ),
+            "pending_suggestions": len(
+                service.list_rules(
+                    source="learned_suggestion", states=("awaiting_confirmation",)
+                )
+            ),
+            "pending_apply": pending_apply(),
+        }
+
+    return await _autonomy_call(profile, _status)
+
+
+@app.get("/api/autonomy/rules")
+async def get_autonomy_rules(
+    profile: Optional[str] = None,
+    source: Optional[str] = None,
+    state: Optional[str] = None,
+    effective: bool = False,
+):
+    """Redacted rule documents across both layers (or the effective contract)."""
+    if source is not None and source not in _AUTONOMY_SOURCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"source must be one of {', '.join(_AUTONOMY_SOURCES)}",
+        )
+
+    def _rules(service):
+        cli = _autonomy_cli()
+        payload: Dict[str, Any] = {"effective": bool(effective)}
+        if effective:
+            stored = service.current_contract()
+            rules = stored.contract.rules
+            payload["contract_version"] = stored.version
+            payload["contract_hash"] = stored.content_hash
+        else:
+            rules = service.list_rules(
+                source=source, states=(state,) if state else None
+            )
+        payload["rules"] = [cli._rule_doc(rule) for rule in rules]
+        return payload
+
+    return await _autonomy_call(profile, _rules)
+
+
+@app.get("/api/autonomy/rules/{rule_id}")
+async def explain_autonomy_rule(rule_id: str, profile: Optional[str] = None):
+    """Complete explanation of one rule: layer, conflicts, and edit routes."""
+    rule_id = _autonomy_require_id(rule_id, "rule_id")
+
+    def _explain(service):
+        cli = _autonomy_cli()
+        explanation = service.explain_rule(rule_id)
+        doc = cli._rule_doc(explanation.rule)
+        doc.update(
+            {
+                "layer": explanation.layer,
+                "revision": explanation.revision,
+                "in_current_contract": explanation.in_current_contract,
+                "conflicts_with": list(explanation.conflicts_with),
+                "edit_route": list(explanation.edit_route),
+                "revoke_route": list(explanation.revoke_route),
+            }
+        )
+        return doc
+
+    return await _autonomy_call(profile, _explain)
+
+
+@app.post("/api/autonomy/preview")
+async def preview_autonomy_change(body: AutonomyChangeBody):
+    """Preview a stable-rule change without writing anything."""
+    change = _autonomy_parse_change(body)
+
+    def _preview(service):
+        cli = _autonomy_cli()
+        return cli._preview_doc(service.preview_rule_change(change))
+
+    return await _autonomy_call(body.profile, _preview)
+
+
+@app.post("/api/autonomy/apply")
+async def apply_autonomy_change(body: AutonomyApplyBody):
+    """Apply a previewed change under exact-hash compare-and-set."""
+    expected = _autonomy_require_id(
+        body.expected_contract_hash, "expected_contract_hash"
+    )
+    change = _autonomy_parse_change(body)
+
+    def _apply(service):
+        from hades_cli.config import is_managed
+
+        if is_managed():
+            # Refuse before the saga starts: managed configuration is a
+            # stronger boundary, and pre-checking avoids leaving a
+            # pending-apply journal for a change that can never commit.
+            raise HTTPException(
+                status_code=403,
+                detail="managed configuration: autonomy rules cannot be "
+                "edited from the dashboard on this install",
+            )
+        cli = _autonomy_cli()
+        preview = service.preview_rule_change(change)
+        applied = service.apply_rule_change(
+            preview, expected_contract_hash=expected
+        )
+        return cli._applied_doc(applied)
+
+    return await _autonomy_call(body.profile, _apply)
+
+
+@app.post("/api/autonomy/suggestions/{suggestion_id}/accept")
+async def accept_autonomy_suggestion(
+    suggestion_id: str, body: AutonomySuggestionAcceptBody
+):
+    """Explicit confirmation of one learned suggestion into NEW authority.
+
+    ``destination="stable"`` previews (and, with an exact contract hash,
+    applies) a durable assertion; ``destination="mandate"`` creates a
+    bounded temporary mandate immediately.  The suggestion itself never
+    becomes authority.
+    """
+    suggestion_id = _autonomy_require_id(suggestion_id, "suggestion_id")
+    destination = (body.destination or "stable").strip().lower()
+    if destination not in ("stable", "mandate"):
+        raise HTTPException(
+            status_code=400, detail="destination must be 'stable' or 'mandate'"
+        )
+    expected = (body.expected_contract_hash or "").strip() or None
+    if expected is not None:
+        expected = _autonomy_require_id(expected, "expected_contract_hash")
+    if destination == "mandate":
+        if body.expires_in_ms is None and body.max_uses is None:
+            raise HTTPException(
+                status_code=400,
+                detail="a temporary mandate must be bounded by expires_in_ms "
+                "and/or max_uses",
+            )
+        if body.expires_in_ms is not None and not (
+            _AUTONOMY_MIN_MANDATE_MS <= body.expires_in_ms <= _AUTONOMY_MAX_MANDATE_MS
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="expires_in_ms must be between 1 minute and 365 days",
+            )
+        if body.max_uses is not None and not (
+            1 <= body.max_uses <= _AUTONOMY_MAX_USES
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"max_uses must be between 1 and {_AUTONOMY_MAX_USES}",
+            )
+    elif body.expires_in_ms is not None or body.max_uses is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="expires_in_ms/max_uses belong to destination 'mandate'",
+        )
+
+    def _accept(service):
+        cli = _autonomy_cli()
+        extra = {"suggestion_id": suggestion_id, "destination": destination}
+        if destination == "mandate":
+            expires_at_ms = (
+                int(time.time() * 1000) + body.expires_in_ms
+                if body.expires_in_ms is not None
+                else None
+            )
+            confirmation = service.confirm_suggestion(
+                suggestion_id,
+                destination="mandate",
+                actor_id=_AUTONOMY_ACTOR_ID,
+                expires_at_ms=expires_at_ms,
+                max_uses=body.max_uses,
+            )
+            return {
+                **extra,
+                "applied": True,
+                "new_rule_id": confirmation.new_rule_id,
+                "expires_at_ms": expires_at_ms,
+                "max_uses": body.max_uses,
+            }
+        confirmation = service.confirm_suggestion(
+            suggestion_id, destination="stable", actor_id=_AUTONOMY_ACTOR_ID
+        )
+        extra["new_rule_id"] = confirmation.new_rule_id
+        if expected is None:
+            return cli._preview_doc(confirmation.preview, extra=extra)
+        applied = service.apply_rule_change(
+            confirmation, expected_contract_hash=expected
+        )
+        return cli._applied_doc(applied, extra=extra)
+
+    return await _autonomy_call(body.profile, _accept)
+
+
+@app.post("/api/autonomy/suggestions/{suggestion_id}/reject")
+async def reject_autonomy_suggestion(suggestion_id: str, body: AutonomyReasonBody):
+    """Explicitly reject a pending suggestion (terminal)."""
+    suggestion_id = _autonomy_require_id(suggestion_id, "suggestion_id")
+    reason = (body.reason or "")[:200]
+
+    def _reject(service):
+        stored = service.reject_suggestion(
+            suggestion_id, actor_id=_AUTONOMY_ACTOR_ID
+        )
+        return {
+            "suggestion_id": suggestion_id,
+            "state": stored.rule.state,
+            "reason": reason,
+        }
+
+    return await _autonomy_call(body.profile, _reject)
+
+
+@app.get("/api/autonomy/mandates")
+async def get_autonomy_mandates(
+    profile: Optional[str] = None, state: Optional[str] = None
+):
+    """Temporary mandates (all states unless filtered) as redacted docs."""
+
+    def _mandates(service):
+        cli = _autonomy_cli()
+        rules = service.list_rules(
+            source="temporary_mandate", states=(state,) if state else None
+        )
+        return {"mandates": [cli._rule_doc(rule) for rule in rules]}
+
+    return await _autonomy_call(profile, _mandates)
+
+
+@app.post("/api/autonomy/mandates/{rule_id}/revoke")
+async def revoke_autonomy_mandate(rule_id: str, body: AutonomyReasonBody):
+    """Revoke an active mandate; terminal states are idempotent."""
+    rule_id = _autonomy_require_id(rule_id, "rule_id")
+    reason = (body.reason or "")[:200]
+
+    def _revoke(service):
+        stored = service.revoke_mandate(rule_id, actor_id=_AUTONOMY_ACTOR_ID)
+        return {"rule_id": rule_id, "state": stored.rule.state, "reason": reason}
+
+    return await _autonomy_call(body.profile, _revoke)
+
+
+@app.get("/api/autonomy/audit")
+async def get_autonomy_audit(
+    profile: Optional[str] = None,
+    limit: int = 100,
+    verdict: Optional[str] = None,
+):
+    """Bounded, redacted decision audit (hashes and identifiers only)."""
+    if not 1 <= limit <= _AUTONOMY_MAX_AUDIT_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"limit must be between 1 and {_AUTONOMY_MAX_AUDIT_LIMIT}",
+        )
+    if verdict is not None and verdict not in ("allow", "ask", "deny"):
+        raise HTTPException(
+            status_code=400, detail="verdict must be allow, ask, or deny"
+        )
+
+    def _audit(service):
+        cli = _autonomy_cli()
+        docs = []
+        for record in service.list_decisions(limit=limit):
+            if verdict and record.decision.verdict != verdict:
+                continue
+            doc = cli._decision_doc(record.decision, stage=record.stage)
+            doc.update(
+                {
+                    "decision_id": record.decision.decision_id,
+                    "operation_key": record.operation_key,
+                    "created_at_ms": record.created_at_ms,
+                }
+            )
+            docs.append(doc)
+        return {"decisions": docs, "count": len(docs), "limit": limit}
+
+    return await _autonomy_call(profile, _audit)
+
+
 class SkillToggle(BaseModel):
     name: str
     enabled: bool
