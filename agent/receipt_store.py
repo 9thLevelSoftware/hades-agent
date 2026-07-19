@@ -67,6 +67,7 @@ __all__ = [
     "ReceiptSourceConflict",
     "ReceiptStore",
     "ReceiptStoreError",
+    "ReceiptTombstone",
     "migrate_v1_receipt_tables",
 ]
 
@@ -105,6 +106,24 @@ class ReceiptAttestation:
     signature_b64: str
     signed_at: str
     verification_state: str
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class ReceiptTombstone:
+    """Immutable record that the retention service deleted one receipt.
+
+    Carries the source identity and old canonical content hash so a
+    replayed source ingest or audit can prove what was deleted and why
+    without resurrecting the deleted content.
+    """
+
+    receipt_id: str
+    receipt_content_hash: str
+    source_kind: str
+    source_id: str
+    deleted_at: str
+    reason: str
     content_hash: str
 
 
@@ -804,6 +823,262 @@ class ReceiptStore:
             )
 
         return self._db._execute_read(_do)
+
+    def get_observation(self, observation_id: str) -> ReceiptObservation | None:
+        def _do(conn: sqlite3.Connection) -> ReceiptObservation | None:
+            row = conn.execute(
+                "SELECT * FROM receipt_observations WHERE observation_id = ?",
+                (observation_id,),
+            ).fetchone()
+            return None if row is None else _decode_observation_row(row)
+
+        return self._db._execute_read(_do)
+
+    # ── Provenance attestations (append-only, never truth) ──
+
+    def append_attestation(
+        self, attestation: ReceiptAttestation
+    ) -> ReceiptAttestation:
+        """Append one immutable provenance attestation over a stored hash.
+
+        The attestation must be self-consistent (its ``content_hash`` and
+        ``attestation_id`` derive from its own fields) and must target an
+        existing receipt or observation whose stored canonical content
+        hash equals ``target_content_hash``. A signature proves who or
+        what produced bytes — appending one never changes a status,
+        claim verdict, uncertainty, freshness, or scorer result.
+        """
+        if not isinstance(attestation, ReceiptAttestation):
+            raise TypeError(
+                "expected a ReceiptAttestation, got "
+                f"{type(attestation).__name__}"
+            )
+        body = {
+            "target_kind": attestation.target_kind,
+            "target_id": attestation.target_id,
+            "target_content_hash": attestation.target_content_hash,
+            "provider_id": attestation.provider_id,
+            "key_id": attestation.key_id,
+            "algorithm": attestation.algorithm,
+            "signature_b64": attestation.signature_b64,
+            "signed_at": attestation.signed_at,
+            "verification_state": attestation.verification_state,
+        }
+        recomputed = canonical_content_hash(body)
+        if recomputed != attestation.content_hash:
+            raise ReceiptIntegrityError(
+                "attestation content hash does not match its fields"
+            )
+        expected_id = f"att_{recomputed.removeprefix('sha256:')}"
+        if attestation.attestation_id != expected_id:
+            raise ReceiptIntegrityError(
+                "attestation ID is not derived from its canonical content hash"
+            )
+        if attestation.target_kind not in ("receipt", "observation"):
+            raise ReceiptIntegrityError(
+                f"unknown attestation target kind {attestation.target_kind!r}"
+            )
+
+        def _do(conn: sqlite3.Connection) -> ReceiptAttestation:
+            existing = conn.execute(
+                "SELECT * FROM receipt_attestations WHERE content_hash = ?",
+                (attestation.content_hash,),
+            ).fetchone()
+            if existing is not None:
+                # Idempotent replay of an identical attestation.
+                return _decode_attestation_row(existing)
+            table = (
+                "receipts"
+                if attestation.target_kind == "receipt"
+                else "receipt_observations"
+            )
+            id_column = (
+                "receipt_id"
+                if attestation.target_kind == "receipt"
+                else "observation_id"
+            )
+            target = conn.execute(
+                f"SELECT content_hash FROM {table} WHERE {id_column} = ?",
+                (attestation.target_id,),
+            ).fetchone()
+            if target is None:
+                raise ReceiptStoreError(
+                    f"unknown attestation target {attestation.target_kind}:"
+                    f"{attestation.target_id}"
+                )
+            if target["content_hash"] != attestation.target_content_hash:
+                raise ReceiptIntegrityError(
+                    "attestation target hash does not match the stored "
+                    f"{attestation.target_kind} content hash"
+                )
+            _insert_attestation_row(conn, attestation)
+            return attestation
+
+        return self._db._execute_write(_do)
+
+    # ── Retention (the only deletion path; tombstone-first) ──
+
+    def list_tombstones(self) -> tuple[ReceiptTombstone, ...]:
+        def _do(conn: sqlite3.Connection) -> tuple[ReceiptTombstone, ...]:
+            return tuple(
+                ReceiptTombstone(
+                    receipt_id=row["receipt_id"],
+                    receipt_content_hash=row["receipt_content_hash"],
+                    source_kind=row["source_kind"],
+                    source_id=row["source_id"],
+                    deleted_at=row["deleted_at"],
+                    reason=row["reason"],
+                    content_hash=row["content_hash"],
+                )
+                for row in conn.execute(
+                    "SELECT * FROM receipt_deletion_tombstones "
+                    "ORDER BY deleted_at, receipt_id"
+                )
+            )
+
+        return self._db._execute_read(_do)
+
+    def _retention_delete(
+        self,
+        *,
+        receipt_ids: tuple[str, ...],
+        artifact_location_ids: tuple[str, ...] = (),
+        deleted_at: str,
+        reason: str,
+    ) -> dict:
+        """Delete expired rows for the retention service — nothing else.
+
+        Deliberately private: deletion is available only to
+        ``agent.receipt_security.ReceiptRetentionService``, so the
+        store's public surface stays free of update/delete methods.
+
+        One transaction: expired raw artifact locators (and any digest
+        row left with zero locations) are deleted before receipt rows;
+        each receipt deletion first appends an immutable tombstone
+        carrying the source identity and old content hash, then removes
+        its attestations, observations, and the receipt itself. An
+        already-tombstoned receipt is skipped, making replay safe. The
+        returned dict includes the raw file locator paths of deleted
+        locations so the caller can remove bytes only inside its
+        configured receipt artifact directory — this method never
+        touches the filesystem.
+        """
+        deleted_at_norm = normalize_utc_timestamp(deleted_at)
+
+        def _do(conn: sqlite3.Connection) -> dict:
+            counts = {
+                "deleted_receipts": 0,
+                "deleted_observations": 0,
+                "deleted_attestations": 0,
+                "deleted_artifact_locations": 0,
+                "tombstones": 0,
+                "already_deleted": 0,
+            }
+            locator_paths: list[str] = []
+            touched_artifacts: set[str] = set()
+            for location_id in artifact_location_ids:
+                row = conn.execute(
+                    "SELECT artifact_id, locator_json FROM artifact_locations "
+                    "WHERE location_id = ?",
+                    (location_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                try:
+                    locator = json.loads(row["locator_json"])
+                except ValueError:
+                    locator = {}
+                if isinstance(locator, dict) and locator.get("kind") == "file":
+                    path = str(locator.get("path") or "")
+                    if path:
+                        locator_paths.append(path)
+                conn.execute(
+                    "DELETE FROM artifact_locations WHERE location_id = ?",
+                    (location_id,),
+                )
+                counts["deleted_artifact_locations"] += 1
+                touched_artifacts.add(row["artifact_id"])
+            for artifact_id in sorted(touched_artifacts):
+                remaining = conn.execute(
+                    "SELECT COUNT(*) FROM artifact_locations "
+                    "WHERE artifact_id = ?",
+                    (artifact_id,),
+                ).fetchone()[0]
+                if remaining == 0:
+                    conn.execute(
+                        "DELETE FROM artifact_digests WHERE artifact_id = ?",
+                        (artifact_id,),
+                    )
+            for receipt_id in receipt_ids:
+                row = conn.execute(
+                    "SELECT receipt_id, source_kind, source_id, content_hash "
+                    "FROM receipts WHERE receipt_id = ?",
+                    (receipt_id,),
+                ).fetchone()
+                if row is None:
+                    tombstoned = conn.execute(
+                        "SELECT 1 FROM receipt_deletion_tombstones "
+                        "WHERE receipt_id = ?",
+                        (receipt_id,),
+                    ).fetchone()
+                    if tombstoned is None:
+                        raise ReceiptStoreError(
+                            f"retention plan names unknown receipt "
+                            f"{receipt_id!r} with no deletion tombstone"
+                        )
+                    counts["already_deleted"] += 1
+                    continue
+                tombstone_body = {
+                    "receipt_id": row["receipt_id"],
+                    "receipt_content_hash": row["content_hash"],
+                    "source_kind": row["source_kind"],
+                    "source_id": row["source_id"],
+                    "deleted_at": deleted_at_norm,
+                    "reason": reason,
+                }
+                conn.execute(
+                    "INSERT INTO receipt_deletion_tombstones (receipt_id, "
+                    "receipt_content_hash, source_kind, source_id, "
+                    "deleted_at, reason, content_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row["receipt_id"],
+                        row["content_hash"],
+                        row["source_kind"],
+                        row["source_id"],
+                        deleted_at_norm,
+                        reason,
+                        canonical_content_hash(tombstone_body),
+                    ),
+                )
+                counts["tombstones"] += 1
+                observation_ids = [
+                    obs_row["observation_id"]
+                    for obs_row in conn.execute(
+                        "SELECT observation_id FROM receipt_observations "
+                        "WHERE receipt_id = ?",
+                        (receipt_id,),
+                    )
+                ]
+                for target_id in [receipt_id, *observation_ids]:
+                    cursor = conn.execute(
+                        "DELETE FROM receipt_attestations WHERE target_id = ?",
+                        (target_id,),
+                    )
+                    counts["deleted_attestations"] += cursor.rowcount
+                cursor = conn.execute(
+                    "DELETE FROM receipt_observations WHERE receipt_id = ?",
+                    (receipt_id,),
+                )
+                counts["deleted_observations"] += cursor.rowcount
+                conn.execute(
+                    "DELETE FROM receipts WHERE receipt_id = ?", (receipt_id,)
+                )
+                counts["deleted_receipts"] += 1
+            counts["deleted_locator_paths"] = locator_paths
+            return counts
+
+        return self._db._execute_write(_do)
 
 
 # ---------------------------------------------------------------------------

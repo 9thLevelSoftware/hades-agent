@@ -47,6 +47,9 @@ class _StubAgent:
         self._response_was_previewed = False
         self._skill_nudge_interval = 0
         self._iters_since_skill = 0
+        # The invariants test exercises capture-mode issuance explicitly;
+        # the shipped config default is receipts.mode: off (Task 7).
+        self._receipts_mode = "capture"
         for attr in (
             "session_input_tokens",
             "session_output_tokens",

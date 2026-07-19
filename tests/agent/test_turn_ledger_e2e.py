@@ -58,6 +58,9 @@ class _FakeAgent:
         self._tool_guardrail_halt_decision = None
         self._interrupt_message = None
         self._response_was_previewed = False
+        # These tests exercise capture-mode behavior explicitly; the
+        # shipped config default is receipts.mode: off (Task 7).
+        self._receipts_mode = "capture"
         self._skill_nudge_interval = 0
         self._iters_since_skill = 0
         self.valid_tool_names = []

@@ -70,8 +70,14 @@ __all__ = [
     "ReceiptScoringService",
     # Issuer service (Task 6).
     "ReceiptIssuer",
-    # Signer protocol (Task 7).
+    # Redaction, export, retention, and gated signing (Task 7).
     "ReceiptSigner",
+    "ReceiptRedactor",
+    "ReceiptExporter",
+    "ReceiptRetentionService",
+    "ReceiptSigningService",
+    "register_receipt_signer",
+    "verify_export_hashes",
 ]
 
 # Public names whose implementation modules land in later plan tasks.
@@ -81,12 +87,38 @@ _FORWARD_EXPORTS: dict[str, tuple[str, str]] = {
     "digest_artifact": ("agent.receipt_artifacts", "digest_artifact"),
     "ReceiptIssuer": ("agent.receipt_ingest", "ReceiptIssuer"),
     "ReceiptSigner": ("agent.receipt_security", "ReceiptSigner"),
+    "ReceiptRedactor": ("agent.receipt_security", "ReceiptRedactor"),
+    "ReceiptExporter": ("agent.receipt_security", "ReceiptExporter"),
+    "ReceiptRetentionService": (
+        "agent.receipt_security",
+        "ReceiptRetentionService",
+    ),
+    "ReceiptSigningService": (
+        "agent.receipt_security",
+        "ReceiptSigningService",
+    ),
+    "register_receipt_signer": (
+        "agent.receipt_security",
+        "register_receipt_signer",
+    ),
+    "verify_export_hashes": (
+        "agent.receipt_security",
+        "verify_export_hashes",
+    ),
 }
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only forward imports
     from agent.receipt_artifacts import digest_artifact  # noqa: F401
     from agent.receipt_ingest import ReceiptIssuer  # noqa: F401
-    from agent.receipt_security import ReceiptSigner  # noqa: F401
+    from agent.receipt_security import (  # noqa: F401
+        ReceiptExporter,
+        ReceiptRedactor,
+        ReceiptRetentionService,
+        ReceiptSigner,
+        ReceiptSigningService,
+        register_receipt_signer,
+        verify_export_hashes,
+    )
     from agent.receipt_store import ReceiptStore  # noqa: F401
 
 
