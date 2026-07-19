@@ -8,6 +8,8 @@ from agent.verification_evidence import (
     classify_verification_command,
     mark_workspace_edited,
     record_terminal_result,
+    session_verification_roots,
+    verification_state_for_root,
     verification_status,
 )
 
@@ -391,3 +393,69 @@ def test_recording_expires_old_edit_only_state(tmp_path, monkeypatch):
     status = verification_status(session_id="old-session", cwd=tmp_path)
     assert status["status"] == "unverified"
     assert status["changed_paths"] == []
+
+
+# ---------------------------------------------------------------------------
+# Read-only receipt-ingest accessors (Task 4): direct-by-root state reads
+# that never run project detection and never create the database.
+# ---------------------------------------------------------------------------
+
+
+def test_session_verification_roots_lists_recorded_roots(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    _node_project(tmp_path)
+
+    assert session_verification_roots("s1") == []
+
+    record_terminal_result(
+        command="pnpm test",
+        cwd=tmp_path,
+        session_id="s1",
+        exit_code=0,
+        output="green",
+    )
+
+    roots = session_verification_roots("s1")
+    assert roots == [str(Path(tmp_path).resolve())]
+    assert session_verification_roots("other-session") == []
+
+
+def test_verification_state_for_root_matches_status_without_project_detection(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    _node_project(tmp_path)
+
+    record_terminal_result(
+        command="pnpm test",
+        cwd=tmp_path,
+        session_id="s1",
+        exit_code=0,
+        output="green",
+    )
+    root = session_verification_roots("s1")[0]
+
+    state = verification_state_for_root(session_id="s1", root=root)
+    assert state["status"] == "passed"
+    assert state["root"] == root
+    assert state["evidence"]["canonical_command"] == "pnpm run test"
+    assert state["last_edit_at"] is None
+
+    mark_workspace_edited(
+        session_id="s1", cwd=tmp_path, paths=[str(tmp_path / "src" / "a.ts")]
+    )
+    stale = verification_state_for_root(session_id="s1", root=root)
+    assert stale["status"] == "stale"
+    assert stale["last_edit_at"] is not None
+    assert stale["changed_paths"]
+
+
+def test_verification_state_for_root_absent_db_is_unverified(tmp_path, monkeypatch):
+    home = tmp_path / ".hades"
+    monkeypatch.setenv("HADES_HOME", str(home))
+
+    state = verification_state_for_root(session_id="s1", root=str(tmp_path))
+    assert state["status"] == "unverified"
+    assert state["evidence"] is None
+    # The read-only accessor must never create the database file.
+    assert not (home / "verification_evidence.db").exists()

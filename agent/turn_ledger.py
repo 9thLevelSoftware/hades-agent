@@ -88,6 +88,52 @@ def record_turn_outcome_safely(
     return None
 
 
+_TURN_OUTCOME_COLUMNS = (
+    "session_id", "turn_id", "created_at", "outcome", "outcome_reason",
+    "turn_exit_reason", "api_calls", "tool_iterations", "retry_count",
+    "guardrail_halt", "cost_usd_delta", "input_tokens_delta",
+    "output_tokens_delta", "cache_read_tokens_delta", "skills_loaded",
+    "model",
+)
+
+
+def fetch_turn_outcome(
+    session_db: Any, session_id: str, turn_id: str
+) -> Optional[TurnOutcomeRecord]:
+    """Read one persisted turn outcome back as a ``TurnOutcomeRecord``.
+
+    Read-only seam for receipt ingestion: the receipt evidence source
+    reloads the durable ledger row instead of trusting an in-memory
+    record. Returns ``None`` for a missing row or a missing database —
+    absence is a fact the caller records, never an error here. Only the
+    original ledger columns are projected; feedback annotation columns
+    stay out of the frozen record contract.
+    """
+    if session_db is None:
+        return None
+    columns = ", ".join(_TURN_OUTCOME_COLUMNS)
+
+    def _read(conn: Any) -> Any:
+        return conn.execute(
+            f"SELECT {columns} FROM turn_outcomes "
+            "WHERE session_id = ? AND turn_id = ?",
+            (str(session_id), str(turn_id)),
+        ).fetchone()
+
+    row = session_db._execute_read(_read)
+    if row is None:
+        return None
+    data = dict(row)
+    try:
+        skills = tuple(
+            str(item) for item in json.loads(data.get("skills_loaded") or "[]")
+        )
+    except (TypeError, ValueError):
+        skills = ()
+    data["skills_loaded"] = skills
+    return TurnOutcomeRecord(**data)
+
+
 def persist_turn_outcome(
     agent: Any,
     *,
@@ -344,6 +390,7 @@ def _bump_sidecar_for_skills(record: "TurnOutcomeRecord") -> None:
 __all__ = [
     "TurnOutcomeRecord",
     "build_turn_outcome_record",
+    "fetch_turn_outcome",
     "record_turn_outcome_safely",
     "persist_turn_outcome",
     "skills_loaded_from",

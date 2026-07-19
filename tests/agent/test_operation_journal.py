@@ -613,3 +613,29 @@ def test_fenced_reconcile_skips_live_owner(db):
 
     assert journal.reconcile_after_restart(owner_fenced=True) == 0
     assert journal.get("live").state == "running"
+
+
+# ---------------------------------------------------------------------------
+# Read-only receipt-ingest accessor (Task 4): list_for_turn.
+# ---------------------------------------------------------------------------
+
+
+def test_list_for_turn_filters_by_session_and_turn(db):
+    journal = _journal(db)
+    journal.create(
+        operation_id="op-a", kind="effect", session_id="s1", turn_id="t1"
+    )
+    journal.create(
+        operation_id="op-b", kind="effect", session_id="s1", turn_id="t1"
+    )
+    journal.create(
+        operation_id="op-other-turn", kind="effect", session_id="s1", turn_id="t2"
+    )
+    journal.create(
+        operation_id="op-other-session", kind="effect", session_id="s2", turn_id="t1"
+    )
+
+    records = journal.list_for_turn("s1", "t1")
+    assert [r.operation_id for r in records] == ["op-a", "op-b"]
+    assert all(isinstance(r, OperationRecord) for r in records)
+    assert journal.list_for_turn("s1", "t-none") == []

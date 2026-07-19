@@ -8,6 +8,7 @@ blocks completion, and never upgrades targeted checks into "repo green".
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sqlite3
@@ -122,13 +123,34 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# POSIX-mode shlex treats ``\`` as an escape, which mangles Windows
+# paths ("C:\Users\...\script.py" loses every separator) and made
+# ad-hoc temp-script detection impossible on Windows. Windows shells do
+# not use backslash escapes, so tokenize non-POSIX there.
+_SHLEX_POSIX = os.name != "nt"
+
+
+def _shlex_split(text: str) -> list[str]:
+    tokens = shlex.split(text, posix=_SHLEX_POSIX)
+    if _SHLEX_POSIX:
+        return tokens
+    # Non-POSIX mode keeps surrounding quotes on quoted tokens; strip
+    # them so canonical matching sees the same tokens as on POSIX.
+    return [
+        token[1:-1]
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'"
+        else token
+        for token in tokens
+    ]
+
+
 def _split_segment_tokens(command: str) -> list[list[str]]:
     segments: list[list[str]] = []
     for segment in _SHELL_SPLIT_RE.split(command.strip()):
         if not segment:
             continue
         try:
-            tokens = shlex.split(segment)
+            tokens = _shlex_split(segment)
         except ValueError:
             continue
         if tokens:
@@ -145,7 +167,7 @@ def _clean_token(token: str) -> str:
 
 def _canonical_tokens(canonical: str) -> list[str]:
     try:
-        return [_clean_token(t) for t in shlex.split(canonical) if t]
+        return [_clean_token(t) for t in _shlex_split(canonical) if t]
     except ValueError:
         return []
 
@@ -544,6 +566,103 @@ def mark_workspace_edited(
             conn.commit()
 
     return {"session_id": sid, "root": root, "last_edit_at": edited_at, "changed_paths": changed_paths}
+
+
+def session_verification_roots(session_id: str | None) -> list[str]:
+    """List every workspace root with recorded state for a session.
+
+    Read-only receipt-ingest seam: the receipt evidence source enumerates
+    the roots this session actually verified or edited instead of
+    re-running project detection. Never creates the database — an absent
+    ledger simply means no roots.
+    """
+    if not _db_path().exists():
+        return []
+    sid = str(session_id or "default")
+    with _DB_LOCK:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT root FROM verification_state
+                WHERE session_id = ?
+                ORDER BY root
+                """,
+                (sid,),
+            ).fetchall()
+    return [row["root"] for row in rows]
+
+
+def verification_state_for_root(
+    *,
+    session_id: str | None,
+    root: str | Path,
+) -> dict[str, Any]:
+    """Return recorded verification state for one exact recorded root.
+
+    Same shape as :func:`verification_status` plus ``last_edit_at``, but
+    keyed directly by the durable ``(session_id, root)`` row: no project
+    detection runs, nothing is written, and the database is never created.
+    Receipt ingestion uses this to reload evidence for roots reported by
+    :func:`session_verification_roots` even when the workspace itself is
+    gone.
+    """
+    sid = str(session_id or "default")
+    root_text = str(root)
+    empty = {
+        "status": "unverified",
+        "evidence": None,
+        "root": root_text,
+        "session_id": sid,
+        "changed_paths": [],
+        "last_edit_at": None,
+    }
+    if not _db_path().exists():
+        return empty
+    with _DB_LOCK:
+        with _connect() as conn:
+            state = conn.execute(
+                """
+                SELECT last_event_id, last_edit_at, changed_paths_json
+                FROM verification_state
+                WHERE session_id = ? AND root = ?
+                """,
+                (sid, root_text),
+            ).fetchone()
+            if state is None:
+                return empty
+            event = None
+            if state["last_event_id"] is not None:
+                event = conn.execute(
+                    "SELECT * FROM verification_events WHERE id = ?",
+                    (state["last_event_id"],),
+                ).fetchone()
+
+    changed_paths: list[str] = []
+    try:
+        changed_paths = json.loads(state["changed_paths_json"] or "[]")
+    except (TypeError, ValueError):
+        changed_paths = []
+
+    if event is None:
+        return {
+            **empty,
+            "changed_paths": changed_paths,
+            "last_edit_at": state["last_edit_at"],
+        }
+
+    evidence = dict(event)
+    if state["last_edit_at"] and state["last_edit_at"] > evidence["created_at"]:
+        status = "stale"
+    else:
+        status = evidence["status"]
+    return {
+        "status": status,
+        "evidence": evidence,
+        "root": root_text,
+        "session_id": sid,
+        "changed_paths": changed_paths,
+        "last_edit_at": state["last_edit_at"],
+    }
 
 
 def verification_status(
