@@ -15,6 +15,7 @@ This module provides:
 """
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -3485,6 +3486,28 @@ DEFAULT_CONFIG = {
         # (regional endpoints silently 404 them). Override to a regional value
         # (e.g. "us-central1") only if your models are pinned to a region.
         "region": "global",
+    },
+
+    # ── Preferences & Autonomy Center (agent/autonomy/) ─────────────────
+    # Durable, non-secret authority preferences. Only confirmed
+    # `user_assertion` rules belong in `stable_rules`; learned suggestions
+    # and temporary mandates live in the profile-local state.db and are
+    # never written here. Programmatic changes go through the exact-hash
+    # guarded saga in agent/autonomy/config_apply.py; direct manual edits
+    # remain supported — the next provider read re-validates the section
+    # and materializes a new contract version, and an invalid section
+    # disables enforce mode with `invalid_stable_authority` instead of
+    # using a partial rule set.
+    "autonomy": {
+        "schema_version": 1,
+        # off | shadow | enforce
+        "mode": "off",
+        # Conservative no-match defaults; "allow" is never valid here.
+        "default_known_reversible": "ask",
+        "default_unknown_or_irreversible": "deny",
+        "decision_ttl_seconds": 300,
+        "audit_retention_days": 90,
+        "stable_rules": [],
     },
 
     # Config schema version - bump this when adding new required fields
@@ -7208,6 +7231,90 @@ def atomic_config_write(config_path: Path, data: Any, **kwargs: Any) -> None:
 
     require_readable_config_before_write(config_path)
     atomic_yaml_write(config_path, data, **kwargs)
+
+
+def raw_config_hash(config: Dict[str, Any]) -> str:
+    """Stable SHA-256 identity of a raw config dict.
+
+    Hashes the parsed structure (sorted keys, compact separators), not the
+    file bytes, so YAML reformatting by an atomic rewrite does not change
+    the identity. Used by the autonomy config-apply saga for its exact-hash
+    compare-and-set between preview and apply.
+    """
+    return hashlib.sha256(
+        json.dumps(
+            config,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+class ConfigSectionConflict(RuntimeError):
+    """An exact-hash guarded section write found config.yaml changed."""
+
+
+def replace_config_section(
+    section: str,
+    value: Any,
+    *,
+    expected_raw_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Exact-hash guarded replacement of ONE top-level raw config section.
+
+    Unlike :func:`save_config`, this never normalizes, migrates, or
+    default-strips the rest of the document: it re-reads the raw config
+    under the config lock, verifies ``expected_raw_hash`` (when given)
+    against :func:`raw_config_hash` of the current raw dict, replaces only
+    ``config[section]`` (``value=None`` removes it), and writes atomically
+    through :func:`atomic_config_write`.
+
+    Raises :class:`ConfigSectionConflict` when the config changed since
+    the caller read it, and :class:`RuntimeError` when the install or the
+    section is managed (package-manager lock or managed-scope pin) —
+    managed configuration is a stronger boundary than any section update.
+
+    Returns the new raw config dict as written.
+    """
+    if not isinstance(section, str) or not section.strip():
+        raise ValueError("section must be a non-empty string")
+    with _CONFIG_LOCK:
+        if is_managed():
+            raise RuntimeError(
+                format_managed_message(f"update the {section!r} config section")
+            )
+        from hades_cli import managed_scope
+
+        pinned = {
+            key
+            for key in managed_scope.managed_config_keys()
+            if key == section or key.startswith(section + ".")
+        }
+        if pinned:
+            raise RuntimeError(
+                f"Cannot update config section {section!r}: key(s) "
+                f"{', '.join(sorted(pinned))} are managed by your administrator"
+            )
+
+        ensure_hermes_home()
+        config_path = get_config_path()
+        raw = read_raw_config()
+        if expected_raw_hash is not None and raw_config_hash(raw) != expected_raw_hash:
+            raise ConfigSectionConflict(
+                f"config.yaml changed since it was read; refusing to replace "
+                f"section {section!r}"
+            )
+        new_raw = copy.deepcopy(raw)
+        if value is None:
+            new_raw.pop(section, None)
+        else:
+            new_raw[section] = copy.deepcopy(value)
+        atomic_config_write(config_path, new_raw)
+        _secure_file(config_path)
+        _RAW_CONFIG_CACHE.pop(str(config_path), None)
+        return new_raw
 
 
 def load_config() -> Dict[str, Any]:

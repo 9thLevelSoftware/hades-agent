@@ -499,7 +499,7 @@ git commit -m "feat: persist versioned autonomy authority"
 - Produces `preview_config_change(change) -> ConfigChangePreview`, `apply_config_change(preview, expected_contract_hash) -> AppliedConfigChange`, and `recover_config_apply()`.
 - Consumes config `autonomy.stable_rules`, Task 2 store, `get_hermes_home()`, existing atomic YAML write/readability/managed-scope checks.
 
-- [ ] **Step 1: Write RED layer, crash, CAS, and profile-isolation tests**
+- [x] **Step 1: Write RED layer, crash, CAS, and profile-isolation tests**
 
 ```python
 def test_compiler_excludes_suggestions_and_includes_active_mandates():
@@ -529,13 +529,13 @@ def test_apply_rejects_changed_preview_and_recovers_after_config_replace(harness
     assert recovered.config_hash == recovered.contract.source_config_hash
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_compiler.py tests/agent/autonomy/test_config_apply.py tests/hermes_cli/test_profiles.py -q`
 
 Expected: FAIL because compiler/config apply services do not exist.
 
-- [ ] **Step 3: Add stable defaults and exact source shape**
+- [x] **Step 3: Add stable defaults and exact source shape**
 
 Add this to `DEFAULT_CONFIG` without writing it to existing user files:
 
@@ -553,17 +553,17 @@ Add this to `DEFAULT_CONFIG` without writing it to existing user files:
 
 Only `user_assertion` rules are valid in `stable_rules`. Reject credentials, secret values, learned suggestions, runtime counters, and task/session IDs in this config layer. Direct manual config edits remain supported: the next provider read validates and materializes a new version; invalid config disables enforce mode and returns `invalid_stable_authority` rather than using a partial rule set.
 
-- [ ] **Step 4: Implement guarded section apply and recovery**
+- [x] **Step 4: Implement guarded section apply and recovery**
 
 Use `get_hermes_home()/autonomy.config.lock` with a bounded portable `fcntl`/`msvcrt` exclusive lock and `get_hermes_home()/autonomy-apply.pending.json` as a content-free recovery journal. Preview returns before/after raw config hashes, before/after contract hashes, exact normalized rule diff, and expiry warnings. Apply requires the exact before contract hash, re-reads config under the lock, checks managed scope, writes/fsyncs the pending journal, atomically replaces YAML through the existing guarded writer, materializes/verifies the contract, marks the journal complete, then removes it. Recovery completes materialization when YAML equals the after hash or restores the verified backup when it equals neither hash. Until recovery succeeds, enforce-mode mutations fail closed with `incomplete_authority_apply`.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_compiler.py tests/agent/autonomy/test_config_apply.py tests/hermes_cli/test_profiles.py -q`
 
 Expected: PASS; suggestions never compile, stale previews fail, crash recovery converges, and named profiles read only their own config/state.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agent/autonomy/compiler.py agent/autonomy/config_apply.py hermes_cli/config.py tests/agent/autonomy/test_compiler.py tests/agent/autonomy/test_config_apply.py tests/hermes_cli/test_profiles.py

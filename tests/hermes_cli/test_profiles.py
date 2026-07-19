@@ -1896,3 +1896,75 @@ class TestProfilesToServe:
     def test_on_no_named_profiles_returns_just_default(self, profile_env):
         serve = profiles_to_serve(multiplex=True)
         assert [n for n, _ in serve] == ["default"]
+
+
+# ===================================================================
+# TestAutonomyProfileIsolation (Preferences & Autonomy Center, Task 3)
+# ===================================================================
+
+class TestAutonomyProfileIsolation:
+    """Named profiles compile authority only from their own home.
+
+    There is no live default-profile inheritance: a named profile's
+    contract never contains rules from the default home's config.yaml,
+    and the config-apply saga's lock/journal/backup files resolve under
+    the active profile home only.
+    """
+
+    @staticmethod
+    def _write_autonomy_config(home, *stable_rules):
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text(
+            yaml.safe_dump({"autonomy": {"stable_rules": list(stable_rules)}}),
+            encoding="utf-8",
+        )
+
+    def test_named_profile_never_reads_live_default_rules(
+        self, profile_env, monkeypatch
+    ):
+        from agent.autonomy.compiler import compile_contract
+        from hades_cli.config import read_raw_config
+
+        default_home = profile_env / ".hades"
+        named_home = default_home / "profiles" / "work"
+        self._write_autonomy_config(
+            default_home, {"rule_id": "default-deny", "effect": "deny"}
+        )
+        self._write_autonomy_config(
+            named_home,
+            {
+                "rule_id": "work-allow",
+                "effect": "allow",
+                "action_classes": ["message.send"],
+            },
+        )
+
+        monkeypatch.setenv("HADES_HOME", str(named_home))
+        contract = compile_contract(
+            read_raw_config(), (), profile_id="work", now_ms=1_000
+        )
+        assert {r.rule_id for r in contract.rules} == {"work-allow"}
+
+        # And the default home still compiles only its own rules.
+        monkeypatch.setenv("HADES_HOME", str(default_home))
+        contract = compile_contract(
+            read_raw_config(), (), profile_id="default", now_ms=1_000
+        )
+        assert {r.rule_id for r in contract.rules} == {"default-deny"}
+
+    def test_autonomy_saga_paths_resolve_in_active_profile_home(
+        self, profile_env, monkeypatch
+    ):
+        from agent.autonomy import config_apply
+
+        default_home = profile_env / ".hades"
+        named_home = default_home / "profiles" / "work"
+        named_home.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setenv("HADES_HOME", str(named_home))
+        assert config_apply.journal_path().parent == named_home
+        assert config_apply.backup_path().parent == named_home
+        assert config_apply.lock_path().parent == named_home
+
+        monkeypatch.setenv("HADES_HOME", str(default_home))
+        assert config_apply.journal_path().parent == default_home
