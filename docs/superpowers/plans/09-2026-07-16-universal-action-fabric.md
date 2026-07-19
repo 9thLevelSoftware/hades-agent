@@ -15,7 +15,7 @@
 - Add no model-visible core tool, no bridge tool, and no model schema field. Do not add an Action Fabric toolset. `hermes action` is a CLI + skill surface over internal services and the existing terminal tool.
 - The system prompt, effective model tool definitions, primary provider, and primary model remain byte-stable for a conversation. Action discovery, MCP refresh, WebMCP `toolchange`, ranking, health, and fallback state are internal and never rebuild the cached prefix or mutate past messages.
 - Preserve strict message-role alternation. CLI/TUI control results are control-plane output, not synthetic user messages inserted into an active agent loop.
-- Profiles remain independent islands. Resolve durable state through `get_hades_home()` and user-visible paths through `display_hades_home()`. An intent, capability, auth binding, action attempt, transaction, or receipt may not cross `HADES_HOME`.
+- Profiles remain independent islands. Resolve durable state through `get_hermes_home()` and user-visible paths through `display_hermes_home()`. An intent, capability, auth binding, action attempt, transaction, or receipt may not cross `HERMES_HOME`.
 - Stable non-secret settings live under `action_fabric:` in `config.yaml`. Credentials remain in existing MCP OAuth, browser-provider, platform, OS, or secret-store ownership. Persist only opaque auth-binding fingerprints; never persist cookies, bearer tokens, form secrets, typed secrets, or screenshots containing secrets.
 - Consume item #2's `EffectAdapter`, `TransactionCoordinator`, `TransactionStore`, exact approval binding, operation certainty, and `unknown_effect` semantics, and item #6's canonical `AuthorityProvider`/`ActionContext` decision contract. Do not create a second authority model, commit boundary, approval store, effect table, transaction state machine, or compensation vocabulary.
 - Consume item #12's immutable `ReceiptStore`, `ReceiptStatus`, claims, observations, artifact digests, and scorer-only verified decision. Do not create an Action Fabric receipt table or let a path adapter choose `verified`.
@@ -27,10 +27,10 @@
 - A stale capability/schema at preview is rediscovered and revalidated. A schema revision after preview invalidates the preview unless the exact fallback candidate and its schema hash were already included in the approved ladder. No unpreviewed capability executes.
 - Capability names, descriptions, parameter descriptions, MCP/WebMCP annotations, page text, accessibility labels, OCR, and visual text are untrusted observations. They may aid display and matching but cannot define authority, risk, resource, destination, information-flow policy, idempotency, compensation, or receipt truth.
 - WebMCP is an optimization and never the product name. Feature-detect it. The evolving `getTools()`/`executeTool()` browser API is isolated behind `WebMCPTransport`; unsupported Chrome versions and API-shape mismatches degrade to normal browser paths.
-- Built-in code owns generic MCP, WebMCP transport, browser-session, and native-UI adapters only. Site/app-specific operation mappings and vendor integrations ship as standalone plugins under `~/.hades/plugins/` or pip entry points, or as MCP servers. They do not land as vendor directories under this repository's core plugin tree.
+- Built-in code owns generic MCP, WebMCP transport, browser-session, and native-UI adapters only. Site/app-specific operation mappings and vendor integrations ship as standalone plugins under `~/.hermes/plugins/` or pip entry points, or as MCP servers. They do not land as vendor directories under this repository's core plugin tree.
 - Native UI fallback is local-host only in the first proof. Docker, SSH, Modal, Daytona, Singularity, remote desktop, service workers, background WebMCP, arbitrary shell, production database writes, purchases, account deletion, remote Git push, and cross-profile actions are excluded.
 - Browser/private-network guards, SSRF protections, secret redaction, MCP OAuth/session handling, tool request/execution middleware ordering, and computer-use hard blocks remain active. Internal adapters do not call private handlers in a way that bypasses those controls.
-- Real-path tests use a temporary `HADES_HOME`, real SQLite, real plugin discovery, a real local HTTPS browser fixture, actual Chromium 149+ with the WebMCP testing flag/origin-trial token in the opt-in lane, real accessibility/screenshot paths where the host supports them, and a fake final external service only at the last network boundary.
+- Real-path tests use a temporary `HERMES_HOME`, real SQLite, real plugin discovery, a real local HTTPS browser fixture, actual Chromium 149+ with the WebMCP testing flag/origin-trial token in the opt-in lane, real accessibility/screenshot paths where the host supports them, and a fake final external service only at the last network boundary.
 - No outbound telemetry. Capability reliability and benchmark reports are profile-local. Reports include denominators, exclusions, Wilson 95% intervals, p50/p95 latency, cost source, and safety slices separately.
 
 ---
@@ -423,7 +423,7 @@ The YAML contains the thresholds in the table above, fixed TLS hostnames, expect
 
 - [ ] **Step 4: Implement the real fixture server and page contract**
 
-`InstrumentedSiteServer` binds loopback only, serves a generated local CA certificate, issues an HttpOnly per-run session cookie, persists fixture state in a temp SQLite file, accepts a stable effect key, and offers `/__fixture/reset`, `/__fixture/state`, and `/__fixture/fault` only when a random harness token header matches. Each HTML page has semantic labels/roles, deterministic visual layout, and the same operation exposed through `document.modelContext.registerTool()`. `webmcp.js` caps descriptions at 500 characters and outputs at 1.5 KiB but includes fault modes that deliberately violate those recommendations so Hades' hostile-input handling is exercised.
+`InstrumentedSiteServer` binds loopback only, serves a generated local CA certificate, issues an HttpOnly per-run session cookie, persists fixture state in a temp SQLite file, accepts a stable effect key, and offers `/__fixture/reset`, `/__fixture/state`, and `/__fixture/fault` only when a random harness token header matches. Each HTML page has semantic labels/roles, deterministic visual layout, and the same operation exposed through `document.modelContext.registerTool()`. `webmcp.js` caps descriptions at 500 characters and outputs at 1.5 KiB but includes fault modes that deliberately violate those recommendations so Hermes' hostile-input handling is exercised.
 
 - [ ] **Step 5: Run GREEN**
 
@@ -516,7 +516,7 @@ git commit -m "feat: define action intent contract"
 
 **Files:**
 - Create: `agent/action_fabric/store.py`
-- Modify: `hades_state.py`
+- Modify: `hermes_state.py`
 - Create: `tests/agent/action_fabric/test_store.py`
 
 **Interfaces:**
@@ -629,7 +629,7 @@ Expected: PASS on new/reopened databases; unknown freezes; duplicate sequence/op
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/action_fabric/store.py hades_state.py tests/agent/action_fabric/test_store.py
+git add agent/action_fabric/store.py hermes_state.py tests/agent/action_fabric/test_store.py
 git commit -m "feat: persist action path lineage"
 ```
 
@@ -1317,7 +1317,7 @@ def test_run_refuses_unpreviewed_stale_or_unknown(cli_harness):
 
 Run: `scripts/run_tests.sh tests/hermes_cli/test_action_fabric_cli.py tests/hermes_cli/test_commands.py -q`
 
-Expected: FAIL importing `hades_cli.action_fabric`.
+Expected: FAIL importing `hermes_cli.action_fabric`.
 
 - [ ] **Step 3: Implement one bounded command surface**
 
@@ -1381,7 +1381,7 @@ git commit -m "feat: add universal action cli"
 
 **Interfaces:**
 - Produces `action.exec` JSON-RPC and native `/action`/`/act` rendering.
-- Consumes `hades_cli.action_fabric.run_argv()` in the live profile process. Mutating action commands never run in `_SlashWorker`.
+- Consumes `hermes_cli.action_fabric.run_argv()` in the live profile process. Mutating action commands never run in `_SlashWorker`.
 
 - [ ] **Step 1: Write RED RPC and native-routing tests**
 
@@ -1705,7 +1705,7 @@ Do not call Universal Action Fabric complete until fresh evidence proves every i
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-07-16-universal-action-fabric.md`. Two execution options:
+Plan complete and saved to `docs/superpowers/plans/09-2026-07-16-universal-action-fabric.md`. Two execution options:
 
 1. **Subagent-Driven (recommended)** — use `superpowers:subagent-driven-development`, one fresh implementation subagent per task with review between tasks.
 2. **Inline Execution** — use `superpowers:executing-plans`, execute task batches with explicit checkpoints.

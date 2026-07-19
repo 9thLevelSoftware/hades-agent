@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let users collaborate with Hades through opt-in direct voice, meetings, and screen-assisted sessions with sub-second response, fast barge-in, explicit control handoff, and no hidden sensing or retention.
+**Goal:** Let users collaborate with Hermes through opt-in direct voice, meetings, and screen-assisted sessions with sub-second response, fast barge-in, explicit control handoff, and no hidden sensing or retention.
 
 **Architecture:** Add an internal, model-invisible `agent.realtime` narrow waist containing immutable media/event contracts, a `RealtimeSessionProvider` ABC, a provider registry, and a profile-local orchestrator. Existing local voice, Discord voice, and Google Meet implementations become concrete plugin providers; item #6 authorizes every sensing/transmission/tool/retention transition, item #15 labels and gates every remote frame or sink, and item #12 receives redacted session claims without becoming a media store. CLI and native Ink own consent and session control; providers never capture or transmit until an acknowledged sensor indicator lease exists.
 
@@ -20,7 +20,7 @@
 - Providers and platform adapters remain plugins or service-gated integrations. The shared ABC/registry is model-invisible Footprint Ladder rung 1; local/Discord/Meet implementations are rung 4 edge consumers. No new model-visible core tool or mid-conversation tool-schema mutation is introduced.
 - Stable non-secret defaults live under `realtime:` in profile-local `config.yaml`; API keys and credentials remain in `.env` or secret providers; runtime consent/session/audit metadata lives in profile-local SQLite. No user-facing non-secret `HERMES_*` setting is added.
 - The system prompt, cached prefix, effective tool-definition snapshot, provider, and primary model remain byte-stable for a conversation. Realtime state travels through deterministic sidecars/callbacks, never past-message mutation or a synthetic user message; strict message-role alternation and compression-only history mutation remain intact.
-- Real-path state, security, device, and remote-I/O tests use a temporary `HADES_HOME`, real imports, real SQLite/config/plugin discovery, and deterministic media fixtures. Mocks stop only at physical hardware, provider network, platform network, and OS media-process boundaries.
+- Real-path state, security, device, and remote-I/O tests use a temporary `HERMES_HOME`, real imports, real SQLite/config/plugin discovery, and deterministic media fixtures. Mocks stop only at physical hardware, provider network, platform network, and OS media-process boundaries.
 - Session/audit/receipt language is truthful: `connected` is not sensing, `sent` is not heard, a transcript is not verified, provider acknowledgement is not exactly-once, and an interrupted/ambiguous tool effect remains `unknown_effect` until independently reconciled.
 - No outbound telemetry is enabled. Proof metrics and media traces stay local under an explicitly selected output directory, exclude raw private content by default, and use opaque participant/provider identifiers.
 - Desktop is not a dependency or parity target. Dashboard receives no second chat/consent implementation; its embedded Ink surface is sufficient, with an optional read-only status endpoint only after primary controls pass.
@@ -465,7 +465,7 @@ git commit -m "feat: register realtime providers"
 
 **Interfaces:**
 - Produces `RealtimeStore`, `build_presence_action_context()`, `build_media_flow_context()`, `authorize_presence_transition()`, and `authorize_media_sink()`.
-- Consumes Task 1 models, item #6 `authorize_effect()`, item #15 `StoredInformationFlowGuard.evaluate()`, `SessionDB._execute_write()`, and active-profile `get_hades_home()`.
+- Consumes Task 1 models, item #6 `authorize_effect()`, item #15 `StoredInformationFlowGuard.evaluate()`, `SessionDB._execute_write()`, and active-profile `get_hermes_home()`.
 
 - [ ] **RED: write crash, replay, stale-consent, and flow tests**
 
@@ -626,7 +626,7 @@ Expected: FAIL because retention service/manifests are absent.
 
 - [ ] **Implement three distinct sinks and conservative recovery**
 
-Recording writes only after `realtime.record` authority and `persist` flow allow, under `get_hades_home()/realtime/recordings/<session-id>/`, using create-exclusive files, normalized extensions, exact byte caps, owner-only permissions where supported, atomic manifest updates, and configured expiry. Transcription consumes a transient frame stream only after its own authorization and writes bounded timestamp/speaker/digest segments to SQLite; recording permission is neither required nor implied. Memory promotion accepts selected transcript claim IDs only after a fresh `realtime.memory.promote` allow and existing memory-provider flow check; it never reads raw recordings implicitly.
+Recording writes only after `realtime.record` authority and `persist` flow allow, under `get_hermes_home()/realtime/recordings/<session-id>/`, using create-exclusive files, normalized extensions, exact byte caps, owner-only permissions where supported, atomic manifest updates, and configured expiry. Transcription consumes a transient frame stream only after its own authorization and writes bounded timestamp/speaker/digest segments to SQLite; recording permission is neither required nor implied. Memory promotion accepts selected transcript claim IDs only after a fresh `realtime.memory.promote` allow and existing memory-provider flow check; it never reads raw recordings implicitly.
 
 On crash, unmanifested files are quarantined then deleted, incomplete transcript segments remain `completed_unverified`, and no memory call is retried. `purge_session()` closes writers, deletes raw media/transcript rows and derived memory through the existing provider deletion contract, appends tombstones, and returns exact success/unknown lists. Receipt claims contain consent/indicator/sensor intervals, byte/segment counts, latency/tool outcome, retention manifest/artifact digests, and deletion uncertainty; the realtime scorer never constructs `VerifiedReceiptDecision` and raw content never enters claims/audit.
 
@@ -661,7 +661,7 @@ git commit -m "feat: govern realtime retention"
 
 **Interfaces:**
 - Produces provider `local.presence.v1`; `build_parser()`, `presence_command(args) -> int`, `run_argv(argv, output_mode) -> CommandResult`, `run_slash(rest) -> str`; commands `hermes presence` and `/presence` with `status|providers|start|pause|resume|takeover|stop|consent|retention|doctor`.
-- Consumes Tasks 1–5, existing local recorder/silence/TTS primitives in `hades_cli.voice`, current config helpers, and canonical command registry.
+- Consumes Tasks 1–5, existing local recorder/silence/TTS primitives in `hermes_cli.voice`, current config helpers, and canonical command registry.
 
 - [ ] **RED: write direct-session and command-contract tests**
 
@@ -926,7 +926,7 @@ git commit -m "feat: add Ink live presence controls"
 
 **Interfaces:**
 - Produces no production API; this is the release gate for Tasks 1–9.
-- Consumes real temp-`HADES_HOME` config/SQLite/plugin discovery, deterministic checked-in media, real local orchestration/CLI/RPC imports, item #6/#12/#15 implementations, and fake physical/provider/platform boundaries only.
+- Consumes real temp-`HERMES_HOME` config/SQLite/plugin discovery, deterministic checked-in media, real local orchestration/CLI/RPC imports, item #6/#12/#15 implementations, and fake physical/provider/platform boundaries only.
 
 - [ ] **RED: write the real-path fault and privacy matrix**
 
@@ -972,7 +972,7 @@ Expected: FAIL at each unwired real boundary; repair only the owning Task 1–9 
 
 - [ ] **Implement the complete offline E2E harness and invariant checks**
 
-Start from a temporary `HADES_HOME`; write real `config.yaml`; open real `SessionDB`, autonomy/flow/receipt/realtime stores; load plugins through the real manager; invoke `hades_cli.presence.run_argv`; route through real TUI RPC dispatch; use real media model validation, local gate, retention filesystem, reconnect, and receipt claim builder. Hardware/provider doubles expose only capture/playback/WebSocket/Discord/Playwright boundaries and record exact calls/monotonic timestamps/bytes.
+Start from a temporary `HERMES_HOME`; write real `config.yaml`; open real `SessionDB`, autonomy/flow/receipt/realtime stores; load plugins through the real manager; invoke `hermes_cli.presence.run_argv`; route through real TUI RPC dispatch; use real media model validation, local gate, retention filesystem, reconnect, and receipt claim builder. Hardware/provider doubles expose only capture/playback/WebSocket/Discord/Playwright boundaries and record exact calls/monotonic timestamps/bytes.
 
 Hash system message, effective tool definitions, primary provider, and primary model before/after start, every sensor event, consent change, frame, barge-in, tool event, pause/takeover, retention toggle, reconnect, purge, and recovery. Assert all four stable; strict role alternation; no media/flow/consent sidecar enters API messages; no history mutation outside compression; and provider/model changes require the existing explicit new-conversation boundary. Assert session/profile/sink IDs never cross, raw PCM/video/screen/transcript/tool args never enter audit or receipt claims, and remote provider cost/usage stays session-ledger-only.
 
@@ -1061,7 +1061,7 @@ Expected: exits 0 only when all denominators, p95 latency/barge-in gates, zero p
 
 The user guide documents the layman outcome; direct/meeting/screen workflows; exact start preview/apply; persistent sensor/remote/record/transcribe/memory indicators; pause/takeover/stop; participant announcement; provider/device/network/cost status; recording/transcript/memory separation; expiry/delete/export; reconnect/device loss; CLI/Ink routes; no Desktop dependency; and how to return to push-to-talk.
 
-The provider guide includes the exact ABC/types, bounded queue/frame rules, trusted identity and clocks, indicator acknowledgement, item #6/#15 call order, TTS/STT ownership, engagement/VAD, turns/barge-in/tool correlation, reconnect/no-replay semantics, retention/receipt redaction, plugin ownership/service gating, temp-`HADES_HOME` real-path tests, and complete synthetic audio/video/screen provider example. Vendor providers stay standalone plugins; a third provider is not added to core merely to generalize the ABC.
+The provider guide includes the exact ABC/types, bounded queue/frame rules, trusted identity and clocks, indicator acknowledgement, item #6/#15 call order, TTS/STT ownership, engagement/VAD, turns/barge-in/tool correlation, reconnect/no-replay semantics, retention/receipt redaction, plugin ownership/service gating, temp-`HERMES_HOME` real-path tests, and complete synthetic audio/video/screen provider example. Vendor providers stay standalone plugins; a third provider is not added to core merely to generalize the ABC.
 
 Rollout is explicitly incubated:
 
@@ -1128,7 +1128,7 @@ git commit -m "docs: incubate live presence"
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-07-16-live-presence.md`. Two execution options:
+Plan complete and saved to `docs/superpowers/plans/11-2026-07-16-live-presence.md`. Two execution options:
 
 1. **Subagent-Driven (recommended)** — use `superpowers:subagent-driven-development`, dispatch a fresh worker per task, and review contract then code quality between tasks.
 2. **Inline Execution** — use `superpowers:executing-plans`, implement in batches with checkpoints after Tasks 3, 6, 9, and 11.

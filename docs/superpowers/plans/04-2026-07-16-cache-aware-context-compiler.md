@@ -4,7 +4,7 @@
 
 **Goal:** Sustain long Hermes conversations and missions with equivalent or better outcomes while reducing uncached input cost by at least 30%, improving cache hits, preserving fresh critical state, and never changing cache identity outside an explicit conversation transition.
 
-**Architecture:** Extend the model-invisible `ContextEngine` boundary with a declarative four-lane segment graph: immutable cached prefix, versioned user/memory snapshots, hot mission/evidence state, and ephemeral tool payloads. A cache-aware context-engine plugin compiles those segments into the existing OpenAI-format conversation without inventing messages or owning source data; it independently fingerprints the pinned system prompt, pinned effective tool schema, provider, and model. OpenAI compaction, Google state/cache, and Anthropic context editing are optional adapter optimizations invoked only at Hades's existing compression boundary; a downgrade always falls back to authoritative Hermes compilation.
+**Architecture:** Extend the model-invisible `ContextEngine` boundary with a declarative four-lane segment graph: immutable cached prefix, versioned user/memory snapshots, hot mission/evidence state, and ephemeral tool payloads. A cache-aware context-engine plugin compiles those segments into the existing OpenAI-format conversation without inventing messages or owning source data; it independently fingerprints the pinned system prompt, pinned effective tool schema, provider, and model. OpenAI compaction, Google state/cache, and Anthropic context editing are optional adapter optimizations invoked only at Hermes's existing compression boundary; a downgrade always falls back to authoritative Hermes compilation.
 
 **Tech Stack:** Python 3.13, frozen dataclasses/enums, canonical JSON/SHA-256, SQLite/WAL through `SessionDB`, existing `ContextEngine`/`ContextCompressor`/conversation compression, prompt builder and prompt caching, tool registry, mission/knowledge/autonomy/receipt contracts, provider adapters and canonical usage telemetry, Rich/classic CLI, Ink/TypeScript JSON-RPC TUI, pytest through `scripts/run_tests.sh`, Vitest, and versioned YAML/JSONL replay fixtures.
 
@@ -22,7 +22,7 @@
 - Provider-native state is a disposable cache, not authoritative session state. Crash, cache eviction, unavailable feature, capability downgrade, or provider error reconstructs the same Hermes compile from local sources without losing hot state or replaying stale provider content.
 - Dynamic registry metadata and `dynamic_schema_overrides` may continue to update the next conversation's schema. The current conversation uses a deep-frozen effective schema snapshot; a requested toolset/schema/provider/model change opens the existing explicit transition rather than mutating it in place.
 - No new model-visible core tool is introduced. Inspection/explanation uses top-level CLI, classic slash, and native Ink JSON-RPC; provider compilers remain plugins/adapters. Delivery is Footprint Ladder rung 1.
-- Real-path state, privacy, compression, provider-boundary, and recovery tests use a temporary `HADES_HOME`, real config/SQLite/import/plugin discovery/message compilation, and actual local segment sources. Mock only provider network/process boundaries and clocks.
+- Real-path state, privacy, compression, provider-boundary, and recovery tests use a temporary `HERMES_HOME`, real config/SQLite/import/plugin discovery/message compilation, and actual local segment sources. Mock only provider network/process boundaries and clocks.
 - Profiles remain independent islands. Segment/source/cache IDs include the active profile identity, and no compiler or recovery path reads live default-profile state.
 - No outbound telemetry is enabled. Provider usage is normalized into local session accounting; proof rows and reports remain local and redact source content, prompts, tool payloads, personal claims, and credentials.
 - User-visible status distinguishes input, cache-read, cache-write, uncached input, output, provider-retained state, compaction count, freshness, and estimated/actual cost. A cache hit is never called verification and a provider compaction acknowledgement is never called exactly-once.
@@ -92,7 +92,7 @@ Missing/aborted cases remain in the denominator with reasons. An underpowered pr
 - `agent/chat_completion_helpers.py`, `agent/codex_responses_adapter.py`, `agent/gemini_native_adapter.py`, and `agent/anthropic_adapter.py` — provider transport and canonical usage/cache telemetry boundaries.
 - `agent/transports/codex.py`, `agent/transports/codex_app_server_session.py`, and `agent/codex_runtime.py` — prompt cache key, native compaction notification, and normalized cached-input accounting.
 - `plugins/context_engine/__init__.py` and `hermes_cli/plugins.py::PluginContext.register_context_engine()` — current config-selected context-engine plugin discovery.
-- `hades_state.py` and `gateway/session.py` — profile-local session transcript/prompt/compression lineage and recovery.
+- `hermes_state.py` and `gateway/session.py` — profile-local session transcript/prompt/compression lineage and recovery.
 - `hermes_cli/missions_db.py` (item #1) — mission objective/events/review/version source; remains mission truth.
 - `plugins/memory/knowledge/provider.py` and retrieval/store modules (item #4) — versioned bounded knowledge prefetch with provenance/freshness/conflicts; remain knowledge truth.
 - `agent/autonomy` (item #6) — provider routing/storage/retention authority and audit.
@@ -119,7 +119,7 @@ Missing/aborted cases remain in the denominator with reasons. An underpowered pr
 - `agent/context_engine.py`, `agent/context_compressor.py`, `agent/conversation_compression.py`, `agent/conversation_loop.py`, `agent/agent_init.py`, `agent/system_prompt.py`, `agent/turn_context.py`
 - `tools/registry.py`, `model_tools.py`
 - `agent/chat_completion_helpers.py`, `agent/codex_responses_adapter.py`, `agent/gemini_native_adapter.py`, `agent/anthropic_adapter.py`
-- `hades_state.py`, `hermes_cli/plugins.py`, `hermes_cli/commands.py`, `hermes_cli/main.py`, `cli.py`
+- `hermes_state.py`, `hermes_cli/plugins.py`, `hermes_cli/commands.py`, `hermes_cli/main.py`, `cli.py`
 - `tui_gateway/server.py`, `ui-tui/src/gatewayTypes.ts`, `ui-tui/src/app/slash/commands/session.ts`
 
 ### Focused tests and proof files
@@ -522,7 +522,7 @@ git commit -m "feat: adapt versioned context sources"
 - Create: `plugins/context_engine/cache_aware/compiler.py`
 - Create: `plugins/context_engine/cache_aware/store.py`
 - Create: `tests/agent/test_cache_aware_context_engine.py`
-- Modify: `hades_state.py`
+- Modify: `hermes_state.py`
 
 **Interfaces:**
 - Produces `CacheAwareContextCompiler(ContextEngine)`, `ContextGraphStore`, `build_graph()`, `compile()`, `plan_compression()`, `recompute_stale_segments()`, `validate_compiled_context()`, and provider-neutral `ContextCompressionPlan`.
@@ -574,7 +574,7 @@ Expected: PASS; all four lanes compile deterministically, budget pressure preser
 - [ ] **Commit**
 
 ```bash
-git add plugins/context_engine/cache_aware/__init__.py plugins/context_engine/cache_aware/plugin.yaml plugins/context_engine/cache_aware/compiler.py plugins/context_engine/cache_aware/store.py hades_state.py tests/agent/test_cache_aware_context_engine.py
+git add plugins/context_engine/cache_aware/__init__.py plugins/context_engine/cache_aware/plugin.yaml plugins/context_engine/cache_aware/compiler.py plugins/context_engine/cache_aware/store.py hermes_state.py tests/agent/test_cache_aware_context_engine.py
 git commit -m "feat: compile four-lane context graphs"
 ```
 
@@ -923,7 +923,7 @@ git commit -m "feat: add context compiler controls"
 
 **Interfaces:**
 - Produces no production API; this is the release gate for Tasks 1–9.
-- Consumes real temp-`HADES_HOME` config/SQLite/plugin/context-engine discovery, real mission/knowledge/receipt fixtures, real compilation/compression/session rotation/CLI/RPC imports, and fake provider network/process boundaries only.
+- Consumes real temp-`HERMES_HOME` config/SQLite/plugin/context-engine discovery, real mission/knowledge/receipt fixtures, real compilation/compression/session rotation/CLI/RPC imports, and fake provider network/process boundaries only.
 
 - [ ] **RED: write the real-path fault and attack matrices**
 
@@ -1062,7 +1062,7 @@ Expected: exits 0 only with equivalent/better outcomes, uncached cost ratio `<= 
 
 The user guide documents the layman outcome, four lanes, source ownership, cache identity, `/context` inspection/explanation, `/compress`, freshness/stale blocks, token/cache/cost/latency fields, provider retention disclosures, explicit new-conversation transitions, crash/downgrade recovery, profile isolation, no Dashboard editor/Desktop dependency, and return to the built-in compressor.
 
-The provider guide defines every public contract, canonical hash, segment/dependency/recompute/freshness rule, role-anchor constraints, token accounting, semantic validation, optimizer ownership/service gating, item #6 disclosure/action contexts, OpenAI/Google/Anthropic boundary mappings, local fallback, telemetry redaction, and temp-`HADES_HOME` real-path tests. Its complete example is a synthetic standalone optimizer plugin; vendor extensions remain outside core.
+The provider guide defines every public contract, canonical hash, segment/dependency/recompute/freshness rule, role-anchor constraints, token accounting, semantic validation, optimizer ownership/service gating, item #6 disclosure/action contexts, OpenAI/Google/Anthropic boundary mappings, local fallback, telemetry redaction, and temp-`HERMES_HOME` real-path tests. Its complete example is a synthetic standalone optimizer plugin; vendor extensions remain outside core.
 
 Rollout and stop conditions are exact:
 
@@ -1127,7 +1127,7 @@ git commit -m "docs: roll out cache-aware context"
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-07-16-cache-aware-context-compiler.md`. Two execution options:
+Plan complete and saved to `docs/superpowers/plans/04-2026-07-16-cache-aware-context-compiler.md`. Two execution options:
 
 1. **Subagent-Driven (recommended)** — use `superpowers:subagent-driven-development`, dispatch a fresh worker per task, and review contract then code quality between tasks.
 2. **Inline Execution** — use `superpowers:executing-plans`, implement in batches with checkpoints after Tasks 3, 5, 8, and 11.

@@ -9,25 +9,25 @@
 | # | Portfolio item | Authoritative implementation plan |
 |---:|---|---|
 | 1 | Durable Goal-to-Outcome Missions | [`2026-07-15-missions-transactions-receipts-vertical-slice.md`](2026-07-15-missions-transactions-receipts-vertical-slice.md) |
-| 2 | Reversible & Revisable Action Transactions | [`2026-07-16-reversible-revisable-action-transactions.md`](2026-07-16-reversible-revisable-action-transactions.md) |
-| 3 | Teach-Once Automation Studio | [`2026-07-16-teach-once-automation-studio.md`](2026-07-16-teach-once-automation-studio.md) |
-| 4 | Sovereign Personal Knowledge & Evidence Timeline | [`2026-07-16-sovereign-personal-knowledge-evidence-timeline.md`](2026-07-16-sovereign-personal-knowledge-evidence-timeline.md) |
-| 5 | Universal Action Fabric | [`2026-07-16-universal-action-fabric.md`](2026-07-16-universal-action-fabric.md) |
-| 6 | Preferences & Autonomy Center | [`2026-07-16-preferences-autonomy-center.md`](2026-07-16-preferences-autonomy-center.md) |
-| 7 | Proactive Attention Broker | [`2026-07-16-proactive-attention-broker.md`](2026-07-16-proactive-attention-broker.md) |
-| 8 | Plan Preview & What-If Dry Run | [`2026-07-16-plan-preview-what-if-dry-run.md`](2026-07-16-plan-preview-what-if-dry-run.md) |
-| 9 | Verified Experience Compiler | [`2026-07-16-verified-experience-compiler.md`](2026-07-16-verified-experience-compiler.md) |
+| 2 | Reversible & Revisable Action Transactions | [`03-2026-07-16-reversible-revisable-action-transactions.md`](03-2026-07-16-reversible-revisable-action-transactions.md) |
+| 3 | Teach-Once Automation Studio | [`05-2026-07-16-teach-once-automation-studio.md`](05-2026-07-16-teach-once-automation-studio.md) |
+| 4 | Sovereign Personal Knowledge & Evidence Timeline | [`08-2026-07-16-sovereign-personal-knowledge-evidence-timeline.md`](08-2026-07-16-sovereign-personal-knowledge-evidence-timeline.md) |
+| 5 | Universal Action Fabric | [`09-2026-07-16-universal-action-fabric.md`](09-2026-07-16-universal-action-fabric.md) |
+| 6 | Preferences & Autonomy Center | [`01-2026-07-16-preferences-autonomy-center.md`](01-2026-07-16-preferences-autonomy-center.md) |
+| 7 | Proactive Attention Broker | [`07-2026-07-16-proactive-attention-broker.md`](07-2026-07-16-proactive-attention-broker.md) |
+| 8 | Plan Preview & What-If Dry Run | [`12-2026-07-16-plan-preview-what-if-dry-run.md`](12-2026-07-16-plan-preview-what-if-dry-run.md) |
+| 9 | Verified Experience Compiler | [`16-2026-07-16-verified-experience-compiler.md`](16-2026-07-16-verified-experience-compiler.md) |
 | 10 | Adaptive Intelligence Router | [`2026-07-15-hermes-auto-routing-roadmap.md`](2026-07-15-hermes-auto-routing-roadmap.md), which orders six independently executable stage plans |
-| 11 | Interactive Agent Workspaces | [`2026-07-16-interactive-agent-workspaces.md`](2026-07-16-interactive-agent-workspaces.md) |
-| 12 | Verified Outcome & Artifact Receipts | [`2026-07-16-verified-outcome-artifact-receipts.md`](2026-07-16-verified-outcome-artifact-receipts.md) |
-| 13 | Sovereign Personal Compute Mesh | [`2026-07-16-sovereign-personal-compute-mesh.md`](2026-07-16-sovereign-personal-compute-mesh.md) |
-| 14 | Diversity-Aware Cognitive Team Planner | [`2026-07-16-diversity-aware-cognitive-team-planner.md`](2026-07-16-diversity-aware-cognitive-team-planner.md) |
-| 15 | Deterministic Information-Flow Guard | [`2026-07-16-deterministic-information-flow-guard.md`](2026-07-16-deterministic-information-flow-guard.md) |
-| 16 | Live Presence | [`2026-07-16-live-presence.md`](2026-07-16-live-presence.md) |
-| 17 | Safe Capability Exchange | [`2026-07-16-safe-capability-exchange.md`](2026-07-16-safe-capability-exchange.md) |
-| 18 | Cache-Aware Context Compiler | [`2026-07-16-cache-aware-context-compiler.md`](2026-07-16-cache-aware-context-compiler.md) |
-| 19 | Delegated Presence & Agent Federation | [`2026-07-16-delegated-presence-agent-federation.md`](2026-07-16-delegated-presence-agent-federation.md) |
-| 20 | Bounded Purchase Assistant & Receipt Vault | [`2026-07-16-bounded-purchase-assistant-receipt-vault.md`](2026-07-16-bounded-purchase-assistant-receipt-vault.md) |
+| 11 | Interactive Agent Workspaces | [`10-2026-07-16-interactive-agent-workspaces.md`](10-2026-07-16-interactive-agent-workspaces.md) |
+| 12 | Verified Outcome & Artifact Receipts | [`02-2026-07-16-verified-outcome-artifact-receipts.md`](02-2026-07-16-verified-outcome-artifact-receipts.md) |
+| 13 | Sovereign Personal Compute Mesh | [`17-2026-07-16-sovereign-personal-compute-mesh.md`](17-2026-07-16-sovereign-personal-compute-mesh.md) |
+| 14 | Diversity-Aware Cognitive Team Planner | [`14-2026-07-16-diversity-aware-cognitive-team-planner.md`](14-2026-07-16-diversity-aware-cognitive-team-planner.md) |
+| 15 | Deterministic Information-Flow Guard | [`06-2026-07-16-deterministic-information-flow-guard.md`](06-2026-07-16-deterministic-information-flow-guard.md) |
+| 16 | Live Presence | [`11-2026-07-16-live-presence.md`](11-2026-07-16-live-presence.md) |
+| 17 | Safe Capability Exchange | [`13-2026-07-16-safe-capability-exchange.md`](13-2026-07-16-safe-capability-exchange.md) |
+| 18 | Cache-Aware Context Compiler | [`04-2026-07-16-cache-aware-context-compiler.md`](04-2026-07-16-cache-aware-context-compiler.md) |
+| 19 | Delegated Presence & Agent Federation | [`18-2026-07-16-delegated-presence-agent-federation.md`](18-2026-07-16-delegated-presence-agent-federation.md) |
+| 20 | Bounded Purchase Assistant & Receipt Vault | [`15-2026-07-16-bounded-purchase-assistant-receipt-vault.md`](15-2026-07-16-bounded-purchase-assistant-receipt-vault.md) |
 
 Item 1 is the plan completed before this follow-on program. Items 2–20 are the nineteen artifacts this program must verify. Item 10 legitimately uses a roadmap plus six stage plans because each stage is independently useful and reviewable; the roadmap is the single portfolio-level entry point.
 

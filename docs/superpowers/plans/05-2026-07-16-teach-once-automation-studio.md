@@ -23,7 +23,7 @@
 - A coordinate-only GUI trace is unpublishable. Every GUI action needs a semantic selector, accessibility/SOM anchor, application/window invariant, or explicit review blocker.
 - All stable behavior configuration lives under `automation_studio` in `config.yaml`. Credentials and secret parameter values use existing secret sources or profile `.env`; no new user-facing `HERMES_*` setting is added.
 - Compilation produces both a validated declarative `AutomationSpec` and a human-readable runbook/skill. It then compiles the graph to existing immutable `WorkflowSpec` nodes; it does not create another production task graph or retry scheduler.
-- Replay uses disposable worktrees, temporary `HADES_HOME`, local instrumented web fixtures or designated non-production accounts, and isolated native-app fixture directories. Production database writes, account deletion, remote Git push, purchases, and browser submission to real accounts are excluded.
+- Replay uses disposable worktrees, temporary `HERMES_HOME`, local instrumented web fixtures or designated non-production accounts, and isolated native-app fixture directories. Production database writes, account deletion, remote Git push, purchases, and browser submission to real accounts are excluded.
 - Every mutation still passes existing approvals and, where supported, mission effect adapters. Unsupported browser/native mutations are allowed only inside an attested ephemeral replay sandbox and may never be promoted as production-safe effects.
 - The learned runbook never grades itself. Promotion consumes deterministic postconditions and immutable mission receipts produced by an independent verifier that cannot read the demonstration success label or compiler rationale.
 - Required replay variants per demonstration are: changed values, reordered collections/layout, one popup/interruption, and one negative fixture. A correct safe stop on the negative fixture counts as verified success.
@@ -50,7 +50,7 @@
 
 ```text
 workflows.db                                      profile filesystem
-┌───────────────────────────────┐                 ~/.hades/automation_studio/
+┌───────────────────────────────┐                 ~/.hermes/automation_studio/
 │ teaching_sessions             │                 ├── <session>/trace.jsonl (redacted)
 │ teaching_trace_events         │                 ├── <session>/observations/
 │ automation_candidates         │                 ├── <automation>/vN/action-graph.yaml
@@ -273,8 +273,8 @@ Each fixture declares exact inputs, expected end-state probes, allowed roots/hos
 def test_teach_once_uses_the_shared_trust_contracts():
     from agent.effect_transactions import EffectAdapter
     from agent.receipts import ReceiptDecision
-    from hades_cli.missions_db import MissionRecord
-    from hades_cli.workflows_spec import WorkflowSpec
+    from hermes_cli.missions_db import MissionRecord
+    from hermes_cli.workflows_spec import WorkflowSpec
 
     assert EffectAdapter and ReceiptDecision and MissionRecord and WorkflowSpec
 ```
@@ -344,7 +344,7 @@ Also prove: one recording session per `(profile, cli_session_id)`; duplicate eve
 scripts/run_tests.sh tests/hermes_cli/test_automations_db.py -q
 ```
 
-Expected: FAIL with `ModuleNotFoundError: hades_cli.automations_db`.
+Expected: FAIL with `ModuleNotFoundError: hermes_cli.automations_db`.
 
 - [ ] **Step 3: Add focused teaching tables to the existing workflow database**
 
@@ -784,7 +784,7 @@ Add `validate_compiled_automation_workflow(spec)` in `workflows_spec.py`; it val
 
 - [ ] **Step 6: Add atomic candidate artifacts and immutable workflow deploy helper**
 
-`write_candidate_artifacts()` writes action graph, runbook, and workflow JSON under `get_hades_home()/automation_studio/<automation>/v<version>/`, fsyncs, renames, then records hashes. Add `deploy_compiled_automation(conn, spec, candidate_id) -> int` as a transaction-aware wrapper around `deploy_definition(..., created_by=f"teach:{candidate_id}")`; same hash/version is idempotent and a different hash requires the next version.
+`write_candidate_artifacts()` writes action graph, runbook, and workflow JSON under `get_hermes_home()/automation_studio/<automation>/v<version>/`, fsyncs, renames, then records hashes. Add `deploy_compiled_automation(conn, spec, candidate_id) -> int` as a transaction-aware wrapper around `deploy_definition(..., created_by=f"teach:{candidate_id}")`; same hash/version is idempotent and a different hash requires the next version.
 
 - [ ] **Step 7: Run GREEN and workflow regressions**
 
@@ -840,7 +840,7 @@ assert attestation.git_branch not in {"main", "master"}
 assert attestation.network_mode == "allowlist"
 ```
 
-Reject the primary checkout, main/master, a non-temporary `HADES_HOME`, non-loopback web writes, undeclared applications, symlink escapes, live credential destinations, and any fixture missing an independent end-state probe.
+Reject the primary checkout, main/master, a non-temporary `HERMES_HOME`, non-loopback web writes, undeclared applications, symlink escapes, live credential destinations, and any fixture missing an independent end-state probe.
 
 - [ ] **Step 2: Write RED replay/backtracking tests**
 
@@ -1164,7 +1164,7 @@ Reject unknown/trailing args, cross-profile sessions, simultaneous capture in on
 scripts/run_tests.sh tests/hermes_cli/test_teach_cli.py -q
 ```
 
-Expected: FAIL because `hades_cli.teach` does not exist.
+Expected: FAIL because `hermes_cli.teach` does not exist.
 
 - [ ] **Step 3: Implement one parser and one service dispatch**
 
@@ -1251,7 +1251,7 @@ git commit -m "feat: add terminal teach-once studio"
 - Modify: `ui-tui/src/components/appOverlays.tsx`
 
 **Interfaces:**
-- Consumes: `hades_cli.teach.review_payload()` and the same approve/reject services used by CLI.
+- Consumes: `hermes_cli.teach.review_payload()` and the same approve/reject services used by CLI.
 - Produces: read-only/review Ink overlay with explicit approval/rejection; Dashboard receives it through its existing embedded `hermes --tui` PTY.
 
 - [ ] **Step 1: Write RED gateway protocol tests**

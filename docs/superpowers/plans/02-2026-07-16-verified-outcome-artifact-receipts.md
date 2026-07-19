@@ -23,11 +23,11 @@
 - Source ingestion is idempotent by `(source_kind, source_id)` and content hash. A repeated identical source returns the existing receipt; reusing a source identity with different content is a conflict, not an update.
 - Artifact rechecks are read-only and race-safe: open the file without following a swapped symlink where the platform permits, hash the same open handle that is statted, enforce allowed roots, and report missing, changed, inaccessible, or ambiguous evidence truthfully.
 - Redact secrets, credentials, message bodies, query strings, and sensitive absolute path prefixes before canonical receipt content is hashed or persisted. Raw local locators live only in the bounded artifact-location table and are excluded from public export.
-- Profiles remain independent. Every database, export, artifact locator, signing provider, and benchmark path resolves from `get_hades_home()`; no lookup, recheck, export, signer, or retention job crosses `HADES_HOME`.
+- Profiles remain independent. Every database, export, artifact locator, signing provider, and benchmark path resolves from `get_hermes_home()`; no lookup, recheck, export, signer, or retention job crosses `HERMES_HOME`.
 - Stable behavioral settings live under `receipts:` in `config.yaml`. Signing credentials stay in a secret store or `.env`; config stores only a provider ID and whether signing is required.
 - Add no model-visible core tool and do not change any existing tool JSON schema. This is Footprint Ladder rung 1 plus CLI, native TUI RPC, secondary read-only Dashboard APIs, and a service-gated/plugin-backed signing seam.
 - The system prompt, effective model tool definitions, provider, and model remain byte-stable for a conversation. Receipt state is never injected into prior messages, never adds a synthetic user message, and never mutates history outside existing compression.
-- Real-path tests use a temporary `HADES_HOME`, real `SessionDB`/verification SQLite connections, real files, real hashes, real CLI parsers, and fresh object graphs or subprocess restarts. Mock only external signing/network/process-kill boundaries.
+- Real-path tests use a temporary `HERMES_HOME`, real `SessionDB`/verification SQLite connections, real files, real hashes, real CLI parsers, and fresh object graphs or subprocess restarts. Mock only external signing/network/process-kill boundaries.
 - No outbound telemetry. Proof reports are local JSON/Markdown and state denominators, exclusions, Wilson intervals, p50/p95 latency, baseline/candidate costs, safety slices, and stop conditions separately.
 
 ---
@@ -57,8 +57,8 @@
 - `agent/turn_finalizer.py:152-185` and `agent/codex_runtime.py:508-558` classify then persist turn outcomes. The receipt hook runs after raw ledger persistence and before a receipt-enabled terminal result is projected.
 - `agent/verification_evidence.py:25-620` owns a separate profile-local `verification_evidence.db`, records terminal checks, marks edits stale, and exposes `verification_status(session_id, cwd)`; receipt code reads it through an immutable adapter and does not duplicate its rows.
 - `agent/verification_stop.py:191-308` consumes `verification_status()` for a bounded coding follow-up. Receipt issuance does not add another prompt nudge or alter this behavior.
-- `agent/operation_journal.py:70-278` and `hades_state.py:870-915` own operation certainty. `unknown`/`effect_disposition == "unknown"` maps to `unknown_effect` and is never retried by receipt code.
-- `hades_state.py:134`, `hades_state.py:760-915`, `hades_state.py:1024-1460`, and `hades_state.py:2302-2380` define v21 declarative schema reconciliation, WAL writes, `turn_outcomes`, `agent_operations`, and turn-ledger accessors. Canonical receipt tables and typed store primitives land here.
+- `agent/operation_journal.py:70-278` and `hermes_state.py:870-915` own operation certainty. `unknown`/`effect_disposition == "unknown"` maps to `unknown_effect` and is never retried by receipt code.
+- `hermes_state.py:134`, `hermes_state.py:760-915`, `hermes_state.py:1024-1460`, and `hermes_state.py:2302-2380` define v21 declarative schema reconciliation, WAL writes, `turn_outcomes`, `agent_operations`, and turn-ledger accessors. Canonical receipt tables and typed store primitives land here.
 - `tools/code_execution_tool.py:67-133`, `tools/code_execution_tool.py:699-910`, and `tools/code_execution_tool.py:1028-1061` bound and persist generated artifacts but currently return paths without canonical artifact IDs or SHA-256 digests.
 - The approved vertical slice may add `hermes_cli/missions_db.py`, `agent/effect_transactions.py`, `agent/receipts.py`, and provisional `receipts`/`receipt_observations`; this plan migrates those tables and replaces that module's public implementation without changing consumer import path.
 - Portfolio item #2 consumes the public names frozen below from `agent.receipts` and adds transaction-specific claim construction in `agent/effects/receipts.py`; it does not own receipt schema, status resolution, hashing, or observations.
@@ -86,7 +86,7 @@
 
 ### Existing production files modified
 
-- `hades_state.py` — canonical tables, indexes, atomic v1 migration, and low-level receipt/artifact methods.
+- `hermes_state.py` — canonical tables, indexes, atomic v1 migration, and low-level receipt/artifact methods.
 - `agent/turn_ledger.py`, `agent/turn_finalizer.py`, `agent/codex_runtime.py` — idempotent turn-source issuance with no new prompt messages.
 - `tools/code_execution_tool.py` — attach canonical artifact ID/hash metadata using internal execution context; tool definition remains byte-identical.
 - `hermes_cli/config.py` — safe `receipts` config and validation.
@@ -438,7 +438,7 @@ git commit -m "feat: define canonical receipt contract"
 ### Task 2: Migrate and Persist One Canonical Receipt Store
 
 **Files:**
-- Modify: `hades_state.py`
+- Modify: `hermes_state.py`
 - Create: `agent/receipt_store.py`
 - Create: `tests/agent/test_receipt_store.py`
 - Create: `tests/agent/test_receipt_migration.py`
@@ -581,7 +581,7 @@ Expected: PASS for clean v21 creation, v1 atomic migration, replay/concurrency, 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add hades_state.py agent/receipt_store.py tests/agent/test_receipt_store.py \
+git add hermes_state.py agent/receipt_store.py tests/agent/test_receipt_store.py \
   tests/agent/test_receipt_migration.py tests/test_hermes_state.py \
   tests/test_hermes_state_wal_fallback.py
 git commit -m "feat: persist and migrate immutable receipts"
@@ -593,7 +593,7 @@ git commit -m "feat: persist and migrate immutable receipts"
 
 **Files:**
 - Create: `agent/receipt_artifacts.py`
-- Modify: `hades_state.py`
+- Modify: `hermes_state.py`
 - Modify: `tools/code_execution_tool.py`
 - Create: `tests/agent/test_receipt_artifacts.py`
 - Modify: `tests/tools/test_code_execution.py`
@@ -689,7 +689,7 @@ Expected: PASS; artifact bytes are stored once, source links are deduplicated, t
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/receipt_artifacts.py hades_state.py tools/code_execution_tool.py \
+git add agent/receipt_artifacts.py hermes_state.py tools/code_execution_tool.py \
   tests/agent/test_receipt_artifacts.py tests/tools/test_code_execution.py \
   tests/tools/test_code_execution_modes.py
 git commit -m "feat: catalog receipt artifact digests"
@@ -1144,7 +1144,7 @@ Cover `list`, `show`, `claims`, `recheck`, `export`, `verify-signature`, `retent
 
 Run: `scripts/run_tests.sh tests/hermes_cli/test_receipt_cli.py -q`
 
-Expected: FAIL importing `hades_cli.receipts` and resolving the command.
+Expected: FAIL importing `hermes_cli.receipts` and resolving the command.
 
 - [ ] **Step 3: Implement the shared command service**
 
@@ -1166,7 +1166,7 @@ hermes receipt prune --confirm-plan PLAN_HASH [--json]
 
 - [ ] **Step 4: Register top-level and classic routes once**
 
-Add `CommandDef("receipt", ..., aliases=("receipts",), args_hint="[list|show|claims|recheck|export|verify-signature|retention-plan|prune]")`. `hermes_cli/main.py` delegates parser construction to `hades_cli.receipts.build_parser`; `HermesCLI.process_command()` delegates the parsed tail to the same `run_argv`. No gateway messaging command or model tool is added.
+Add `CommandDef("receipt", ..., aliases=("receipts",), args_hint="[list|show|claims|recheck|export|verify-signature|retention-plan|prune]")`. `hermes_cli/main.py` delegates parser construction to `hermes_cli.receipts.build_parser`; `HermesCLI.process_command()` delegates the parsed tail to the same `run_argv`. No gateway messaging command or model tool is added.
 
 - [ ] **Step 5: Run GREEN and registry regressions**
 
@@ -1197,7 +1197,7 @@ git commit -m "feat: add receipt cli viewer"
 - Modify: `ui-tui/src/__tests__/createSlashHandler.test.ts`
 
 **Interfaces:**
-- Consumes Task 8 `hades_cli.receipts.run_argv(..., output="json")`.
+- Consumes Task 8 `hermes_cli.receipts.run_argv(..., output="json")`.
 - Produces `receipt.exec` JSON-RPC and native Ink `/receipt`/`/receipts` rendering; no shell subprocess and no `slash.exec` fallback for receipt commands.
 
 - [ ] **Step 1: Write RED RPC and Ink behavior tests**
@@ -1390,7 +1390,7 @@ def test_each_seeded_mission_is_traceable_and_recheckable(receipt_e2e, case):
     assert receipt_e2e.recheck_in_new_process(result.receipt_id).receipt_id == result.receipt_id
 ```
 
-Use a temporary `HADES_HOME`, real `state.db`, real `verification_evidence.db`, real mission/workflow records, real operation rows, real files/hashes, and real CLI service. Use the final fake platform boundary only for partial-delivery ambiguity and a fake signer only for provenance attacks.
+Use a temporary `HERMES_HOME`, real `state.db`, real `verification_evidence.db`, real mission/workflow records, real operation rows, real files/hashes, and real CLI service. Use the final fake platform boundary only for partial-delivery ambiguity and a fake signer only for provenance attacks.
 
 - [ ] **Step 2: Run RED**
 
@@ -1527,13 +1527,13 @@ Expected: FAIL because final rollout metadata/help contract is incomplete.
 
 - [ ] **Step 3: Write the complete operator guide**
 
-Document the layman outcome; one copyable issue/list/show/recheck/export flow; exact five statuses; original versus latest observation; claim→evidence→artifact traceability; freshness; missing and ambiguous evidence; artifact hashes; public/local export; retention plan/confirmation; signing provider configuration; why signature is provenance and never truth; storage paths via `display_hades_home()`; profile isolation; and the 50-mission benchmark command/report.
+Document the layman outcome; one copyable issue/list/show/recheck/export flow; exact five statuses; original versus latest observation; claim→evidence→artifact traceability; freshness; missing and ambiguous evidence; artifact hashes; public/local export; retention plan/confirmation; signing provider configuration; why signature is provenance and never truth; storage paths via `display_hermes_home()`; profile isolation; and the 50-mission benchmark command/report.
 
 State exclusions prominently: no new model tool, no exactly-once inference, no claim that compensation/reversal occurred without evidence, no automatic retry for unknown effects, no cross-profile receipt, no telemetry upload, no messaging-gateway viewer, no Desktop dependency/parity, and no Dashboard mutation controls.
 
 - [ ] **Step 4: Write the complete consumer/scorer/signer guide**
 
-Document every frozen `agent.receipts` public type/signature; canonical hash normalization/exclusions and protocol vector; source dedupe/conflict behavior; immutable insertion; observation chain CAS; claim/evidence/artifact reference validation; status precedence; scorer independence/appropriateness/freshness rules; sealed verified decision; mission/transaction projection recovery; read-only recheck rule; redaction boundaries; attestation semantics; signer `check_fn`; migration downgrade behavior; and required temp-`HADES_HOME` real-path tests.
+Document every frozen `agent.receipts` public type/signature; canonical hash normalization/exclusions and protocol vector; source dedupe/conflict behavior; immutable insertion; observation chain CAS; claim/evidence/artifact reference validation; status precedence; scorer independence/appropriateness/freshness rules; sealed verified decision; mission/transaction projection recovery; read-only recheck rule; redaction boundaries; attestation semantics; signer `check_fn`; migration downgrade behavior; and required temp-`HERMES_HOME` real-path tests.
 
 Include complete examples of a mission evidence source, a transaction claim builder consuming `ReceiptStore.insert/append_observation`, a read-only scorer, and a standalone plugin signer registration. Vendor signers remain standalone plugins; widening the scorer/source ABC requires a concrete approved consumer.
 
@@ -1607,7 +1607,7 @@ Do not call Verified Outcome & Artifact Receipts complete until fresh evidence p
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-07-16-verified-outcome-artifact-receipts.md`. Two execution options:
+Plan complete and saved to `docs/superpowers/plans/02-2026-07-16-verified-outcome-artifact-receipts.md`. Two execution options:
 
 1. **Subagent-Driven (recommended)** — use `superpowers:subagent-driven-development`, one fresh implementation subagent per task with specification and quality review between tasks.
 2. **Inline Execution** — use `superpowers:executing-plans`, execute task batches with explicit checkpoints.

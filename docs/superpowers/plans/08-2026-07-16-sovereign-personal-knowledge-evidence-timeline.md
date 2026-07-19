@@ -6,7 +6,7 @@
 
 **Architecture:** Ship the graph and all product-specific state as the active `knowledge` memory-provider plugin (Footprint Ladder rung 4). Widen the existing `MemoryProvider`/`MemoryManager` edge only with a generic, non-model-visible management API so the CLI, Ink TUI, and secondary Dashboard inspector can call the active provider without importing its concrete implementation. Store retained evidence, temporal claim assertions, source edges, entities, contradictions, derived artifacts, and lineage in a profile-local SQLite database; use an idempotent purge journal to remove raw copies, summaries, embeddings, graph indexes, caches, and managed exports while preserving content-free deletion audit rows.
 
-**Tech Stack:** Python 3, stdlib `sqlite3`/FTS5, local `sentence-transformers` embeddings installed with the plugin, existing Hermes memory-provider/plugin discovery, `SessionDB`, argparse/Rich, TUI JSON-RPC, React/TypeScript/Ink/nanostores, React Dashboard sidecar, pytest through `scripts/run_tests.sh`, Vitest, and the existing temporary-`HADES_HOME` test harness.
+**Tech Stack:** Python 3, stdlib `sqlite3`/FTS5, local `sentence-transformers` embeddings installed with the plugin, existing Hermes memory-provider/plugin discovery, `SessionDB`, argparse/Rich, TUI JSON-RPC, React/TypeScript/Ink/nanostores, React Dashboard sidecar, pytest through `scripts/run_tests.sh`, Vitest, and the existing temporary-`HERMES_HOME` test harness.
 
 ## Global Constraints
 
@@ -16,7 +16,7 @@
 - Claims include entity links, supporting or contradicting source edges, valid-time interval, recorded-time interval, confidence, freshness, visibility/consent scope, and supersession/contradiction links.
 - Only explicit CLI or Ink confirmation may create `user_confirmed` authority. Extraction, retrieval, and the model may create only `source_says` or `hermes_inferred` assertions.
 - Erasure is lineage-aware and covers all Hermes-controlled raw evidence, claim rows, source/graph edges, summaries, embeddings, FTS indexes, caches, managed exports, and staged import files. Content-free tombstones may retain opaque IDs, counts, timestamps, and operation status, but no deleted text, locator, hash, embedding, entity label, or canary.
-- The original user-owned export passed to `ingest` and user-copied unmanaged exports are outside Hermes control. Every preview and completion report must say so; the zero-canary gate covers only state controlled by Hades.
+- The original user-owned export passed to `ingest` and user-copied unmanaged exports are outside Hermes control. Every preview and completion report must say so; the zero-canary gate covers only state controlled by Hermes.
 - Session-origin erasure must either leave the source session intact and report `residual_origin`, or, after explicit `--delete-source-session` authority and an active-session check, use existing `SessionDB.delete_session()` to remove that entire source session. It must never rewrite or splice live conversation history.
 - The proof ingests exactly two authorized offline exports—Google Takeout Contacts (`.vcf`) and a Slack standard export (`.zip`)—plus explicitly selected Hermes sessions. It does not mine private history implicitly and makes no connector/network request.
 - The frozen evaluation corpus contains at least 100 ground-truthed temporal questions/claims with expected valid intervals and evidence IDs. Freeze corpus version, strata, scorer definitions, current-Hermes baseline, sample size, hardware/network class, cost source, exclusions, and thresholds before evaluation.
@@ -27,9 +27,9 @@
 - Add no model-visible core tool. `KnowledgeMemoryProvider.get_tool_schemas()` returns `[]`; recall enters only through the existing provider prefetch path and user controls enter through CLI/RPC.
 - The system prompt, cached prefix, effective tool-definition snapshot, provider, and model remain byte-stable for a conversation. Enabling the provider, changing embedding identity, or changing published recall configuration takes effect only in a new conversation.
 - Preserve strict role alternation and compression-only history mutation. Do not inject a synthetic user message mid-loop.
-- Stable non-secret settings live under `memory.knowledge` in `config.yaml`. No credential is required; do not add an environment variable. Runtime authority, evidence, and audit state live in profile-local SQLite/files under `get_hades_home()`.
-- Profiles remain independent islands. Resolve every database, raw-copy, cache, managed-export, and corpus path from the active `HADES_HOME`; never inherit live state from the default profile.
-- Use `scripts/run_tests.sh` for every Python RED/GREEN command. Use real imports and a temporary `HADES_HOME`; mock only external model execution and OS process boundaries.
+- Stable non-secret settings live under `memory.knowledge` in `config.yaml`. No credential is required; do not add an environment variable. Runtime authority, evidence, and audit state live in profile-local SQLite/files under `get_hermes_home()`.
+- Profiles remain independent islands. Resolve every database, raw-copy, cache, managed-export, and corpus path from the active `HERMES_HOME`; never inherit live state from the default profile.
+- Use `scripts/run_tests.sh` for every Python RED/GREEN command. Use real imports and a temporary `HERMES_HOME`; mock only external model execution and OS process boundaries.
 - Truthful status vocabulary is `verified`, `completed_unverified`, `unknown_effect`, `blocked`, and `failed`. A cascade is `verified` only after a full controlled-layer canary scan; interrupted or unscannable deletion is never presented as complete.
 
 ---
@@ -54,7 +54,7 @@
 - `agent/memory_manager.py:353-1138` — provider fan-out, one-external-provider enforcement, tool-schema aggregation, prefetch, write bridge, and shutdown. Add active-provider management dispatch that is never included in `get_all_tool_schemas()`.
 - `plugins/memory/__init__.py:64-458` — bundled/user provider discovery and active memory-plugin CLI discovery. Reuse it unchanged except for behavior tests proving `knowledge` is found and its CLI loads without importing embedding dependencies.
 - `agent/agent_init.py:1439-1488` and `agent/turn_context.py:629-652` — existing provider initialization and fenced prefetch injection. Reuse these paths; the implementation must not rebuild the system prompt or tool schema after initialization.
-- `hades_state.py:711-1018, 4342-4528, 5410-5730, 5971-6459` — durable sessions/messages/FTS, `search_messages()`, imports/exports, and `delete_session()`. The plugin reads selected sessions through public methods and uses `delete_session()` only after explicit whole-session erasure authority; no knowledge tables go into `state.db`.
+- `hermes_state.py:711-1018, 4342-4528, 5410-5730, 5971-6459` — durable sessions/messages/FTS, `search_messages()`, imports/exports, and `delete_session()`. The plugin reads selected sessions through public methods and uses `delete_session()` only after explicit whole-session erasure authority; no knowledge tables go into `state.db`.
 - `agent/turn_ledger.py:28-319` — turn outcome provenance. Read it only to attach a selected session/turn outcome to evidence metadata; do not redefine task receipts as knowledge evidence.
 - `plugins/memory/holographic/store.py:17-619` and `plugins/memory/holographic/retrieval.py` — useful local SQLite/FTS/entity/vector precedent, but its mutable facts and heuristic contradiction score do not meet this design. Do not retrofit or import its store.
 - `plugins/web/tavily/provider.py:64-124`, `plugins/web/exa/provider.py:175-189`, and `plugins/web/parallel/provider.py:243-270` — current normalized URL/title metadata. The knowledge plugin accepts such metadata when a selected session contains it, without changing web providers.
@@ -334,7 +334,7 @@ git commit -m "feat(memory): add provider management contract"
 - Create: `tests/plugins/memory/knowledge/test_models_store.py`
 
 **Interfaces:**
-- Consumes: `get_hades_home()` and stdlib SQLite WAL/FTS5.
+- Consumes: `get_hermes_home()` and stdlib SQLite WAL/FTS5.
 - Produces: `KnowledgeStore`, `EvidenceRecord`, `ClaimAssertion`, `TemporalQuery`, `PurgeRequest`, `insert_evidence()`, `append_assertion()`, `link_assertion_evidence()`, `upsert_entity()`, `add_contradiction()`, and `query_assertions()`.
 
 - [ ] **Step 1: Write failing schema and invariants tests**
@@ -668,7 +668,7 @@ git commit -m "feat(knowledge): cascade lineage correction and erasure"
 
 ```python
 def test_provider_is_local_profile_scoped_and_has_no_model_tools(tmp_path, monkeypatch):
-    monkeypatch.setenv("HADES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     provider = KnowledgeMemoryProvider({"enabled": True, "prefetch_limit": 5})
     provider.initialize("s-1", hermes_home=str(tmp_path), platform="cli", agent_context="primary")
     assert provider.get_tool_schemas() == []
@@ -695,7 +695,7 @@ Expected: FAIL because `KnowledgeMemoryProvider` is undefined.
 
 - [ ] **Step 3: Implement provider registration, bounded prefetch, and config**
 
-`system_prompt_block()` is a constant string based only on provider/retrieval version—not record counts or changing state. `prefetch()` returns at most configured `prefetch_limit` hits and `prefetch_char_limit`, fenced by existing `build_memory_context_block()`, with claim ID, authority, confidence, valid interval, freshness, source locator, and conflict marker. `sync_turn()` does not ingest automatically; explicitly selected sessions are imported by management action. `on_session_end()` is a no-op. `backup_paths()` returns `[]` because all state stays under `HADES_HOME`.
+`system_prompt_block()` is a constant string based only on provider/retrieval version—not record counts or changing state. `prefetch()` returns at most configured `prefetch_limit` hits and `prefetch_char_limit`, fenced by existing `build_memory_context_block()`, with claim ID, authority, confidence, valid interval, freshness, source locator, and conflict marker. `sync_turn()` does not ingest automatically; explicitly selected sessions are imported by management action. `on_session_end()` is a no-op. `backup_paths()` returns `[]` because all state stays under `HERMES_HOME`.
 
 Add default `memory.knowledge` keys: `enabled: true`, `prefetch_limit: 5`, `prefetch_char_limit: 4000`, `embedding_model`, `embedding_revision`, and `managed_export_retention_days: 30`. Register the provider as `name == "knowledge"`. Do not expose extraction/write tools.
 
@@ -994,7 +994,7 @@ git commit -m "test(knowledge): freeze temporal evidence benchmark"
 def test_real_path_import_correct_query_export_erase(
     tmp_path, monkeypatch, fixture_exports, seeded_session_db
 ):
-    monkeypatch.setenv("HADES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     provider = load_memory_provider("knowledge")
     provider.initialize("e2e-session", hermes_home=str(tmp_path), platform="cli", agent_context="primary")
     ingest_all_three_authorized_sources(provider, fixture_exports, seeded_session_db)
@@ -1034,7 +1034,7 @@ Document the origin/residual boundary, user-confirmed authority, correction-vs-e
 
 Run: `scripts/run_tests.sh tests/agent/test_memory_management_contract.py tests/plugins/memory/knowledge tests/tui_gateway/test_knowledge_rpc.py tests/hermes_cli/test_web_server_knowledge.py tests/agent/test_memory_provider.py tests/hermes_cli/test_plugin_cli_registration.py -v`
 
-Expected: PASS with real imports and temporary profile-local state; no test writes to the user's actual Hades home.
+Expected: PASS with real imports and temporary profile-local state; no test writes to the user's actual Hermes home.
 
 Run: `cd ui-tui && npm test -- --run src/__tests__/knowledgeTimeline.test.tsx src/__tests__/knowledgeCommand.test.ts && npm run typecheck && npm run lint`
 

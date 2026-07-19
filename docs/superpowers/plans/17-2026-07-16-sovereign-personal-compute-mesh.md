@@ -11,10 +11,10 @@
 ## Global Constraints
 
 - This is portfolio item #13 only: one user's trust domain, exactly two user devices plus one user-controlled remote node, durable mission/task handoff, placement, selective replication, recovery, revocation, and optional attestation. Multi-owner federation, delegated external agents, commerce, live sensing, general-purpose file sync, and fleet management are excluded.
-- Delivery is Footprint Ladder rung 4, with a possible transport-only rung-5 service catalog entry after incubation. The implementation lives in the standalone `hermes-sovereign-mesh` distribution and profile install directory; it does not land as a third-party/vendor directory in Hades core.
+- Delivery is Footprint Ladder rung 4, with a possible transport-only rung-5 service catalog entry after incubation. The implementation lives in the standalone `hermes-sovereign-mesh` distribution and profile install directory; it does not land as a third-party/vendor directory in Hermes core.
 - Add no model-visible core tool, no MCP tool exposed to the conversation, and no tool-definition field. The agent uses existing mission/workflow/terminal capabilities; users govern the mesh through `hermes mesh` and `/mesh`.
 - The system prompt, cached prefix, effective tool-definition snapshot, provider, and model remain byte-stable for a conversation. No mesh event injects a synthetic user message or rewrites history; a primary runtime change starts a new conversation lineage.
-- Profiles are independent islands. All plugin config/state/locks/keys resolve from the active `get_hades_home()` and `PluginContext.profile_name`; no live default-profile inheritance or cross-profile pairing exists.
+- Profiles are independent islands. All plugin config/state/locks/keys resolve from the active `get_hermes_home()` and `PluginContext.profile_name`; no live default-profile inheritance or cross-profile pairing exists.
 - Stable non-secret settings live under `plugins.entries.sovereign-mesh` in profile-local `config.yaml`. Device private keys, recovery material, bootstrap tokens, and transport credentials live in an OS secret provider or a user-held encrypted recovery bundle; `.env` is credentials-only.
 - Import `AuthorityProvider`, `StoredAuthorityProvider`, `ActionContext`, `AuthorityDecision`, and `authorize_effect()` from canonical `agent.autonomy`. Preview never authorizes commit; dispatch, grant, revocation, recovery, and compensation reload authority immediately before mutation.
 - Import `ReceiptStore`, `ReceiptStatus`, `ReceiptSourceKey`, `Receipt`, `ReceiptObservation`, and `RECEIPT_STATUSES` from canonical `agent.receipts`. The only statuses are `verified`, `completed_unverified`, `failed`, `blocked`, and `unknown_effect`; mesh code cannot mint `verified` or define a sixth status.
@@ -73,13 +73,13 @@ The strict inspection timebox found reusable seams, but none currently provides 
 
 - `gateway/run.py::_get_proxy_url()` and `_run_agent_via_proxy()` forward chat/SSE to a remote API server and preserve platform delivery, but they send prompt/history material and use bearer/TLS transport rather than device identity, E2E selective replication, grants, IFC, or revocation. The mesh must not relabel this path as private E2E compute.
 - `gateway/platforms/api_server.py::_handle_create_session()`, `_handle_session_chat()`, `_handle_session_chat_stream()`, `_handle_fork_session()`, and the `/api/sessions` family provide authenticated client-safe session resources. They are useful compatibility references; the proof sends bounded mesh work envelopes, not whole session history.
-- `hades_state.py::SessionDB.claim_session_lease()`, `touch_session_lease()`, `release_session_lease()`, and `reconcile_expired_session_leases()` are conservative process/session leases. Mesh workload leases use the same end-only/owner-checked principles in plugin storage; they do not overload or weaken session leases.
+- `hermes_state.py::SessionDB.claim_session_lease()`, `touch_session_lease()`, `release_session_lease()`, and `reconcile_expired_session_leases()` are conservative process/session leases. Mesh workload leases use the same end-only/owner-checked principles in plugin storage; they do not overload or weaken session leases.
 - `apps/shared/src/json-rpc-gateway.ts::JsonRpcGatewayClient` supplies request IDs, timeouts, cancellation, reconnect cleanup, and event dispatch for Dashboard/Desktop clients. The mesh does not fork this client; Ink uses existing `slash.exec`/`command.dispatch`, and an optional Dashboard plugin may use the shared client only for existing gateway events.
 - `tui_gateway/server.py::slash.exec` already detects typed plugin commands and dispatches their handlers without the slash-worker subprocess. `commands.catalog` currently catalogs built-ins, quick commands, and skills rather than plugin commands, so the proof promises typed `/mesh` execution plus the packaged `mesh-control` skill for discovery—not unimplemented palette parity and not a new JSON-RPC method.
 - `tools/environments/base.py::BaseEnvironment.execute()` and the local, Docker, SSH, Modal, Daytona, and Singularity adapters provide controlled execution backends. `tools/environments/file_sync.py::FileSyncManager` is deliberately not the replication primitive because its broad file-copy semantics cannot prove selective E2E residency.
 - `hermes_cli/runtime_provider.py`, `hermes_cli/model_switch.py`, and `hermes_cli/models.py` already resolve custom/local endpoints and LM Studio/local-model inventory. Nodes advertise these existing runtimes; the mesh neither installs models nor invents provider resolution.
 - `hermes_cli/plugins.py::PluginContext.register_cli_command()` and `register_command()` provide top-level and in-session controls, `PluginContext.profile_name` identifies the active profile, and entry-point discovery supports a standalone distribution.
-- `hades_constants.py::get_hades_home()` plus context-local overrides enforce profile-local paths. `agent.secret_scope.get_secret()` and `build_profile_secret_scope()` provide fail-closed multiplexed secret resolution; secrets are never copied into envelopes or child environments.
+- `hermes_constants.py::get_hermes_home()` plus context-local overrides enforce profile-local paths. `agent.secret_scope.get_secret()` and `build_profile_secret_scope()` provide fail-closed multiplexed secret resolution; secrets are never copied into envelopes or child environments.
 - `tools/environments/local.py::_sanitize_subprocess_env()` and `hermes_subprocess_env()` provide credential-stripped subprocess construction. Node workers start from the stripped environment and receive only exact granted secret handles resolved locally.
 - `hermes_cli/web_server.py::_discover_dashboard_plugins()` and `_mount_plugin_api_routes()` can mount a standalone plugin's optional static UI/API under `/api/plugins/<name>` after the primary CLI/Ink proof passes.
 
@@ -312,7 +312,7 @@ git commit -m "test: preregister sovereign mesh proof"
 - Create: `hermes-sovereign-mesh/tests/test_profile_isolation.py`
 
 **Interfaces:**
-- Consumes: `get_hades_home()`, `PluginContext.profile_name`, guarded profile-local config reads, SQLite/WAL, and frozen Task 0 fixture IDs.
+- Consumes: `get_hermes_home()`, `PluginContext.profile_name`, guarded profile-local config reads, SQLite/WAL, and frozen Task 0 fixture IDs.
 - Produces: all frozen mesh dataclasses/vocabularies above, `canonical_cbor()`, `content_hash()`, `MeshConfig.load_current()`, and `MeshStore.open_current()` plus typed identity/envelope/lineage/conflict/replay/lease/revocation/audit methods.
 
 - [ ] **Step 1 — RED: write validation, canonicalization, and isolation tests**
@@ -1185,7 +1185,7 @@ git commit -m "docs: ship sovereign mesh proof and incubation"
 | No plaintext outside boundary | 12 sentinel cases scanning transport and all required storage/log/temp/export surfaces with zero leaks |
 | Truthful outcomes | Canonical `ReceiptStore`, five statuses only, independent scorer, one receipt per terminal mission |
 | Cache/tool/role invariants | Independent hashes across mesh changes, pinned provider/model/runtime, strict role alternation, no mesh tool |
-| Profile/secret isolation | `get_hades_home()`, secret handles/local resolution, distinct state/key stores, adversarial cross-profile tests |
+| Profile/secret isolation | `get_hermes_home()`, secret handles/local resolution, distinct state/key stores, adversarial cross-profile tests |
 | Primary/secondary surfaces | `hermes mesh` + `/mesh` through existing Ink plugin path; optional Dashboard inspector; no Desktop files |
 | Narrow-waist delivery | Standalone rung-4 plugin/service, canonical dependency adapters only, no core production change |
 | 90-day proof and comparison | 12 baseline cases; 48 mission, 24 lineage, 48 security candidate cases; exact metrics/gates and local reports |

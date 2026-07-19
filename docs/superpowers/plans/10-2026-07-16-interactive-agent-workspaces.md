@@ -19,13 +19,13 @@
 - Reuse item #6 `agent.autonomy.AuthorityProvider`, `StoredAuthorityProvider`, `ActionContext`, `AuthorityDecision`, and `authorize_effect()`. Do not create a workspace permission store, evaluator, rule type, or approval protocol.
 - Reuse item #2 `agent.effects.TransactionCoordinator`, `TransactionStore`, `TransactionRevision`, `RevisionNode`, `EffectAdapter`, and the existing `OperationJournal` for mutating action effects. Workspace invocation rows are an audited UI projection, not another effect state machine.
 - Reuse item #12's canonical `Receipt`, `ArtifactDigest`, `ReceiptStatus`, evidence freshness, and statuses `verified`, `completed_unverified`, `failed`, `blocked`, and `unknown_effect`. Until the standalone #12 plan lands, consume the canonical `agent.receipts` contract established by item #1; do not define a local receipt schema.
-- Persist immutable envelopes, resumable instance state, trusted action bindings, append-only events, and invocation projections in profile-local `state.db` resolved through `get_hades_home()`. Profiles remain independent islands.
+- Persist immutable envelopes, resumable instance state, trusted action bindings, append-only events, and invocation projections in profile-local `state.db` resolved through `get_hermes_home()`. Profiles remain independent islands.
 - Non-secret settings live under `workspaces:` in `config.yaml`. Credentials and secret values are not valid workspace fields and never enter envelope/state/audit JSON.
 - The system prompt, cached prefix, effective tool definitions, provider, and model remain byte-stable for a conversation. Workspace state changes never rewrite history, rebuild prompts, reload tools, inject a synthetic user message, or change role alternation.
 - Workspace events travel only through durable workspace tables and out-of-band UI events; they are never appended as chat messages.
 - Delivery is Footprint Ladder rung 1 at the existing terminal UI edge, plus the existing CLI-command path. There is no new core model-visible tool. Optional third-party producers ship later as standalone plugins (rung 4) or MCP servers/Apps (rung 5) and may emit only the audited envelope.
 - CLI and native Ink are primary. Dashboard is secondary. Do not modify `apps/desktop/`, import Desktop packages, require Desktop parity, or make Dashboard/desktop a dependency of the workspace service.
-- Real-path tests use temporary `HADES_HOME`, real `SessionDB`, real imports, real files/artifacts, real CLI/service paths, real TUI RPC dispatch, and restart by reopening stores or spawning a fresh process. Mock only external MCP/network/process-kill boundaries.
+- Real-path tests use temporary `HERMES_HOME`, real `SessionDB`, real imports, real files/artifacts, real CLI/service paths, real TUI RPC dispatch, and restart by reopening stores or spawning a fresh process. Mock only external MCP/network/process-kill boundaries.
 - Bound every envelope to 1 MiB canonical JSON, 100 components, 500 rows/items per component, 64 KiB per text value, 128 actions, and 24 hours maximum uncommitted action-binding lifetime. Enforce limits before persistence and rendering.
 - Each task ends with focused GREEN tests, relevant regressions, `git diff --check`, and exactly one conventional commit.
 
@@ -49,7 +49,7 @@
 
 ### Existing seams this plan extends
 
-- `hades_state.py:710-938` owns declarative additive SQLite schema; `SessionDB._execute_write()`/`_execute_read()` provide bounded profile-local access. Additive tables do not require a schema-version bump under the current reconciliation convention.
+- `hermes_state.py:710-938` owns declarative additive SQLite schema; `SessionDB._execute_write()`/`_execute_read()` provide bounded profile-local access. Additive tables do not require a schema-version bump under the current reconciliation convention.
 - `hermes_cli/commands.py:213-215` registers `/workflow`; `cli.py:8427-8833` dispatches canonical slash commands; `hermes_cli/cli_commands_mixin.py:1536-1557` shows the shared classic-handler pattern; `hermes_cli/workflows.py:31-125,565-600` shows a shared top-level/slash parser and renderer.
 - `hermes_cli/main.py:4328-4334,13252-13255` wires top-level workflow parsing/dispatch. Workspace CLI wiring follows this path and does not invoke a shell.
 - `tui_gateway/server.py:1123-1167` emits typed session events; `@method("commands.catalog")` at 11801 and `@method("slash.exec")` at 13278 expose registry/fallback routing; `approval.request`/`approval.respond` at 1147 and 10324 are the existing prompt transport.
@@ -83,7 +83,7 @@
 
 ### Existing production files modified
 
-- `hades_state.py` — additive workspace tables and lazy `SessionDB.workspaces` facade.
+- `hermes_state.py` — additive workspace tables and lazy `SessionDB.workspaces` facade.
 - `hermes_cli/config.py` — bounded `workspaces:` settings only.
 - `hermes_cli/commands.py`, `hermes_cli/main.py`, `hermes_cli/cli_commands_mixin.py`, `cli.py` — top-level/classic `/workspace` registration and dispatch.
 - `tui_gateway/server.py` — `workspace.exec`, `workspace.action`, `workspace.state.update`, and `workspace.updated` events.
@@ -336,7 +336,7 @@ git commit -m "feat: define audited workspace envelope"
 
 **Files:**
 - Create: `agent/workspaces/store.py`
-- Modify: `hades_state.py`
+- Modify: `hermes_state.py`
 - Create: `tests/agent/workspaces/test_store.py`
 - Modify: `tests/test_hermes_state.py`
 
@@ -460,7 +460,7 @@ Expected: PASS on fresh/reopened databases; stale/replayed writes cannot corrupt
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/workspaces/store.py hades_state.py tests/agent/workspaces/test_store.py tests/test_hermes_state.py
+git add agent/workspaces/store.py hermes_state.py tests/agent/workspaces/test_store.py tests/test_hermes_state.py
 git commit -m "feat: persist resumable workspace state"
 ```
 
@@ -730,7 +730,7 @@ Run: `scripts/run_tests.sh tests/hermes_cli/test_workspaces.py tests/hermes_cli/
 
 Expected: PASS; top-level/classic output agrees, approval reuse works, and `/workspace` is discoverable.
 
-Run: `python -m hades_cli.main workspace --help`
+Run: `python -m hermes_cli.main workspace --help`
 
 Expected: bounded subcommands are listed without starting Dashboard, Desktop, or a model call.
 
@@ -759,7 +759,7 @@ git commit -m "feat: add terminal workspace controls"
 
 **Interfaces:**
 - Produces JSON-RPC `workspace.exec`, `workspace.state.update`, and `workspace.action`; event `workspace.updated`; typed `WorkspaceViewResponse`/`WorkspaceActionResponse`; feature-owned `$workspace` nanostore; native `/workspace` handler.
-- Consumes: shared `hades_cli.workspaces.run_argv(..., output_mode="structured")`, `WorkspaceService`, existing `approval.request`/`approval.respond`, existing session transport/stale-session guards, and Task 2 semantic nodes.
+- Consumes: shared `hermes_cli.workspaces.run_argv(..., output_mode="structured")`, `WorkspaceService`, existing `approval.request`/`approval.respond`, existing session transport/stale-session guards, and Task 2 semantic nodes.
 
 - [ ] **Step 1: Write RED RPC, native-route, replay, and event tests**
 
@@ -936,7 +936,7 @@ git commit -m "feat: add secondary dashboard workspaces"
 - Consumes: complete Tasks 2–8 implementation plus landed item #1/#6/#12 contracts.
 - Produces: no new public production interface; this task is the release security/recovery gate.
 
-- [ ] **Step 1: Write the real-path temp-`HADES_HOME` scenario**
+- [ ] **Step 1: Write the real-path temp-`HERMES_HOME` scenario**
 
 Create a temporary profile home, real `SessionDB`, real config, real mission/receipt fixtures through their public stores, a real workspace artifact file, real CLI intake, real TUI RPC dispatch, and a disposable Git worktree for the bounded effect. Use a fake external effect only at the final adapter boundary.
 
@@ -1161,7 +1161,7 @@ Expected: exits 0 only when the 20-pair denominator is complete; time improves a
 
 The user guide documents the layman outcome, five families, file/Mission/Receipt/MCP origins, exact CLI/classic/Ink workflow, plain/screen-reader mode, keyboard keys, save/resume/close, stale/disabled action explanations, authority/approval/transaction/receipt meanings, `unknown_effect`, artifact checks, profile isolation, Dashboard-secondary behavior, retention/purge, and troubleshooting. It explicitly says there is no arbitrary code, remote fetch, gateway messaging parity, Desktop parity, or claim that UI state is task verification.
 
-The developer guide documents strict schema/limits/canonical hash, closed registry, semantic projection, origin matrix, separate binding identity, `ActionContext` trusted fields, `AuthorityProvider` reload, item #2 transaction revision/preview/commit/reconciliation semantics, canonical receipt/artifact use, SQLite CAS/idempotency, MCP reserved-member shape, renderer obligations, accessibility contract, threat model, cache/role invariants, temp-`HADES_HOME` real-path test template, and rung-4/5 producer rules.
+The developer guide documents strict schema/limits/canonical hash, closed registry, semantic projection, origin matrix, separate binding identity, `ActionContext` trusted fields, `AuthorityProvider` reload, item #2 transaction revision/preview/commit/reconciliation semantics, canonical receipt/artifact use, SQLite CAS/idempotency, MCP reserved-member shape, renderer obligations, accessibility contract, threat model, cache/role invariants, temp-`HERMES_HOME` real-path test template, and rung-4/5 producer rules.
 
 - [ ] **Step 6: Define bounded rollout, rollback, and stop conditions**
 

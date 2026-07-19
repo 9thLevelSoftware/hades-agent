@@ -14,7 +14,7 @@
 - The system prompt, cached prefix, effective model-tool definition snapshot, primary provider, and primary model remain byte-stable for a conversation. Event intake never appends a synthetic user message, mutates history, swaps tools, or wakes an existing agent turn.
 - Delivery is Footprint Ladder rung 1 for the shared gateway broker and rung 2 for its CLI + skill. There is no new model-visible core tool. New vendor/source connectors remain service-gated, standalone plugins, or MCP servers.
 - Proactivity is explicit opt-in. `attention.mode` defaults to `off`; `shadow` records recommendations but performs no mission update, workflow start, transaction, digest, notification, interrupt, or other outward action.
-- Profiles are independent islands. Every config, database, cursor, hash key, audit row, inbox item, label, benchmark artifact, and source subscription resolves from `get_hades_home()`; no live default-profile inheritance or cross-profile dedupe is allowed.
+- Profiles are independent islands. Every config, database, cursor, hash key, audit row, inbox item, label, benchmark artifact, and source subscription resolves from `get_hermes_home()`; no live default-profile inheritance or cross-profile dedupe is allowed.
 - Stable, non-secret settings and explicit subscriptions live under `attention:` and `autonomy:` in `config.yaml`. Credentials remain in existing adapter secret fields, secret providers, or `.env`; event/audit/runtime state lives in profile-local SQLite.
 - Source identity, native event identity, sensitivity, canonical entity links, dedupe keys, authority context, and causality are produced by trusted local normalizers. Event text, webhook JSON, page content, message text, model output, and remote metadata cannot assert those fields.
 - Cheap deterministic/local filters run before any model. Optional model ranking is bounded, off by default, authority-checked as remote/local inference, budgeted, and used only for uncertain cases. Failure, timeout, malformed output, or unavailable provider never becomes interrupt/action.
@@ -25,7 +25,7 @@
 - Audit payloads contain hashes, bounded redacted summaries, reason codes, and evidence references—not secrets, raw webhook bodies, raw message bodies, full file contents, access tokens, cookies, or model prompts. Deleting a subscription can purge derived summaries while retaining non-sensitive accounting hashes.
 - Initial proof sources are exactly the approved corpus sources: cron/time, filesystem and local Git state, an inbound generic/GitHub-style webhook, and one already-configured gateway channel feeding the terminal attention inbox. Calendar, email, commerce, and always-on sensors remain excluded without separate opt-in.
 - CLI/terminal and native Ink TUI are primary. Dashboard is a secondary inbox/inspection surface. The Electron Desktop app is not modified and is not a delivery dependency.
-- Every state, security, config, resolution, and remote-I/O path receives a real-import E2E test against a temporary `HADES_HOME`. Mocks are limited to clocks, the optional model/network boundary, platform delivery, and explicit crash injection.
+- Every state, security, config, resolution, and remote-I/O path receives a real-import E2E test against a temporary `HERMES_HOME`. Mocks are limited to clocks, the optional model/network boundary, platform delivery, and explicit crash injection.
 - The no-action gate is immutable: at least 10 active eight-hour days, at least 500 normalized events, at least 100 surfaced candidates all labeled, and at least 100 stratified suppressed events audited. Usefulness precision must be at least 85%, premature would-interrupts must average fewer than 1 per active eight-hour day, audited high-value misses must be at most 5%, dedupe must prevent every duplicate surface/action, authority violations must be zero, and the review trail must be complete before reversible-only rollout.
 
 ---
@@ -92,10 +92,10 @@
 
 ### Existing production files modified
 
-- `hades_state.py` — additive attention tables and a `SessionDB.attention` facade; no schema-version snapshot test.
+- `hermes_state.py` — additive attention tables and a `SessionDB.attention` facade; no schema-version snapshot test.
 - `hermes_cli/config.py` — bounded `attention` defaults, `auxiliary.attention_ranker`, and guarded section apply.
 - `agent/autonomy/models.py`, `agent/autonomy/store.py`, `agent/autonomy/service.py`, `agent/autonomy/__init__.py` — named usage budgets owned by autonomy.
-- `agent/effects/adapters/hades_state.py` — reversible `hermes.workflow.trigger.v1` adapter over owner-module APIs.
+- `agent/effects/adapters/hermes_state.py` — reversible `hermes.workflow.trigger.v1` adapter over owner-module APIs.
 - `hermes_cli/missions_db.py` — idempotent attention event/review append helpers, preserving mission ownership.
 - `hermes_cli/workflows_spec.py`, `hermes_cli/workflows_capabilities.py`, `hermes_cli/workflows_db.py`, `hermes_cli/workflows_dispatcher.py` — durable webhook trigger matching/start and event-sink publication.
 - `cron/scheduler.py` — optional event sink at due/start/finish boundaries, with unchanged behavior when absent.
@@ -400,7 +400,7 @@ git commit -m "feat: define canonical event envelopes"
 - Modify: `agent/autonomy/store.py`
 - Modify: `agent/autonomy/service.py`
 - Modify: `agent/autonomy/__init__.py`
-- Modify: `hades_state.py`
+- Modify: `hermes_state.py`
 - Create: `tests/agent/events/test_subscriptions.py`
 - Create: `tests/agent/autonomy/test_usage_budgets.py`
 
@@ -522,7 +522,7 @@ Expected: PASS; only exact active subscriptions resolve, budget races grant at m
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/events/subscriptions.py hermes_cli/config.py agent/autonomy hades_state.py tests/agent/events/test_subscriptions.py tests/agent/autonomy/test_usage_budgets.py
+git add agent/events/subscriptions.py hermes_cli/config.py agent/autonomy hermes_state.py tests/agent/events/test_subscriptions.py tests/agent/autonomy/test_usage_budgets.py
 git commit -m "feat: authorize attention sources and budgets"
 ```
 
@@ -534,7 +534,7 @@ git commit -m "feat: authorize attention sources and budgets"
 - Create: `agent/attention/__init__.py`
 - Create: `agent/attention/models.py`
 - Create: `agent/attention/store.py`
-- Modify: `hades_state.py`
+- Modify: `hermes_state.py`
 - Create: `tests/agent/attention/test_store.py`
 
 **Interfaces:**
@@ -713,7 +713,7 @@ Expected: PASS; reopen/replay preserves one logical event, one decision, one inb
 - [ ] **Step 6: Commit**
 
 ```bash
-git add agent/attention/models.py agent/attention/store.py agent/attention/__init__.py hades_state.py tests/agent/attention/test_store.py
+git add agent/attention/models.py agent/attention/store.py agent/attention/__init__.py hermes_state.py tests/agent/attention/test_store.py
 git commit -m "feat: persist attention decisions and audit"
 ```
 
@@ -825,7 +825,7 @@ git commit -m "feat: rank attention with bounded local policy"
 - Create: `agent/attention/service.py`
 - Create: `agent/attention/executor.py`
 - Modify: `hermes_cli/missions_db.py`
-- Modify: `agent/effects/adapters/hades_state.py`
+- Modify: `agent/effects/adapters/hermes_state.py`
 - Modify: `gateway/delivery.py`
 - Create: `tests/agent/attention/test_service.py`
 - Create: `tests/agent/attention/test_executor.py`
@@ -907,7 +907,7 @@ Expected: PASS; shadow makes zero calls, duplicate decisions execute once, and o
 - [ ] **Step 7: Commit**
 
 ```bash
-git add agent/attention/service.py agent/attention/executor.py hermes_cli/missions_db.py agent/effects/adapters/hades_state.py gateway/delivery.py tests/agent/attention/test_service.py tests/agent/attention/test_executor.py
+git add agent/attention/service.py agent/attention/executor.py hermes_cli/missions_db.py agent/effects/adapters/hermes_state.py gateway/delivery.py tests/agent/attention/test_service.py tests/agent/attention/test_executor.py
 git commit -m "feat: execute bounded attention decisions"
 ```
 
@@ -1138,7 +1138,7 @@ def test_reversible_rollout_refuses_incomplete_proof(cli):
 
 Run: `scripts/run_tests.sh tests/hermes_cli/test_attention.py -q`
 
-Expected: FAIL importing `hades_cli.attention`.
+Expected: FAIL importing `hermes_cli.attention`.
 
 - [ ] **Step 3: Implement the exact command grammar**
 
@@ -1199,7 +1199,7 @@ git commit -m "feat: add attention broker cli controls"
 
 **Interfaces:**
 - Produces JSON-RPC `attention.exec` with `{argv: string[], session_id?: string}` and structured `AttentionExecResponse`.
-- Consumes `hades_cli.attention.run_argv(..., output_mode="structured")`, existing pages/panels/system messages, and active profile/session resolution.
+- Consumes `hermes_cli.attention.run_argv(..., output_mode="structured")`, existing pages/panels/system messages, and active profile/session resolution.
 
 - [ ] **Step 1: Write RED native RPC/parity/render tests**
 
@@ -1341,7 +1341,7 @@ git commit -m "feat: add dashboard attention inbox"
 
 - [ ] **Step 1: Write real-path crash/replay/partial-failure scenarios**
 
-Use a temporary `HADES_HOME`, real SQLite/WAL, real guarded config, real local aiohttp webhook, real temp filesystem/Git repository, real workflow and mission stores, real policy/authority imports, and process/object reconstruction. Cover:
+Use a temporary `HERMES_HOME`, real SQLite/WAL, real guarded config, real local aiohttp webhook, real temp filesystem/Git repository, real workflow and mission stores, real policy/authority imports, and process/object reconstruction. Cover:
 
 1. crash after authenticated receive but before event insert returns 503 and provider retry creates one event;
 2. crash after event insert before decision recovers to review with complete audit;
@@ -1574,7 +1574,7 @@ The Proactive Attention Broker is complete only when the no-action proof passes 
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-07-16-proactive-attention-broker.md`. Execute only after portfolio items #1, #2, and #6 expose the consumed contracts named above.
+Plan complete and saved to `docs/superpowers/plans/07-2026-07-16-proactive-attention-broker.md`. Execute only after portfolio items #1, #2, and #6 expose the consumed contracts named above.
 
 1. **Subagent-Driven (recommended)** — use `superpowers:subagent-driven-development`, one fresh implementation subagent per task with review between tasks.
 2. **Inline Execution** — use `superpowers:executing-plans`, execute task batches with explicit checkpoints.
