@@ -81,6 +81,7 @@ const PROFILE_SCOPED_PREFIXES = [
   "/api/model/moa",
   "/api/model/options",
   "/api/autonomy",
+  "/api/receipts",
 ];
 
 function withManagementProfile(url: string): string {
@@ -1358,6 +1359,34 @@ export const api = {
   getAutonomyAudit: (limit = 100, verdict?: string) =>
     fetchJSON<AutonomyAuditResponse>(
       `/api/autonomy/audit?limit=${limit}${verdict ? `&verdict=${encodeURIComponent(verdict)}` : ""}`,
+    ),
+
+  // ── Receipts (verified outcome & artifact receipts) ──────────────────
+  // Secondary READ-ONLY inspection surface over the profile-scoped
+  // receipt endpoints. GET-only by design: recheck/export/sign/prune
+  // stay with `hades receipt ...` / `/receipt ...`. Reads inherit the
+  // global management-profile scope via PROFILE_SCOPED_PREFIXES.
+  getReceipts: (params?: {
+    status?: ReceiptStatus;
+    subject?: string;
+    cursor?: string;
+    limit?: number;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.status) query.set("status", params.status);
+    if (params?.subject) query.set("subject", params.subject);
+    if (params?.cursor) query.set("cursor", params.cursor);
+    if (params?.limit) query.set("limit", String(params.limit));
+    const qs = query.toString();
+    return fetchJSON<ReceiptListResponse>(`/api/receipts${qs ? `?${qs}` : ""}`);
+  },
+  getReceipt: (receiptId: string) =>
+    fetchJSON<ReceiptDetailResponse>(
+      `/api/receipts/${encodeURIComponent(receiptId)}`,
+    ),
+  getReceiptObservations: (receiptId: string) =>
+    fetchJSON<ReceiptObservationsResponse>(
+      `/api/receipts/${encodeURIComponent(receiptId)}/observations`,
     ),
 };
 
@@ -2798,4 +2827,173 @@ export interface AgentPluginUpdateResponse {
 export interface PluginProvidersPutRequest {
   memory_provider?: string;
   context_engine?: string;
+}
+
+// ── Receipts (verified outcome & artifact receipts) types ────────────────
+// Mirrors the redacted read-only projections served by the dashboard
+// receipt endpoints: canonical statuses only, claim→evidence→artifact
+// edges, append-only recheck observations, and attestations that are
+// always labeled "provenance only" (a signature never proves truth).
+
+export type ReceiptStatus =
+  | "verified"
+  | "completed_unverified"
+  | "failed"
+  | "blocked"
+  | "unknown_effect";
+
+export interface ReceiptSourceKey {
+  source_kind: string;
+  source_id: string;
+}
+
+export interface ReceiptSummary {
+  receipt_id: string;
+  source: ReceiptSourceKey;
+  subject_kind: string;
+  subject_id: string;
+  session_id: string | null;
+  status: ReceiptStatus;
+  scorer_id: string;
+  scorer_version: string;
+  decided_at: string;
+  content_hash: string;
+}
+
+export interface ReceiptRequestedOutcome {
+  outcome_kind: string;
+  description: string;
+  constraints: string[];
+  producer_id: string;
+  content_hash: string;
+}
+
+export interface ReceiptClaimDoc {
+  claim_id: string;
+  claim_kind: string;
+  statement: string;
+  expected_json: string;
+  observed_json: string;
+  evidence_ids: string[];
+  artifact_ids: string[];
+  required: boolean;
+  verdict: "satisfied" | "unsatisfied" | "unknown" | "not_applicable";
+  uncertainty: string[];
+  content_hash: string;
+}
+
+export interface ReceiptEvidenceDoc {
+  evidence_id: string;
+  evidence_kind: string;
+  source_ref: string;
+  producer_id: string;
+  observed_at: string;
+  fresh_until: string | null;
+  summary: string;
+  payload_hash: string;
+  artifact_ids: string[];
+  content_hash: string;
+}
+
+export interface ReceiptArtifactDoc {
+  artifact_id: string;
+  source_kind: string;
+  source_ref: string;
+  display_name: string;
+  media_type: string | null;
+  size_bytes: number;
+  sha256: string;
+  mtime_ns: number | null;
+  captured_at: string;
+  content_hash: string;
+}
+
+export interface ReceiptDoc {
+  receipt_id: string;
+  source: ReceiptSourceKey;
+  subject_kind: string;
+  subject_id: string;
+  session_id: string | null;
+  turn_id: string | null;
+  mission_id: string | null;
+  transaction_id: string | null;
+  requested_outcome: ReceiptRequestedOutcome;
+  status: ReceiptStatus;
+  claims: ReceiptClaimDoc[];
+  evidence: ReceiptEvidenceDoc[];
+  artifacts: ReceiptArtifactDoc[];
+  uncertainty: string[];
+  scorer_id: string;
+  scorer_version: string;
+  decided_at: string;
+  content_hash: string;
+}
+
+export interface ReceiptObservationDoc {
+  observation_id: string;
+  receipt_id: string;
+  previous_observation_id: string | null;
+  status: ReceiptStatus;
+  claims: ReceiptClaimDoc[];
+  evidence: ReceiptEvidenceDoc[];
+  artifacts: ReceiptArtifactDoc[];
+  uncertainty: string[];
+  scorer_id: string;
+  scorer_version: string;
+  observed_at: string;
+  content_hash: string;
+}
+
+export interface ReceiptClaimEdge {
+  claim_id: string;
+  claim_kind: string;
+  statement: string;
+  verdict: string;
+  required: boolean;
+  evidence_ids: string[];
+  artifact_ids: string[];
+  uncertainty: string[];
+}
+
+export interface ReceiptAttestationDoc {
+  attestation_id: string;
+  target_kind: string;
+  target_id: string;
+  target_content_hash: string;
+  provider_id: string;
+  key_id: string;
+  algorithm: string;
+  signature_b64: string;
+  signed_at: string;
+  verification_state: string;
+  content_hash: string;
+  /** Always "provenance only" — a signature never proves a claim is true. */
+  role: string;
+}
+
+export interface ReceiptListResponse {
+  ok: boolean;
+  receipts: ReceiptSummary[];
+  count: number;
+  next_cursor: string | null;
+}
+
+export interface ReceiptDetailResponse {
+  ok: boolean;
+  receipt_id: string;
+  receipt: ReceiptDoc;
+  claim_edges: ReceiptClaimEdge[];
+  original_status: ReceiptStatus;
+  latest_observation: ReceiptObservationDoc | null;
+  observation_count: number;
+  attestations: ReceiptAttestationDoc[];
+  status_note: string;
+  recheck_hint: string;
+}
+
+export interface ReceiptObservationsResponse {
+  ok: boolean;
+  receipt_id: string;
+  observations: ReceiptObservationDoc[];
+  count: number;
 }
