@@ -338,7 +338,7 @@ git commit -m "test: preregister autonomy contract proof"
 - Produces `SessionDB.autonomy -> AutonomyStore`, with the facade lazily imported to preserve the dependency chain.
 - Consumes Task 1 records and `SessionDB._execute_write()` / `_execute_read()`.
 
-- [ ] **Step 1: Write RED persistence, replay, and privacy tests**
+- [x] **Step 1: Write RED persistence, replay, and privacy tests**
 
 ```python
 def test_reopen_preserves_immutable_version_runtime_rule_and_audit(tmp_path):
@@ -373,13 +373,13 @@ def test_audit_rows_contain_hashes_not_sensitive_values(store):
     assert "sk-canary" not in raw
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_store.py tests/agent/autonomy/test_models.py -q`
 
 Expected: FAIL importing `agent.autonomy.store`.
 
-- [ ] **Step 3: Add the declarative SQL schema**
+- [x] **Step 3: Add the declarative SQL schema**
 
 Append these tables to the existing `SCHEMA_SQL`; do not bump `SCHEMA_VERSION` for additive schema:
 
@@ -465,17 +465,17 @@ CREATE INDEX IF NOT EXISTS idx_autonomy_cost_rule_window
 
 Contract and rule JSON use `sort_keys=True`, separators `(',', ':')`, UTF-8, integer fixed-point cost/confidence/uncertainty, normalized sorted tuples, and SHA-256. `hash_recipient()` uses a random profile-local 32-byte key stored in `state_meta` as `autonomy.recipient_hash_key.v1`; it is never exported, displayed, or shared across profiles.
 
-- [ ] **Step 4: Implement bounded transactional access**
+- [x] **Step 4: Implement bounded transactional access**
 
 `materialize_contract()` inserts by content hash, verifies the stored bytes/hash, and compare-and-sets the singleton head in one `_execute_write()`. Runtime rule updates require exact revision; every transition appends an event in the same transaction. `consume_rules_and_record_decision()` first checks the unique replay identity, validates all selected mandates are active/unexpired/unexhausted, inserts the decision, inserts consumption rows, decrements uses, and marks zero-use rules consumed in one transaction. `reserve_budget()` rejects a negative or over-limit reservation without writing a decision grant. Reads return frozen records and verify hashes before use.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_store.py tests/test_hermes_state.py -q`
 
 Expected: PASS; reopen/replay/concurrency preserve one consumption and no sensitive value reaches audit rows.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agent/autonomy/canonical.py agent/autonomy/store.py hermes_state.py tests/agent/autonomy/test_store.py tests/agent/autonomy/test_models.py

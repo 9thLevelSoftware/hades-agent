@@ -1,13 +1,14 @@
-"""Task 1 model-contract tests for ``agent.autonomy``.
+"""Task 1/2 model- and canonicalization-contract tests for ``agent.autonomy``.
 
 These tests freeze the public authority contract: frozen dataclasses,
-finite vocabularies, and fail-closed validation. No runtime behaviour
-(store/evaluator/service) is exercised here.
+finite vocabularies, fail-closed validation, and the deterministic
+canonical JSON / hashing layer. No persistence is exercised here.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 
 import pytest
 
@@ -26,7 +27,13 @@ from agent.autonomy import (
     RuleProvenance,
     RuleScope,
     TimeConstraint,
+    canonical_json,
+    context_hash,
+    contract_hash,
+    hash_recipient,
+    normalize_action_class,
 )
+from agent.autonomy.canonical import rule_from_dict, rule_to_dict
 
 
 def provenance(**overrides) -> RuleProvenance:
@@ -414,6 +421,94 @@ def test_evidence_requirement_validates_stage():
         EvidenceRequirement(kind="recipient_verified", stage="mid_action")
     with pytest.raises(ValueError, match="kind"):
         EvidenceRequirement(kind="", stage="pre_action")
+
+
+# ── Canonicalization and hashing (Task 2) ───────────────────────────────────
+
+
+def test_canonical_json_is_deterministic_and_compact():
+    text = canonical_json({"b": 2, "a": [1, {"z": None, "y": "é"}]})
+    assert text == '{"a":[1,{"y":"é","z":null}],"b":2}'
+    # Key insertion order never changes the canonical bytes.
+    assert canonical_json({"a": [1, {"y": "é", "z": None}], "b": 2}) == text
+
+
+def test_canonical_json_rejects_floats_and_non_string_keys():
+    with pytest.raises(ValueError, match="float"):
+        canonical_json({"amount": 1.5})
+    with pytest.raises(ValueError, match="float"):
+        canonical_json([float("nan")])
+    with pytest.raises(ValueError):
+        canonical_json({1: "a"})
+    with pytest.raises(ValueError):
+        canonical_json({"obj": object()})
+
+
+def test_contract_hash_is_stable_over_key_order():
+    body = {"schema": AUTONOMY_CONTRACT_SCHEMA, "profile_id": "default", "rules": []}
+    reordered = {"rules": [], "profile_id": "default", "schema": AUTONOMY_CONTRACT_SCHEMA}
+    assert contract_hash(body) == contract_hash(reordered)
+    assert len(contract_hash(body)) == 64
+    assert contract_hash(body) != contract_hash({**body, "profile_id": "other"})
+
+
+def test_context_hash_is_stable_and_field_sensitive():
+    def ctx(**overrides) -> ActionContext:
+        base = dict(
+            operation_key="op-1",
+            stage="execute",
+            action_class="message.send",
+            data_classes=("public",),
+        )
+        base.update(overrides)
+        return ActionContext(**base)
+
+    assert context_hash(ctx()) == context_hash(ctx())
+    assert context_hash(ctx()) != context_hash(ctx(data_classes=("personal",)))
+    assert context_hash(ctx()) != context_hash(ctx(stage="commit"))
+
+
+def test_rule_round_trips_through_canonical_dicts():
+    original = rule(
+        source="temporary_mandate",
+        state="active",
+        expires_at_ms=5_000,
+        max_uses=2,
+        remaining_uses=1,
+        data_classes=("public", "internal"),
+        recipient_hashes=("rh-1",),
+        scope=RuleScope(task_id="task-1", resource_prefixes=("workspace:/tmp",)),
+        cost=CostConstraint(max_per_action_cents=500),
+        time=TimeConstraint(window_start_minute=540, window_end_minute=1_020),
+        evidence_requirements=(
+            EvidenceRequirement(kind="workspace_checkpoint", stage="pre_action"),
+        ),
+    )
+    wire = json.loads(canonical_json(rule_to_dict(original)))
+    assert rule_from_dict(wire) == original
+
+
+def test_normalize_action_class_normalizes_and_fails_closed():
+    assert normalize_action_class("  Message.Send ") == "message.send"
+    assert normalize_action_class("workspace.delete") == "workspace.delete"
+    for bad in ("MessageSend", "message send", "message.", ".send", "", None, 7):
+        with pytest.raises(ValueError):
+            normalize_action_class(bad)
+
+
+def test_hash_recipient_is_keyed_exact_and_confusable_distinct():
+    key = b"k" * 32
+    baseline = hash_recipient("alice@example.test", key=key)
+    assert baseline == hash_recipient("alice@example.test", key=key)
+    # Case-insensitive equivalence, but Unicode confusables stay distinct.
+    assert baseline == hash_recipient(" Alice@Example.Test ", key=key)
+    assert baseline != hash_recipient("aлice@example.test", key=key)
+    assert baseline != hash_recipient("alice@example.test", key=b"x" * 32)
+    assert "alice" not in baseline
+    with pytest.raises(ValueError, match="key"):
+        hash_recipient("alice@example.test", key=b"short")
+    with pytest.raises(ValueError):
+        hash_recipient("", key=key)
 
 
 # ── Immutability ────────────────────────────────────────────────────────────
