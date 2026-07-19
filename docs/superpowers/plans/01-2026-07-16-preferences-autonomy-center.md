@@ -751,7 +751,7 @@ git commit -m "feat: add autonomy authority service"
 - Consumes `StoredAuthorityProvider`, existing approval identity hashing/pending flows, and existing structured clarify question/choice format.
 - Item #2 maps each prepared effect into `ActionContext` and calls `authorize_effect(..., stage="preview", consume=False)` then reloads/calls `stage="commit", consume=True` immediately before the adapter; an earlier allow is never a commit grant.
 
-- [ ] **Step 1: Write RED middleware/order/schema/prompt-dedupe tests**
+- [x] **Step 1: Write RED middleware/order/schema/prompt-dedupe tests**
 
 ```python
 def test_plugin_modified_args_are_the_authorized_identity(plugin_harness):
@@ -778,13 +778,13 @@ def test_registry_authority_metadata_never_changes_model_schema(registry):
 
 Also prove mode `off` performs no autonomy DB write; `shadow` records candidate verdict but preserves current execution/approval behavior; `enforce` blocks before handler; no middleware plugin still invokes the gate; plugin short-circuit creates no autonomy decision; `next_call()` remains single-use; async/sync exceptions preserve the original result; audit failure blocks mutating enforce-mode calls; read-only calls do not gain mutation authority; and structured ask includes a bounded clarification request without injecting a message.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_runtime.py tests/tools/test_registry.py tests/tools/test_approval.py tests/hermes_cli/test_plugins.py -q`
 
 Expected: FAIL because authority registry metadata and runtime gate do not exist.
 
-- [ ] **Step 3: Add non-schema action-context resolvers**
+- [x] **Step 3: Add non-schema action-context resolvers**
 
 The registry stores the optional resolver in `ToolEntry`, returns a defensive copy, and conservatively maps missing mutating metadata to `unknown.mutation`, `data_classes=("unknown",)`, `recipients=("unknown",)`, `reversibility="unknown"`, and unknown cost/uncertainty. Concrete resolvers:
 
@@ -794,7 +794,7 @@ The registry stores the optional resolver in `ToolEntry`, returns a defensive co
 
 Resolvers receive arguments only; they never read secret values or place raw content into the returned context.
 
-- [ ] **Step 4: Wrap the true terminal handler after plugin finalization**
+- [x] **Step 4: Wrap the true terminal handler after plugin finalization**
 
 In `run_tool_execution_middleware()`, always wrap `next_call` in a terminal closure that accepts the final effective arguments and invokes `authority_gate()` exactly once. Pass that closure to `_run_execution_chain()`; when there are no callbacks, call the same closure directly. Calculate the operation key from the final arguments at that boundary. Mode/config/provider lookup occurs at execution time and never mutates the prompt or tool schemas.
 
@@ -802,13 +802,13 @@ For `ask`, call `request_tool_approval()` with `rule_key="autonomy:<contract-has
 
 For `allow`, install a context-local `AuthorityGrant` bound to operation key, tool name, final argument hash, decision ID, contract version/hash, expiry, and `satisfies_generic_approval`. `tools.approval._run_approval_gate()` checks/consumes this grant only after caller-specific hardline/deny checks and pending exact-approval replay checks, and before recoverable session/permanent prompting. It cannot satisfy an exact irreversible transaction approval or a mismatched call.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy/test_runtime.py tests/tools/test_registry.py tests/tools/test_approval.py tests/hermes_cli/test_plugins.py -q`
 
 Expected: PASS; final arguments are gated, hardline policy remains stronger, exact explicit authority removes redundant recoverable prompts, and tool schemas are byte-identical.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agent/autonomy/runtime.py tools/registry.py tools/file_tools.py tools/send_message_tool.py tools/terminal_tool.py hermes_cli/middleware.py tools/approval.py tests/agent/autonomy/test_runtime.py tests/tools/test_registry.py tests/tools/test_approval.py tests/hermes_cli/test_plugins.py

@@ -16,6 +16,15 @@ from agent.autonomy.canonical import (
     hash_resource,
     normalize_action_class,
 )
+from agent.autonomy.runtime import (
+    AuthorityGrant,
+    argument_hash,
+    authority_gate,
+    clear_authority_grant,
+    consume_exact_authority_grant,
+    set_authority_grant,
+    structured_authority_block,
+)
 from agent.autonomy.service import (
     AuthorityProvider,
     AutonomyService,
@@ -62,6 +71,13 @@ __all__ = [
     "hash_recipient",
     "hash_resource",
     "normalize_action_class",
+    "AuthorityGrant",
+    "argument_hash",
+    "authority_gate",
+    "clear_authority_grant",
+    "consume_exact_authority_grant",
+    "set_authority_grant",
+    "structured_authority_block",
     "authorize_effect",
     "ActionContext",
     "AuthorityProvider",

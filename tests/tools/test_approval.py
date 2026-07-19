@@ -2638,3 +2638,138 @@ class TestApprovalPromptRedaction:
         # The script's credential must not appear in the user-facing message.
         assert "sk-proj-abc123xyz4567890abcdef" not in result["message"]
         assert "sk-proj-abc123xyz4567890abcdef" not in result["command"]
+
+
+class TestAutonomyAuthorityGrant:
+    """Task 6: exact autonomy allow grants satisfy the recoverable gate."""
+
+    def _grant(self, tool_name, arguments, **overrides):
+        from agent.autonomy.runtime import AuthorityGrant, argument_hash
+
+        base = dict(
+            operation_key="op-grant-1",
+            tool_name=tool_name,
+            argument_hash=argument_hash(arguments),
+            decision_id="dec-1",
+            contract_version=1,
+            contract_hash="hash-1",
+            expires_at_ms=None,
+            satisfies_generic_approval=True,
+        )
+        base.update(overrides)
+        return AuthorityGrant(**base)
+
+    def _clean_env(self, monkeypatch):
+        for var in ("HERMES_INTERACTIVE", "HERMES_GATEWAY_SESSION",
+                    "HERMES_CRON_SESSION", "HERMES_SESSION_PLATFORM"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_matching_grant_satisfies_plugin_escalation_once(self, monkeypatch):
+        from agent.autonomy.runtime import set_authority_grant
+        from tools.approval import request_tool_approval
+
+        self._clean_env(monkeypatch)
+        args = {"path": "/tmp/canary.txt"}
+        token = set_authority_grant(self._grant("write_file", args))
+        try:
+            first = request_tool_approval(
+                "write_file", "grant test rule", arguments=dict(args)
+            )
+            second = request_tool_approval(
+                "write_file", "grant test rule", arguments=dict(args)
+            )
+        finally:
+            from agent.autonomy.runtime import clear_authority_grant
+            clear_authority_grant(token)
+
+        assert first["approved"] is True
+        # one-use: the second identical call is NOT satisfied and, with no
+        # human present, the plugin escalation fails closed
+        assert second["approved"] is False
+
+    def test_mismatched_grant_never_satisfies(self, monkeypatch):
+        from agent.autonomy.runtime import (
+            clear_authority_grant,
+            set_authority_grant,
+        )
+        from tools.approval import request_tool_approval
+
+        self._clean_env(monkeypatch)
+        token = set_authority_grant(
+            self._grant("write_file", {"path": "/tmp/canary.txt"})
+        )
+        try:
+            wrong_args = request_tool_approval(
+                "write_file", "grant mismatch rule",
+                arguments={"path": "/tmp/other.txt"},
+            )
+            wrong_tool = request_tool_approval(
+                "patch", "grant mismatch rule",
+                arguments={"path": "/tmp/canary.txt"},
+            )
+        finally:
+            clear_authority_grant(token)
+
+        assert wrong_args["approved"] is False
+        assert wrong_tool["approved"] is False
+
+    def test_expired_or_non_generic_grant_never_satisfies(self, monkeypatch):
+        from agent.autonomy.runtime import (
+            clear_authority_grant,
+            set_authority_grant,
+        )
+        from tools.approval import request_tool_approval
+
+        self._clean_env(monkeypatch)
+        args = {"path": "/tmp/canary.txt"}
+        token = set_authority_grant(
+            self._grant("write_file", args, expires_at_ms=1)
+        )
+        try:
+            expired = request_tool_approval(
+                "write_file", "expired grant rule", arguments=dict(args)
+            )
+        finally:
+            clear_authority_grant(token)
+        assert expired["approved"] is False
+
+        token = set_authority_grant(
+            self._grant("write_file", args, satisfies_generic_approval=False)
+        )
+        try:
+            exact_only = request_tool_approval(
+                "write_file", "irreversible grant rule", arguments=dict(args)
+            )
+        finally:
+            clear_authority_grant(token)
+        assert exact_only["approved"] is False
+
+
+class TestRequestToolApprovalAllowPermanent:
+    def test_allow_permanent_false_hides_always_and_never_persists(
+        self, monkeypatch
+    ):
+        from tools.approval import request_tool_approval
+
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        seen = {}
+
+        def callback(command, description, **kwargs):
+            seen.update(kwargs)
+            return "always"
+
+        with mock_patch.object(approval_module, "approve_permanent") as perm, \
+                mock_patch.object(approval_module, "save_permanent_allowlist") as save:
+            result = request_tool_approval(
+                "write_file",
+                "allow-permanent-false rule",
+                approval_callback=callback,
+                arguments={"path": "/tmp/x"},
+                allow_permanent=False,
+            )
+
+        assert result["approved"] is True
+        assert seen.get("allow_permanent") is False
+        perm.assert_not_called()
+        save.assert_not_called()
