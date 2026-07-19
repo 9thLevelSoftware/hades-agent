@@ -993,7 +993,7 @@ git commit -m "feat: add native tui autonomy controls"
 - Produces profile-scoped `/api/autonomy/status`, `/rules`, `/preview`, `/apply`, `/suggestions/{id}/accept`, `/suggestions/{id}/reject`, `/mandates`, `/mandates/{id}/revoke`, and `/audit` endpoints.
 - Consumes the same `AutonomyService`; Dashboard never reads/writes tables or YAML directly.
 
-- [ ] **Step 1: Write RED API/page tests**
+- [x] **Step 1: Write RED API/page tests**
 
 ```typescript
 it('shows source, confidence, expiry, conflicts, and edit route for every rule', async () => {
@@ -1017,7 +1017,7 @@ it('previews a stable edit and sends its exact hash on apply', async () => {
 
 Python API tests cover invalid profile, cross-profile stale hash, managed config, request-size/limit bounds, CSRF/auth middleware, no raw recipients in responses, and no await while holding `_profile_scope`'s process-global lock.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `scripts/run_tests.sh tests/hermes_cli/test_web_server.py -k autonomy -q`
 
@@ -1027,15 +1027,15 @@ Run: `cd web && npm test -- --run src/pages/AutonomyPage.test.tsx`
 
 Expected: FAIL because the page/API client do not exist.
 
-- [ ] **Step 3: Implement scoped APIs**
+- [x] **Step 3: Implement scoped APIs**
 
 Resolve/validate the requested profile synchronously, then execute service work in a worker thread inside a short `_profile_scope`; never hold the scope across an await. Pydantic bodies cap rule documents at 1 MiB and audit limit at 500. Apply requires exact preview hash. Endpoint responses use the same bounded structured renderer as TUI and preserve profile-local hashes.
 
-- [ ] **Step 4: Implement the secondary page**
+- [x] **Step 4: Implement the secondary page**
 
 Add `/autonomy` navigation. The page has contract status/mode/version, effective rule table, source/state/confidence/expiry/uses, rule explanation drawer, stable edit preview/apply, suggestion accept/reject, mandate revoke, and bounded audit table. It labels conservative conflicts and never implies suggestions are active. Failures render non-destructively and do not affect `/chat` or its embedded TUI.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 Run: `scripts/run_tests.sh tests/hermes_cli/test_web_server.py -k autonomy -q`
 
@@ -1045,10 +1045,10 @@ Run: `cd web && npm test -- --run src/pages/AutonomyPage.test.tsx && npm run typ
 
 Expected: PASS; profile-local Dashboard management works without a Desktop dependency.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
-git add hermes_cli/web_server.py web/src/lib/api.ts web/src/pages/AutonomyPage.tsx web/src/pages/AutonomyPage.test.tsx web/src/App.tsx
+git add hades_cli/web_server.py web/src/lib/api.ts web/src/pages/AutonomyPage.tsx web/src/pages/AutonomyPage.test.tsx web/src/App.tsx
 git commit -m "feat: add dashboard autonomy center"
 ```
 
