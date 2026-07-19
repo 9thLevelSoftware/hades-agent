@@ -13,11 +13,13 @@ independent scorer can mint the sealed ``VerifiedReceiptDecision``
 required for ``verified``; a signature proves provenance over a content
 hash and never changes truth status.
 
-Names delivered by later plan tasks (``ReceiptStore``,
-``digest_artifact``, the scorer/signer protocols, and the issuer
-service) resolve lazily so the frozen contract surface is stable from
-day one; accessing one before its module lands raises ``AttributeError``
-naming the pending module.
+The scorer protocol and sealing service (``EndStateScorer``,
+``ReceiptScoringService``) resolve eagerly from
+``agent.receipt_scoring``. Names delivered by later plan tasks
+(``ReceiptStore``, ``digest_artifact``, the signer protocol, and the
+issuer service) resolve lazily so the frozen contract surface is stable
+from day one; accessing one before its module lands raises
+``AttributeError`` naming the pending module.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 from agent.receipt_hashing import canonical_content_hash
+from agent.receipt_scoring import EndStateScorer, ReceiptScoringService
 from agent.receipt_models import (
     RECEIPT_STATUSES,
     ArtifactDigest,
@@ -76,8 +79,6 @@ __all__ = [
 _FORWARD_EXPORTS: dict[str, tuple[str, str]] = {
     "ReceiptStore": ("agent.receipt_store", "ReceiptStore"),
     "digest_artifact": ("agent.receipt_artifacts", "digest_artifact"),
-    "EndStateScorer": ("agent.receipt_scoring", "EndStateScorer"),
-    "ReceiptScoringService": ("agent.receipt_scoring", "ReceiptScoringService"),
     "ReceiptIssuer": ("agent.receipt_ingest", "ReceiptIssuer"),
     "ReceiptSigner": ("agent.receipt_security", "ReceiptSigner"),
 }
@@ -85,10 +86,6 @@ _FORWARD_EXPORTS: dict[str, tuple[str, str]] = {
 if TYPE_CHECKING:  # pragma: no cover - typing-only forward imports
     from agent.receipt_artifacts import digest_artifact  # noqa: F401
     from agent.receipt_ingest import ReceiptIssuer  # noqa: F401
-    from agent.receipt_scoring import (  # noqa: F401
-        EndStateScorer,
-        ReceiptScoringService,
-    )
     from agent.receipt_security import ReceiptSigner  # noqa: F401
     from agent.receipt_store import ReceiptStore  # noqa: F401
 
