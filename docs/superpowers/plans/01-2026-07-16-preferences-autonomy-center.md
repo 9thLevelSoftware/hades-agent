@@ -1143,7 +1143,7 @@ git commit -m "test: prove autonomy safety and recovery"
 - Produces `run_corpus(manifest_path, cases_path, mode, output_dir)`, `score_run(baseline, candidate)`, local `results.json`, and `report.md`.
 - Consumes the frozen Task 1 fixtures, real CLI/service imports, current approval baseline harness, and final implementation.
 
-- [ ] **Step 1: Write RED scorer/denominator tests**
+- [x] **Step 1: Write RED scorer/denominator tests**
 
 ```python
 def test_score_requires_all_cases_and_reports_slices(tmp_path):
@@ -1167,13 +1167,13 @@ def test_missing_or_excluded_case_cannot_silently_shrink_denominator():
         score_run(baseline, candidate)
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `scripts/run_tests.sh tests/benchmarks/test_autonomy_benchmark.py -q`
 
 Expected: FAIL because runner/scorer are incomplete.
 
-- [ ] **Step 3: Implement baseline, candidate, and metrics**
+- [x] **Step 3: Implement baseline, candidate, and metrics**
 
 Baseline runs current Hermes approval behavior with autonomy mode off. Candidate runs enforce mode with exactly the case's predeclared assertions/mandates/suggestions. Both use the same action context, clock, designated outward-effect stub, and initial state. Record per case: expected/actual verdict, handler call count, contract violation, prompts (approval plus clarification), redundant prompt eligibility, conflict correctness, explanation success, edit/re-evaluate success, latency, cost source/value, excluded/aborted reason, and authority/audit hashes.
 
@@ -1186,7 +1186,7 @@ Definitions:
 
 Report exact denominators, Wilson 95% intervals for rates, p50/p95 latency, session-ledger cost and cost per correct decision, every exclusion/abort, and each safety stratum separately. Never aggregate away a violation. If a denominator is underpowered, report inconclusive and increase cases before changing a threshold.
 
-- [ ] **Step 4: Run the benchmark gate**
+- [x] **Step 4: Run the benchmark gate**
 
 Run: `python benchmarks/autonomy/run.py --manifest benchmarks/autonomy/manifest.yaml --cases benchmarks/autonomy/cases.yaml --mode baseline --output benchmarks/autonomy/results/baseline`
 
@@ -1200,13 +1200,13 @@ Run: `python benchmarks/autonomy/score.py --baseline benchmarks/autonomy/results
 
 Expected: exits 0 only with zero contract violations, conflict accuracy 50-case applicable subset at 100%, prompt reduction at least 20%, and explain/edit rate 100%. Generated result directories remain local artifacts and are not committed.
 
-- [ ] **Step 5: Write user and developer documentation**
+- [x] **Step 5: Write user and developer documentation**
 
 The user guide documents the layman outcome, source kinds, allow/ask/deny, conflict precedence, recipient/data/action/cost/time/uncertainty/reversibility/evidence fields, stable vs temporary storage, mode off/shadow/enforce, every CLI/TUI command, Dashboard-secondary workflow, profile isolation/no inheritance, suggestion confirmation, mandate expiry/consumption, audit/export/purge, approval/clarify behavior, commit-time recheck, recovery/doctor, and local benchmark. Include one complete recipient-sharing rule, one one-use transaction mandate, one cost/time rule, and the exact preview/apply commands.
 
 The developer guide documents canonical JSON/hashes, `AuthorityProvider` signatures, `ActionContext` trusted fields, resolver failure behavior, pure evaluation order, version/materialization/consumption transactions, budget reservation/settlement, decision audit redaction, approval-grant ordering, item #2 adapter/recheck integration, item #15 ownership boundary, profile/secret rules, crash recovery, cache invariants, and required real-path tests for new consumers.
 
-- [ ] **Step 6: Define rollout and rollback gates**
+- [x] **Step 6: Define rollout and rollback gates**
 
 1. Ship defaults with `autonomy.mode: off`; operators may run CLI/TUI explain/benchmark and inspect suggestions.
 2. Enable `shadow` for the full 50-case preregistered corpus and at least two real CLI/TUI workflows from each applicable §8.5 archetype, with only user-authorized data/designated accounts.
@@ -1214,7 +1214,7 @@ The developer guide documents canonical JSON/hashes, `AuthorityProvider` signatu
 4. Stop rollout on any contract violation, inferred authorization, approval replay, cross-profile access, unredacted sensitive audit value, incorrect conflict, commit without fresh recheck, prompt/tool/provider/model drift, role alternation violation, audit-unavailable fail-open, or false completion/verification claim.
 5. Roll back by setting `autonomy.mode: off` through guarded config apply and starting no new authority-gated effects; preserve state/audit for diagnosis. Export stable rules if desired, then purge runtime audit through the explicit command. Do not delete `state.db` or alter past conversations.
 
-- [ ] **Step 7: Run GREEN through the final verification matrix**
+- [x] **Step 7: Run GREEN through the final verification matrix**
 
 Run: `scripts/run_tests.sh tests/agent/autonomy tests/hermes_cli/test_autonomy.py tests/hermes_cli/test_profiles.py tests/tools/test_registry.py tests/tools/test_approval.py tests/tui_gateway/test_autonomy_rpc.py tests/benchmarks/test_autonomy_benchmark.py -q`
 
@@ -1236,7 +1236,7 @@ Run: `git diff --check`
 
 Expected: no whitespace errors.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add benchmarks/autonomy/run.py benchmarks/autonomy/score.py benchmarks/autonomy/README.md tests/benchmarks/test_autonomy_benchmark.py website/docs/user-guide/features/preferences-autonomy-center.md website/docs/developer-guide/autonomy-contract.md

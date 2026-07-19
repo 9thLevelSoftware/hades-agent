@@ -1,8 +1,10 @@
-"""Task 1 preregistration tests for the frozen autonomy 50-case corpus.
+"""Preregistration and proof tests for the autonomy 50-case corpus.
 
 The corpus in ``benchmarks/autonomy/`` is the 90-day gate. These tests
-freeze its identity: exact case IDs, strata, gates, denominators, and
-per-case declarations. Changing the corpus must fail these tests.
+freeze its identity (exact case IDs, strata, gates, denominators, and
+per-case declarations — changing the corpus must fail these tests) and
+prove the runner/scorer: complete denominators, per-slice reporting,
+zero-violation candidate behaviour, and the preregistered gate.
 """
 
 from __future__ import annotations
@@ -10,9 +12,12 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
+import pytest
 import yaml
 
 from agent.autonomy import ACTION_CLASSES
+from benchmarks.autonomy.run import run_corpus
+from benchmarks.autonomy.score import CaseResult, RunResult, score_run
 
 BENCH_DIR = Path(__file__).resolve().parents[2] / "benchmarks" / "autonomy"
 
@@ -175,3 +180,184 @@ def test_rule_ids_referenced_by_expectations_exist_in_the_case():
         expected = case["expected"]
         for rid in expected["matched_rule_ids"] + expected["conflicting_rule_ids"]:
             assert rid in declared, f"{cid}: expectation references undeclared rule {rid}"
+
+
+# ── Task 11: runner/scorer proof ────────────────────────────────────────────
+
+
+def synthetic_complete_runs() -> tuple[RunResult, RunResult]:
+    """Complete 50-case baseline/candidate runs derived from the frozen corpus.
+
+    The candidate decides exactly as preregistered (actual == expected,
+    zero violations); the baseline prompts exactly as declared. This is
+    the scorer's happy-path input — the real runs come from ``run_corpus``.
+    """
+    _manifest, cases = load_fixtures()
+    baseline_cases: list[CaseResult] = []
+    candidate_cases: list[CaseResult] = []
+    for case in cases:
+        expected = case["expected"]
+        common = dict(
+            case_id=case["id"],
+            stratum=case["stratum"],
+            expected_verdict=expected["verdict"],
+            expected_code=expected["code"],
+            latency_ns=1_000_000,
+            cost_source="session_usage_ledger",
+            cost_usd_micros=0,
+            excluded_reason=None,
+            abort_reason=None,
+            authority_hash="synthetic",
+            context_hash="synthetic",
+        )
+        baseline_cases.append(
+            CaseResult(
+                actual_verdict="ask" if case["baseline_prompts"] else "allow",
+                actual_code="generic_approval",
+                prompts=1 if case["baseline_prompts"] else 0,
+                handler_calls=1,
+                contract_violations=[],
+                redundant_prompt_eligible=False,
+                conflict_expected=False,
+                conflict_correct=False,
+                effective_rules=0,
+                explain_edit_successes=0,
+                **common,
+            )
+        )
+        conflict_expected = bool(expected["conflicting_rule_ids"])
+        effective = len(case["stable_assertions"]) + len(
+            [
+                m
+                for m in case["temporary_mandates"]
+                if m["state"] == "active"
+            ]
+        )
+        candidate_cases.append(
+            CaseResult(
+                actual_verdict=expected["verdict"],
+                actual_code=expected["code"],
+                prompts=1 if expected["verdict"] == "ask" else 0,
+                handler_calls=1 if expected["verdict"] == "allow" else 0,
+                contract_violations=[],
+                redundant_prompt_eligible=(
+                    expected["verdict"] == "allow"
+                    and case["baseline_prompts"]
+                    and not case["candidate_may_prompt"]
+                ),
+                conflict_expected=conflict_expected,
+                conflict_correct=conflict_expected,
+                effective_rules=effective,
+                explain_edit_successes=effective,
+                **common,
+            )
+        )
+    baseline = RunResult(
+        corpus_version="autonomy-50-v1",
+        mode="baseline",
+        clock_ms=1760000000000,
+        cases=baseline_cases,
+    )
+    candidate = RunResult(
+        corpus_version="autonomy-50-v1",
+        mode="candidate",
+        clock_ms=1760000000000,
+        cases=candidate_cases,
+    )
+    return baseline, candidate
+
+
+def test_score_requires_all_cases_and_reports_slices(tmp_path):
+    baseline, candidate = synthetic_complete_runs()
+    report = score_run(baseline, candidate)
+    assert report.denominator == 50
+    assert report.contract_violations == 0
+    assert report.conservative_conflict_accuracy == 1.0
+    assert report.effective_rule_explain_edit_rate == 1.0
+    assert report.redundant_prompt_reduction >= 0.20
+    assert set(report.slices) == {
+        "recipients", "sharing", "deletion", "purchases", "outbound_messages",
+        "model_privacy_routing", "expired_approval",
+    }
+
+
+def test_missing_or_excluded_case_cannot_silently_shrink_denominator():
+    baseline, candidate = synthetic_complete_runs()
+    candidate.cases.pop()
+    with pytest.raises(ValueError, match="expected 50 cases"):
+        score_run(baseline, candidate)
+
+
+def test_baseline_missing_case_also_fails_the_denominator():
+    baseline, candidate = synthetic_complete_runs()
+    baseline.cases.pop(0)
+    with pytest.raises(ValueError, match="expected 50 cases"):
+        score_run(candidate=candidate, baseline=baseline)
+
+
+def test_a_violation_is_never_aggregated_away():
+    baseline, candidate = synthetic_complete_runs()
+    candidate.cases[3].contract_violations.append(
+        "handler called although the expected verdict was deny"
+    )
+    report = score_run(baseline, candidate)
+    assert report.contract_violations == 1
+    assert report.passed is False
+    assert any("violation" in failure for failure in report.gate_failures)
+    # the offending case is named, never averaged into a passing rate
+    assert any(v.case_id == candidate.cases[3].case_id for v in report.violations)
+
+
+def test_run_corpus_candidate_matches_every_preregistered_verdict(tmp_path):
+    result = run_corpus(
+        BENCH_DIR / "manifest.yaml",
+        BENCH_DIR / "cases.yaml",
+        "candidate",
+        tmp_path / "candidate",
+    )
+    assert len(result.cases) == 50
+    for case in result.cases:
+        assert case.actual_verdict == case.expected_verdict, case.case_id
+        assert case.actual_code == case.expected_code, case.case_id
+        assert case.contract_violations == [], case.case_id
+        # deny/ask never reach the outward-effect stub
+        if case.expected_verdict != "allow":
+            assert case.handler_calls == 0, case.case_id
+    assert (tmp_path / "candidate" / "results.json").is_file()
+
+
+def test_run_corpus_baseline_prompts_match_frozen_declarations(tmp_path):
+    _manifest, cases = load_fixtures()
+    declared = {c["id"]: c["baseline_prompts"] for c in cases}
+    result = run_corpus(
+        BENCH_DIR / "manifest.yaml",
+        BENCH_DIR / "cases.yaml",
+        "baseline",
+        tmp_path / "baseline",
+    )
+    assert len(result.cases) == 50
+    for case in result.cases:
+        assert case.prompts == (1 if declared[case.case_id] else 0), case.case_id
+
+
+def test_real_runs_pass_the_preregistered_gate(tmp_path):
+    baseline = run_corpus(
+        BENCH_DIR / "manifest.yaml",
+        BENCH_DIR / "cases.yaml",
+        "baseline",
+        tmp_path / "baseline",
+    )
+    candidate = run_corpus(
+        BENCH_DIR / "manifest.yaml",
+        BENCH_DIR / "cases.yaml",
+        "candidate",
+        tmp_path / "candidate",
+    )
+    report = score_run(baseline, candidate)
+    assert report.denominator == 50
+    assert report.contract_violations == 0
+    assert report.conservative_conflict_accuracy == 1.0
+    assert report.effective_rule_explain_edit_rate == 1.0
+    assert report.redundant_prompt_reduction >= 0.20
+    assert report.passed is True
+    assert report.gate_failures == []

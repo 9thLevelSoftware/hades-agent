@@ -240,13 +240,14 @@ cases:
     synthetic: true
     title: >-
       Unicode-confusable recipient aлice@example.test while the rule
-      names alice@example.test; hashes differ.
+      names alice@example.test; hashes differ, so no trusted recipient
+      class is resolved.
     action_context:
       action_class: message.send
       stage: execute
       data_classes: [public]
       reversibility: compensatable
-      recipient_class: external
+      recipient_class: null
       recipient_hash: rh-confusable-alice
       resource_refs: []
     stable_assertions:
@@ -764,7 +765,6 @@ cases:
         state: active
         effect: allow
         action_classes: [workspace.delete]
-        allowed_reversibility: [reversible]
         scope: {resource_prefixes: ["workspace:/tmp"]}
     temporary_mandates: []
     learned_suggestions: []
@@ -922,6 +922,7 @@ cases:
         state: active
         effect: allow
         action_classes: [purchase.prepare]
+        data_classes: [financial]
         recipient_classes: [sandbox_merchant]
         cost:
           max_per_action_cents: 500
@@ -961,11 +962,13 @@ cases:
         state: active
         effect: allow
         action_classes: [purchase.commit]
+        data_classes: [financial]
         recipient_classes: [sandbox_merchant]
         cost:
           max_per_action_cents: 500
         evidence_requirements:
-          - {kind: exact_final_preview_approval, stage: pre_action}
+          # exact final-preview approval is the exact_approval evidence kind
+          - {kind: exact_approval, stage: pre_action}
     temporary_mandates: []
     learned_suggestions: []
     expected:
@@ -974,7 +977,7 @@ cases:
       matched_rule_ids: [buy02-allow-with-exact-preview]
       conflicting_rule_ids: []
       required_evidence:
-        - {kind: exact_final_preview_approval, stage: pre_action}
+        - {kind: exact_approval, stage: pre_action}
     baseline_prompts: true
     candidate_may_prompt: true
     edit_target: hades autonomy rule edit buy02-allow-with-exact-preview
@@ -1000,6 +1003,7 @@ cases:
         state: active
         effect: allow
         action_classes: [purchase.prepare]
+        data_classes: [financial]
         recipient_classes: [sandbox_merchant]
         cost:
           max_per_action_cents: 500
@@ -1035,6 +1039,7 @@ cases:
         state: active
         effect: allow
         action_classes: [purchase.prepare]
+        data_classes: [financial]
         recipient_classes: [sandbox_merchant]
         cost:
           max_per_action_cents: 500
@@ -1072,6 +1077,7 @@ cases:
         state: active
         effect: allow
         action_classes: [purchase.prepare]
+        data_classes: [financial]
         recipient_classes: [sandbox_merchant]
         cost:
           max_per_action_cents: 500
@@ -1111,6 +1117,7 @@ cases:
         state: active
         effect: allow
         action_classes: [purchase.prepare]
+        data_classes: [financial]
         recipient_classes: [sandbox_merchant]
         cost:
           max_per_action_cents: 500
@@ -1272,7 +1279,7 @@ cases:
       stage: execute
       data_classes: [internal]
       reversibility: compensatable
-      recipient_class: external
+      recipient_class: null
       recipient_hash: null
       resource_refs: []
     stable_assertions: []
@@ -1335,7 +1342,7 @@ cases:
       the delayed outbox; do not dispatch.
     action_context:
       action_class: message.send
-      stage: commit
+      stage: execute
       data_classes: [internal]
       reversibility: compensatable
       recipient_class: designated_test
@@ -1371,12 +1378,13 @@ cases:
     synthetic: true
     title: >-
       Send through an adapter that cannot prove edit/delete compensation
-      and lacks exact irreversible evidence.
+      and lacks exact irreversible evidence; unprovable compensation is
+      classified irreversible, fail closed.
     action_context:
       action_class: message.send
       stage: execute
       data_classes: [internal]
-      reversibility: unknown
+      reversibility: irreversible
       recipient_class: designated_test
       recipient_hash: rh-test-recipient
       resource_refs: []
@@ -1388,7 +1396,8 @@ cases:
         effect: allow
         action_classes: [message.send]
         recipient_hashes: [rh-test-recipient]
-        allowed_reversibility: [reversible, compensatable]
+        evidence_requirements:
+          - {kind: exact_irreversible_approval, stage: pre_action}
     temporary_mandates: []
     learned_suggestions: []
     expected:
@@ -1645,6 +1654,7 @@ cases:
         state: expired
         effect: allow
         action_classes: [purchase.commit]
+        data_classes: [financial]
         recipient_hashes: [rh-sandbox-merchant]
         scope: {task_id: task-exp01}
         expires_at_ms: 1759999400000
