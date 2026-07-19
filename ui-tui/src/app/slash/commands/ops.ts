@@ -1,4 +1,5 @@
 import type {
+  AutonomyExecResponse,
   BrowserManageResponse,
   CommandsCatalogResponse,
   DelegationPauseResponse,
@@ -17,7 +18,7 @@ import type { PanelSection } from '../../../types.js'
 import { applyDelegationStatus, getDelegationState } from '../../delegationStore.js'
 import { patchOverlayState } from '../../overlayStore.js'
 import { getSpawnHistory, pushDiskSnapshot, setDiffPair, type SpawnSnapshot } from '../../spawnHistoryStore.js'
-import type { SlashCommand } from '../types.js'
+import type { SlashCommand, SlashRunCtx } from '../types.js'
 
 interface SkillInfo {
   category?: string
@@ -61,7 +62,90 @@ interface SkillsReloadResponse {
   output?: string
 }
 
+const isLongText = (text: string) => text.length > 180 || text.split('\n').filter(Boolean).length > 2
+
+/**
+ * Render one structured `autonomy.exec` result.
+ *
+ * Deny/conflict decisions become warnings naming the exact edit commands;
+ * mutation preview/apply become persistent system messages carrying the
+ * exact contract hash; suggestions always carry source/confidence plus the
+ * "not authorization" label. An in-flight action that *asks* reuses the
+ * existing approval/clarify overlays — this renderer never adds a second
+ * modal, so a standalone evaluate/explain just prints its question.
+ */
+const renderAutonomyResult = (action: string, r: AutonomyExecResponse, ctx: SlashRunCtx): void => {
+  const { page, panel, sys } = ctx.transcript
+  const decision = r.decision
+
+  if (decision && (decision.verdict === 'deny' || (decision.conflicting_rule_ids?.length ?? 0) > 0)) {
+    sys(`warning: ${decision.verdict} / ${decision.code} — ${decision.reason || 'no matching authority'}`)
+
+    for (const target of decision.edit_targets ?? []) {
+      sys(`edit: ${target}`)
+    }
+
+    return
+  }
+
+  if (decision) {
+    return isLongText(r.output) ? page(r.output, 'Autonomy decision') : sys(r.output)
+  }
+
+  if (r.preview) {
+    sys(
+      `autonomy change previewed (not applied) · before ${r.preview.before_contract_hash} → after ${r.preview.after_contract_hash}`
+    )
+
+    if (r.output) {
+      sys(r.output)
+    }
+
+    return
+  }
+
+  if (r.applied) {
+    return sys(`autonomy change applied · contract v${r.applied.contract_version} hash ${r.applied.contract_hash}`)
+  }
+
+  if (r.suggestions.length) {
+    return panel('Autonomy suggestions (not authorization)', [
+      {
+        rows: r.suggestions.map(s => [
+          s.rule_id,
+          `${s.effect} · ${s.state} · ${s.provenance ?? 'unknown provenance'} · confidence ${
+            s.confidence_ppm ?? '?'
+          } ppm — not authorization`
+        ])
+      }
+    ])
+  }
+
+  const title = `Autonomy ${(r.action || action).replace(/^-+/, '') || 'help'}`
+  const text = r.output || '(no output)'
+
+  return isLongText(text) ? page(text, title) : sys(text)
+}
+
 export const opsCommands: SlashCommand[] = [
+  {
+    aliases: ['authority'],
+    help: 'explain and edit what Hades may do (allow/ask/deny authority)',
+    name: 'autonomy',
+    run: (arg, ctx) => {
+      // Existing slash tokenizer semantics (whitespace split) — never a shell.
+      const tokens = arg.trim().split(/\s+/).filter(Boolean)
+      const argv = tokens.length ? tokens : ['--help']
+
+      // Native route only: mutating autonomy verbs must never reach the
+      // slash-worker fallback (slash.exec) — see slashParity.test.ts.
+      ctx.gateway
+        .rpc<AutonomyExecResponse>('autonomy.exec', { argv, session_id: ctx.sid })
+        .then(ctx.guarded<AutonomyExecResponse>(r => renderAutonomyResult(argv[0]!, r, ctx)))
+        .catch(ctx.guardedErr)
+    }
+  },
+
   {
     help: 'stop background processes',
     name: 'stop',

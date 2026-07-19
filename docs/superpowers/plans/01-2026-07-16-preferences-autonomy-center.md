@@ -921,7 +921,7 @@ git commit -m "feat: add autonomy center cli controls"
 - Produces JSON-RPC `autonomy.exec` with `{argv: string[], session_id?: string}` and structured `AutonomyExecResponse`.
 - Consumes `hermes_cli.autonomy.run_argv(..., output_mode="structured")`, existing approval/clarify overlays, transcript panel/page/sys renderers, and stale-session guards.
 
-- [ ] **Step 1: Write RED RPC and native-route tests**
+- [x] **Step 1: Write RED RPC and native-route tests**
 
 ```python
 def test_autonomy_exec_is_profile_local_and_structured(rpc, profile_home):
@@ -941,7 +941,7 @@ it('routes mutating autonomy commands through native autonomy.exec', () => {
 })
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `scripts/run_tests.sh tests/tui_gateway/test_autonomy_rpc.py -q`
 
@@ -951,17 +951,17 @@ Run: `cd ui-tui && npm test -- --run src/__tests__/autonomyCommand.test.ts src/_
 
 Expected: FAIL because `/autonomy` has no native handler.
 
-- [ ] **Step 3: Implement bounded live-process RPC**
+- [x] **Step 3: Implement bounded live-process RPC**
 
 Validate at most 64 UTF-8 argv entries and 64 KiB total, resolve the active session/profile, call the shared service, and return `{ok, action, output, contract, rules, suggestions, decision, audit, preview, approval_pending, profile_home}`. Validation/conflict errors use JSON-RPC 4xxx and storage/recovery errors use 5xxx. Redact exception strings and never return tracebacks, raw recipients, source content, or secrets.
 
-- [ ] **Step 4: Implement Ink rendering and parity**
+- [x] **Step 4: Implement Ink rendering and parity**
 
 Add `autonomy` with alias `authority` to `opsCommands`; parse with the existing slash argv parser, never a shell. Render status/list/rule/evaluate/audit as panels/pages, mutation preview/apply as persistent system messages with the exact hash, deny/conflict as warnings naming edit commands, and suggestions with source/confidence plus “not authorization.” Reuse existing approval/clarify overlays if an in-flight action asks; do not add a second modal.
 
 Add `autonomy` to both `NATIVE_MUTATING_COMMANDS` and `MUTATING_COMMANDS`. Assert catalog discovery cannot route it to `slash.exec`, including when the local handler registry is temporarily absent.
 
-- [ ] **Step 5: Run GREEN and typecheck**
+- [x] **Step 5: Run GREEN and typecheck**
 
 Run: `scripts/run_tests.sh tests/tui_gateway/test_autonomy_rpc.py -q`
 
@@ -971,7 +971,7 @@ Run: `cd ui-tui && npm test -- --run src/__tests__/autonomyCommand.test.ts src/_
 
 Expected: PASS; autonomy mutations are native, explanations render, and existing prompt overlays still work.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tui_gateway/server.py ui-tui/src/gatewayTypes.ts ui-tui/src/app/slash/commands/ops.ts tests/tui_gateway/test_autonomy_rpc.py ui-tui/src/__tests__/autonomyCommand.test.ts ui-tui/src/__tests__/slashParity.test.ts

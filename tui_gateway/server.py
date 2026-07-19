@@ -12797,6 +12797,111 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5017, str(e))
 
 
+# ── Autonomy (Preferences & Autonomy Center) ─────────────────────────
+# Native in-process route for the Ink TUI's /autonomy command. Bounded
+# argv over the SAME shared parser/service as `hades autonomy ...` and
+# the classic slash path (hades_cli.autonomy.run_argv) — no shell, no
+# subprocess, no second authority surface.
+
+_AUTONOMY_MAX_ARGV_ENTRIES = 64
+_AUTONOMY_MAX_ARGV_BYTES = 65_536  # 64 KiB total UTF-8
+
+
+def _autonomy_contract_doc(payload: dict) -> dict | None:
+    """Contract identity (version/hash/profile/mode) when the verb exposed it."""
+    if not (payload.get("contract_version") or payload.get("contract_hash")):
+        return None
+    doc = {
+        "version": payload.get("contract_version"),
+        "hash": payload.get("contract_hash"),
+    }
+    for key in ("profile_id", "mode"):
+        if payload.get(key) is not None:
+            doc[key] = payload[key]
+    return doc
+
+
+@method("autonomy.exec")
+def _(rid, params: dict) -> dict:
+    argv = params.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(entry, str) for entry in argv)
+        or len(argv) > _AUTONOMY_MAX_ARGV_ENTRIES
+        or sum(len(entry.encode("utf-8")) for entry in argv) > _AUTONOMY_MAX_ARGV_BYTES
+    ):
+        return _err(
+            rid,
+            4033,
+            "autonomy.exec: argv must be a non-empty list[str] of at most "
+            f"{_AUTONOMY_MAX_ARGV_ENTRIES} entries and "
+            f"{_AUTONOMY_MAX_ARGV_BYTES} UTF-8 bytes total",
+        )
+
+    # Profile isolation: a session resumed from another profile carries its
+    # own profile_home; bind it for the duration of the call so the shared
+    # service resolves THAT profile's config.yaml/state.db, never the launch
+    # profile's. No session (or an unknown one) means the launch profile.
+    session = _sessions.get(params.get("session_id") or "") or {}
+    profile_home = session.get("profile_home")
+    home_token = set_hades_home_override(str(profile_home)) if profile_home else None
+    try:
+        import hades_cli.autonomy as _autonomy_cli
+
+        result = _autonomy_cli.run_argv(list(argv), output_mode="structured")
+        resolved_home = str(get_hades_home())
+        exit_ok = _autonomy_cli.EXIT_OK
+        exit_validation = _autonomy_cli.EXIT_VALIDATION
+        exit_storage = _autonomy_cli.EXIT_STORAGE
+    except Exception:
+        # Deliberately redacted: no tracebacks, exception strings, raw
+        # recipients, source content, or secrets on the wire.
+        logger.exception("autonomy.exec failed")
+        return _err(
+            rid,
+            5038,
+            "autonomy.exec: internal failure (details withheld; run "
+            "`hades autonomy doctor` in a terminal)",
+        )
+    finally:
+        if home_token is not None:
+            reset_hades_home_override(home_token)
+
+    payload = result.payload or {}
+    # run_argv already maps failures to bounded, redacted messages
+    # (clipped, never a traceback). Surface them on the JSON-RPC error
+    # channel: 4xxx validation/conflict, 5xxx storage/recovery.
+    if result.exit_code == exit_validation:
+        return _err(rid, 4034, payload.get("error") or "autonomy: validation error")
+    if result.exit_code == exit_storage:
+        return _err(rid, 5039, payload.get("error") or "autonomy: storage failure")
+
+    preview = payload if payload.get("applied") is False else None
+    applied = payload if payload.get("applied") is True else None
+    return _ok(
+        rid,
+        {
+            "ok": result.exit_code == exit_ok,
+            "action": argv[0].strip().lower(),
+            "exit_code": result.exit_code,
+            "output": result.output,
+            "contract": _autonomy_contract_doc(payload),
+            "rules": payload.get("rules") or [],
+            "suggestions": payload.get("suggestions") or [],
+            "decision": payload if "verdict" in payload else None,
+            "audit": payload.get("decisions") or [],
+            "preview": preview,
+            "applied": applied,
+            # True while an authority change awaits its explicit second step:
+            # a previewed change needing the exact-hash apply, or a crashed
+            # apply journal pending recovery (authority fails closed).
+            "approval_pending": bool(preview) or bool(payload.get("pending_apply")),
+            "profile_home": resolved_home,
+        },
+    )
+
+
 @method("command.resolve")
 def _(rid, params: dict) -> dict:
     try:

@@ -13,9 +13,10 @@ interface CommandRegistryLoad {
   names: string[]
 }
 
-const NATIVE_MUTATING_COMMANDS = new Set(['browser', 'busy', 'fast', 'reload-mcp', 'rollback', 'stop'])
+const NATIVE_MUTATING_COMMANDS = new Set(['autonomy', 'browser', 'busy', 'fast', 'reload-mcp', 'rollback', 'stop'])
 
 const MUTATING_COMMANDS = [
+  'autonomy',
   'background',
   'branch',
   'browser',
@@ -96,10 +97,21 @@ describe('slash parity matrix', () => {
     const routes = Object.fromEntries(commandRegistry.names.map(name => [name, classifyRoute(name)]))
 
     expect(routes['model']).toBe('local')
+    expect(routes['autonomy']).toBe('native')
     expect(routes['browser']).toBe('native')
     expect(routes['reload-mcp']).toBe('native')
     expect(routes['rollback']).toBe('native')
     expect(routes['stop']).toBe('native')
+  })
+
+  it('keeps /autonomy off slash.exec even without the local handler registry', () => {
+    // NATIVE_MUTATING_COMMANDS classification is name-based and checked BEFORE
+    // the local slash registry, so catalog discovery can never route an
+    // autonomy mutation to the slash worker — including when the local
+    // handler registry is temporarily absent (e.g. mid-reload).
+    expect(NATIVE_MUTATING_COMMANDS.has('autonomy')).toBe(true)
+    expect(classifyRoute('autonomy')).toBe('native')
+    expect(findSlashCommand('autonomy'), '/autonomy must have a native local handler').toBeDefined()
   })
 
   registryIt('keeps every mutating command off slash-worker fallback', () => {
