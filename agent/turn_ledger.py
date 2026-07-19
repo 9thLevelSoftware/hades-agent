@@ -134,6 +134,150 @@ def fetch_turn_outcome(
     return TurnOutcomeRecord(**data)
 
 
+def _ledger_logger() -> Any:
+    """Lazy shared logger — mirrors the finalizer's no-cycle pattern."""
+    try:
+        from agent.conversation_loop import logger
+        return logger
+    except Exception:  # pragma: no cover - fallback when logger unavailable
+        import logging
+        return logging.getLogger(__name__)
+
+
+_RECEIPTS_MODES = ("capture", "require", "off")
+
+
+def resolve_receipts_mode(agent: Any) -> str:
+    """Resolve the receipts behavior mode for this agent's turns.
+
+    ``capture`` (default): receipts are issued best-effort and never
+    surface on the turn result. ``require``: the receipt projection is
+    exposed on the result and a store failure for an explicitly
+    receipt-required turn downgrades that projection to
+    ``completed_unverified``. ``off``: no receipt issuance. An explicit
+    agent attribute wins; the ``receipts:`` config section is the
+    fallback; anything unreadable falls back to ``capture``.
+    """
+    mode = getattr(agent, "_receipts_mode", None)
+    if isinstance(mode, str) and mode in _RECEIPTS_MODES:
+        return mode
+    try:
+        from hades_cli.config import load_config_readonly
+
+        receipts_cfg = (load_config_readonly() or {}).get("receipts") or {}
+        cfg_mode = receipts_cfg.get("mode")
+        if isinstance(cfg_mode, str) and cfg_mode in _RECEIPTS_MODES:
+            return cfg_mode
+    except Exception:
+        pass
+    return "capture"
+
+
+def issue_turn_receipt_safely(
+    agent: Any, record: TurnOutcomeRecord
+) -> Optional[dict]:
+    """Issue the one canonical receipt for a just-persisted turn.
+
+    Never raises, never appends a message, and never resets prompt/tool
+    state — the receipt path is invisible to the conversation. In
+    ``capture`` mode failures are logged and nothing (verified or
+    otherwise) is exposed on the turn result. In ``require`` mode the
+    projection is returned for the result dict; a receipt-store failure
+    for an explicitly receipt-required turn changes only that projection
+    to ``completed_unverified``.
+    """
+    mode = resolve_receipts_mode(agent)
+    if mode == "off":
+        return None
+    required = bool(getattr(agent, "_turn_receipt_required", False))
+
+    def _downgraded(reason: str) -> Optional[dict]:
+        if mode == "require" and required:
+            return {
+                "receipt_id": None,
+                "receipt_status": "completed_unverified",
+                "receipt_error": reason,
+            }
+        return None
+
+    session_db = getattr(agent, "_session_db", None)
+    if session_db is None or not record.session_id or not record.turn_id:
+        return _downgraded(
+            "no session database or turn identity available for receipt "
+            "issuance"
+        )
+    try:
+        from agent.receipt_ingest import (
+            SnapshotConflictError,
+            build_receipt_issuer,
+        )
+        from agent.receipt_models import ReceiptSourceKey
+
+        issuer = build_receipt_issuer(session_db)
+        source = ReceiptSourceKey(
+            "turn", f"{record.session_id}:{record.turn_id}"
+        )
+        try:
+            receipt = issuer.issue(source)
+            receipt_id = receipt.receipt_id
+            receipt_status = receipt.status
+        except SnapshotConflictError:
+            # The turn's durable content changed after issuance: a
+            # changed terminal source becomes a recheck observation,
+            # never a replacement receipt.
+            existing = issuer.store.find_by_source(source)
+            if existing is None:
+                raise
+            observation = issuer.recheck(existing.receipt_id)
+            receipt_id = existing.receipt_id
+            receipt_status = observation.status
+    except Exception as exc:  # noqa: BLE001 - receipt path must not escape
+        try:
+            _ledger_logger().warning(
+                "turn receipt issuance failed for session=%s turn=%s: %s",
+                record.session_id,
+                record.turn_id,
+                exc,
+            )
+        except Exception:
+            pass
+        return _downgraded(f"receipt issuance failed: {exc}")
+    if mode == "require":
+        return {"receipt_id": receipt_id, "receipt_status": receipt_status}
+    # Capture mode: the receipt is stored, but no verified receipt (or
+    # any projection) is exposed on the turn result.
+    return None
+
+
+def record_turn_outcome_and_receipt(
+    agent: Any,
+    *,
+    outcome: str,
+    outcome_reason: str,
+    turn_exit_reason: Optional[str],
+    api_calls: int,
+    tool_iterations: int,
+    messages: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> tuple[TurnOutcomeRecord, Optional[dict]]:
+    """The one finalizer seam: raw ledger record, then receipt issuance.
+
+    Ledger persistence stays best-effort and independent; receipt
+    issuance runs after the raw record lands and can never fabricate a
+    user/system message or alter the response.
+    """
+    record = persist_turn_outcome(
+        agent,
+        outcome=outcome,
+        outcome_reason=outcome_reason,
+        turn_exit_reason=turn_exit_reason,
+        api_calls=api_calls,
+        tool_iterations=tool_iterations,
+        messages=messages,
+    )
+    projection = issue_turn_receipt_safely(agent, record)
+    return record, projection
+
+
 def persist_turn_outcome(
     agent: Any,
     *,
@@ -391,7 +535,10 @@ __all__ = [
     "TurnOutcomeRecord",
     "build_turn_outcome_record",
     "fetch_turn_outcome",
+    "issue_turn_receipt_safely",
+    "record_turn_outcome_and_receipt",
     "record_turn_outcome_safely",
+    "resolve_receipts_mode",
     "persist_turn_outcome",
     "skills_loaded_from",
     "extract_loaded_skills",

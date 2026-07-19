@@ -196,3 +196,84 @@ def test_interrupt_without_tool_tail_adds_nothing():
     _finalize(agent, messages, interrupted=True, final_response="partial reply")
     assert len(messages) == before
     assert messages[-1]["role"] == "assistant"
+
+
+def test_receipt_issue_and_recheck_preserve_conversation_invariants(tmp_path):
+    """Receipt issue/recheck never touches the conversation or prompt cache.
+
+    Hash the system message, effective tool definitions, provider, model,
+    and normalized role sequence immediately before and after receipt
+    issue and recheck: the receipt path appends no message, resets no
+    cached prompt field, and mutates no history.
+    """
+    import hashlib
+    import json
+
+    from agent.receipt_ingest import build_receipt_issuer
+    from agent.receipt_store import ReceiptStore
+    from agent.receipts import ReceiptSourceKey
+    from agent.turn_ledger import record_turn_outcome_and_receipt
+    from hades_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        agent = _StubAgent()
+        agent._session_db = db
+        agent._current_turn_id = "turn-inv"
+        system_message = {"role": "system", "content": "You are Hermes."}
+        tool_definitions = [
+            {
+                "type": "function",
+                "function": {"name": "patch", "parameters": {"type": "object"}},
+            }
+        ]
+        messages = [
+            system_message,
+            {"role": "user", "content": "edit the file"},
+            {"role": "assistant", "content": "Done."},
+        ]
+
+        def _fingerprint() -> str:
+            return hashlib.sha256(
+                json.dumps(
+                    {
+                        "system": system_message,
+                        "tools": tool_definitions,
+                        "provider": agent.provider,
+                        "model": agent.model,
+                        "roles": [m.get("role") for m in messages],
+                    },
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+
+        before_issue = _fingerprint()
+        _record, projection = record_turn_outcome_and_receipt(
+            agent,
+            outcome="completed_unverified",
+            outcome_reason="response completed without verification",
+            turn_exit_reason="text_response(finish_reason=stop)",
+            api_calls=1,
+            tool_iterations=0,
+            messages=messages,
+        )
+        assert _fingerprint() == before_issue
+        assert len(messages) == 3
+        # Capture mode exposes no receipt projection.
+        assert projection is None
+
+        receipt = ReceiptStore(db).find_by_source(
+            ReceiptSourceKey("turn", "sess-1:turn-inv")
+        )
+        assert receipt is not None
+
+        issuer = build_receipt_issuer(db)
+        before_recheck = _fingerprint()
+        observation = issuer.recheck(receipt.receipt_id)
+        assert _fingerprint() == before_recheck
+        assert len(messages) == 3
+        assert observation.receipt_id == receipt.receipt_id
+        # The original receipt is byte-identical after the recheck.
+        assert ReceiptStore(db).get(receipt.receipt_id) == receipt
+    finally:
+        db.close()

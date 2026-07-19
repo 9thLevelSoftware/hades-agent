@@ -812,8 +812,9 @@ def run_codex_app_server_turn(
     # The sidecar bump runs in a SEPARATE try/except so a ledger-write
     # failure cannot suppress utility-counter evidence.
     _turn_outcome_record = None
+    _turn_receipt_projection = None
     try:
-        from agent.turn_ledger import persist_turn_outcome
+        from agent.turn_ledger import record_turn_outcome_and_receipt
         # turn.turn_id is an opaque codex UUID, NOT an exit reason — store
         # a stable fallback so downstream analytics can group codex turns
         # alongside chat-completions turns without leaking UUIDs into the
@@ -828,14 +829,16 @@ def run_codex_app_server_turn(
             codex_exit_reason = "codex_no_response"
         else:
             codex_exit_reason = "codex_response"
-        _turn_outcome_record = persist_turn_outcome(
-            agent,
-            outcome=turn_outcome["outcome"],
-            outcome_reason=turn_outcome["reason"],
-            turn_exit_reason=codex_exit_reason,
-            api_calls=api_calls,
-            tool_iterations=turn.tool_iterations,
-            messages=messages,
+        _turn_outcome_record, _turn_receipt_projection = (
+            record_turn_outcome_and_receipt(
+                agent,
+                outcome=turn_outcome["outcome"],
+                outcome_reason=turn_outcome["reason"],
+                turn_exit_reason=codex_exit_reason,
+                api_calls=api_calls,
+                tool_iterations=turn.tool_iterations,
+                messages=messages,
+            )
         )
     except Exception as _ledger_err:
         logger.debug("turn_outcome ledger write skipped: %s", _ledger_err)
@@ -877,7 +880,7 @@ def run_codex_app_server_turn(
             agent._background_review_in_flight = False
             logger.debug("background review spawn raised", exc_info=True)
 
-    return {
+    result = {
         "final_response": turn.final_text,
         "messages": messages,
         "api_calls": api_calls,
@@ -900,6 +903,11 @@ def run_codex_app_server_turn(
         "codex_turn_id": turn.turn_id,
         **usage_result,
     }
+    # Receipt projection (require mode only). Additive result metadata:
+    # the receipt path never appends a message or alters the response.
+    if _turn_receipt_projection:
+        result["receipt"] = dict(_turn_receipt_projection)
+    return result
 
 
 # ---------------------------------------------------------------------------

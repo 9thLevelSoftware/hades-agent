@@ -30,23 +30,28 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from agent.operation_journal import OperationJournal
 from agent.receipt_artifacts import ArtifactCatalog
-from agent.receipt_hashing import canonical_content_hash
+from agent.receipt_hashing import canonical_content_hash, normalize_utc_timestamp
 from agent.receipt_ingest import (
     EvidenceSourceError,
     MissionEvidenceSource,
     ReceiptIngestError,
     ReceiptIngestor,
+    ReceiptIssuer,
+    ReceiptSourceResolver,
     SnapshotConflictError,
     TransactionEvidenceSource,
     TurnEvidenceSource,
     build_absence_evidence,
     build_evidence_snapshot,
+    build_receipt_issuer,
     build_verification_evidence_digest,
 )
 from agent.receipt_models import (
@@ -54,6 +59,7 @@ from agent.receipt_models import (
     ReceiptDecision,
     build_claim,
     build_evidence_digest,
+    build_observation as build_observation_record,
     build_operation_evidence,
     build_requested_outcome,
 )
@@ -947,3 +953,366 @@ def test_recover_projection_without_projection_tables_is_safe(turn_source, db):
     receipt = ingestor.issue(turn_source.snapshot("s1", "t1"))
     assert ingestor.recover_projection(ReceiptSourceKey("turn", "s1:t1")) == receipt
     assert ingestor.recover_projection(ReceiptSourceKey("turn", "s9:t9")) is None
+
+
+# ---------------------------------------------------------------------------
+# Task 6: ReceiptIssuer — deterministic issue, observation-only recheck,
+# CAS-chained observations, and crash-safe mission projection recovery.
+# ---------------------------------------------------------------------------
+
+
+class InjectedCrash(RuntimeError):
+    """Test-injected crash between receipt insert and projection."""
+
+
+def _ticking_now():
+    """Deterministic strictly-increasing decision clock for scoring."""
+    base = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
+    state = {"i": 0}
+
+    def _now() -> str:
+        state["i"] += 1
+        return normalize_utc_timestamp(base + timedelta(seconds=state["i"]))
+
+    return _now
+
+
+@pytest.fixture()
+def receipt_issuer(db, workflows_db_path, tmp_path):
+    """A full ReceiptIssuer over a mission with a file-backed artifact."""
+    artifact_root = tmp_path / "deliverables"
+    artifact_root.mkdir()
+    artifact_path = artifact_root / "deliverable.txt"
+    artifact_path.write_text("published release notes v2\n")
+    catalog = ArtifactCatalog(db)
+    digest = catalog.register_path(
+        artifact_path,
+        source_kind="mission",
+        source_ref="m1:artifact",
+        allowed_roots=(artifact_root,),
+    )
+    _seed_mission(
+        workflows_db_path,
+        evidence={
+            "artifact_ids": [digest.artifact_id],
+            "before": {"page": "absent"},
+            "after": {"page": "published"},
+        },
+    )
+    issuer = build_receipt_issuer(
+        db,
+        workflows_db_path=workflows_db_path,
+        profile="default",
+        allowed_roots=(artifact_root,),
+        now=_ticking_now(),
+    )
+    issuer.fixture = SimpleNamespace(
+        artifact_id=digest.artifact_id,
+        artifact_path=artifact_path,
+        revert_artifact=lambda: artifact_path.write_text(
+            "old draft content (reverted)\n"
+        ),
+        delete_artifact=lambda: artifact_path.unlink(),
+    )
+    return issuer
+
+
+def test_recheck_appends_and_never_rewrites_original(receipt_issuer):
+    original = receipt_issuer.issue(ReceiptSourceKey("mission", "m1"))
+    receipt_issuer.fixture.revert_artifact()
+    observation = receipt_issuer.recheck(original.receipt_id)
+    assert observation.receipt_id == original.receipt_id
+    assert observation.previous_observation_id is None
+    assert observation.status == "failed"
+    assert receipt_issuer.store.get(original.receipt_id) == original
+
+
+def test_issue_by_source_key_is_idempotent_and_projects_mission_id(
+    receipt_issuer, workflows_db_path
+):
+    first = receipt_issuer.issue(ReceiptSourceKey("mission", "m1"))
+    second = receipt_issuer.issue(ReceiptSourceKey("mission", "m1"))
+    assert first == second
+    assert first.mission_id == "m1"
+    assert len(receipt_issuer.store.list(ReceiptQuery())) == 1
+    conn = sqlite3.connect(workflows_db_path)
+    try:
+        row = conn.execute(
+            "SELECT receipt_id FROM missions WHERE mission_id = 'm1'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == first.receipt_id
+
+
+def test_second_and_third_rechecks_chain_predecessor_ids(receipt_issuer):
+    original = receipt_issuer.issue(ReceiptSourceKey("mission", "m1"))
+    first = receipt_issuer.recheck(original.receipt_id)
+    second = receipt_issuer.recheck(original.receipt_id)
+    third = receipt_issuer.recheck(original.receipt_id)
+    assert first.previous_observation_id is None
+    assert second.previous_observation_id == first.observation_id
+    assert third.previous_observation_id == second.observation_id
+    chain = receipt_issuer.store.observations(original.receipt_id)
+    assert [o.observation_id for o in chain] == [
+        first.observation_id,
+        second.observation_id,
+        third.observation_id,
+    ]
+    # Earlier observations are immutable — the chain grows, never rewrites.
+    assert chain[0] == first
+    assert chain[1] == second
+    assert receipt_issuer.store.get(original.receipt_id) == original
+
+
+def test_concurrent_recheck_cas_conflict_retries(receipt_issuer):
+    original = receipt_issuer.issue(ReceiptSourceKey("mission", "m1"))
+    store = receipt_issuer.store
+    real_append = store.append_observation
+    state = {"competitor": None}
+
+    def racing_append(observation, *, decision=None):
+        if state["competitor"] is None:
+            # A concurrent process appends its own observation first.
+            competitor = build_observation_record(
+                receipt_id=original.receipt_id,
+                previous_observation_id=None,
+                status="completed_unverified",
+                uncertainty=("appended by a concurrent recheck",),
+                scorer_id="test.competitor",
+                scorer_version="1.0",
+                observed_at="2026-07-16T11:00:00Z",
+            )
+            state["competitor"] = real_append(competitor)
+        return real_append(observation, decision=decision)
+
+    store.append_observation = racing_append
+    observation = receipt_issuer.recheck(original.receipt_id)
+    assert state["competitor"] is not None
+    # The CAS conflict was retried and chained after the competitor.
+    assert observation.previous_observation_id == (
+        state["competitor"].observation_id
+    )
+    chain = store.observations(original.receipt_id)
+    assert [o.observation_id for o in chain] == [
+        state["competitor"].observation_id,
+        observation.observation_id,
+    ]
+
+
+def test_recheck_missing_artifact_file_is_failed(receipt_issuer):
+    original = receipt_issuer.issue(ReceiptSourceKey("mission", "m1"))
+    receipt_issuer.fixture.delete_artifact()
+    observation = receipt_issuer.recheck(original.receipt_id)
+    assert observation.status == "failed"
+    assert any("missing" in u for u in observation.uncertainty)
+    assert receipt_issuer.store.get(original.receipt_id) == original
+
+
+def test_recheck_pruned_artifact_locator_is_uncertainty_not_failure(
+    receipt_issuer, db
+):
+    original = receipt_issuer.issue(ReceiptSourceKey("mission", "m1"))
+    artifact_id = receipt_issuer.fixture.artifact_id
+
+    def _prune(conn):
+        conn.execute(
+            "DELETE FROM artifact_locations WHERE artifact_id = ?",
+            (artifact_id,),
+        )
+
+    db._execute_write(_prune)
+    observation = receipt_issuer.recheck(original.receipt_id)
+    assert observation.status == "completed_unverified"
+    assert any("no recheckable location" in u for u in observation.uncertainty)
+
+
+def test_recheck_turn_receipt_operation_ambiguity_after_issue(db):
+    db.record_turn_outcome(record())
+    issuer = build_receipt_issuer(db, now=_ticking_now())
+    original = issuer.issue(ReceiptSourceKey("turn", "s1:t1"))
+    assert original.status == "completed_unverified"
+    journal = OperationJournal(db)
+    journal.create(
+        operation_id="op-late",
+        kind="message_send",
+        session_id="s1",
+        turn_id="t1",
+        tool_call_id="call-late",
+    )
+    journal.transition(
+        "op-late",
+        from_states={"pending"},
+        to_state="running",
+        effect_disposition="none",
+    )
+    journal.transition(
+        "op-late",
+        from_states={"running"},
+        to_state="unknown",
+        effect_disposition="unknown",
+    )
+    observation = issuer.recheck(original.receipt_id)
+    assert observation.status == "unknown_effect"
+    assert issuer.store.get(original.receipt_id) == original
+
+
+def _external_snapshot(subject_id: str = "x1") -> EvidenceSnapshot:
+    outcome = build_requested_outcome(
+        outcome_kind="external_state",
+        description="external subject",
+        producer_id="test.external",
+    )
+    evidence = build_evidence_digest(
+        evidence_kind="external_observation",
+        source_ref=f"external:{subject_id}",
+        producer_id="test.external",
+        observed_at=DECIDED_AT,
+        summary="external state observed",
+        payload_hash=canonical_content_hash({"external": subject_id}),
+    )
+    claim = build_claim(
+        claim_kind="requested-end-state",
+        statement="the external end state independently holds",
+        evidence_ids=(evidence.evidence_id,),
+        verdict="unknown",
+    )
+    return build_evidence_snapshot(
+        source=ReceiptSourceKey("external", subject_id),
+        subject_kind="external",
+        subject_id=subject_id,
+        producer_id="test.external",
+        requested_outcome=outcome,
+        claims=(claim,),
+        evidence=(evidence,),
+        captured_at=DECIDED_AT,
+    )
+
+
+class _MutatingAdapter:
+    """A domain adapter that wrongly exposes a mutating method."""
+
+    def __init__(self, subject_id: str) -> None:
+        self._subject_id = subject_id
+
+    def snapshot(self) -> EvidenceSnapshot:
+        return _external_snapshot(self._subject_id)
+
+    def revert_artifact(self):  # pragma: no cover - must never be reached
+        raise AssertionError("a mutating adapter method must never run")
+
+
+def test_recheck_source_view_refuses_mutating_adapter_methods(db):
+    resolver = ReceiptSourceResolver(db)
+    resolver.register_adapter(
+        "external", lambda source_id: _MutatingAdapter(source_id)
+    )
+    view = resolver.for_key(ReceiptSourceKey("external", "x1"))
+    # Read-only snapshot access passes through.
+    assert view.snapshot().subject_id == "x1"
+    # A mutating adapter method is refused at the recheck seam.
+    with pytest.raises(ReceiptIngestError):
+        view.revert_artifact
+
+
+def test_resolver_rejects_sources_without_live_adapter(db):
+    resolver = ReceiptSourceResolver(db)
+    with pytest.raises(EvidenceSourceError):
+        resolver.for_key(ReceiptSourceKey("legacy", "legacy-1"))
+    with pytest.raises(EvidenceSourceError):
+        resolver.for_key(ReceiptSourceKey("turn", "missing-turn-separator"))
+
+
+class _MissionCrashHarness:
+    """Simulates the mission terminalizer's insert-then-project sequence.
+
+    The vertical-slice mission implementation does not exist in this
+    clone; the harness drives the same ReceiptIssuer seam that
+    implementation will call, against the fixture-backed tables.
+    """
+
+    def __init__(
+        self, state_dir: Path, workflows_db_path: Path, artifact_root: Path
+    ) -> None:
+        self._state_dir = state_dir
+        self._workflows_db_path = workflows_db_path
+        self._artifact_root = artifact_root
+        self.db = SessionDB(db_path=state_dir / "state.db")
+
+    def _issuer(self) -> ReceiptIssuer:
+        return build_receipt_issuer(
+            self.db,
+            workflows_db_path=self._workflows_db_path,
+            profile="default",
+            allowed_roots=(self._artifact_root,),
+            now=_ticking_now(),
+        )
+
+    def issue_mission(self, mission_id: str = "m1", crash_at: str | None = None):
+        issuer = self._issuer()
+        if crash_at == "after_receipt_insert":
+            def _crash(source):
+                raise InjectedCrash(
+                    "crash between receipt insert and mission projection"
+                )
+
+            issuer._project = _crash
+        return issuer.issue(ReceiptSourceKey("mission", mission_id))
+
+    def reopen(self) -> "_MissionCrashHarness":
+        self.db.close()
+        self.db = SessionDB(db_path=self._state_dir / "state.db")
+        return self
+
+    def recover_mission(self, mission_id: str):
+        issuer = self._issuer()
+        receipt = issuer.recover_projection(
+            ReceiptSourceKey("mission", mission_id)
+        )
+        conn = sqlite3.connect(self._workflows_db_path)
+        try:
+            row = conn.execute(
+                "SELECT receipt_id FROM missions WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return SimpleNamespace(
+            receipt=receipt,
+            receipt_count=len(issuer.store.list(ReceiptQuery())),
+            mission=SimpleNamespace(receipt_id=row[0] if row else None),
+        )
+
+
+@pytest.fixture()
+def harness(tmp_path, workflows_db_path):
+    artifact_root = tmp_path / "harness-deliverables"
+    artifact_root.mkdir()
+    artifact_path = artifact_root / "notes.txt"
+    artifact_path.write_text("published notes\n")
+    state_dir = tmp_path / "harness-state"
+    state_dir.mkdir()
+    crash_harness = _MissionCrashHarness(
+        state_dir, workflows_db_path, artifact_root
+    )
+    catalog = ArtifactCatalog(crash_harness.db)
+    digest = catalog.register_path(
+        artifact_path,
+        source_kind="mission",
+        source_ref="m1:artifact",
+        allowed_roots=(artifact_root,),
+    )
+    _seed_mission(
+        workflows_db_path,
+        evidence={"artifact_ids": [digest.artifact_id]},
+    )
+    yield crash_harness
+    crash_harness.db.close()
+
+
+def test_crash_after_insert_before_mission_projection_reuses_receipt(harness):
+    with pytest.raises(InjectedCrash):
+        harness.issue_mission(crash_at="after_receipt_insert")
+    recovered = harness.reopen().recover_mission("m1")
+    assert recovered.receipt_count == 1
+    assert recovered.mission.receipt_id == recovered.receipt.receipt_id

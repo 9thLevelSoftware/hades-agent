@@ -43,7 +43,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from agent.operation_journal import OperationJournal
-from agent.receipt_artifacts import ArtifactCatalog, _redact_source_ref
+from agent.receipt_artifacts import (
+    ArtifactCatalog,
+    ArtifactCatalogError,
+    _redact_source_ref,
+)
 from agent.receipt_hashing import canonical_content_hash, normalize_utc_timestamp
 from agent.receipt_models import (
     EvidenceSnapshot,
@@ -58,7 +62,11 @@ from agent.receipt_models import (
     build_receipt,
     build_requested_outcome,
 )
-from agent.receipt_store import ReceiptSourceConflict, ReceiptStore
+from agent.receipt_store import (
+    ReceiptObservationConflict,
+    ReceiptSourceConflict,
+    ReceiptStore,
+)
 from agent.turn_ledger import fetch_turn_outcome
 from agent.verification_evidence import (
     session_verification_roots,
@@ -71,6 +79,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
         EvidenceDigest,
         Receipt,
         ReceiptClaim,
+        ReceiptObservation,
         RequestedOutcome,
     )
     from hades_state import SessionDB
@@ -80,11 +89,15 @@ __all__ = [
     "MissionEvidenceSource",
     "ReceiptIngestError",
     "ReceiptIngestor",
+    "ReceiptIssuer",
+    "ReceiptSourceResolver",
     "SnapshotConflictError",
     "TransactionEvidenceSource",
     "TurnEvidenceSource",
     "build_absence_evidence",
     "build_evidence_snapshot",
+    "build_observation",
+    "build_receipt_issuer",
     "build_verification_evidence_digest",
 ]
 
@@ -178,7 +191,16 @@ def _resolve_artifacts(
     resolved = []
     ids = artifact_ids if isinstance(artifact_ids, (list, tuple)) else []
     for artifact_id in sorted({str(item) for item in ids if item}):
-        digest = catalog.get(artifact_id)
+        try:
+            digest = catalog.get(artifact_id)
+        except ArtifactCatalogError as exc:
+            # A pruned/retained locator or unreadable digest row is
+            # truthful uncertainty, never a crash or a silent success.
+            uncertainty.append(
+                f"artifact {artifact_id} cannot be resolved from the "
+                f"catalog: {exc}"
+            )
+            continue
         if digest is None:
             uncertainty.append(
                 f"artifact {artifact_id} is referenced by the source but is "
@@ -724,6 +746,11 @@ class MissionEvidenceSource:
             if row is None:
                 raise EvidenceSourceError(f"unknown mission {mission_id!r}")
             mission = dict(row)
+            # The receipt_id column is the consumer's own projection of
+            # this receipt pipeline, not a durable mission fact —
+            # hashing it would make every projected mission a false
+            # source conflict on re-read.
+            mission.pop("receipt_id", None)
             links = [
                 dict(r)
                 for r in conn.execute(
@@ -1111,6 +1138,9 @@ class TransactionEvidenceSource:
             if row is None:
                 return (table, None, None, [])
             tx = dict(row)
+            # Like the mission adapter: a receipt_id projection column is
+            # not a durable transaction fact and never enters the hash.
+            tx.pop("receipt_id", None)
             op_row = conn.execute(
                 "SELECT * FROM agent_operations WHERE operation_id = ?",
                 (tx["operation_id"],),
@@ -1548,3 +1578,438 @@ class ReceiptIngestor:
                 )
 
         db._execute_write(_link)
+
+
+# ---------------------------------------------------------------------------
+# Task 6: source resolution, read-only recheck views, and the issuer.
+# ---------------------------------------------------------------------------
+
+# Method name prefixes recheck code may reach on a source adapter. A
+# recheck runs only inspect/status/reconcile_read_only/hash-style reads;
+# anything else is refused before the attribute is even resolved.
+_RECHECK_READ_ONLY_PREFIXES = (
+    "snapshot",
+    "inspect",
+    "status",
+    "reconcile_read_only",
+    "hash",
+    "bind",
+    "get",
+    "list",
+    "read",
+)
+
+
+class _ReadOnlySourceView:
+    """Guarded view of a source adapter for issue/recheck code paths.
+
+    Attribute access is allowed only for read-only method families;
+    reaching for a mutating adapter method raises
+    :class:`ReceiptIngestError` before the call can happen.
+    """
+
+    def __init__(self, adapter: object) -> None:
+        self._adapter = adapter
+
+    def __getattr__(self, name: str) -> object:
+        if name.startswith("_") or not name.startswith(
+            _RECHECK_READ_ONLY_PREFIXES
+        ):
+            raise ReceiptIngestError(
+                f"adapter method {name!r} is not read-only; recheck runs "
+                "only inspect/status/reconcile_read_only/hash methods and "
+                "never a mutating effect"
+            )
+        return getattr(self._adapter, name)
+
+
+def _artifact_recheck_facts(
+    catalog: ArtifactCatalog,
+    original: "Receipt",
+    allowed_roots: tuple[Path, ...],
+    fresh_artifact_ids: frozenset[str],
+) -> tuple[tuple, tuple[str, ...], tuple[str, ...]]:
+    """Read-only recheck of every artifact the original receipt cites.
+
+    Returns durable ``artifact_recheck`` evidence digests plus the
+    failure/uncertainty facts they imply: a changed or missing artifact
+    is a known failure (precedence rule 2 → ``failed``); an
+    inaccessible, ambiguous, or locator-pruned artifact is truthful
+    uncertainty, never silent success.
+    """
+    from agent.receipt_artifacts import ArtifactCatalogError
+
+    evidence: list = []
+    failures: list[str] = []
+    uncertainty: list[str] = []
+    for artifact in original.artifacts:
+        try:
+            results = catalog.recheck(
+                artifact.artifact_id, allowed_roots=allowed_roots
+            )
+        except ArtifactCatalogError as exc:
+            uncertainty.append(
+                f"artifact {artifact.display_name} cannot be rechecked: {exc}"
+            )
+            continue
+        if not results:
+            uncertainty.append(
+                f"artifact {artifact.display_name} has no recheckable "
+                "location (locator missing, pruned, or retained)"
+            )
+            continue
+        linked_ids = (
+            (artifact.artifact_id,)
+            if artifact.artifact_id in fresh_artifact_ids
+            else ()
+        )
+        for result in results:
+            evidence.append(
+                build_evidence_digest(
+                    evidence_kind="artifact_recheck",
+                    source_ref=(
+                        f"state.db:artifact_locations:{result.location_id}"
+                    ),
+                    producer_id=_SNAPSHOT_MARKER_PRODUCER,
+                    observed_at=result.checked_at,
+                    summary=(
+                        f"artifact {artifact.display_name} recheck "
+                        f"{result.status}"
+                    ),
+                    payload_hash=canonical_content_hash(
+                        {
+                            "artifact_id": result.artifact_id,
+                            "location_id": result.location_id,
+                            "status": result.status,
+                            "detail": result.detail,
+                            "observed_sha256": result.observed_sha256,
+                            "observed_size_bytes": result.observed_size_bytes,
+                        }
+                    ),
+                    artifact_ids=linked_ids,
+                )
+            )
+            if result.status in ("changed", "missing"):
+                failures.append(
+                    f"artifact {artifact.display_name} is {result.status}: "
+                    f"{result.detail}"
+                )
+            elif result.status in ("inaccessible", "ambiguous"):
+                uncertainty.append(
+                    f"artifact {artifact.display_name} recheck is "
+                    f"{result.status}: {result.detail}"
+                )
+    return tuple(evidence), tuple(failures), tuple(uncertainty)
+
+
+class _RecheckableSource:
+    """One subject-bound, read-only source with a recheck snapshot seam."""
+
+    def __init__(
+        self,
+        adapter: object,
+        args: tuple,
+        catalog: ArtifactCatalog,
+        allowed_roots: tuple[Path, ...],
+    ) -> None:
+        self._view = _ReadOnlySourceView(adapter)
+        self._args = tuple(args)
+        self._catalog = catalog
+        self._allowed_roots = tuple(allowed_roots)
+
+    def snapshot(self) -> EvidenceSnapshot:
+        return self._view.snapshot(*self._args)
+
+    def snapshot_for_recheck(self, original: "Receipt") -> EvidenceSnapshot:
+        """Current durable facts bound to the immutable original outcome.
+
+        Re-reads the source through the read-only view, rechecks every
+        artifact the original receipt cites, records evidence changes as
+        uncertainty, and reuses the original's immutable requested
+        outcome — a recheck never renegotiates what was asked for.
+        """
+        fresh = self.snapshot()
+        uncertainty = list(fresh.uncertainty)
+        issued_hash = _stored_snapshot_hash(original)
+        if issued_hash is not None and issued_hash != fresh.content_hash:
+            uncertainty.append(
+                "durable source content changed after issuance "
+                f"(snapshot {issued_hash} -> {fresh.content_hash})"
+            )
+        recheck_evidence, failures, recheck_uncertainty = (
+            _artifact_recheck_facts(
+                self._catalog,
+                original,
+                self._allowed_roots,
+                frozenset(a.artifact_id for a in fresh.artifacts),
+            )
+        )
+        return build_evidence_snapshot(
+            source=fresh.source,
+            subject_kind=fresh.subject_kind,
+            subject_id=fresh.subject_id,
+            producer_id=fresh.producer_id,
+            requested_outcome=original.requested_outcome,
+            claims=fresh.claims,
+            evidence=fresh.evidence + recheck_evidence,
+            artifacts=fresh.artifacts,
+            operation_states=fresh.operation_states,
+            blocked_reasons=fresh.blocked_reasons,
+            known_failures=fresh.known_failures + failures,
+            uncertainty=tuple(uncertainty) + recheck_uncertainty,
+            captured_at=fresh.captured_at,
+        )
+
+    def __getattr__(self, name: str) -> object:
+        # Everything else flows through the read-only guard.
+        return getattr(self._view, name)
+
+
+class ReceiptSourceResolver:
+    """Resolve a :class:`ReceiptSourceKey` to its read-only live adapter.
+
+    Turn, mission, and transaction keys resolve to the three built-in
+    evidence sources. Domain layers (the vertical-slice missions and
+    portfolio item #2 transactions) may register additional adapters by
+    source kind; every resolved adapter is wrapped in the read-only
+    recheck view — there is no path to a mutating method.
+    ``legacy``/``external`` sources without a registered adapter have no
+    live source to re-read and fail truthfully.
+    """
+
+    def __init__(
+        self,
+        db: "SessionDB",
+        *,
+        workflows_db_path: Path | None = None,
+        profile: str | None = None,
+        catalog: ArtifactCatalog | None = None,
+        allowed_roots: tuple[Path, ...] = (),
+    ) -> None:
+        self._db = db
+        self._workflows_db_path = (
+            Path(workflows_db_path) if workflows_db_path is not None else None
+        )
+        self._profile = profile
+        self._catalog = catalog if catalog is not None else ArtifactCatalog(db)
+        self._allowed_roots = tuple(allowed_roots)
+        self._custom: dict[str, Callable[[str], object]] = {}
+
+    def register_adapter(
+        self, source_kind: str, factory: Callable[[str], object]
+    ) -> None:
+        """Register a domain adapter factory for one source kind."""
+        self._custom[str(source_kind)] = factory
+
+    def _bind(self, adapter: object, args: tuple) -> _RecheckableSource:
+        return _RecheckableSource(
+            adapter, args, self._catalog, self._allowed_roots
+        )
+
+    def for_key(self, source: ReceiptSourceKey) -> _RecheckableSource:
+        if not isinstance(source, ReceiptSourceKey):
+            raise ReceiptIngestError(
+                f"for_key() takes a ReceiptSourceKey, got {source!r}"
+            )
+        factory = self._custom.get(source.source_kind)
+        if factory is not None:
+            return self._bind(factory(source.source_id), ())
+        if source.source_kind == "turn":
+            session_id, sep, turn_id = source.source_id.partition(":")
+            if not sep or not session_id or not turn_id:
+                raise EvidenceSourceError(
+                    "turn source IDs are 'session_id:turn_id', got "
+                    f"{source.source_id!r}"
+                )
+            return self._bind(
+                TurnEvidenceSource(self._db, catalog=self._catalog),
+                (session_id, turn_id),
+            )
+        if source.source_kind == "mission":
+            return self._bind(
+                MissionEvidenceSource(
+                    self._db,
+                    workflows_db_path=self._workflows_db_path,
+                    profile=self._profile,
+                    catalog=self._catalog,
+                ),
+                (source.source_id,),
+            )
+        if source.source_kind == "transaction":
+            return self._bind(
+                TransactionEvidenceSource(self._db, catalog=self._catalog),
+                (source.source_id,),
+            )
+        raise EvidenceSourceError(
+            f"no live evidence adapter exists for source kind "
+            f"{source.source_kind!r}"
+        )
+
+
+def build_observation(
+    original: "Receipt",
+    previous: "ReceiptObservation | None",
+    snapshot: EvidenceSnapshot,
+    decision: object,
+) -> "ReceiptObservation":
+    """Build the linked recheck observation for one immutable receipt.
+
+    The observation carries the current facts and decision under the
+    canonical five statuses, chains from the current latest observation,
+    and never touches the original receipt.
+    """
+    if not isinstance(decision, (ReceiptDecision, VerifiedReceiptDecision)):
+        raise ReceiptIngestError(
+            "recheck decisions must be a ReceiptDecision or a sealed "
+            f"VerifiedReceiptDecision, got {type(decision).__name__}"
+        )
+    from agent.receipt_models import build_observation as _build_record
+
+    uncertainty = tuple(
+        dict.fromkeys(
+            tuple(snapshot.uncertainty)
+            + tuple(getattr(decision, "uncertainty", ()) or ())
+        )
+    )
+    return _build_record(
+        receipt_id=original.receipt_id,
+        previous_observation_id=(
+            previous.observation_id if previous is not None else None
+        ),
+        status=decision.status,
+        claims=snapshot.claims,
+        evidence=snapshot.evidence,
+        artifacts=snapshot.artifacts,
+        uncertainty=uncertainty,
+        scorer_id=decision.scorer_id,
+        scorer_version=decision.scorer_version,
+        observed_at=decision.decided_at,
+    )
+
+
+class ReceiptIssuer:
+    """Issue receipts and append observation-only rechecks.
+
+    ``issue()`` builds a fresh persisted snapshot, asks the scoring
+    service, constructs the deterministic receipt, inserts it (with a
+    verified seal only when the service returned one), then projects its
+    ID. ``recheck()`` reloads the immutable original requested outcome
+    and source adapter through the read-only view, scores current facts,
+    and appends one linked observation — it never updates the original
+    receipt, subject terminal state, or an earlier observation.
+    """
+
+    _CAS_RETRIES = 3
+
+    def __init__(
+        self,
+        store: ReceiptStore,
+        *,
+        scoring: object,
+        sources: ReceiptSourceResolver,
+        workflows_db_path: Path | None = None,
+    ) -> None:
+        self.store = store
+        self.scoring = scoring
+        self.sources = sources
+        self._ingestor = ReceiptIngestor(
+            store,
+            decide=scoring.decide,
+            workflows_db_path=workflows_db_path,
+        )
+
+    # ── Issue ──
+
+    def issue(self, source: object) -> "Receipt":
+        if isinstance(source, ReceiptSourceKey):
+            bound: object = self.sources.for_key(source)
+        else:
+            # Compatibility with the ingest seam: a prepared snapshot or
+            # an already-bound evidence source is accepted as-is.
+            bound = source
+        receipt = self._ingestor.issue(bound)
+        self._project(receipt.source)
+        return receipt
+
+    def _project(self, source: ReceiptSourceKey) -> None:
+        """Projection step after insert — separate so a crash between
+        receipt insertion and consumer projection is exactly modeled and
+        repaired by :meth:`recover_projection`."""
+        self._ingestor.recover_projection(source)
+
+    def recover_projection(self, source: ReceiptSourceKey) -> "Receipt | None":
+        return self._ingestor.recover_projection(source)
+
+    # ── Recheck ──
+
+    def recheck(self, receipt_id: str) -> "ReceiptObservation":
+        original = self.store.get(receipt_id)
+        if original is None:
+            raise ReceiptIngestError(
+                f"unknown receipt {receipt_id!r}: recheck appends an "
+                "observation to an existing immutable receipt"
+            )
+        snapshot = self.sources.for_key(original.source).snapshot_for_recheck(
+            original
+        )
+        from agent.receipt_scoring import PRECEDENCE_SCORER_ID
+
+        scorer_id = original.scorer_id or None
+        if scorer_id == PRECEDENCE_SCORER_ID:
+            # The precedence identity is not a registered scorer; the
+            # service re-resolves an appropriate one (or stays capped at
+            # completed_unverified).
+            scorer_id = None
+        decision = self.scoring.decide(snapshot, scorer_id=scorer_id)
+        seal = decision if isinstance(decision, VerifiedReceiptDecision) else None
+        last_conflict: ReceiptObservationConflict | None = None
+        for _attempt in range(self._CAS_RETRIES):
+            observation = build_observation(
+                original,
+                self.store.latest_observation(receipt_id),
+                snapshot,
+                decision,
+            )
+            try:
+                return self.store.append_observation(observation, decision=seal)
+            except ReceiptObservationConflict as conflict:
+                # A concurrent recheck appended first; re-read the chain
+                # head and append after it — the chain never forks.
+                last_conflict = conflict
+        raise last_conflict  # type: ignore[misc]
+
+
+def build_receipt_issuer(
+    db: "SessionDB",
+    *,
+    workflows_db_path: Path | None = None,
+    profile: str | None = None,
+    allowed_roots: tuple[Path, ...] = (),
+    now: Callable[[], str] | None = None,
+) -> ReceiptIssuer:
+    """A fully wired issuer over one profile-local ``SessionDB``.
+
+    Uses the shared artifact catalog, the default independent scoring
+    service, and the live source resolver. Everything resolves inside
+    the one profile; nothing crosses ``HADES_HOME``.
+    """
+    from agent.receipt_scoring import build_default_scoring_service
+
+    catalog = ArtifactCatalog(db)
+    roots = tuple(allowed_roots)
+    scoring = build_default_scoring_service(
+        catalog=catalog, allowed_roots=roots, now=now
+    )
+    sources = ReceiptSourceResolver(
+        db,
+        workflows_db_path=workflows_db_path,
+        profile=profile,
+        catalog=catalog,
+        allowed_roots=roots,
+    )
+    return ReceiptIssuer(
+        ReceiptStore(db),
+        scoring=scoring,
+        sources=sources,
+        workflows_db_path=workflows_db_path,
+    )

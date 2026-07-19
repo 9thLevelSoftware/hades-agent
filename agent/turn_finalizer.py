@@ -165,8 +165,9 @@ def finalize_turn(
     # suppress utility-counter evidence — DB failure must not shadow the
     # skill-utility signal.
     _turn_outcome_record = None
+    _turn_receipt_projection = None
     try:
-        from agent.turn_ledger import persist_turn_outcome
+        from agent.turn_ledger import record_turn_outcome_and_receipt
         # tool_iterations must reflect the actual tool-call count from the
         # turn's messages — NOT ``agent._iters_since_skill`` (a skill-nudge
         # cadence counter with no relation to model-issued tool calls).
@@ -176,14 +177,16 @@ def finalize_turn(
             and m.get("role") == "assistant"
             and m.get("tool_calls")
         )
-        _turn_outcome_record = persist_turn_outcome(
-            agent,
-            outcome=_turn_outcome["outcome"],
-            outcome_reason=_turn_outcome["reason"],
-            turn_exit_reason=_turn_exit_reason,
-            api_calls=api_call_count,
-            tool_iterations=_turn_tool_count,
-            messages=messages,
+        _turn_outcome_record, _turn_receipt_projection = (
+            record_turn_outcome_and_receipt(
+                agent,
+                outcome=_turn_outcome["outcome"],
+                outcome_reason=_turn_outcome["reason"],
+                turn_exit_reason=_turn_exit_reason,
+                api_calls=api_call_count,
+                tool_iterations=_turn_tool_count,
+                messages=messages,
+            )
         )
     except Exception as _ledger_err:
         logger.debug("turn_outcome ledger write skipped: %s", _ledger_err)
@@ -504,6 +507,10 @@ def finalize_turn(
     }
     if agent._tool_guardrail_halt_decision is not None:
         result["guardrail"] = agent._tool_guardrail_halt_decision.to_metadata()
+    # Receipt projection (require mode only). Additive result metadata:
+    # the receipt path never appends a message or alters the response.
+    if _turn_receipt_projection:
+        result["receipt"] = dict(_turn_receipt_projection)
     # Surface any post-loop cleanup failures so the caller can distinguish a
     # clean turn from one whose trajectory/session/resource teardown raised
     # (the response is still returned either way — #8049).
