@@ -402,3 +402,303 @@ def test_cron_create_failure_returns_nonzero(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "Failed to create job: boom" in out
+
+
+# =============================================================================
+# Task5: Cron state mutation service (real-store TDD tests)
+# =============================================================================
+
+import copy
+import json
+import hashlib
+
+from cron.jobs import (
+    apply_mutation,
+    canonical_revision,
+    canonical_snapshot,
+    CronStateMutation,
+    load_jobs,
+    prepare_create,
+    prepare_disable,
+    prepare_update,
+    restore_mutation,
+    use_cron_store,
+    verify_mutation,
+    _jobs_lock,
+    _save_jobs_unlocked,
+)
+
+
+@pytest.fixture()
+def cron_home(tmp_path):
+    """Isolated cron store via use_cron_store."""
+    home = tmp_path / "profile"
+    home.mkdir()
+    with use_cron_store(home):
+        yield home
+
+
+def _make_raw_job(job_id="raw001", **overrides):
+    """Construct a raw job dict as if read from storage."""
+    base = {
+        "id": job_id,
+        "name": "Test",
+        "prompt": "do stuff",
+        "skills": [],
+        "skill": None,
+        "model": None,
+        "provider": None,
+        "base_url": None,
+        "script": None,
+        "no_agent": False,
+        "context_from": None,
+        "schedule": {"kind": "interval", "minutes": 60, "display": "every 60m"},
+        "schedule_display": "every 60m",
+        "repeat": {"times": None, "completed": 0},
+        "enabled": True,
+        "state": "scheduled",
+        "paused_at": None,
+        "paused_reason": None,
+        "created_at": "2026-01-01T00:00:00",
+        "next_run_at": "2026-01-01T01:00:00",
+        "last_run_at": None,
+        "last_status": None,
+        "last_error": None,
+        "last_delivery_error": None,
+        "deliver": "local",
+        "origin": None,
+        "enabled_toolsets": None,
+        "workdir": None,
+        "provider_snapshot": None,
+        "model_snapshot": None,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestCanonicalSnapshot:
+    def test_omits_runtime_keys(self, cron_home):
+        job = create_job(prompt="test", schedule="every 1h")
+        snap = canonical_snapshot(job)
+        assert "next_run_at" not in snap
+        assert "last_run_at" not in snap
+        assert "last_status" not in snap
+        assert "last_error" not in snap
+        assert "last_delivery_error" not in snap
+
+    def test_keeps_stable_keys(self, cron_home):
+        job = create_job(prompt="stable", schedule="every 2h", deliver="local")
+        snap = canonical_snapshot(job)
+        assert snap["id"] == job["id"]
+        assert snap["prompt"] == "stable"
+        assert snap["deliver"] == "local"
+        assert snap["schedule"] == job["schedule"]
+        assert snap["enabled"] is True
+
+    def test_repeat_omits_completed(self, cron_home):
+        job = create_job(prompt="repeat test", schedule="every 1h")
+        snap = canonical_snapshot(job)
+        assert "completed" not in snap["repeat"]
+        assert snap["repeat"]["times"] is None
+
+    def test_defensive_copy(self, cron_home):
+        job = create_job(prompt="copy test", schedule="every 1h")
+        snap = canonical_snapshot(job)
+        snap["prompt"] = "mutated"
+        assert job["prompt"] == "copy test"
+
+    def test_revision_deterministic(self, cron_home):
+        job = create_job(prompt="det", schedule="every 1h")
+        r1 = canonical_revision(job)
+        r2 = canonical_revision(job)
+        assert r1 == r2
+        assert isinstance(r1, str) and len(r1) == 64  # sha256 hex
+
+    def test_absent_revision_is_none(self):
+        assert canonical_revision(None) is None
+
+
+class TestCronStateMutationDataclass:
+    def test_frozen(self, cron_home):
+        job = create_job(prompt="frozen", schedule="every 1h")
+        m = CronStateMutation(
+            resource=job["id"], action="update",
+            expected_revision="abc", before={"x": 1}, after={"x": 2},
+        )
+        with pytest.raises(AttributeError):
+            m.action = "delete"
+
+    def test_defensive_copy_on_init(self, cron_home):
+        inner = {"x": 1}
+        m = CronStateMutation(
+            resource="r", action="create",
+            expected_revision=None, before=None, after=inner,
+        )
+        inner["x"] = 999
+        assert m.after["x"] == 1
+
+
+class TestPrepareMutations:
+    def test_prepare_create(self, cron_home):
+        job = _make_raw_job("new01")
+        m = prepare_create(job)
+        assert m.action == "create"
+        assert m.resource == "new01"
+        assert m.before is None
+        assert m.expected_revision is None
+        assert m.after["id"] == "new01"
+
+    def test_prepare_update(self, cron_home):
+        job = create_job(prompt="orig", schedule="every 1h")
+        m = prepare_update(job["id"], job, {"prompt": "changed"})
+        assert m.action == "update"
+        assert m.resource == job["id"]
+        assert m.before is not None
+        assert m.expected_revision is not None
+        assert m.before["prompt"] == "orig"
+        assert m.after["prompt"] == "changed"
+        # Stable fields preserved in after
+        assert m.after["schedule"] == canonical_snapshot(job)["schedule"]
+
+    def test_prepare_disable(self, cron_home):
+        job = create_job(prompt="disable me", schedule="every 1h")
+        m = prepare_disable(job["id"], job)
+        assert m.action == "disable"
+        assert m.before["enabled"] is True
+        assert m.after["enabled"] is False
+        assert m.after["state"] == "paused"
+
+
+class TestApplyMutation:
+    def test_create_and_read(self, cron_home):
+        job = _make_raw_job("cr01")
+        m = prepare_create(job)
+        apply_mutation(m)
+        stored = get_job("cr01")
+        assert stored is not None
+        assert stored["prompt"] == "do stuff"
+
+    def test_update_changes_fields(self, cron_home):
+        job = create_job(prompt="orig", schedule="every 1h")
+        m = prepare_update(job["id"], job, {"prompt": "updated"})
+        apply_mutation(m)
+        stored = get_job(job["id"])
+        assert stored["prompt"] == "updated"
+        assert stored["schedule"] == job["schedule"]
+
+    def test_disable_sets_paused(self, cron_home):
+        job = create_job(prompt="dis", schedule="every 1h")
+        m = prepare_disable(job["id"], job)
+        apply_mutation(m)
+        stored = get_job(job["id"])
+        assert stored["enabled"] is False
+        assert stored["state"] == "paused"
+
+    def test_create_duplicate_raises(self, cron_home):
+        job = _make_raw_job("dup01")
+        m = prepare_create(job)
+        apply_mutation(m)
+        with pytest.raises(RuntimeError, match="already exists"):
+            apply_mutation(m)
+
+    def test_revision_mismatch_blocks_update(self, cron_home):
+        job = create_job(prompt="conflict", schedule="every 1h")
+        m = prepare_update(job["id"], job, {"prompt": "mine"})
+        # Concurrent write
+        with _jobs_lock():
+            jobs = load_jobs()
+            for j in jobs:
+                if j["id"] == job["id"]:
+                    j["prompt"] = "theirs"
+            _save_jobs_unlocked(jobs)
+        with pytest.raises(RuntimeError, match="revision mismatch"):
+            apply_mutation(m)
+
+
+class TestDurableVerify:
+    def test_verify_create(self, cron_home):
+        job = _make_raw_job("ver01")
+        m = prepare_create(job)
+        apply_mutation(m)
+        assert verify_mutation(m) is True
+
+    def test_verify_update(self, cron_home):
+        job = create_job(prompt="verify", schedule="every 1h")
+        m = prepare_update(job["id"], job, {"prompt": "verified"})
+        apply_mutation(m)
+        assert verify_mutation(m) is True
+
+    def test_verify_disable(self, cron_home):
+        job = create_job(prompt="vdis", schedule="every 1h")
+        m = prepare_disable(job["id"], job)
+        apply_mutation(m)
+        assert verify_mutation(m) is True
+
+    def test_verify_fails_after_concurrent_overwrite(self, cron_home):
+        job = create_job(prompt="verconflict", schedule="every 1h")
+        m = prepare_update(job["id"], job, {"prompt": "mine"})
+        apply_mutation(m)
+        # Overwrite after apply
+        with _jobs_lock():
+            jobs = load_jobs()
+            for j in jobs:
+                if j["id"] == job["id"]:
+                    j["prompt"] = "theirs"
+            _save_jobs_unlocked(jobs)
+        assert verify_mutation(m) is False
+
+
+class TestRestoreMutation:
+    def test_restore_create_removes_job(self, cron_home):
+        job = _make_raw_job("rest01")
+        m = prepare_create(job)
+        apply_mutation(m)
+        assert get_job("rest01") is not None
+        restore_mutation(m)
+        assert get_job("rest01") is None
+
+    def test_restore_update_restores_exact_before(self, cron_home):
+        job = create_job(
+            prompt="original", schedule="every 1h", deliver="local", skill="sk",
+        )
+        orig_snap = canonical_snapshot(job)
+        m = prepare_update(job["id"], job, {"prompt": "changed", "deliver": "telegram"})
+        apply_mutation(m)
+        changed = get_job(job["id"])
+        assert changed["prompt"] == "changed"
+        assert changed["deliver"] == "telegram"
+        restore_mutation(m)
+        restored = get_job(job["id"])
+        restored_snap = canonical_snapshot(restored)
+        # All stable fields match original
+        for key in orig_snap:
+            assert restored_snap[key] == orig_snap[key], f"field {key} not restored"
+
+    def test_restore_disable_restores_schedule_and_delivery(self, cron_home):
+        job = create_job(prompt="rdis", schedule="every 30m", deliver="local")
+        orig_schedule = copy.deepcopy(job["schedule"])
+        orig_deliver = job["deliver"]
+        m = prepare_disable(job["id"], job)
+        apply_mutation(m)
+        assert get_job(job["id"])["enabled"] is False
+        restore_mutation(m)
+        restored = get_job(job["id"])
+        assert restored["enabled"] is True
+        assert restored["state"] == "scheduled"
+        assert restored["deliver"] == orig_deliver
+        assert restored["schedule"] == orig_schedule
+
+    def test_restore_refuses_to_clobber_concurrent_change(self, cron_home):
+        job = create_job(prompt="original", schedule="every 1h", deliver="local")
+        mutation = prepare_update(job["id"], job, {"prompt": "mission"})
+        apply_mutation(mutation)
+        with _jobs_lock():
+            jobs = load_jobs()
+            for current in jobs:
+                if current["id"] == job["id"]:
+                    current["prompt"] = "human"
+            _save_jobs_unlocked(jobs)
+
+        with pytest.raises(RuntimeError, match="revision mismatch"):
+            restore_mutation(mutation)
+        assert get_job(job["id"])["prompt"] == "human"

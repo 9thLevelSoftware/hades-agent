@@ -775,6 +775,11 @@ _CATEGORY_MERGE: Dict[str, str] = {
     # field — fold it into the agent tab rather than spawning a one-field
     # orphan category.
     "computer_use": "agent",
+    # `missions.outbox.max_delay_seconds` is the only schema-surfaced
+    # missions field — fold it into the workflow tab (both are durable
+    # dispatcher-owned settings) rather than spawning a one-field orphan
+    # category.
+    "missions": "workflow",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.

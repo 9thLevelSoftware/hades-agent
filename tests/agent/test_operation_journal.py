@@ -613,3 +613,115 @@ def test_fenced_reconcile_skips_live_owner(db):
 
     assert journal.reconcile_after_restart(owner_fenced=True) == 0
     assert journal.get("live").state == "running"
+
+
+# ── Task 3 helpers (coordinator queries) ──────────────────────────────────
+
+
+class TestCoordinatorHelpers:
+    """Task 3 adds minimal query helpers used by the effect-transactions
+    coordinator. Restart semantics must be unchanged: a running/dispatched
+    operation with no durable acknowledgement stays a candidate for
+    reconcile — not for blind commit."""
+
+    def test_get_by_operation_id_returns_record(self, db):
+        journal = _journal(db)
+        journal.create(operation_id="op-1", kind="tool")
+        record = journal.get_by_operation_id("op-1")
+        assert record is not None
+        assert record.operation_id == "op-1"
+        assert record.state == "pending"
+
+    def test_get_by_operation_id_returns_none_when_missing(self, db):
+        journal = _journal(db)
+        assert journal.get_by_operation_id("missing") is None
+
+    def test_get_by_operation_id_after_terminal_settles(self, db):
+        journal = _journal(db)
+        journal.create(operation_id="op-1", kind="tool")
+        journal.transition(
+            "op-1",
+            from_states={"pending"},
+            to_state="running",
+            effect_disposition="none",
+        )
+        journal.transition(
+            "op-1",
+            from_states={"running"},
+            to_state="confirmed",
+            effect_disposition="landed",
+            result={"ok": True},
+        )
+        record = journal.get_by_operation_id("op-1")
+        assert record.state == "confirmed"
+        assert record.effect_disposition == "landed"
+        # The coordinator reads this back as a "previously confirmed" case
+        # and must see the settled effect disposition.
+        assert record.result_json is not None
+
+    def test_running_state_recovery_path_marks_unknown(self, db):
+        """restart recovery semantics must not regress: an in-flight row
+        stays ``running`` until reconcile flips it to ``unknown``. The
+        coordinator must NOT see ``confirmed`` here."""
+        journal = _journal(db)
+        journal.create(operation_id="op-1", kind="tool")
+        journal.transition(
+            "op-1",
+            from_states={"pending"},
+            to_state="running",
+            effect_disposition="none",
+        )
+        # Without reconcile, the operation stays in ``running`` —
+        # exactly the state the coordinator must treat as "needs
+        # reconcile, do not blindly commit".
+        record = journal.get_by_operation_id("op-1")
+        assert record.state == "running"
+        assert record.effect_disposition == "none"
+
+    def test_terminal_result_lookup_returns_payload(self, db):
+        journal = _journal(db)
+        journal.create(operation_id="op-1", kind="tool")
+        journal.transition(
+            "op-1",
+            from_states={"pending"},
+            to_state="running",
+            effect_disposition="none",
+        )
+        journal.transition(
+            "op-1",
+            from_states={"running"},
+            to_state="confirmed",
+            effect_disposition="landed",
+            result={"value": 42},
+        )
+        record = journal.get_by_operation_id("op-1")
+        assert record is not None
+        # Coordinator decodes the canonical-JSON payload exactly once via
+        # ``OperationJournal.terminal_result`` (the helper the spec calls
+        # for). It must round-trip cleanly.
+        payload = journal.terminal_result("op-1")
+        assert payload == {"value": 42}
+
+    def test_terminal_result_returns_none_for_non_terminal(self, db):
+        journal = _journal(db)
+        journal.create(operation_id="op-1", kind="tool")
+        assert journal.terminal_result("op-1") is None
+
+    def test_terminal_result_returns_none_for_unknown_effect(self, db):
+        """A confirmed-unknown must NOT be returned as a stable result —
+        the coordinator must reconcile, not replay."""
+        journal = _journal(db)
+        journal.create(operation_id="op-1", kind="tool")
+        journal.transition(
+            "op-1",
+            from_states={"pending"},
+            to_state="running",
+            effect_disposition="none",
+        )
+        journal.transition(
+            "op-1",
+            from_states={"running"},
+            to_state="unknown",
+            effect_disposition="unknown",
+        )
+        assert journal.terminal_result("op-1") is None

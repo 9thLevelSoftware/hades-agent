@@ -3103,6 +3103,82 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     _loop_heartbeat_task: Optional["asyncio.Task"] = None
     _gateway_started_at: float = 0.0
     _shutdown_watchdog_done: Optional["threading.Event"] = None
+    def _get_mission_outbox_dispatcher(self) -> Any | None:
+        dispatcher = getattr(self, "_mission_outbox_dispatcher", None)
+        if dispatcher is not None:
+            return dispatcher
+        async_db = getattr(self, "_session_db", None)
+        state_db = getattr(async_db, "_db", None)
+        if state_db is None:
+            logger.warning("mission outbox dispatcher: session database unavailable; disabled")
+            return None
+        try:
+            from agent.operation_journal import OperationJournal
+            from gateway.mission_delivery import MissionOutboxDispatcher
+            from gateway.mission_outbox import MissionOutboxStore
+        except Exception:
+            logger.warning("mission outbox dispatcher: dependencies unavailable; disabled")
+            return None
+        journal = OperationJournal(state_db)
+        self.delivery_router.journal = journal
+        dispatcher = MissionOutboxDispatcher(
+            store=MissionOutboxStore(state_db),
+            router=self.delivery_router,
+            journal=journal,
+            owner_id=f"gateway:{os.getpid()}",
+        )
+        self._mission_outbox_dispatcher = dispatcher
+        return dispatcher
+
+    async def _mission_outbox_dispatcher_watcher(
+        self,
+        initial_delay: float = 5.0,
+        sleep: Optional[Callable[[float], Any]] = None,
+    ) -> None:
+        try:
+            from hades_cli.config import load_config as _load_config
+        except Exception:
+            logger.warning("mission outbox dispatcher: config loader unavailable; disabled")
+            return
+
+        enabled, interval, limit = _resolve_workflow_dispatch_settings(_load_config)
+        if not enabled:
+            logger.info(
+                "mission outbox dispatcher: disabled via config "
+                "workflow.dispatch_in_gateway=false"
+            )
+            return
+        dispatcher = self._get_mission_outbox_dispatcher()
+        if dispatcher is None:
+            return
+
+        logger.info(
+            "mission outbox dispatcher: enabled interval=%.1fs limit=%d",
+            interval,
+            limit,
+        )
+        sleeper = sleep or asyncio.sleep
+        if initial_delay > 0:
+            await sleeper(initial_delay)
+
+        while self._running:
+            try:
+                report = await dispatcher.drain(limit=limit)
+                if report.claimed:
+                    logger.info(
+                        "mission outbox dispatcher: claimed=%d delivered=%d "
+                        "failed=%d unknown=%d released=%d",
+                        report.claimed,
+                        report.delivered,
+                        report.failed,
+                        report.unknown,
+                        report.released,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("mission outbox dispatcher: drain failed: %s", exc)
+            await sleeper(interval)
 
     def __init__(self, config: Optional[GatewayConfig] = None):
         global _gateway_runner_ref
@@ -3771,6 +3847,88 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "✗ %s disconnect error after %.2fs%s: %s",
                 platform.value, time.monotonic() - started_at, suffix, e,
             )
+
+    @staticmethod
+    def _log_detached_watcher_result(task: "asyncio.Task[Any]") -> None:
+        """Log a cancellation-resistant watcher's eventual outcome.
+
+        Attached only to tasks shutdown gave up waiting on (P1-4). Purely
+        observational — by the time this fires, shutdown has already
+        proceeded without this task; nothing here changes that.
+        """
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(
+                "Detached gateway watcher task ended after shutdown gave up "
+                "waiting on it: %s", exc,
+            )
+
+    async def _cancel_and_await_background_tasks(self) -> None:
+        """Cancel tracked gateway watchers before any adapter teardown.
+
+        Watchers can be inside an adapter delivery when shutdown starts. They
+        must observe cancellation and finish their persistence/reconciliation
+        path while the state database and transport objects are still alive;
+        disconnecting adapters first leaves orphan tasks and in-flight sends.
+        A bounded await prevents one cancellation-resistant watcher from
+        blocking the rest of shutdown indefinitely.
+
+        Uses ``asyncio.wait`` directly rather than
+        ``asyncio.wait_for(asyncio.gather(...), timeout=...)`` (P1-4):
+        ``wait_for`` cancels its wrapped awaitable on timeout but then still
+        awaits it to completion with no further bound, so a watcher that
+        catches/suppresses ``CancelledError`` can hold that combined
+        ``gather`` future open indefinitely — the exact "bounded await" this
+        method's own docstring promises does not actually hold against a
+        resistant watcher. ``asyncio.wait`` with a timeout never blocks past
+        it regardless of whether a task actually finishes, so shutdown can
+        only ever be delayed by the configured timeout — never longer. Any
+        watcher still pending afterward is left to finish (or not) detached
+        in the background; shutdown does not wait for it further.
+        """
+        current = asyncio.current_task()
+        tasks = [
+            task
+            for task in list(getattr(self, "_background_tasks", set()))
+            if task is not current
+            and task is not getattr(self, "_stop_task", None)
+            and task is not getattr(self, "_restart_task", None)
+            and not task.done()
+        ]
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        timeout = max(self._adapter_disconnect_timeout_secs(), 0.1)
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            logger.warning(
+                "Timed out after %.1fs awaiting %d/%d gateway watcher task(s) "
+                "during shutdown; %d did not honor cancellation and were "
+                "left to finish detached",
+                timeout,
+                len(pending),
+                len(tasks),
+                len(pending),
+            )
+            for task in pending:
+                task.add_done_callback(self._log_detached_watcher_result)
+        for task in done:
+            if task.cancelled():
+                continue
+            exc = task.exception()
+            if exc is not None:
+                logger.warning("Gateway watcher task ended during shutdown: %s", exc)
+        self._background_tasks.difference_update(done)
+
+    def _track_background_task(self, coroutine: Any) -> asyncio.Task:
+        """Create a gateway watcher that participates in shutdown ownership."""
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     def _adapter_disconnect_timeout_secs(self) -> float:
         """Return the per-adapter disconnect timeout used during shutdown."""
@@ -7916,7 +8074,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Start background workflow dispatcher — ticks queued workflow graph
         # executions. Gated by `workflow.dispatch_in_gateway` (default True).
-        asyncio.create_task(self._workflow_dispatcher_watcher())
+        self._track_background_task(self._workflow_dispatcher_watcher())
+
+        # Start durable outbox delivery after workflow materialization. It shares
+        # the workflow cadence/config but owns claim-token-fenced transport I/O.
+        self._track_background_task(self._mission_outbox_dispatcher_watcher())
 
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
@@ -9120,6 +9282,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     await self._cleanup_agent_resources_off_loop(
                         _agent, context="shutdown idle-cache"
                     )
+
+            # Stop every tracked watcher before adapter teardown. In particular
+            # the durable outbox watcher may be inside router.deliver(); its
+            # cancellation must settle/reconcile while adapters and SessionDB
+            # are still available.
+            await self._cancel_and_await_background_tasks()
 
             for platform, adapter in list(self.adapters.items()):
                 await self._bounded_adapter_teardown(adapter, platform)
@@ -13085,7 +13253,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 watchers = process_registry.pending_watchers
                 process_registry.pending_watchers = []
                 for i, watcher in enumerate(watchers):
-                    asyncio.create_task(self._run_process_watcher(watcher))
+                    self._track_background_task(self._run_process_watcher(watcher))
                     if i % 100 == 99:
                         await asyncio.sleep(0)
             except Exception as e:

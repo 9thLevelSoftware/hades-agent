@@ -27,6 +27,7 @@ IMPLEMENTED_NODE_TYPES = {
     "switch",
     "agent_task",
     "wait",
+    "send_message",
     "parallel",
     "join",
     "fail",

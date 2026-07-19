@@ -88,6 +88,10 @@ class WorkflowVersionConflict(Exception):
     """Raised when a draft's expected_latest_version no longer matches the DB."""
 
 
+class WorkflowStateConflict(Exception):
+    """Raised when apply_state_mutation detects a stale expected_revision."""
+
+
 class WorkflowHistoryExists(Exception):
     """Raised when a destructive delete would orphan execution/feed history."""
 
@@ -148,6 +152,7 @@ CREATE TABLE IF NOT EXISTS workflow_node_runs (
     wait_until    INTEGER,
     kanban_task_id TEXT,
     kanban_board   TEXT,
+    outbox_id      TEXT,
     FOREIGN KEY (execution_id) REFERENCES workflow_executions(execution_id)
 );
 
@@ -221,6 +226,51 @@ CREATE TABLE IF NOT EXISTS workflow_drafts (
     base_version INTEGER,
     updated_at   INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS missions (
+    mission_id        TEXT PRIMARY KEY,
+    profile           TEXT NOT NULL,
+    objective         TEXT NOT NULL,
+    constraints_json  TEXT NOT NULL,
+    authority_json    TEXT NOT NULL,
+    evidence_json     TEXT NOT NULL,
+    authority_version INTEGER NOT NULL DEFAULT 1,
+    status            TEXT NOT NULL,
+    verdict           TEXT,
+    receipt_id        TEXT,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    terminal_at       INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS mission_execution_links (
+    mission_id   TEXT NOT NULL REFERENCES missions(mission_id) ON DELETE CASCADE,
+    execution_id TEXT NOT NULL REFERENCES workflow_executions(execution_id),
+    relation     TEXT NOT NULL DEFAULT 'primary',
+    linked_at    INTEGER NOT NULL,
+    PRIMARY KEY (mission_id, execution_id)
+);
+
+CREATE TABLE IF NOT EXISTS mission_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    mission_id      TEXT NOT NULL REFERENCES missions(mission_id) ON DELETE CASCADE,
+    kind            TEXT NOT NULL,
+    payload_json    TEXT NOT NULL,
+    idempotency_key TEXT,
+    created_at      INTEGER NOT NULL,
+    UNIQUE (mission_id, idempotency_key)
+);
+
+CREATE TABLE IF NOT EXISTS mission_review_items (
+    review_id     TEXT PRIMARY KEY,
+    mission_id    TEXT NOT NULL REFERENCES missions(mission_id) ON DELETE CASCADE,
+    transaction_id TEXT,
+    kind          TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    detail_json   TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    resolved_at   INTEGER
+);
 """
 
 
@@ -265,6 +315,8 @@ def init_db(db_path: Path | None = None) -> None:
                 conn.execute("ALTER TABLE workflow_node_runs ADD COLUMN kanban_task_id TEXT")
             if "kanban_board" not in columns:
                 conn.execute("ALTER TABLE workflow_node_runs ADD COLUMN kanban_board TEXT")
+            if "outbox_id" not in columns:
+                conn.execute("ALTER TABLE workflow_node_runs ADD COLUMN outbox_id TEXT")
             def_columns = {
                 row["name"]
                 for row in conn.execute("PRAGMA table_info(workflow_definitions)")
@@ -292,6 +344,10 @@ def init_db(db_path: Path | None = None) -> None:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_workflow_node_runs_kanban_task
                     ON workflow_node_runs(kanban_task_id)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_workflow_node_runs_outbox_id
+                    ON workflow_node_runs(outbox_id)
             """)
         _INITIALIZED_DB_PATHS.add(cache_key)
 
@@ -328,8 +384,21 @@ def _json_loads_or_empty(value: str | None) -> Any:
     return {} if decoded is None else decoded
 
 
+_LEGACY_NON_SEND_MESSAGE_FIELDS = (
+    "platform",
+    "target",
+    "message",
+    "not_before_seconds",
+)
+
+
 def _spec_json(spec: WorkflowSpec) -> str:
-    return _json_dumps(spec.model_dump(mode="json", by_alias=True))
+    payload = spec.model_dump(mode="json", by_alias=True)
+    for node in payload["nodes"].values():
+        if node["type"] != "send_message":
+            for field in _LEGACY_NON_SEND_MESSAGE_FIELDS:
+                node.pop(field, None)
+    return _json_dumps(payload)
 
 
 def _checksum(raw: str) -> str:
@@ -1412,6 +1481,7 @@ def list_node_runs(conn: sqlite3.Connection, execution_id: str) -> list[dict[str
                 "wait_until": row["wait_until"],
                 "kanban_task_id": row["kanban_task_id"],
                 "kanban_board": row["kanban_board"],
+                "outbox_id": row["outbox_id"],
             }
         )
 
@@ -1434,6 +1504,7 @@ def list_node_runs(conn: sqlite3.Connection, execution_id: str) -> list[dict[str
                     "wait_until": None,
                     "kanban_task_id": None,
                     "kanban_board": None,
+                    "outbox_id": None,
                 }
             )
 
@@ -1600,4 +1671,203 @@ def append_event(
                 _json_dumps(payload or {}),
                 int(time.time()),
             ),
+        )
+
+
+# --- Task 5: workflow state mutation service ---
+
+
+@dataclass(frozen=True)
+class WorkflowStateSnapshot:
+    resource: str
+    version: int | None
+    enabled: bool | None
+    checksum: str | None
+
+
+@dataclass(frozen=True)
+class WorkflowStatePoint:
+    version: int | None
+    enabled: bool | None
+    checksum: str | None
+
+
+@dataclass(frozen=True)
+class WorkflowStateMutation:
+    resource: str
+    action: str  # "deploy" | "enable" | "disable"
+    expected_revision: str | None
+    before: WorkflowStatePoint
+    after: WorkflowStatePoint
+    spec: WorkflowSpec | None = None
+
+    def model_copy(self, *, update: dict[str, Any]) -> "WorkflowStateMutation":
+        import dataclasses
+        return dataclasses.replace(self, **update)
+
+
+def _revision(checksum: str | None, enabled: bool | None) -> str | None:
+    if checksum is None:
+        return None
+    return f"{checksum}:{1 if enabled else 0}"
+
+
+def snapshot_workflow_state(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+    version: int | None = None,
+) -> WorkflowStateSnapshot:
+    """Canonical snapshot of a workflow/version's durable state."""
+    if version is None:
+        row = conn.execute(
+            """
+            SELECT version, enabled, checksum FROM workflow_definitions
+             WHERE workflow_id = ?
+             ORDER BY version DESC LIMIT 1
+            """,
+            (workflow_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT version, enabled, checksum FROM workflow_definitions
+             WHERE workflow_id = ? AND version = ?
+            """,
+            (workflow_id, version),
+        ).fetchone()
+    if row is None:
+        return WorkflowStateSnapshot(
+            resource=workflow_id, version=None, enabled=None, checksum=None,
+        )
+    return WorkflowStateSnapshot(
+        resource=workflow_id,
+        version=int(row["version"]),
+        enabled=bool(row["enabled"]),
+        checksum=row["checksum"],
+    )
+
+
+def prepare_state_mutation(
+    snapshot: WorkflowStateSnapshot,
+    *,
+    action: str,
+    spec: WorkflowSpec | None = None,
+) -> WorkflowStateMutation:
+    """Prepare an immutable mutation from a snapshot."""
+    before = WorkflowStatePoint(
+        version=snapshot.version,
+        enabled=snapshot.enabled,
+        checksum=snapshot.checksum,
+    )
+    if action == "deploy":
+        if spec is None:
+            raise ValueError("deploy action requires spec")
+        raw = _spec_json(spec)
+        after_checksum = _checksum(raw)
+        after = WorkflowStatePoint(
+            version=spec.version,
+            enabled=bool(spec.enabled),
+            checksum=after_checksum,
+        )
+    elif action == "enable":
+        after = WorkflowStatePoint(
+            version=snapshot.version,
+            enabled=True,
+            checksum=snapshot.checksum,
+        )
+    elif action == "disable":
+        after = WorkflowStatePoint(
+            version=snapshot.version,
+            enabled=False,
+            checksum=snapshot.checksum,
+        )
+    else:
+        raise ValueError(f"unknown action: {action}")
+    return WorkflowStateMutation(
+        resource=snapshot.resource,
+        action=action,
+        expected_revision=_revision(snapshot.checksum, snapshot.enabled),
+        before=before,
+        after=after,
+        spec=spec,
+    )
+
+
+def apply_state_mutation(
+    conn: sqlite3.Connection,
+    mutation: WorkflowStateMutation,
+) -> None:
+    """Apply a mutation inside write_txn with optimistic revision check."""
+    with write_txn(conn):
+        current = snapshot_workflow_state(
+            conn, mutation.resource, mutation.before.version,
+        )
+        current_rev = _revision(current.checksum, current.enabled)
+        if current_rev != mutation.expected_revision:
+            raise WorkflowStateConflict(
+                f"workflow {mutation.resource} revision mismatch: "
+                f"expected {mutation.expected_revision!r}, found {current_rev!r}"
+            )
+        if mutation.action == "deploy":
+            assert mutation.spec is not None
+            deploy_definition(conn, mutation.spec, created_by=None)
+        else:
+            enabled = mutation.action == "enable"
+            set_definition_enabled(
+                conn, mutation.resource, enabled, version=mutation.before.version,
+            )
+
+
+def verify_state_mutation(
+    conn: sqlite3.Connection,
+    mutation: WorkflowStateMutation,
+) -> bool:
+    """Reread the exact version and compare immutable checksum plus enabled state."""
+    current = snapshot_workflow_state(conn, mutation.resource, mutation.after.version)
+    return (
+        current.version == mutation.after.version
+        and current.enabled == mutation.after.enabled
+        and current.checksum == mutation.after.checksum
+    )
+
+
+def rollback_state_mutation(
+    conn: sqlite3.Connection,
+    mutation: WorkflowStateMutation,
+) -> None:
+    """Restore prior enabled state without editing published definitions."""
+    with write_txn(conn):
+        current = snapshot_workflow_state(
+            conn, mutation.resource, mutation.after.version,
+        )
+        if (
+            current.version != mutation.after.version
+            or current.enabled != mutation.after.enabled
+            or current.checksum != mutation.after.checksum
+        ):
+            raise WorkflowStateConflict(
+                f"workflow {mutation.resource} revision mismatch during rollback"
+            )
+
+        if mutation.action == "deploy":
+            # An idempotent deploy of the already-existing exact version had no
+            # effect to undo. A new published version is immutable, so rollback
+            # makes it unavailable rather than deleting or editing it.
+            if (
+                mutation.before.version == mutation.after.version
+                and mutation.before.checksum == mutation.after.checksum
+            ):
+                return
+            set_definition_enabled(
+                conn, mutation.resource, False, version=mutation.after.version,
+            )
+            return
+
+        if mutation.before.enabled is None or mutation.before.version is None:
+            raise WorkflowStateConflict(
+                f"workflow {mutation.resource} has no prior version to restore"
+            )
+        set_definition_enabled(
+            conn, mutation.resource, mutation.before.enabled,
+            version=mutation.before.version,
         )

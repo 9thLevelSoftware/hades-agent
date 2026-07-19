@@ -8,6 +8,7 @@ from agent.verification_evidence import (
     classify_verification_command,
     mark_workspace_edited,
     record_terminal_result,
+    receipt_verification_observation,
     verification_status,
 )
 
@@ -391,3 +392,24 @@ def test_recording_expires_old_edit_only_state(tmp_path, monkeypatch):
     status = verification_status(session_id="old-session", cwd=tmp_path)
     assert status["status"] == "unverified"
     assert status["changed_paths"] == []
+
+
+def test_receipt_observation_uses_existing_ledger_timestamp_and_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    _node_project(tmp_path)
+    record_terminal_result(
+        command="pnpm test",
+        cwd=tmp_path,
+        session_id="receipt-session",
+        exit_code=0,
+        output="all green",
+    )
+
+    observation = receipt_verification_observation(
+        session_id="receipt-session", cwd=tmp_path
+    )
+
+    assert observation["status"] == "passed"
+    assert observation["source"] == "verification_evidence"
+    assert observation["timestamp"]
+    assert observation["evidence"]["canonical_command"] == "pnpm run test"

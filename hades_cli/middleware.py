@@ -206,8 +206,26 @@ def run_tool_execution_middleware(
     reaches the gate and creates no autonomy decision. Mode/config lookup
     happens inside the gate at execution time and never mutates the
     prompt or the model-visible tool schemas.
+
+    The ``effect_coordinator`` and ``operation_key_factory`` callables
+    (Task 3) are evaluated inside the gate's handler, not pre-chain: the
+    gate decides whether the operation may proceed at all, and only then
+    does the coordinator (if any) decide whether and how to invoke the
+    real handler. A plugin short-circuit (which never reaches the
+    terminal handler) pays for neither the gate nor the coordinator/factory.
+
+    Spec 3: when ``effect_coordinator`` is injected, the gated slot calls
+    ``coordinator.execute(tool_name=..., args=final_payload,
+    handler=next_call, operation_key=..., mission_id=...)`` with the
+    *post-plugin* final payload. The original ``next_call`` is the
+    coordinator's handler, so the coordinator decides whether and
+    how to invoke it. Plugin short-circuits skip the coordinator
+    entirely; the no-coordinator path passes through unchanged.
     """
     callbacks = _get_middleware_callbacks(TOOL_EXECUTION_MIDDLEWARE)
+    effect_coordinator = context.pop("effect_coordinator", None)
+    operation_key_factory = context.pop("operation_key_factory", None)
+    mission_id = context.get("mission_id")
     gate_kwargs = {
         "operation_metadata": context.get("operation_metadata"),
         "task_id": context.get("task_id") or "",
@@ -215,17 +233,37 @@ def run_tool_execution_middleware(
         "tool_call_id": context.get("tool_call_id") or "",
     }
 
+    def _coordinated_call(payload):
+        # Spec 3: hand off to the coordinator when one is wired in. The
+        # coordinator decides whether to invoke ``next_call`` (the real
+        # handler) under mission / authority / approval rules.
+        if effect_coordinator is not None:
+            return effect_coordinator.execute(
+                tool_name=tool_name,
+                args=payload,
+                handler=next_call,
+                operation_key=context.get("operation_key", ""),
+                mission_id=mission_id,
+            )
+        return next_call(payload)
+
     def _gated_terminal(final_args: Any) -> Any:
         from agent.autonomy.runtime import authority_gate
 
-        # The operation key for the authority decision is derived from the
-        # final arguments at this boundary (inside the gate); the legacy
-        # operation_key_factory below remains the middleware-payload key.
-        return authority_gate(tool_name, final_args, next_call, **gate_kwargs)
+        return authority_gate(tool_name, final_args, _coordinated_call, **gate_kwargs)
 
     if not callbacks:
+        # No tool_execution middleware is registered, so no callback needs
+        # to observe the key. Only evaluate the factory when a coordinator
+        # is wired in to actually consume it — otherwise stay lazy (some
+        # callers pass large/expensive-to-hash arguments and rely on the
+        # key never being computed when nothing will read it).
+        if effect_coordinator is not None and callable(operation_key_factory):
+            context["operation_key"] = operation_key_factory()
         return _gated_terminal(args)
-    operation_key_factory = context.pop("operation_key_factory", None)
+    # Callbacks are registered: the key must exist before the chain runs
+    # so tool_execution middleware can read it from its kwargs (a
+    # pre-existing contract real plugins rely on) — evaluated once, here.
     if callable(operation_key_factory):
         context["operation_key"] = operation_key_factory()
     return _run_execution_chain(
@@ -237,7 +275,6 @@ def run_tool_execution_middleware(
         original_args=context.pop("original_args", args),
         **context,
     )
-
 
 def run_api_execution_middleware(
     request: Dict[str, Any],

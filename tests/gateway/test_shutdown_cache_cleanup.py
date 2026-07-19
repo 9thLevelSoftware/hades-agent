@@ -50,6 +50,15 @@ class _FakeGateway:
         self._pending_messages = {}
         self._pending_approvals = {}
         self._busy_ack_ts = {}
+        # stop() cancels tracked watchers before adapter teardown (durable
+        # mission outbox watcher may be inside router.deliver() at shutdown
+        # time). This fake never populates _background_tasks, so the real
+        # implementation's early-return keeps this a no-op here.
+        self._cancel_and_await_background_tasks = (
+            gw_mod.GatewayRunner._cancel_and_await_background_tasks.__get__(
+                self, gw_mod.GatewayRunner
+            )
+        )
 
     def _running_agent_count(self):
         return len(self._running_agents)

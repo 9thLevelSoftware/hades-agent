@@ -365,6 +365,9 @@ print(json.dumps([
                     "read_only": False,
                     "destructive": True,
                     "idempotent": False,
+                    "effect_adapter": None,
+                    "effect_semantic_kind": None,
+                    "effect_overrides": {},
                 },
             }
             assert called == []
@@ -512,6 +515,9 @@ print(json.dumps([
                     "read_only": False,
                     "destructive": True,
                     "idempotent": False,
+                    "effect_adapter": None,
+                    "effect_semantic_kind": None,
+                    "effect_overrides": {},
                 },
             }
             assert called == []

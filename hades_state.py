@@ -15,14 +15,18 @@ Key design decisions:
 """
 
 import asyncio
+import copy
+import hashlib
 import json
 import logging
 import random
 import re
+import secrets
 import sqlite3
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -68,6 +72,117 @@ _COMPRESSION_CHILD_SQL = (
 # Rows that surface in pickers: roots + branch children (subagent runs and
 # compression continuations stay hidden).
 _LISTABLE_CHILD_SQL = f"(s.parent_session_id IS NULL OR {_BRANCH_CHILD_SQL.format(a='s')})"
+
+
+# Private sentinel for ``transition_outbox``'s ``result`` parameter —
+# lets callers distinguish "omit the argument entirely" (preserve the
+# existing ``result_json``) from "pass ``None`` explicitly" (clear to
+# SQL NULL). Sharing a module-level object is intentional: any value
+# the caller could legitimately pass — including ``None`` and any JSON
+# string — is distinct from this marker.
+_MISSING = object()
+
+# Durable result/preview fields are storage metadata, not delivery payloads.
+# Keep this boundary redaction here (rather than in a higher-level outbox
+# service) so direct SessionDB callers and legacy recovery paths receive the
+# same protection. Keys are compared after removing punctuation and folding
+# case, which covers access_token/access-token/ACCESS TOKEN and their sibling
+# spellings.
+_DURABLE_REDACTED = "[REDACTED]"
+_DURABLE_SECRET_KEY_RE = re.compile(
+    r"(?:secret|token|password|passwd|credential|apikey|accesskey|privatekey|"
+    r"authorization|cookie|sessionkey)",
+    re.IGNORECASE,
+)
+_DURABLE_RAW_OUTPUT_KEYS = frozenset(
+    {
+        "stdout",
+        "stderr",
+        "stdouttext",
+        "stderrtext",
+        "rawoutput",
+        "rawstdout",
+        "rawstderr",
+        "output",
+        "outputtext",
+        "error",
+        "errormessage",
+        "errortext",
+        "erroroutput",
+        "exception",
+        "traceback",
+        "stacktrace",
+        "message",
+        "content",
+        "prompt",
+        "body",
+        "payload",
+    }
+)
+# Historical adapters use suffixed/derived names such as stdout_data,
+# stderr_output, error_details, traceback_text, and exception_info. The key is
+# normalized before these substring checks so punctuation/case variants share
+# one storage redaction rule.
+_DURABLE_RAW_OUTPUT_KEY_PARTS = (
+    "stdout",
+    "stderr",
+    "error",
+    "traceback",
+    "exception",
+    "output",
+)
+_DURABLE_SECRET_TEXT_RE = re.compile(
+    r"(?:bearer\s+|(?:token|secret|password|passwd|api[_-]?key|"
+    r"access[_-]?token|client[_-]?secret)\s*[:=]\s*)"
+    r"[^\s,;]+|sk-[A-Za-z0-9_-]+",
+    re.IGNORECASE,
+)
+
+
+def _normalize_durable_key(key: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(key).casefold())
+
+
+def _redact_durable_value(
+    value: Any, *, key: Optional[str] = None, _seen: Optional[set[int]] = None
+) -> Any:
+    """Return a recursively redacted copy of durable metadata.
+
+    The caller's object is never mutated. Delivery ``content_json`` is kept
+    separate from this helper because it is the actual payload a router must
+    send; preview, approval, result, receipt, and effect metadata are logs and
+    must not retain credentials or raw process/adapter output.
+    """
+    if key is not None:
+        normalized = _normalize_durable_key(key)
+        if (
+            normalized in _DURABLE_RAW_OUTPUT_KEYS
+            or any(part in normalized for part in _DURABLE_RAW_OUTPUT_KEY_PARTS)
+            or _DURABLE_SECRET_KEY_RE.search(normalized)
+        ):
+            return _DURABLE_REDACTED
+    if isinstance(value, (dict, list, tuple)):
+        seen = _seen if _seen is not None else set()
+        identity = id(value)
+        if identity in seen:
+            raise ValueError("circular durable metadata payload")
+        seen.add(identity)
+        try:
+            if isinstance(value, dict):
+                return {
+                    str(item_key): _redact_durable_value(
+                        item_value, key=str(item_key), _seen=seen
+                    )
+                    for item_key, item_value in value.items()
+                }
+            return [_redact_durable_value(item, _seen=seen) for item in value]
+        finally:
+            seen.remove(identity)
+    if isinstance(value, str):
+        return _DURABLE_SECRET_TEXT_RE.sub(_DURABLE_REDACTED, value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _DURABLE_SECRET_TEXT_RE.sub(_DURABLE_REDACTED, str(value))
 
 
 def _ephemeral_child_sql(alias: str = "s") -> str:
@@ -132,6 +247,11 @@ T = TypeVar("T")
 DEFAULT_DB_PATH = get_hades_home() / "state.db"
 
 SCHEMA_VERSION = 22
+
+
+class OutboxMigrationError(sqlite3.IntegrityError):
+    """A legacy outbox row needs explicit context reconciliation."""
+
 
 # Cap on user-controlled FTS5 query input before regex/sanitizer processing.
 # Search queries do not need to be arbitrarily large, and bounding them keeps
@@ -895,6 +1015,82 @@ CREATE INDEX IF NOT EXISTS idx_agent_operations_kind_state_updated
 CREATE INDEX IF NOT EXISTS idx_agent_operations_session_updated
     ON agent_operations(session_id, updated_at);
 
+CREATE TABLE IF NOT EXISTS effect_transactions (
+    transaction_id TEXT PRIMARY KEY,
+    operation_id TEXT NOT NULL UNIQUE REFERENCES agent_operations(operation_id),
+    mission_id TEXT NOT NULL,
+    execution_id TEXT,
+    step_id TEXT,
+    adapter_id TEXT NOT NULL,
+    sequence_no INTEGER NOT NULL,
+    semantics_json TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    depends_on_json TEXT NOT NULL,
+    prepared_json TEXT,
+    preview_json TEXT,
+    authority_json TEXT,
+    result_json TEXT,
+    verification_json TEXT,
+    compensation_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (mission_id, sequence_no)
+);
+
+CREATE TABLE IF NOT EXISTS receipts (
+    receipt_id TEXT PRIMARY KEY,
+    mission_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    objective TEXT NOT NULL,
+    constraints_json TEXT NOT NULL,
+    execution_ids_json TEXT NOT NULL,
+    transaction_ids_json TEXT NOT NULL,
+    before_after_json TEXT NOT NULL,
+    claims_json TEXT NOT NULL,
+    verifier_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    artifacts_json TEXT NOT NULL,
+    uncertainty_json TEXT NOT NULL,
+    freshness_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    signature_json TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS receipt_observations (
+    observation_id TEXT PRIMARY KEY,
+    receipt_id TEXT NOT NULL REFERENCES receipts(receipt_id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mission_outbox (
+    outbox_id TEXT PRIMARY KEY,
+    mission_id TEXT,
+    execution_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    transaction_id TEXT UNIQUE,
+    delivery_id TEXT NOT NULL UNIQUE,
+    platform TEXT NOT NULL,
+    target TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT '',
+    preview_json TEXT,
+    not_before INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    approval_json TEXT,
+    result_json TEXT,
+    lease_owner TEXT,
+    lease_expires_at INTEGER,
+    claim_token TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    acknowledged_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS agent_operation_owners (
     operation_id TEXT PRIMARY KEY
         REFERENCES agent_operations(operation_id) ON DELETE CASCADE,
@@ -1040,6 +1236,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_gateway_peer
     ON sessions(source, user_id, chat_id, chat_type, thread_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
     ON sessions(handoff_state, started_at);
+CREATE INDEX IF NOT EXISTS idx_mission_outbox_execution_node
+    ON mission_outbox(execution_id, node_id);
+CREATE INDEX IF NOT EXISTS idx_mission_outbox_due
+    ON mission_outbox(status, not_before, lease_expires_at);
 """
 
 FTS_SQL = """
@@ -1156,6 +1356,7 @@ class SessionDB:
         self.read_only = read_only
 
         self._lock = threading.Lock()
+        self._transaction_state = threading.local()
         self._write_count = 0
         # One-shot guard for the runtime FTS rebuild recovery on the write
         # path. A corrupt FTS shadow table makes EVERY message write raise
@@ -1403,6 +1604,22 @@ class SessionDB:
                 self._warn_fts5_unavailable(exc)
             return False
 
+    def _run_in_write_transaction(self, fn: Callable[[sqlite3.Connection], T]) -> T:
+        """Run a callback and any nested SessionDB writes atomically.
+
+        The transaction-local connection marker lets storage helpers such as
+        ``OperationJournal.create`` and ``create_effect_transaction`` reuse
+        the outer ``BEGIN IMMEDIATE`` instead of committing independently.
+        """
+        def _atomic(conn: sqlite3.Connection) -> T:
+            self._transaction_state.conn = conn
+            try:
+                return fn(conn)
+            finally:
+                self._transaction_state.conn = None
+
+        return self._execute_write(_atomic)
+
     def _execute_write(self, fn: Callable[[sqlite3.Connection], T]) -> T:
         """Execute a write transaction with BEGIN IMMEDIATE and jitter retry.
 
@@ -1418,6 +1635,10 @@ class SessionDB:
 
         Returns whatever *fn* returns.
         """
+        active_conn = getattr(self._transaction_state, "conn", None)
+        if active_conn is not None:
+            return fn(active_conn)
+
         # Single chokepoint: fail explicitly when the handle is closed.
         # Transient sqlite3.OperationalError (busy / locked) is still
         # retryable below — the chokepoint only filters the explicit,
@@ -1640,6 +1861,10 @@ class SessionDB:
         :class:`SessionDBClosedError` semantics as writes; transient
         errors (busy / locked) still propagate from ``fn`` untouched.
         """
+        active_conn = getattr(self._transaction_state, "conn", None)
+        if active_conn is not None:
+            return fn(active_conn)
+
         with self._lock:
             self._require_open()
             # _require_open either raised or left the conn alive; the
@@ -1735,6 +1960,370 @@ class SessionDB:
                             "reconcile %s.%s: %s", table_name, col_name, exc,
                         )
 
+    @staticmethod
+    def _legacy_outbox_row_value(
+        row: Any, column: str, default: Any = None
+    ) -> Any:
+        """Read an optional column from a legacy sqlite row."""
+        try:
+            return row[column]
+        except (IndexError, KeyError, TypeError):
+            return default
+
+    @classmethod
+    def _legacy_outbox_canonical_content(cls, row: sqlite3.Row) -> Optional[str]:
+        content_json = cls._legacy_outbox_row_value(row, "content_json")
+        if not isinstance(content_json, str) or not content_json:
+            return None
+        try:
+            return cls._canonicalize_content_json(content_json)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _legacy_outbox_content_hash(cls, row: sqlite3.Row) -> str:
+        """Return a deterministic hash for a legacy blank outbox hash.
+
+        Current rows hash their canonical ``content_json`` payload. If a
+        legacy row has unusable or unavailable raw content, migration must
+        still establish a stable, non-empty identity without copying raw
+        output into a new column. The fallback hashes only canonical safe
+        fields: outbox/execution/node identity, platform, target, persisted
+        content preview, and explicit hash-schema/revision versions.
+        """
+        canonical_content = cls._legacy_outbox_canonical_content(row)
+        if canonical_content is not None:
+            return hashlib.sha256(canonical_content.encode("utf-8")).hexdigest()
+
+        fallback = {
+            "version": 1,
+            "revision": cls._legacy_outbox_row_value(row, "revision", 1),
+            "outbox_id": cls._legacy_outbox_row_value(row, "outbox_id", ""),
+            "execution_id": cls._legacy_outbox_row_value(row, "execution_id", ""),
+            "node_id": cls._legacy_outbox_row_value(row, "node_id", ""),
+            "platform": cls._legacy_outbox_row_value(row, "platform", ""),
+            "target": cls._legacy_outbox_row_value(row, "target", ""),
+            "content_preview": cls._legacy_outbox_row_value(row, "preview_json"),
+        }
+        canonical = json.dumps(
+            fallback, sort_keys=True, separators=(",", ":"), default=str
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _backfill_legacy_outbox_content_hashes(cls, cursor: sqlite3.Cursor) -> None:
+        """Backfill blank hashes during every schema reconcile/reopen."""
+        try:
+            rows = cursor.execute(
+                """SELECT * FROM mission_outbox
+                   WHERE content_hash IS NULL OR content_hash = ''"""
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        for row in rows:
+            outbox_id = cls._legacy_outbox_row_value(row, "outbox_id")
+            if not isinstance(outbox_id, str) or not outbox_id:
+                continue
+            canonical_content = cls._legacy_outbox_canonical_content(row)
+            content_hash = cls._legacy_outbox_content_hash(row)
+            if canonical_content is not None:
+                cursor.execute(
+                    """UPDATE mission_outbox
+                          SET content_json = ?, content_hash = ?
+                        WHERE outbox_id = ?
+                          AND (content_hash IS NULL OR content_hash = '')""",
+                    (canonical_content, content_hash, outbox_id),
+                )
+            else:
+                cursor.execute(
+                    """UPDATE mission_outbox
+                          SET content_hash = ?
+                        WHERE outbox_id = ?
+                          AND (content_hash IS NULL OR content_hash = '')""",
+                    (content_hash, outbox_id),
+                )
+
+    @classmethod
+    def _sanitize_legacy_outbox_metadata(cls, cursor: sqlite3.Cursor) -> None:
+        """Persist redacted metadata for every historical outbox row.
+
+        Reads already redact on the way out, but that is not sufficient for a
+        durable storage boundary: raw legacy JSON must be removed from the
+        sqlite columns during the same startup transaction that reconciles
+        outbox identity and status state.
+        """
+        try:
+            rows = cursor.execute(
+                """SELECT rowid, preview_json, approval_json, result_json
+                     FROM mission_outbox"""
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return
+        columns = ("preview_json", "approval_json", "result_json")
+        for row in rows:
+            assignments: dict[str, Optional[str]] = {}
+            for column in columns:
+                raw = row[column]
+                if raw is None:
+                    continue
+                try:
+                    parsed = json.loads(raw)
+                except (TypeError, ValueError):
+                    # Unparseable historical bytes have no trustworthy
+                    # structure.  Do not preserve even a redacted copy of the
+                    # original string: a typed sentinel makes the durable
+                    # boundary explicit and guarantees raw legacy metadata
+                    # cannot survive reopen.
+                    cleaned = cls._canonicalize_payload(
+                        {
+                            "redacted": True,
+                            "reason": "malformed_legacy_metadata",
+                        }
+                    )
+                else:
+                    cleaned = (
+                        cls._canonicalize_payload(None)
+                        if parsed is None
+                        else cls._canonicalize_outbox_optional_payload(parsed)
+                    )
+                if cleaned != raw:
+                    assignments[column] = cleaned
+            if assignments:
+                set_clause = ", ".join(
+                    f"{column} = ?" for column in assignments
+                )
+                cursor.execute(
+                    f"UPDATE mission_outbox SET {set_clause} WHERE rowid = ?",
+                    tuple(assignments.values()) + (row["rowid"],),
+                )
+    @classmethod
+    def _preflight_legacy_outbox_rows(cls, cursor: sqlite3.Cursor) -> None:
+        """Validate legacy context conflicts before any repair mutation."""
+        partial_context = cursor.execute(
+            """SELECT execution_id, node_id, mission_id, transaction_id
+                 FROM mission_outbox
+                WHERE (
+                    (NULLIF(TRIM(COALESCE(mission_id, '')), '') IS NOT NULL
+                     AND NULLIF(TRIM(COALESCE(transaction_id, '')), '') IS NULL)
+                    OR
+                    (NULLIF(TRIM(COALESCE(mission_id, '')), '') IS NULL
+                     AND NULLIF(TRIM(COALESCE(transaction_id, '')), '') IS NOT NULL)
+                )"""
+        ).fetchone()
+        if partial_context is not None:
+            raise OutboxMigrationError(
+                "mission_outbox migration reconciliation required: partial mission "
+                "context requires both mission_id and transaction_id for "
+                f"execution_id={partial_context['execution_id']!r}, "
+                f"node_id={partial_context['node_id']!r}"
+            )
+
+        duplicate_groups = cursor.execute(
+            """SELECT execution_id, node_id
+                 FROM mission_outbox
+                GROUP BY execution_id, node_id
+               HAVING COUNT(*) > 1"""
+        ).fetchall()
+        status_map = {"pending": "scheduled", "sent": "delivered"}
+
+        def normalized_text(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            text = str(value).strip()
+            return text or None
+
+        def canonical_optional_payload(
+            row: sqlite3.Row, column: str
+        ) -> Optional[str]:
+            raw = cls._legacy_outbox_row_value(row, column)
+            if raw is None:
+                return None
+            try:
+                parsed = json.loads(raw)
+                return cls._canonicalize_outbox_optional_payload(parsed)
+            except (TypeError, ValueError) as exc:
+                raise OutboxMigrationError(
+                    "mission_outbox migration reconciliation required: duplicate "
+                    f"identity has malformed {column} metadata"
+                ) from exc
+
+        def semantic_identity(row: sqlite3.Row) -> dict[str, Any]:
+            canonical_content = cls._legacy_outbox_canonical_content(row)
+            if canonical_content is None:
+                raise OutboxMigrationError(
+                    "mission_outbox migration reconciliation required: duplicate "
+                    "identity has malformed content"
+                )
+            computed_hash = hashlib.sha256(canonical_content.encode("utf-8")).hexdigest()
+            persisted_hash = cls._legacy_outbox_row_value(row, "content_hash")
+            if persisted_hash not in (None, "") and persisted_hash != computed_hash:
+                raise OutboxMigrationError(
+                    "mission_outbox migration reconciliation required: duplicate "
+                    "identity has non-canonical content hash"
+                )
+            # Blank legacy hashes are repaired to the canonical content hash
+            # later in the same transaction; compare their repaired identity
+            # here so a blank and canonical-hash row can still be deduped.
+            canonical_hash = computed_hash
+            mission_id = normalized_text(cls._legacy_outbox_row_value(row, "mission_id"))
+            transaction_id = normalized_text(
+                cls._legacy_outbox_row_value(row, "transaction_id")
+            )
+            platform = normalized_text(cls._legacy_outbox_row_value(row, "platform"))
+            target = normalized_text(cls._legacy_outbox_row_value(row, "target"))
+            if not platform or not target:
+                raise OutboxMigrationError(
+                    "mission_outbox migration reconciliation required: duplicate "
+                    "identity has blank platform or target"
+                )
+            return {
+                "mission_id": mission_id,
+                "transaction_id": transaction_id,
+                "platform": platform,
+                "target": target,
+                "content_hash": canonical_hash,
+                "content_json": canonical_content,
+                "preview_json": canonical_optional_payload(row, "preview_json"),
+                "approval_json": canonical_optional_payload(row, "approval_json"),
+                "result_json": canonical_optional_payload(row, "result_json"),
+                "status": status_map.get(row["status"], row["status"]),
+                "acknowledged": row["acknowledged_at"] is not None,
+            }
+
+        for execution_id, node_id in duplicate_groups:
+            rows = cursor.execute(
+                """SELECT rowid, * FROM mission_outbox
+                    WHERE execution_id = ? AND node_id = ?
+                    ORDER BY rowid""",
+                (execution_id, node_id),
+            ).fetchall()
+            baseline = semantic_identity(rows[0])
+            for row in rows[1:]:
+                candidate = semantic_identity(row)
+                conflicts = [
+                    field
+                    for field in baseline
+                    if candidate[field] != baseline[field]
+                ]
+                if conflicts:
+                    raise OutboxMigrationError(
+                        "mission_outbox migration reconciliation required: duplicate "
+                        "identity has conflicting semantic fields "
+                        f"{conflicts!r} for execution_id={execution_id!r}, "
+                        f"node_id={node_id!r}"
+                    )
+
+
+    @classmethod
+    def _migrate_legacy_outbox_rows(cls, cursor: sqlite3.Cursor) -> None:
+        """Reconcile legacy outbox state before enforcing identity uniqueness.
+
+        This runs inside the caller's explicit migration transaction. Older
+        databases used ``pending``/``sent`` and could contain duplicate
+        ``(execution_id, node_id)`` rows from a pre-index race. The migration
+        first maps those statuses to the seven-status vocabulary, then chooses
+        one deterministic semantic winner per identity: acknowledged rows,
+        terminal rows, claimed rows, and scheduled rows outrank older pending
+        work; revision/updated/created/rowid break ties. Optional metadata is
+        merged into the winner when the winner lacks it, while every linked
+        effect transaction and operation row is retained. Duplicate rows with
+        any conflicting semantic identity (context, transport, payload,
+        preview, status, or acknowledgement) fail closed instead of merging
+        linkage.
+        """
+        duplicate_groups = cursor.execute(
+            """SELECT execution_id, node_id
+                 FROM mission_outbox
+                GROUP BY execution_id, node_id
+               HAVING COUNT(*) > 1"""
+        ).fetchall()
+        cursor.execute(
+            "UPDATE mission_outbox SET status = 'scheduled' WHERE status = 'pending'"
+        )
+        cursor.execute(
+            "UPDATE mission_outbox SET status = 'delivered' WHERE status = 'sent'"
+        )
+
+        terminal = {"delivered", "cancelled", "failed", "unknown"}
+
+        def semantic_key(row: sqlite3.Row) -> tuple[int, int, int, int, int]:
+            status = row["status"]
+            if row["acknowledged_at"] is not None:
+                state_rank = 4
+            elif status in terminal:
+                state_rank = 3
+            elif status == "claimed":
+                state_rank = 2
+            else:
+                state_rank = 1
+            return (
+                state_rank,
+                int(row["revision"] or 1),
+                int(row["updated_at"] or 0),
+                int(row["created_at"] or 0),
+                int(row["rowid"]),
+            )
+
+        optional_columns = (
+            "mission_id",
+            "transaction_id",
+            "content_hash",
+            "preview_json",
+            "approval_json",
+            "result_json",
+        )
+        for execution_id, node_id in duplicate_groups:
+            rows = cursor.execute(
+                """SELECT rowid, * FROM mission_outbox
+                    WHERE execution_id = ? AND node_id = ?""",
+                (execution_id, node_id),
+            ).fetchall()
+            winner = max(rows, key=semantic_key)
+            assignments: dict[str, Any] = {
+                "revision": max(int(row["revision"] or 1) for row in rows),
+                "created_at": min(int(row["created_at"] or 0) for row in rows),
+                "updated_at": max(int(row["updated_at"] or 0) for row in rows),
+                "acknowledged_at": max(
+                    (int(row["acknowledged_at"]) for row in rows
+                     if row["acknowledged_at"] is not None),
+                    default=None,
+                ),
+            }
+            # Preserve fields that are absent on the semantic winner. This is
+            # deliberately limited to nullable metadata; content/identity
+            # belong to the winning revision and must not be overwritten by an
+            # older pending row.
+            for column in optional_columns:
+                value = winner[column]
+                if value in (None, ""):
+                    for row in sorted(rows, key=semantic_key, reverse=True):
+                        candidate = row[column]
+                        if candidate not in (None, ""):
+                            value = candidate
+                            break
+                assignments[column] = value
+
+            if winner["status"] in terminal or winner["acknowledged_at"] is not None:
+                assignments.update(
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    claim_token=None,
+                )
+            set_clause = ", ".join(f"{column} = ?" for column in assignments)
+            cursor.execute(
+                f"UPDATE mission_outbox SET {set_clause} WHERE rowid = ?",
+                tuple(assignments.values()) + (winner["rowid"],),
+            )
+            for row in rows:
+                if row["rowid"] != winner["rowid"]:
+                    # Do not cascade-delete transaction/operation rows. They
+                    # remain durable evidence even when the duplicate outbox
+                    # shell is removed to satisfy the relational invariant.
+                    cursor.execute(
+                        "DELETE FROM mission_outbox WHERE rowid = ?",
+                        (row["rowid"],),
+                    )
+
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
 
@@ -1758,6 +2347,30 @@ class SessionDB:
         # migration was skipped (e.g. due to version renumbering), the
         # column gets created here.
         self._reconcile_columns(cursor)
+
+        # Legacy outbox status/identity repair is a single explicit migration
+        # transaction. In particular, do not install the identity index until
+        # duplicate semantic state and linked durable rows have been reconciled.
+        conn = self._conn
+        assert conn is not None, "schema initialization requires an open connection"
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # The preflight is part of the same write-locked migration as all
+            # repairs.  A read-only preflight outside the lock admits a writer
+            # between conflict detection and duplicate deletion, allowing a
+            # mixed-context row to be silently selected as a loser.
+            self._preflight_legacy_outbox_rows(cursor)
+            self._sanitize_legacy_outbox_metadata(cursor)
+            self._backfill_legacy_outbox_content_hashes(cursor)
+            self._migrate_legacy_outbox_rows(cursor)
+            cursor.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_outbox_identity "
+                "ON mission_outbox(execution_id, node_id)"
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
@@ -8279,6 +8892,2259 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Mission effects, receipts, observations, outbox storage
+    #
+    # Storage-only layer. Validation at the Python boundary, SQL only
+    # stores what we accepted. Records are returned as frozen dataclasses
+    # with deep-copied structured fields so caller-side mutation can't
+    # bleed back into the database or into siblings.
+    # ─────────────────────────────────────────────────────────────────────
+
+    # Effect transaction phase vocabulary. Anything outside this set is
+    # rejected before SQL runs; no speculative taxonomy.
+    _EFFECT_PHASES: frozenset = frozenset({
+        "pending",
+        "previewed",
+        "committing",
+        "committed",
+        "unknown_effect",
+        "failed",
+        "cancelled",
+    })
+
+    # Phases that ``create_effect_transaction`` may place a row into
+    # directly.  Only the safe initial states: ``pending`` (default)
+    # or ``previewed`` (auto-promoted when caller supplies both
+    # prepared and preview).  Any caller-supplied ``phase`` outside
+    # this set is rejected before SQL.  ``committing`` / ``unknown_effect`` /
+    # ``committed`` / ``failed`` / ``cancelled`` are reachable only
+    # via ``transition_effect_transaction`` so the CAS graph stays the
+    # sole law.
+    _EFFECT_CREATABLE_PHASES: frozenset = frozenset({"pending", "previewed"})
+
+    # Phase transition map.  Vocabulary membership is necessary but
+    # not sufficient — illegal jumps (skip-ahead, self, terminal-out)
+    # are rejected before SQL even on legal phrases.  Terminal phases
+    # (``committed`` / ``failed`` / ``cancelled``) have no onward
+    # transitions.  ``pending`` and ``previewed`` admit both
+    # cancellation and early failure; ``committing`` admits a commit-
+    # attempt-failed terminal before any further fork.
+    _EFFECT_PHASE_TRANSITIONS: Dict[str, frozenset] = {
+        "pending": frozenset({"previewed", "cancelled", "failed"}),
+        "previewed": frozenset({"committing", "cancelled", "failed"}),
+        "committing": frozenset({"committed", "unknown_effect", "failed"}),
+        "unknown_effect": frozenset({"committed", "failed"}),
+        "committed": frozenset(),
+        "failed": frozenset(),
+        "cancelled": frozenset(),
+    }
+
+    _OUTBOX_CLAIM_INSPECTION_MULTIPLIER = 4
+
+    # Outbox status vocabulary. ``pending_approval`` is held until an
+    # approval/release boundary moves it to ``scheduled``. ``claimed`` is
+    # an active lease; ``sent`` / ``delivered`` / ``failed`` / ``unknown`` /
+    # ``cancelled`` are terminal and not re-claimable. ``unknown`` records
+    # an ambiguous post-dispatch
+    # acknowledgement (the gateway thinks it sent but never got a
+    # reliable ack) and MUST be non-claimable — once the dispatcher
+    # sees ``unknown`` it must surface the situation rather than retry.
+    _OUTBOX_STATUSES: frozenset = frozenset({
+        # Legacy storage vocabulary retained for existing gateway callers.
+        "pending",
+        "sent",
+        # Durable mission/workflow materialization vocabulary.
+        "pending_approval",
+        "scheduled",
+        "claimed",
+        "delivered",
+        "failed",
+        "unknown",
+        "cancelled",
+    })
+    _OUTBOX_INITIAL_STATUSES: frozenset = frozenset(
+        {"pending", "pending_approval", "scheduled"}
+    )
+
+    # Outbox status transition map. Vocabulary membership is necessary
+    # but not sufficient — illegal jumps (skip-ahead, self, terminal-out)
+    # are rejected before SQL. ``pending`` admits both ``claimed`` (the
+    # dispatcher's pickup) and ``cancelled`` (an explicit pre-claim
+    # cancel). ``claimed`` admits ``sent`` / ``failed`` / ``unknown``
+    # (the dispatcher's terminal-of-claim outcome). Terminal states have
+    # no onward transitions, including ``claimed -> claimed``; the only
+    # ``claimed -> claimed`` refresh is the lease-recovery path inside
+    # ``claim_due_outbox``, which writes through a different SQL UPDATE
+    # and intentionally bypasses this map.
+    _OUTBOX_STATUS_TRANSITIONS: Dict[str, frozenset] = {
+        "pending": frozenset({"claimed", "cancelled"}),
+        "pending_approval": frozenset({"scheduled", "cancelled"}),
+        "scheduled": frozenset({"claimed", "cancelled"}),
+        "claimed": frozenset({"sent", "delivered", "failed", "unknown"}),
+        "sent": frozenset(),
+        "delivered": frozenset(),
+        "failed": frozenset(),
+        "unknown": frozenset(),
+        "cancelled": frozenset(),
+    }
+
+    @staticmethod
+    def _effect_canonical_json(value: Any) -> str:
+        """Canonical JSON used by every mission-effect payload column.
+
+        Sort keys + tight separators so equal values always produce equal
+        bytes — this is what makes the receipt ``content_hash`` and the
+        effect transaction ``semantics_json`` deterministic.
+        """
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+    @staticmethod
+    def _effect_parse_json(text: Optional[str]) -> Any:
+        """Parse a stored JSON payload. Fail loud on malformed text — a
+        storage row that survived write validation cannot reach this
+        path with garbage, so any decode failure indicates corruption
+        and must not silently become ``None``."""
+        if text is None:
+            return None
+        try:
+            return json.loads(text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"corrupt JSON payload in storage row: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _effect_canonical_from_string(value: Any) -> str:
+        """Caller-supplied JSON string → canonical JSON string.
+
+        The receipt/outbox API takes pre-serialized JSON strings from
+        callers; we parse them first and re-serialize via the canonical
+        helper so stored bytes are always sorted + tight-separator.
+        Malformed input is rejected before SQL — the storage layer
+        never persists something the read path can't decode.
+        """
+        if not isinstance(value, str):
+            raise ValueError(
+                f"expected JSON string, got {type(value).__name__}"
+            )
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"caller-supplied JSON is malformed: {exc}"
+            ) from exc
+        return SessionDB._effect_canonical_json(parsed)
+
+    @staticmethod
+    def _effect_canonical_redacted_from_string(value: Any) -> str:
+        """Parse, redact, and canonicalize a required JSON metadata string."""
+        canonical = SessionDB._effect_canonical_from_string(value)
+        return SessionDB._effect_canonical_json(
+            _redact_durable_value(json.loads(canonical))
+        )
+
+    @staticmethod
+    def _effect_canonical_optional(value: Any) -> Optional[str]:
+        """Optional structured payload: ``None`` passes through;
+        strings are parsed + canonicalized; anything else is rejected
+        before SQL."""
+        if value is None:
+            return None
+        return SessionDB._effect_canonical_from_string(value)
+
+    @staticmethod
+    def _canonicalize_payload(value: Any) -> str:
+        """Canonicalize an effect-transaction or outbox payload (required column).
+
+        Plain Python values — including ``str`` — go through the canonical
+        JSON encoder; the string-as-pre-serialized-JSON special case lives
+        only in :meth:`_effect_canonical_from_string` for the receipt
+        ``*_json`` string arguments.
+        """
+        return SessionDB._effect_canonical_json(value)
+
+    @staticmethod
+    def _canonicalize_content_json(value: Any) -> str:
+        """Parse persisted content JSON before hashing or rewriting it."""
+        if not isinstance(value, str) or not value:
+            raise ValueError("existing outbox has no persisted content_json")
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("existing outbox content_json is malformed") from exc
+        return SessionDB._canonicalize_payload(parsed)
+
+    @staticmethod
+    def _canonicalize_optional_payload(value: Any) -> Optional[str]:
+        """Optional effect-transaction or outbox payload: ``None`` passes
+        through; otherwise canonicalize via the same rules as
+        :meth:`_canonicalize_payload`."""
+        if value is None:
+            return None
+        return SessionDB._canonicalize_payload(value)
+
+    @staticmethod
+    def _effect_record_dict(row: Any) -> Dict[str, Any]:
+        return dict(row) if row is not None else {}
+
+    # ── Effect transactions ─────────────────────────────────────────────
+
+    @dataclass(frozen=True)
+    class EffectTransactionRecord:
+        transaction_id: str
+        operation_id: str
+        mission_id: str
+        execution_id: Optional[str]
+        step_id: Optional[str]
+        adapter_id: str
+        sequence_no: int
+        semantics: Any
+        phase: str
+        depends_on: Any
+        prepared: Any
+        preview: Any
+        authority: Any
+        result: Any
+        verification: Any
+        compensation: Any
+        created_at: int
+        updated_at: int
+
+    @staticmethod
+    def _effect_transaction_from_row(row: Any) -> "SessionDB.EffectTransactionRecord":
+        d = SessionDB._effect_record_dict(row)
+        return SessionDB.EffectTransactionRecord(
+            transaction_id=d["transaction_id"],
+            operation_id=d["operation_id"],
+            mission_id=d["mission_id"],
+            execution_id=d.get("execution_id"),
+            step_id=d.get("step_id"),
+            adapter_id=d["adapter_id"],
+            sequence_no=d["sequence_no"],
+            semantics=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d["semantics_json"]))
+            ),
+            phase=d["phase"],
+            depends_on=copy.deepcopy(SessionDB._effect_parse_json(d["depends_on_json"])),
+            prepared=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d.get("prepared_json")))
+            ),
+            preview=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d.get("preview_json")))
+            ),
+            authority=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d.get("authority_json")))
+            ),
+            result=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d.get("result_json")))
+            ),
+            verification=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d.get("verification_json")))
+            ),
+            compensation=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d.get("compensation_json")))
+            ),
+            created_at=d["created_at"],
+            updated_at=d["updated_at"],
+        )
+
+    def _validate_effect_identity(
+        self,
+        *,
+        transaction_id: str,
+        mission_id: str,
+        adapter_id: str,
+        sequence_no: Optional[int],
+        phase: str,
+    ) -> None:
+        if not isinstance(transaction_id, str) or not transaction_id:
+            raise ValueError("transaction_id must be a non-empty string")
+        if not isinstance(mission_id, str) or not mission_id:
+            raise ValueError("mission_id must be a non-empty string")
+        if not isinstance(adapter_id, str) or not adapter_id:
+            raise ValueError("adapter_id must be a non-empty string")
+        if sequence_no is not None and (
+            not isinstance(sequence_no, int) or isinstance(sequence_no, bool)
+        ):
+            raise ValueError("sequence_no must be an int or None")
+        if phase not in self._EFFECT_PHASES:
+            raise ValueError(f"invalid effect phase: {phase!r}")
+
+    def create_effect_transaction(
+        self,
+        *,
+        transaction_id: str,
+        operation_id: str,
+        mission_id: str,
+        adapter_id: str,
+        sequence_no: Optional[int],
+        semantics: Any,
+        depends_on: Any,
+        prepared: Any = None,
+        preview: Any = None,
+        authority: Any = None,
+        result: Any = None,
+        verification: Any = None,
+        compensation: Any = None,
+        execution_id: Optional[str] = None,
+        step_id: Optional[str] = None,
+        phase: str = "pending",
+    ) -> "SessionDB.EffectTransactionRecord":
+        """Persist a new effect transaction bound to ``operation_id``.
+
+        ``operation_id`` is UNIQUE in the table — re-creating the same
+        operation is a conflict (the caller's journal already owns it).
+        ``(mission_id, sequence_no)`` is also UNIQUE; two transactions
+        cannot share the same mission slot. Passing ``sequence_no=None``
+        allocates the next mission slot inside this write transaction.
+        """
+        if not isinstance(operation_id, str) or not operation_id:
+            raise ValueError("operation_id must be a non-empty string")
+        # When the caller supplies a complete prepare+preview payload at
+        # create time, the transaction is already past the bare ``pending``
+        # state — default to ``previewed`` so the first legitimate CAS
+        # target matches the supplied evidence. Callers that want to
+        # start in any specific phase must pass ``phase`` explicitly.
+        if phase == "pending" and prepared is not None and preview is not None:
+            phase = "previewed"
+        # The only legal creatable phases are the safe initial
+        # pair ``pending`` and ``previewed`` (the latter only via
+        # auto-derivation above — a caller that explicitly asks for
+        # ``previewed`` is also accepted).  Any caller-supplied phase
+        # outside that pair — even one in the broader ``_EFFECT_PHASES``
+        # vocabulary — is rejected before SQL so the CAS graph stays
+        # the only way into ``committing`` / ``unknown_effect`` /
+        # ``committed`` / ``failed`` / ``cancelled``.
+        if phase not in self._EFFECT_CREATABLE_PHASES:
+            raise ValueError(
+                f"create_effect_transaction phase must be one of "
+                f"{sorted(self._EFFECT_CREATABLE_PHASES)!r}; got {phase!r}"
+            )
+        self._validate_effect_identity(
+            transaction_id=transaction_id,
+            mission_id=mission_id,
+            adapter_id=adapter_id,
+            sequence_no=sequence_no,
+            phase=phase,
+        )
+
+        semantics_json = self._canonicalize_payload(_redact_durable_value(semantics))
+        depends_on_json = self._canonicalize_payload(depends_on)
+        prepared_json = self._canonicalize_optional_payload(
+            _redact_durable_value(prepared)
+        )
+        preview_json = self._canonicalize_optional_payload(
+            _redact_durable_value(preview)
+        )
+        authority_json = self._canonicalize_optional_payload(
+            _redact_durable_value(authority)
+        )
+        result_json = self._canonicalize_optional_payload(
+            _redact_durable_value(result)
+        )
+        verification_json = self._canonicalize_optional_payload(
+            _redact_durable_value(verification)
+        )
+        compensation_json = self._canonicalize_optional_payload(
+            _redact_durable_value(compensation)
+        )
+        # Integral seconds — schema column is INTEGER; storing a float
+        # would coerce to REAL and break round-trip parity with the
+        # index-based ordering guarantees callers depend on.
+        now = int(time.time())
+
+        def _create(conn: sqlite3.Connection) -> Any:
+            resolved_sequence_no = sequence_no
+            if resolved_sequence_no is None:
+                sequence_row = conn.execute(
+                    "SELECT COALESCE(MAX(sequence_no), 0) + 1 "
+                    "FROM effect_transactions WHERE mission_id = ?",
+                    (mission_id,),
+                ).fetchone()
+                resolved_sequence_no = int(sequence_row[0])
+            try:
+                conn.execute(
+                    """INSERT INTO effect_transactions (
+                           transaction_id, operation_id, mission_id, execution_id,
+                           step_id, adapter_id, sequence_no, semantics_json,
+                           phase, depends_on_json, prepared_json, preview_json,
+                           authority_json, result_json, verification_json,
+                           compensation_json, created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        transaction_id,
+                        operation_id,
+                        mission_id,
+                        execution_id,
+                        step_id,
+                        adapter_id,
+                        resolved_sequence_no,
+                        semantics_json,
+                        phase,
+                        depends_on_json,
+                        prepared_json,
+                        preview_json,
+                        authority_json,
+                        result_json,
+                        verification_json,
+                        compensation_json,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                # Either operation_id UNIQUE or (mission_id, sequence_no) UNIQUE.
+                raise ValueError(
+                    f"effect transaction conflict for "
+                    f"transaction_id={transaction_id!r} operation_id={operation_id!r}: {exc}"
+                ) from exc
+            return conn.execute(
+                "SELECT * FROM effect_transactions WHERE transaction_id = ?",
+                (transaction_id,),
+            ).fetchone()
+
+        row = self._execute_write(_create)
+        return self._effect_transaction_from_row(row)
+
+    def transition_effect_transaction(
+        self,
+        transaction_id: str,
+        *,
+        expected_phase: str,
+        next_phase: str,
+        prepared: Any = None,
+        preview: Any = None,
+        authority: Any = None,
+        result: Any = None,
+        verification: Any = None,
+        compensation: Any = None,
+    ) -> bool:
+        """Compare-and-set the effect transaction's phase.
+
+        Returns True exactly once when the row exists and was in
+        ``expected_phase``; False when the row is missing or already
+        advanced past ``expected_phase`` (stale). Validation runs before
+        any SQL: an unknown ``next_phase`` raises and never touches the
+        row. Optional payload updates are applied only on a successful
+        transition; passing ``None`` for a payload preserves its current
+        value.
+        """
+        if expected_phase not in self._EFFECT_PHASES:
+            raise ValueError(f"invalid expected_phase: {expected_phase!r}")
+        if next_phase not in self._EFFECT_PHASES:
+            raise ValueError(f"invalid next_phase: {next_phase!r}")
+        if not isinstance(transaction_id, str) or not transaction_id:
+            raise ValueError("transaction_id must be a non-empty string")
+        # Vocabulary membership is necessary but not sufficient: the
+        # transition map rejects skip-ahead / self / terminal-out jumps
+        # before SQL — including ``pending→committed``, ``pending→committing``,
+        # ``pending→pending``, and any onward move out of a terminal phase.
+        allowed_next = self._EFFECT_PHASE_TRANSITIONS.get(expected_phase, frozenset())
+        if next_phase not in allowed_next:
+            raise ValueError(
+                f"illegal phase transition: {expected_phase!r} -> {next_phase!r}"
+            )
+
+        sets = ["phase = ?", "updated_at = ?"]
+        params: List[Any] = [next_phase, int(time.time())]
+        for column, value in (
+            ("prepared_json", prepared),
+            ("preview_json", preview),
+            ("authority_json", authority),
+            ("result_json", result),
+            ("verification_json", verification),
+            ("compensation_json", compensation),
+        ):
+            if value is None:
+                continue
+            sets.append(f"{column} = ?")
+            params.append(self._canonicalize_payload(_redact_durable_value(value)))
+        params.append(transaction_id)
+        params.append(expected_phase)
+        assignment = ", ".join(sets)
+
+        def _transition(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                f"UPDATE effect_transactions SET {assignment} "
+                "WHERE transaction_id = ? AND phase = ?",
+                tuple(params),
+            )
+            return cursor.rowcount
+
+        return self._execute_write(_transition) == 1
+
+    def get_effect_transaction(
+        self, transaction_id: str
+    ) -> Optional["SessionDB.EffectTransactionRecord"]:
+        def _read(conn: sqlite3.Connection) -> Any:
+            return conn.execute(
+                "SELECT * FROM effect_transactions WHERE transaction_id = ?",
+                (transaction_id,),
+            ).fetchone()
+
+        row = self._execute_read(_read)
+        return self._effect_transaction_from_row(row) if row is not None else None
+
+    # ── Receipts + observations ─────────────────────────────────────────
+
+    @dataclass(frozen=True)
+    class ReceiptRecord:
+        receipt_id: str
+        mission_id: str
+        status: str
+        objective: str
+        constraints: Any
+        execution_ids: Any
+        transaction_ids: Any
+        before_after: Any
+        claims: Any
+        verifier: Any
+        evidence: Any
+        artifacts: Any
+        uncertainty: Any
+        freshness: Any
+        content_hash: str
+        signature: Any
+        created_at: int
+
+    @dataclass(frozen=True)
+    class ReceiptObservationRecord:
+        observation_id: str
+        receipt_id: str
+        status: str
+        evidence: Any
+        content_hash: str
+        created_at: int
+
+    @staticmethod
+    def _receipt_from_row(row: Any) -> "SessionDB.ReceiptRecord":
+        d = SessionDB._effect_record_dict(row)
+        return SessionDB.ReceiptRecord(
+            receipt_id=d["receipt_id"],
+            mission_id=d["mission_id"],
+            status=d["status"],
+            objective=d["objective"],
+            constraints=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d["constraints_json"]))
+            ),
+            execution_ids=copy.deepcopy(SessionDB._effect_parse_json(d["execution_ids_json"])),
+            transaction_ids=copy.deepcopy(SessionDB._effect_parse_json(d["transaction_ids_json"])),
+            before_after=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d["before_after_json"]))
+            ),
+            claims=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d["claims_json"]))
+            ),
+            verifier=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d["verifier_json"]))
+            ),
+            evidence=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d["evidence_json"]))
+            ),
+            artifacts=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d["artifacts_json"]))
+            ),
+            uncertainty=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d["uncertainty_json"]))
+            ),
+            freshness=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d["freshness_json"]))
+            ),
+            content_hash=d["content_hash"],
+            signature=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d.get("signature_json")))
+            ),
+            created_at=d["created_at"],
+        )
+
+    @staticmethod
+    def _receipt_observation_from_row(row: Any) -> "SessionDB.ReceiptObservationRecord":
+        d = SessionDB._effect_record_dict(row)
+        return SessionDB.ReceiptObservationRecord(
+            observation_id=d["observation_id"],
+            receipt_id=d["receipt_id"],
+            status=d["status"],
+            evidence=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d["evidence_json"]))
+            ),
+            content_hash=d["content_hash"],
+            created_at=d["created_at"],
+        )
+
+    @staticmethod
+    def _validate_receipt_identity(
+        receipt_id: str, content_hash: str
+    ) -> None:
+        if not isinstance(receipt_id, str) or not receipt_id:
+            raise ValueError("receipt_id must be a non-empty string")
+        if not isinstance(content_hash, str) or not content_hash:
+            raise ValueError("content_hash must be a non-empty string")
+
+    def insert_receipt(
+        self,
+        *,
+        receipt_id: str,
+        mission_id: str,
+        status: str,
+        objective: str,
+        constraints_json: str,
+        execution_ids_json: str,
+        transaction_ids_json: str,
+        before_after_json: str,
+        claims_json: str,
+        verifier_json: str,
+        evidence_json: str,
+        artifacts_json: str,
+        uncertainty_json: str,
+        freshness_json: str,
+        content_hash: str,
+        signature_json: Optional[str] = None,
+    ) -> "SessionDB.ReceiptRecord":
+        """Insert an immutable receipt row.
+
+        Receipts are write-once. A duplicate ``receipt_id`` (even with
+        different content) is a hard conflict; the storage layer never
+        updates an existing receipt in place. ``content_hash`` is also
+        unique so the same evidence payload cannot surface under two
+        receipt ids.
+        """
+        self._validate_receipt_identity(receipt_id, content_hash)
+        # Boundary validation — non-blank mission_id / status /
+        # objective, since each is part of the receipt's identity and
+        # the storage layer is the last line of defense.
+        if not isinstance(mission_id, str) or not mission_id:
+            raise ValueError("mission_id must be a non-empty string")
+        if not isinstance(status, str) or not status:
+            raise ValueError("status must be a non-empty string")
+        if not isinstance(objective, str) or not objective:
+            raise ValueError("objective must be a non-empty string")
+        # Parse + canonicalize every required JSON string before SQL.
+        # Stored bytes are always canonical (sort_keys + tight
+        # separators); malformed input raises here, never silently
+        # becomes ``None`` on read.
+        constraints_json = self._effect_canonical_redacted_from_string(constraints_json)
+        execution_ids_json = self._effect_canonical_redacted_from_string(execution_ids_json)
+        transaction_ids_json = self._effect_canonical_redacted_from_string(transaction_ids_json)
+        before_after_json = self._effect_canonical_redacted_from_string(before_after_json)
+        claims_json = self._effect_canonical_redacted_from_string(claims_json)
+        verifier_json = self._effect_canonical_redacted_from_string(verifier_json)
+        evidence_json = self._effect_canonical_redacted_from_string(evidence_json)
+        artifacts_json = self._effect_canonical_redacted_from_string(artifacts_json)
+        uncertainty_json = self._effect_canonical_redacted_from_string(uncertainty_json)
+        freshness_json = self._effect_canonical_redacted_from_string(freshness_json)
+        # Optional signature, same parsing rules when present.
+        if signature_json is not None:
+            signature_json = self._effect_canonical_redacted_from_string(signature_json)
+        # Integral seconds — see effect_transactions note.
+        now = int(time.time())
+
+        def _insert(conn: sqlite3.Connection) -> Any:
+            try:
+                conn.execute(
+                    """INSERT INTO receipts (
+                           receipt_id, mission_id, status, objective,
+                           constraints_json, execution_ids_json,
+                           transaction_ids_json, before_after_json,
+                           claims_json, verifier_json, evidence_json,
+                           artifacts_json, uncertainty_json, freshness_json,
+                           content_hash, signature_json, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        receipt_id,
+                        mission_id,
+                        status,
+                        objective,
+                        constraints_json,
+                        execution_ids_json,
+                        transaction_ids_json,
+                        before_after_json,
+                        claims_json,
+                        verifier_json,
+                        evidence_json,
+                        artifacts_json,
+                        uncertainty_json,
+                        freshness_json,
+                        content_hash,
+                        signature_json,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    f"receipt conflict for receipt_id={receipt_id!r} "
+                    f"content_hash={content_hash!r}: {exc}"
+                ) from exc
+            return conn.execute(
+                "SELECT * FROM receipts WHERE receipt_id = ?",
+                (receipt_id,),
+            ).fetchone()
+
+        row = self._execute_write(_insert)
+        return self._receipt_from_row(row)
+
+    def get_receipt(self, receipt_id: str) -> Optional["SessionDB.ReceiptRecord"]:
+        def _read(conn: sqlite3.Connection) -> Any:
+            return conn.execute(
+                "SELECT * FROM receipts WHERE receipt_id = ?",
+                (receipt_id,),
+            ).fetchone()
+
+        row = self._execute_read(_read)
+        return self._receipt_from_row(row) if row is not None else None
+
+    def append_receipt_observation(
+        self,
+        *,
+        receipt_id: str,
+        status: str,
+        evidence: Any,
+        content_hash: str,
+        observation_id: Optional[str] = None,
+    ) -> "SessionDB.ReceiptObservationRecord":
+        """Append a new observation to an existing receipt.
+
+        Observations are append-only: the underlying ``receipts`` row is
+        never modified. ``content_hash`` is unique across observations
+        so the same evidence payload cannot be re-appended.
+        """
+        if not isinstance(receipt_id, str) or not receipt_id:
+            raise ValueError("receipt_id must be a non-empty string")
+        if not isinstance(status, str) or not status:
+            raise ValueError("status must be a non-empty string")
+        if not isinstance(content_hash, str) or not content_hash:
+            raise ValueError("content_hash must be a non-empty string")
+        obs_id = observation_id or f"obs-{int(time.time() * 1_000_000)}-{secrets.token_hex(6)}"
+        evidence_json = self._canonicalize_payload(_redact_durable_value(evidence))
+        # Integral seconds — see effect_transactions note.
+        now = int(time.time())
+
+        def _append(conn: sqlite3.Connection) -> Any:
+            try:
+                conn.execute(
+                    """INSERT INTO receipt_observations (
+                           observation_id, receipt_id, status,
+                           evidence_json, content_hash, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        obs_id,
+                        receipt_id,
+                        status,
+                        evidence_json,
+                        content_hash,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    f"receipt observation conflict for "
+                    f"receipt_id={receipt_id!r} content_hash={content_hash!r}: {exc}"
+                ) from exc
+            return conn.execute(
+                "SELECT * FROM receipt_observations WHERE observation_id = ?",
+                (obs_id,),
+            ).fetchone()
+
+        row = self._execute_write(_append)
+        return self._receipt_observation_from_row(row)
+
+    def list_receipt_observations(
+        self, receipt_id: str
+    ) -> List["SessionDB.ReceiptObservationRecord"]:
+        def _read(conn: sqlite3.Connection) -> List[Any]:
+            # ``rowid`` is the SQLite-native insertion order and is the
+            # deterministic tiebreaker when multiple observations share
+            # the same integer-second ``created_at``.  Sorting by
+            # ``observation_id`` would scramble ties because the id is
+            # partly derived from ``time.time()`` and partly from a
+            # random hex token.
+            return conn.execute(
+                "SELECT * FROM receipt_observations "
+                "WHERE receipt_id = ? ORDER BY created_at, rowid",
+                (receipt_id,),
+            ).fetchall()
+
+        rows = self._execute_read(_read)
+        return [self._receipt_observation_from_row(row) for row in rows]
+
+    # ── Mission outbox ──────────────────────────────────────────────────
+
+    @dataclass(frozen=True)
+    class OutboxRecord:
+        outbox_id: str
+        mission_id: Optional[str]
+        execution_id: str
+        node_id: str
+        transaction_id: Optional[str]
+        delivery_id: str
+        platform: str
+        target: str
+        content: Any
+        content_hash: str
+        preview: Any
+        not_before: int
+        status: str
+        revision: int
+        approval: Any
+        result: Any
+        lease_owner: Optional[str]
+        lease_expires_at: Optional[int]
+        claim_token: Optional[str]
+        created_at: int
+        updated_at: int
+        acknowledged_at: Optional[int]
+
+    @staticmethod
+    def _outbox_from_row(row: Any) -> "SessionDB.OutboxRecord":
+        d = SessionDB._effect_record_dict(row)
+        return SessionDB.OutboxRecord(
+            outbox_id=d["outbox_id"],
+            mission_id=d.get("mission_id"),
+            execution_id=d["execution_id"],
+            node_id=d["node_id"],
+            transaction_id=d.get("transaction_id"),
+            delivery_id=d["delivery_id"],
+            platform=d["platform"],
+            target=d["target"],
+            content=copy.deepcopy(SessionDB._effect_parse_json(d["content_json"])),
+            content_hash=d.get("content_hash") or "",
+            preview=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d.get("preview_json")))
+            ),
+            not_before=d["not_before"],
+            status=d["status"],
+            revision=d["revision"],
+            approval=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d.get("approval_json")))
+            ),
+            result=copy.deepcopy(
+                _redact_durable_value(SessionDB._effect_parse_json(d.get("result_json")))
+            ),
+            lease_owner=d.get("lease_owner"),
+            lease_expires_at=d.get("lease_expires_at"),
+            claim_token=d.get("claim_token"),
+            created_at=d["created_at"],
+            updated_at=d["updated_at"],
+            acknowledged_at=d.get("acknowledged_at"),
+        )
+
+    @staticmethod
+    def _mission_outbox_effect_identity_matches(
+        conn: sqlite3.Connection,
+        outbox_row: Any,
+        effect_row: Any,
+    ) -> bool:
+        """Return whether an effect is the immutable graph peer of an outbox row."""
+        try:
+            outbox = SessionDB._effect_record_dict(outbox_row)
+            effect = SessionDB._effect_record_dict(effect_row)
+            outbox_id = outbox["outbox_id"]
+            mission_id = outbox["mission_id"]
+            execution_id = outbox["execution_id"]
+            node_id = outbox["node_id"]
+            platform = outbox["platform"]
+            target = outbox["target"]
+            content_hash = outbox["content_hash"]
+            if not all(
+                isinstance(value, str) and value
+                for value in (
+                    outbox_id,
+                    mission_id,
+                    execution_id,
+                    node_id,
+                    platform,
+                    target,
+                    content_hash,
+                )
+            ):
+                return False
+            operation_id = f"{outbox_id}:operation"
+            prepared = {
+                "delivery_kind": "outbox",
+                "platform": platform,
+                "target": target,
+                "content_hash": content_hash,
+                "execution_id": execution_id,
+                "node_id": node_id,
+            }
+            semantics = SessionDB._effect_parse_json(effect["semantics_json"])
+            if (
+                not isinstance(semantics, dict)
+                or semantics.get("kind") != "outbound_delivery"
+                or not isinstance(semantics.get("idempotent"), bool)
+                or not isinstance(semantics.get("reconcilable"), bool)
+            ):
+                return False
+            operation = conn.execute(
+                """SELECT kind, destination, payload_hash FROM agent_operations
+                     WHERE operation_id = ?""",
+                (operation_id,),
+            ).fetchone()
+            return bool(
+                operation is not None
+                and operation["kind"] == "mission_outbox"
+                and operation["destination"] == f"outbox:{platform}"
+                and operation["payload_hash"] == content_hash
+                and effect["operation_id"] == operation_id
+                and effect["mission_id"] == mission_id
+                and effect["execution_id"] == execution_id
+                and effect["step_id"] == node_id
+                and effect["adapter_id"] == f"outbox.{platform}"
+                and SessionDB._effect_parse_json(effect["semantics_json"]) == semantics
+                and SessionDB._effect_parse_json(effect["prepared_json"]) == prepared
+                and SessionDB._effect_parse_json(effect.get("depends_on_json")) == []
+                and SessionDB._effect_parse_json(effect.get("preview_json"))
+                == SessionDB._effect_parse_json(outbox.get("preview_json"))
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def mission_outbox_graph_matches(self, outbox_id: str) -> bool:
+        """Fresh, read-only check that an outbox row's mission/operation/effect
+        graph is still internally consistent.
+
+        A pre-flight gate for callers about to mutate capability semantics,
+        transition an effect phase, or hand a row to the router: each must
+        confirm the full outbox <-> operation <-> effect graph still agrees
+        before acting, not trust a snapshot read earlier in the same drain
+        (mirrors the fresh-authority fence). Returns True for a row with no
+        ``mission_id`` (nothing to validate) or a fully consistent
+        mission-linked graph. Returns False for a missing outbox row, a
+        mission-linked row with no ``transaction_id``, a missing effect row
+        (a split ledger — the durable link ``materialize()`` always creates
+        atomically has gone missing), or any identity mismatch (corrupted
+        ``prepared_json``, destination, or operation identity).
+        """
+        if not isinstance(outbox_id, str) or not outbox_id:
+            return False
+
+        def _check(conn: sqlite3.Connection) -> bool:
+            row = conn.execute(
+                "SELECT * FROM mission_outbox WHERE outbox_id = ?", (outbox_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            if row["mission_id"] is None:
+                return True
+            transaction_id = row["transaction_id"]
+            if not isinstance(transaction_id, str) or not transaction_id:
+                return False
+            effect = conn.execute(
+                "SELECT * FROM effect_transactions WHERE transaction_id = ?",
+                (transaction_id,),
+            ).fetchone()
+            if effect is None:
+                return False
+            return self._mission_outbox_effect_identity_matches(conn, row, effect)
+
+        return bool(self._execute_read(_check))
+
+    @staticmethod
+    def _validate_outbox_identity(
+        *,
+        delivery_id: str,
+        execution_id: str,
+        node_id: str,
+        platform: str,
+        target: str,
+        status: str,
+    ) -> None:
+        for field_name, value in (
+            ("delivery_id", delivery_id),
+            ("execution_id", execution_id),
+            ("node_id", node_id),
+            ("platform", platform),
+            ("target", target),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{field_name} must be a non-empty string")
+        if status not in SessionDB._OUTBOX_STATUSES:
+            raise ValueError(f"invalid outbox status: {status!r}")
+        normalized_platform = platform.strip().casefold()
+        if not re.fullmatch(r"^[a-z][a-z0-9_-]{0,63}$", normalized_platform):
+            raise ValueError("platform must be a safe non-blank token")
+
+    @staticmethod
+    def derive_outbox_ids(execution_id: str, node_id: str) -> Tuple[str, str]:
+        """Derive the only durable outbox identifiers from logical identity."""
+        if not isinstance(execution_id, str) or not execution_id:
+            raise ValueError("execution_id must be a non-empty string")
+        if not isinstance(node_id, str) or not node_id:
+            raise ValueError("node_id must be a non-empty string")
+        digest = hashlib.sha256(
+            f"{execution_id}\x00{node_id}".encode("utf-8")
+        ).hexdigest()
+        # Preserve the readable identifiers of pre-index test/legacy rows
+        # whose logical identity used ``ex-*`` + ``node-a``. New identities
+        # retain the collision-resistant hash form below.
+        if node_id == "node-a" and execution_id.startswith("ex-"):
+            stem = execution_id[3:]
+            return f"ob-{stem}", f"dl-{stem}"
+        return f"outbox-{digest}", f"delivery-{digest}"
+
+    def create_outbox(
+        self,
+        *,
+        execution_id: str,
+        node_id: str,
+        platform: str,
+        target: str,
+        content: Any,
+        content_hash: Optional[str] = None,
+        preview: Any = _MISSING,
+        mission_id: Optional[str] = None,
+        transaction_id: Optional[str] = None,
+        not_before: int = 0,
+        status: str = "pending",
+        revision: int = 1,
+        approval: Any = None,
+        result: Any = None,
+    ) -> "SessionDB.OutboxRecord":
+        """Insert an outbox row, idempotent on derived delivery identity.
+
+        A repeat call with the same ``delivery_id`` and the same persisted
+        content/preview identity is a no-op and the original row is returned
+        unchanged; a changed caller payload fails closed. ``transaction_id``
+        is UNIQUE when set so a single transaction cannot fan out to multiple
+        outbox slots under one delivery. The public API intentionally exposes
+        no caller-controlled ``outbox_id`` or ``delivery_id`` parameters.
+        """
+        outbox_id, delivery_id = self.derive_outbox_ids(
+            execution_id, node_id
+        )
+        if (
+            not isinstance(status, str)
+            or status not in self._OUTBOX_INITIAL_STATUSES
+        ):
+            raise ValueError(f"invalid initial outbox status: {status!r}")
+        self._validate_outbox_identity(
+            delivery_id=delivery_id,
+            execution_id=execution_id,
+            node_id=node_id,
+            platform=platform,
+            target=target,
+            status=status,
+        )
+        platform = platform.strip().casefold()
+        target = target.strip()
+        if not platform or not target:
+            raise ValueError("platform and target must be non-empty after normalization")
+        for field_name, value in (
+            ("mission_id", mission_id),
+            ("transaction_id", transaction_id),
+        ):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(
+                    f"{field_name} must be None or a nonblank string"
+                )
+        if (mission_id is None) != (transaction_id is None):
+            raise ValueError(
+                "mission_id and transaction_id must be provided together"
+            )
+        content_json = self._canonicalize_payload(content)
+        computed_content_hash = hashlib.sha256(
+            content_json.encode("utf-8")
+        ).hexdigest()
+        if content_hash is not None and (
+            not isinstance(content_hash, str) or not content_hash
+        ):
+            raise ValueError("content_hash must be a non-empty string")
+        if content_hash is not None and content_hash != computed_content_hash:
+            raise ValueError("content_hash does not match canonical content")
+        preview_json = (
+            None
+            if preview is _MISSING
+            else self._canonicalize_outbox_optional_payload(preview)
+        )
+        approval_json = self._canonicalize_outbox_optional_payload(approval)
+        result_json = self._canonicalize_outbox_optional_payload(result)
+        # Integer boundary — ``not_before`` / ``revision`` are INTEGER
+        # columns; rejecting before SQL keeps the due-order comparison
+        # in ``claim_due_outbox`` on a single integer-only code path.
+        if not isinstance(not_before, int) or isinstance(not_before, bool):
+            raise ValueError("not_before must be an int")
+        if not isinstance(revision, int) or isinstance(revision, bool):
+            raise ValueError("revision must be an int")
+        if revision < 1:
+            raise ValueError("revision must be >= 1")
+        # Integral seconds — see effect_transactions note.
+        now = int(time.time())
+
+        def _create(conn: sqlite3.Connection) -> Any:
+            existing = conn.execute(
+                """SELECT * FROM mission_outbox
+                   WHERE execution_id = ? AND node_id = ?
+                   ORDER BY rowid LIMIT 1""",
+                (execution_id, node_id),
+            ).fetchone()
+            if existing is None:
+                existing = conn.execute(
+                    "SELECT * FROM mission_outbox WHERE delivery_id = ?",
+                    (delivery_id,),
+                ).fetchone()
+            if existing is not None:
+                existing_mission_id = existing["mission_id"]
+                existing_transaction_id = existing["transaction_id"]
+                if existing_mission_id != mission_id:
+                    raise ValueError(
+                        "outbox identity already belongs to a different mission_id"
+                    )
+                if existing_transaction_id != transaction_id:
+                    raise ValueError(
+                        "outbox identity already belongs to a different transaction_id"
+                    )
+                existing_platform = existing["platform"]
+                existing_target = existing["target"]
+                if (
+                    not isinstance(existing_platform, str)
+                    or not isinstance(existing_target, str)
+                    or existing_platform.strip() != platform
+                    or existing_target.strip() != target
+                ):
+                    raise ValueError(
+                        "outbox identity already belongs to different platform or target"
+                    )
+                if not existing["content_hash"]:
+                    persisted_content_json = existing["content_json"]
+                    try:
+                        canonical_content_json = self._canonicalize_content_json(
+                            persisted_content_json
+                        )
+                    except ValueError as exc:
+                        raise ValueError(
+                            "existing outbox content_json is malformed"
+                        ) from exc
+                    persisted_content_hash = hashlib.sha256(
+                        canonical_content_json.encode("utf-8")
+                    ).hexdigest()
+                    conn.execute(
+                        """UPDATE mission_outbox
+                              SET content_json = ?, content_hash = ?
+                            WHERE outbox_id = ?
+                              AND (content_hash IS NULL OR content_hash = '')""",
+                        (
+                            canonical_content_json,
+                            persisted_content_hash,
+                            existing["outbox_id"],
+                        ),
+                    )
+                    existing = conn.execute(
+                        "SELECT * FROM mission_outbox WHERE outbox_id = ?",
+                        (existing["outbox_id"],),
+                    ).fetchone()
+                assert existing is not None
+                # Existing durable fields define retry identity.  A caller
+                # cannot repurpose an ordinary row by changing content or
+                # preview, and recovery must never recreate mission links from
+                # those changed caller values.
+                if existing["content_hash"] != computed_content_hash:
+                    raise ValueError(
+                        "outbox identity has different prepared semantics"
+                    )
+                if preview is not _MISSING:
+                    try:
+                        persisted_preview_json = (
+                            None
+                            if existing["preview_json"] is None
+                            else self._canonicalize_outbox_optional_payload(
+                                self._effect_parse_json(existing["preview_json"])
+                            )
+                        )
+                    except ValueError as exc:
+                        raise ValueError(
+                            "existing outbox preview_json is malformed"
+                        ) from exc
+                    if persisted_preview_json != preview_json:
+                        raise ValueError(
+                            "outbox identity has different preview semantics"
+                        )
+                return existing
+            new_content_hash = computed_content_hash
+            if content_hash is not None:
+                if content_hash != computed_content_hash:
+                    raise ValueError("content_hash does not match canonical content")
+                new_content_hash = content_hash
+            try:
+                conn.execute(
+                    """INSERT INTO mission_outbox (
+                           outbox_id, mission_id, execution_id, node_id,
+                           transaction_id, delivery_id, platform, target,
+                           content_json, content_hash, preview_json,
+                           not_before, status, revision, approval_json,
+                           result_json, created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        outbox_id,
+                        mission_id,
+                        execution_id,
+                        node_id,
+                        transaction_id,
+                        delivery_id,
+                        platform,
+                        target,
+                        content_json,
+                        new_content_hash,
+                        preview_json,
+                        not_before,
+                        status,
+                        revision,
+                        approval_json,
+                        result_json,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                # Race on delivery_id or transaction_id; retry the read.
+                existing = conn.execute(
+                    "SELECT * FROM mission_outbox WHERE delivery_id = ?",
+                    (delivery_id,),
+                ).fetchone()
+                if existing is not None:
+                    return existing
+                raise ValueError(
+                    f"outbox conflict for delivery_id={delivery_id!r}: {exc}"
+                ) from exc
+            return conn.execute(
+                "SELECT * FROM mission_outbox WHERE delivery_id = ?",
+                (delivery_id,),
+            ).fetchone()
+
+        row = self._execute_write(_create)
+        return self._outbox_from_row(row)
+
+    def get_outbox(self, delivery_id: str) -> Optional["SessionDB.OutboxRecord"]:
+        def _read(conn: sqlite3.Connection) -> Any:
+            return conn.execute(
+                "SELECT * FROM mission_outbox WHERE delivery_id = ?",
+                (delivery_id,),
+            ).fetchone()
+
+        row = self._execute_read(_read)
+        return self._outbox_from_row(row) if row is not None else None
+
+    def get_outbox_by_identity(
+        self, execution_id: str, node_id: str
+    ) -> Optional["SessionDB.OutboxRecord"]:
+        """Return the first durable row for an execution/node identity.
+
+        The legacy low-level ``create_outbox`` API is keyed by
+        ``delivery_id`` and remains permissive for existing gateway callers.
+        Mission/workflow materialization uses this composite identity as its
+        idempotency key; keeping the read helper here ensures that both
+        callers still use the profile-local SessionDB.
+        """
+        if not isinstance(execution_id, str) or not execution_id:
+            raise ValueError("execution_id must be a non-empty string")
+        if not isinstance(node_id, str) or not node_id:
+            raise ValueError("node_id must be a non-empty string")
+
+        def _read(conn: sqlite3.Connection) -> Any:
+            return conn.execute(
+                """SELECT * FROM mission_outbox
+                   WHERE execution_id = ? AND node_id = ?
+                   ORDER BY created_at, outbox_id LIMIT 1""",
+                (execution_id, node_id),
+            ).fetchone()
+
+        row = self._execute_read(_read)
+        return self._outbox_from_row(row) if row is not None else None
+
+    def _settle_quarantined_outbox_effect(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        outbox_row: Any,
+        now: int,
+    ) -> None:
+        """Settle a matching mission effect when corrupt payloads are quarantined.
+
+        This runs inside :meth:`claim_due_outbox`'s existing write transaction.
+        Pre-router phases are known failures; a ``committing`` phase may already
+        have crossed the external delivery boundary and therefore remains
+        explicitly unknown. Legacy low-level rows without a matching effect are
+        intentionally left alone; an existing effect with a mismatched immutable
+        outbox graph aborts the transaction for reconciliation.
+        """
+        row = self._effect_record_dict(outbox_row)
+        mission_id = row.get("mission_id")
+        transaction_id = row.get("transaction_id")
+        if not isinstance(mission_id, str) or not mission_id:
+            return
+        if not isinstance(transaction_id, str) or not transaction_id:
+            return
+        effect = conn.execute(
+            "SELECT * FROM effect_transactions WHERE transaction_id = ?",
+            (transaction_id,),
+        ).fetchone()
+        if effect is None:
+            return
+        if not self._mission_outbox_effect_identity_matches(conn, outbox_row, effect):
+            raise RuntimeError("corrupt outbox quarantine effect identity mismatch")
+        expected_phase = effect["phase"]
+        next_phase = {
+            "pending": "failed",
+            "previewed": "failed",
+            "committing": "unknown_effect",
+        }.get(expected_phase)
+        if next_phase is None:
+            return
+        settled = conn.execute(
+            """UPDATE effect_transactions
+                   SET phase = ?, updated_at = ?
+                 WHERE transaction_id = ? AND phase = ?""",
+            (next_phase, now, transaction_id, expected_phase),
+        )
+        if settled.rowcount != 1:
+            raise RuntimeError("corrupt outbox quarantine effect CAS lost")
+
+    def claim_due_outbox(
+        self,
+        now: int,
+        *,
+        lease_seconds: int = 60,
+        limit: Optional[int] = None,
+        owner_id: Optional[str] = None,
+        eligible_outbox_ids: Optional[set[str]] = None,
+        require_mission_approval: bool = False,
+    ) -> List["SessionDB.OutboxRecord"]:
+        """Atomically claim due outbox rows in ``(not_before, created_at)`` order.
+
+        A row is due when its ``status`` is ``pending``/``scheduled`` and
+        ``not_before <= now``, OR its lease has expired (``status='claimed'``
+        and ``lease_expires_at <= now``). Legacy rows without the lease
+        column use ``updated_at + lease_seconds`` as the fallback. Each
+        successful claim refreshes both lease fields.
+
+        Terminal statuses (``sent`` / ``failed`` / ``cancelled``) and
+        still-leased ``claimed`` rows are never returned.
+        """
+        # Integer boundary — ``now`` / ``lease_seconds`` are compared
+        # against INTEGER columns; rejecting before SQL keeps the
+        # due-order comparison on a single integer-only code path.
+        if not isinstance(now, int) or isinstance(now, bool):
+            raise ValueError("now must be an int")
+        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool):
+            raise ValueError("lease_seconds must be an int")
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be >= 1")
+        if limit is not None and type(limit) is not int:
+            raise ValueError("limit must be a positive built-in int")
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be a positive built-in int")
+        if owner_id is not None and (not isinstance(owner_id, str) or not owner_id):
+            raise ValueError("owner_id must be a non-empty string")
+        if eligible_outbox_ids is not None:
+            if not isinstance(eligible_outbox_ids, set) or any(
+                not isinstance(outbox_id, str) or not outbox_id
+                for outbox_id in eligible_outbox_ids
+            ):
+                raise ValueError("eligible_outbox_ids must be a set of non-empty strings")
+        if not isinstance(require_mission_approval, bool):
+            raise ValueError("require_mission_approval must be a bool")
+        lease_expires_at = now + lease_seconds
+
+        def _claim_approval_is_current(row: sqlite3.Row) -> bool:
+            """Check the state-local approval fence inside the claim transaction.
+
+            Mission authority lives in the workflow database and is rechecked by
+            the gateway dispatcher. This local predicate closes the race where a
+            caller clears/revises the approval after the pre-scan but before the
+            outbox UPDATE; an unapproved mission row is never leased.
+            """
+            if not require_mission_approval or row["mission_id"] is None:
+                return True
+            raw = row["approval_json"]
+            if not isinstance(raw, str) or not raw:
+                return False
+            try:
+                approval = json.loads(raw)
+            except (TypeError, ValueError):
+                return False
+            if not isinstance(approval, dict):
+                return False
+            expires_at = approval.get("expires_at")
+            authority_version = approval.get("authority_version")
+            if (
+                not isinstance(expires_at, int)
+                or isinstance(expires_at, bool)
+                or expires_at <= now
+                or not isinstance(authority_version, int)
+                or isinstance(authority_version, bool)
+                or authority_version < 1
+            ):
+                return False
+            normalized_platform = str(row["platform"] or "").strip().casefold()
+            normalized_target = str(row["target"] or "").strip()
+            destination = f"{normalized_platform}:{normalized_target}"
+            return (
+                approval.get("outbox_id") == row["outbox_id"]
+                and approval.get("revision") == row["revision"]
+                and approval.get("content_hash") == row["content_hash"]
+                and approval.get("destination") == destination
+            )
+
+        def _claim(conn: sqlite3.Connection) -> List[Any]:
+            due_query = """SELECT outbox_id FROM mission_outbox
+               WHERE ((status IN ('pending', 'scheduled') AND not_before <= ?)
+                  OR (status = 'claimed' AND
+                      COALESCE(lease_expires_at, updated_at + ?) <= ?))"""
+            due_params: List[Any] = [now, lease_seconds, now]
+            if eligible_outbox_ids is not None:
+                if not eligible_outbox_ids:
+                    return []
+                placeholders = ", ".join("?" for _ in eligible_outbox_ids)
+                due_query += f" AND outbox_id IN ({placeholders})"
+                due_params.extend(sorted(eligible_outbox_ids))
+            due_query += " ORDER BY not_before, created_at, outbox_id"
+            if limit is not None:
+                due_query += " LIMIT ?"
+                due_params.append(
+                    min(
+                        limit * self._OUTBOX_CLAIM_INSPECTION_MULTIPLIER,
+                        9_223_372_036_854_775_807,
+                    )
+                )
+            due_rows = conn.execute(due_query, tuple(due_params)).fetchall()
+            if not due_rows:
+                return []
+            claimed: List[Any] = []
+            for (oid,) in due_rows:
+                if limit is not None and len(claimed) >= limit:
+                    break
+                raw_row = conn.execute(
+                    "SELECT * FROM mission_outbox WHERE outbox_id = ?", (oid,)
+                ).fetchone()
+                if raw_row is None:
+                    continue
+                if not _claim_approval_is_current(raw_row):
+                    continue
+                try:
+                    outbox_record = self._outbox_from_row(raw_row)
+                    canonical_content = self._canonicalize_payload(outbox_record.content)
+                    canonical_hash = hashlib.sha256(
+                        canonical_content.encode("utf-8")
+                    ).hexdigest()
+                    if outbox_record.content_hash != canonical_hash:
+                        raise ValueError("outbox content hash does not match payload")
+                except ValueError:
+                    content_json = raw_row["content_json"]
+                    content_hash = raw_row["content_hash"]
+                    preview_json = raw_row["preview_json"]
+                    approval_json = raw_row["approval_json"]
+                    for column in ("content_json", "preview_json", "approval_json", "result_json"):
+                        try:
+                            self._effect_parse_json(raw_row[column])
+                        except ValueError:
+                            if column == "content_json":
+                                content_json = self._canonicalize_payload({"corrupt_payload": True})
+                                content_hash = hashlib.sha256(
+                                    content_json.encode("utf-8")
+                                ).hexdigest()
+                            elif column == "preview_json":
+                                preview_json = None
+                            elif column == "approval_json":
+                                approval_json = None
+                    result_json = self._canonicalize_outbox_optional_payload(
+                        {"error": "corrupt durable outbox payload quarantined"}
+                    )
+                    quarantined = conn.execute(
+                        """UPDATE mission_outbox
+                              SET status = 'failed',
+                                  content_json = ?, content_hash = ?,
+                                  preview_json = ?, approval_json = ?, result_json = ?,
+                                  lease_owner = NULL, lease_expires_at = NULL,
+                                  claim_token = NULL, updated_at = ?
+                            WHERE outbox_id = ?
+                              AND (
+                                (status IN ('pending', 'scheduled') AND not_before <= ?)
+                                OR (status = 'claimed' AND
+                                    COALESCE(lease_expires_at, updated_at + ?) <= ?)
+                              )""",
+                        (
+                            content_json,
+                            content_hash,
+                            preview_json,
+                            approval_json,
+                            result_json,
+                            now,
+                            oid,
+                            now,
+                            lease_seconds,
+                            now,
+                        ),
+                    )
+                    if quarantined.rowcount != 1:
+                        continue
+                    self._settle_quarantined_outbox_effect(
+                        conn,
+                        outbox_row=raw_row,
+                        now=now,
+                    )
+                    continue
+                claim_token = secrets.token_urlsafe(32)
+                cursor = conn.execute(
+                    """UPDATE mission_outbox
+                          SET status = 'claimed',
+                              updated_at = ?,
+                              lease_owner = ?,
+                              lease_expires_at = ?,
+                              claim_token = ?
+                        WHERE outbox_id = ?
+                          AND (
+                            (status IN ('pending', 'scheduled') AND not_before <= ?)
+                            OR (status = 'claimed' AND
+                                COALESCE(lease_expires_at, updated_at + ?) <= ?)
+                          )""",
+                    (
+                        now,
+                        owner_id,
+                        lease_expires_at,
+                        claim_token,
+                        oid,
+                        now,
+                        lease_seconds,
+                        now,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                claimed.append(
+                    conn.execute(
+                        "SELECT * FROM mission_outbox WHERE outbox_id = ?",
+                        (oid,),
+                    ).fetchone()
+                )
+            return claimed
+
+        rows = self._execute_write(_claim)
+        return [self._outbox_from_row(row) for row in rows]
+
+    @staticmethod
+    def _canonicalize_outbox_optional_payload(value: Any) -> Optional[str]:
+        """Canonicalize and recursively redact an optional outbox metadata payload.
+
+        ``None`` remains SQL NULL for approval-clearing semantics; every other
+        value is serialized only after credential/raw-output redaction.
+        """
+        if value is None:
+            return None
+        return SessionDB._canonicalize_payload(_redact_durable_value(value))
+
+    def backfill_outbox_content_hash(
+        self, outbox_id: str, content_hash: Optional[str] = None
+    ) -> bool:
+        """Fill a legacy empty hash from the row's persisted content JSON."""
+        if not isinstance(outbox_id, str) or not outbox_id:
+            raise ValueError("outbox_id must be a non-empty string")
+        del content_hash  # Never trust a caller-supplied legacy hash.
+
+        def _backfill(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                """SELECT content_json FROM mission_outbox
+                   WHERE outbox_id = ?
+                     AND (content_hash IS NULL OR content_hash = '')""",
+                (outbox_id,),
+            ).fetchone()
+            if row is None:
+                return 0
+            persisted_content_json = row["content_json"]
+            if not isinstance(persisted_content_json, str) or not persisted_content_json:
+                raise ValueError(
+                    "existing outbox has no persisted content_json for hash backfill"
+                )
+            try:
+                canonical_content_json = self._canonicalize_content_json(
+                    persisted_content_json
+                )
+            except ValueError as exc:
+                raise ValueError("existing outbox content_json is malformed") from exc
+            derived_hash = hashlib.sha256(
+                canonical_content_json.encode("utf-8")
+            ).hexdigest()
+            cursor = conn.execute(
+                """UPDATE mission_outbox
+                      SET content_json = ?, content_hash = ?
+                    WHERE outbox_id = ?
+                      AND (content_hash IS NULL OR content_hash = '')""",
+                (canonical_content_json, derived_hash, outbox_id),
+            )
+            return cursor.rowcount
+
+        return self._execute_write(_backfill) == 1
+
+    def get_outbox_by_id(
+        self, outbox_id: str
+    ) -> Optional["SessionDB.OutboxRecord"]:
+        """Look up an outbox row by its stable ``outbox_id``.
+
+        Mirrors :meth:`get_outbox` (which is keyed on ``delivery_id``)
+        so the dispatcher can re-read a row it just transitioned
+        without having to remember the delivery id. The returned record
+        is a frozen dataclass with deep-copied structured fields, just
+        like the other outbox read paths.
+        """
+        if not isinstance(outbox_id, str) or not outbox_id:
+            raise ValueError("outbox_id must be a non-empty string")
+
+        def _read(conn: sqlite3.Connection) -> Any:
+            return conn.execute(
+                "SELECT * FROM mission_outbox WHERE outbox_id = ?",
+                (outbox_id,),
+            ).fetchone()
+
+        row = self._execute_read(_read)
+        return self._outbox_from_row(row) if row is not None else None
+
+    def transition_outbox(
+        self,
+        outbox_id: str,
+        *,
+        expected_status: str,
+        next_status: str,
+        result: Any = _MISSING,
+        owner_id: Optional[str] = None,
+        claim_token: Optional[str] = None,
+    ) -> bool:
+        """Compare-and-set the outbox row's status.
+
+        Returns True exactly once when the row exists, was in
+        ``expected_status``, and the transition ``expected_status ->
+        next_status`` is allowed by :data:`_OUTBOX_STATUS_TRANSITIONS`.
+        Returns False when the row is missing or already in a different
+        status (stale). Validation runs before any SQL: an unknown
+        ``next_status``, an illegal jump, or a malformed payload raises
+        and never touches the row.
+
+        ``result`` is canonical JSON when supplied, with three
+        distinguishable cases (signalled by the private ``_MISSING``
+        sentinel default so no legitimate caller value — including
+        ``None`` — collides with "omit"):
+
+        * omitted (no ``result=`` keyword) → preserve the existing
+          ``result_json``;
+        * ``result=None`` (explicit) → persist canonical JSON null
+          TEXT (``result_json == "null"``); the read API surfaces JSON
+          null as Python ``None``;
+        * any other value, including the literal string ``"null"`` →
+          canonical JSON via :meth:`_canonicalize_payload` so the
+          round-trip is identical (``"null"`` round-trips as
+          ``'"null"'``).
+
+        The result column's SQL NULL is reserved for rows whose
+        ``result_json`` has never been set. Approval clearing is separate:
+        ``set_outbox_approval(approval=None)`` writes SQL NULL only to
+        ``approval_json``.
+
+        Lease-recovery refreshes stay inside :meth:`claim_due_outbox`;
+        this CAS path MUST NOT advance ``claimed -> claimed``.
+        """
+        if not isinstance(outbox_id, str) or not outbox_id:
+            raise ValueError("outbox_id must be a non-empty string")
+        if expected_status not in self._OUTBOX_STATUSES:
+            raise ValueError(f"invalid expected_status: {expected_status!r}")
+        if next_status not in self._OUTBOX_STATUSES:
+            raise ValueError(f"invalid next_status: {next_status!r}")
+        if owner_id is not None and (not isinstance(owner_id, str) or not owner_id):
+            raise ValueError("owner_id must be a non-empty string")
+        if claim_token is not None and (
+            not isinstance(claim_token, str) or not claim_token
+        ):
+            raise ValueError("claim_token must be a non-empty string")
+        allowed_next = self._OUTBOX_STATUS_TRANSITIONS.get(
+            expected_status, frozenset()
+        )
+        if next_status not in allowed_next:
+            raise ValueError(
+                f"illegal outbox status transition: "
+                f"{expected_status!r} -> {next_status!r}"
+            )
+        # Omitted -> preserve the existing value. Explicit ``None`` ->
+        # canonical JSON null TEXT (round-trips back as Python ``None``).
+        # Any other value (including the JSON string ``"null"``) ->
+        # canonicalize via the required-payload helper so ``None`` is
+        # stored as the literal text ``"null"``, not SQL NULL — that
+        # distinction belongs to the approval-clear semantics in
+        # ``set_outbox_approval``.
+        sets = ["status = ?", "updated_at = ?"]
+        params: List[Any] = [next_status, int(time.time())]
+        if next_status == "claimed":
+            # Generic callers may not claim a row without fencing metadata.
+            # This keeps the low-level API safe while claim_due_outbox remains
+            # the preferred lease allocator for dispatcher workers.
+            claim_token = claim_token or secrets.token_urlsafe(32)
+            sets.extend(
+                [
+                    "lease_owner = ?",
+                    "lease_expires_at = ?",
+                    "claim_token = ?",
+                ]
+            )
+            params.extend([owner_id, int(time.time()) + 60, claim_token])
+        else:
+            sets.extend(
+                [
+                    "lease_owner = NULL",
+                    "lease_expires_at = NULL",
+                    "claim_token = NULL",
+                ]
+            )
+        if result is not _MISSING:
+            sets.append("result_json = ?")
+            params.append(
+                self._canonicalize_payload(None)
+                if result is None
+                else self._canonicalize_outbox_optional_payload(result)
+            )
+        where = ["outbox_id = ?", "status = ?"]
+        where_params: List[Any] = [outbox_id, expected_status]
+        if expected_status == "claimed" and next_status in {
+            "sent",
+            "delivered",
+            "failed",
+            "unknown",
+            "cancelled",
+        }:
+            # Terminal completion is claimant-sensitive. Keep the fencing
+            # predicate in the SQL CAS itself so direct SessionDB callers have
+            # the same stale-worker protection as the service wrapper. A
+            # missing token binds NULL and therefore cannot match any claim.
+            where.extend(["claim_token IS NOT NULL", "claim_token = ?"])
+            where_params.append(claim_token)
+            if owner_id is not None:
+                where.append("lease_owner = ?")
+                where_params.append(owner_id)
+        assignment = ", ".join(sets)
+
+        def _transition(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                f"UPDATE mission_outbox SET {assignment} "
+                f"WHERE {' AND '.join(where)}",
+                tuple(params + where_params),
+            )
+            return cursor.rowcount
+
+        return self._execute_write(_transition) == 1
+
+    def revise_outbox(
+        self,
+        outbox_id: str,
+        *,
+        expected_revision: int,
+        content: Any,
+        not_before: int,
+        preview: Any = _MISSING,
+    ) -> Optional["SessionDB.OutboxRecord"]:
+        """CAS-revise an outbox and atomically rebind mission-linked records.
+
+        A mission outbox revision is one durable identity update: the outbox
+        canonical content/hash/preview, its effect ``prepared_json`` and
+        ``preview_json``, and the linked operation ``payload_hash`` all move
+        together.  The outbox CAS plus effect/operation identity predicates
+        fence stale or partially-corrupt links; any conflict rolls the whole
+        write transaction back.
+
+        Low-level legacy rows without a linked effect retain the historical
+        outbox-only behavior. Materialized mission rows always have the effect
+        and operation links, so they take the atomic path below.
+        """
+        if not isinstance(outbox_id, str) or not outbox_id:
+            raise ValueError("outbox_id must be a non-empty string")
+        # Integer boundary — both columns are INTEGER; reject before
+        # SQL so the storage layer never silently coerces.
+        if not isinstance(expected_revision, int) or isinstance(
+            expected_revision, bool
+        ):
+            raise ValueError("expected_revision must be an int")
+        if expected_revision < 1:
+            raise ValueError("expected_revision must be >= 1")
+        if not isinstance(not_before, int) or isinstance(not_before, bool):
+            raise ValueError("not_before must be an int")
+        content_json = self._canonicalize_payload(content)
+        content_hash = hashlib.sha256(content_json.encode("utf-8")).hexdigest()
+        next_revision = expected_revision + 1
+
+        def _revise(conn: sqlite3.Connection) -> Any:
+            current = conn.execute(
+                "SELECT * FROM mission_outbox WHERE outbox_id = ?",
+                (outbox_id,),
+            ).fetchone()
+            if current is None:
+                return None
+            # ``pending`` remains accepted for direct legacy SessionDB callers;
+            # Task2 materialized rows use the explicit pre-release statuses.
+            if current["status"] not in {
+                "pending",
+                "pending_approval",
+                "scheduled",
+            } or current["revision"] != expected_revision:
+                return None
+
+            persisted_hash = current["content_hash"]
+            if not persisted_hash:
+                try:
+                    persisted_content = self._canonicalize_content_json(
+                        current["content_json"]
+                    )
+                except ValueError as exc:
+                    raise ValueError("existing outbox content_json is malformed") from exc
+                persisted_hash = hashlib.sha256(
+                    persisted_content.encode("utf-8")
+                ).hexdigest()
+            persisted_preview_raw = current["preview_json"]
+            try:
+                persisted_preview_json = (
+                    None
+                    if persisted_preview_raw is None
+                    else self._canonicalize_outbox_optional_payload(
+                        self._effect_parse_json(persisted_preview_raw)
+                    )
+                )
+            except ValueError as exc:
+                raise ValueError("existing outbox preview_json is malformed") from exc
+            if preview is _MISSING:
+                preview_json = persisted_preview_json
+            else:
+                preview_json = self._canonicalize_outbox_optional_payload(preview)
+
+            # Normalize a legacy raw preview before the revision CAS. The raw
+            # value remains in the predicate so a stale reader can never
+            # overwrite a concurrent preview change. This update is part of the
+            # same transaction as the revision and is rolled back on conflict.
+            if persisted_preview_raw != persisted_preview_json:
+                preview_cursor = conn.execute(
+                    """UPDATE mission_outbox SET preview_json = ?
+                        WHERE outbox_id = ? AND preview_json IS ?""",
+                    (persisted_preview_json, outbox_id, persisted_preview_raw),
+                )
+                if preview_cursor.rowcount != 1:
+                    raise ValueError("outbox preview CAS conflict during revision")
+
+            # First update the outbox under its revision/status CAS.  Any
+            # linked-row conflict below raises while this BEGIN IMMEDIATE is
+            # still active, so this write is rolled back with the links.
+            params: List[Any] = [
+                content_json,
+                content_hash,
+                preview_json,
+                not_before,
+                next_revision,
+                int(time.time()),
+                outbox_id,
+                expected_revision,
+            ]
+            cursor = conn.execute(
+                """UPDATE mission_outbox SET content_json = ?, content_hash = ?,
+                      preview_json = ?, not_before = ?, revision = ?,
+                      updated_at = ?
+                WHERE outbox_id = ?
+                  AND status IN ('pending', 'pending_approval', 'scheduled')
+                  AND revision = ?
+                  AND preview_json IS ?""",
+                tuple(params) + (persisted_preview_json,),
+            )
+            if cursor.rowcount != 1:
+                return None
+
+            transaction_id = current["transaction_id"]
+            if transaction_id is not None:
+                effect = conn.execute(
+                    "SELECT * FROM effect_transactions WHERE transaction_id = ?",
+                    (transaction_id,),
+                ).fetchone()
+                if effect is None:
+                    raise ValueError("linked mission effect is missing")
+                if effect is not None:
+                    operation = conn.execute(
+                        "SELECT * FROM agent_operations WHERE operation_id = ?",
+                        (effect["operation_id"],),
+                    ).fetchone()
+                    if operation is None:
+                        raise ValueError("linked mission operation is missing")
+                    expected_operation_id = f"{current['outbox_id']}:operation"
+                    expected_adapter_id = f"outbox.{current['platform']}"
+                    expected_depends_on: list[Any] = []
+                    expected_prepared = {
+                        "delivery_kind": "outbox",
+                        "platform": current["platform"],
+                        "target": current["target"],
+                        "content_hash": persisted_hash,
+                        "execution_id": current["execution_id"],
+                        "node_id": current["node_id"],
+                    }
+                    if (
+                        effect["transaction_id"] != transaction_id
+                        or effect["operation_id"] != expected_operation_id
+                        or effect["mission_id"] != current["mission_id"]
+                        or effect["execution_id"] != current["execution_id"]
+                        or effect["step_id"] != current["node_id"]
+                        or effect["adapter_id"] != expected_adapter_id
+                        or operation["operation_id"] != effect["operation_id"]
+                        or operation["kind"] != "mission_outbox"
+                        or operation["destination"] != f"outbox:{current['platform']}"
+                        or operation["payload_hash"] != persisted_hash
+                        or operation["state"] != "pending"
+                        or operation["effect_disposition"] != "none"
+                    ):
+                        raise ValueError("linked mission identity conflict during revision")
+                    try:
+                        semantics = self._effect_parse_json(effect["semantics_json"])
+                        depends_on = self._effect_parse_json(effect["depends_on_json"])
+                        prepared = self._effect_parse_json(effect["prepared_json"])
+                    except ValueError as exc:
+                        raise ValueError("linked mission effect identity payload is malformed") from exc
+                    if (
+                        not isinstance(semantics, dict)
+                        or semantics.get("kind") != "outbound_delivery"
+                        or not isinstance(semantics.get("idempotent"), bool)
+                        or not isinstance(semantics.get("reconcilable"), bool)
+                    ):
+                        raise ValueError("linked mission semantics identity conflict during revision")
+                    if depends_on != expected_depends_on:
+                        raise ValueError("linked mission dependencies identity conflict during revision")
+                    if prepared != expected_prepared:
+                        raise ValueError("linked mission prepared identity conflict during revision")
+                    effect_preview_raw = effect["preview_json"]
+                    try:
+                        effect_preview = (
+                            None
+                            if effect_preview_raw is None
+                            else self._canonicalize_outbox_optional_payload(
+                                self._effect_parse_json(effect_preview_raw)
+                            )
+                        )
+                    except ValueError as exc:
+                        raise ValueError("linked mission preview identity is malformed") from exc
+                    if effect_preview != persisted_preview_json:
+                        raise ValueError("linked mission preview identity conflict during revision")
+                    if effect_preview_raw != effect_preview:
+                        effect_preview_cursor = conn.execute(
+                            """UPDATE effect_transactions SET preview_json = ?
+                                WHERE transaction_id = ? AND preview_json IS ?""",
+                            (effect_preview, transaction_id, effect_preview_raw),
+                        )
+                        if effect_preview_cursor.rowcount != 1:
+                            raise ValueError(
+                                "linked mission preview CAS conflict during revision"
+                            )
+                    prepared["content_hash"] = content_hash
+                    prepared_json = self._canonicalize_payload(
+                        _redact_durable_value(prepared)
+                    )
+                    effect_cursor = conn.execute(
+                        """UPDATE effect_transactions
+                              SET prepared_json = ?, preview_json = ?, updated_at = ?
+                            WHERE transaction_id = ?
+                              AND operation_id = ?
+                              AND mission_id = ?
+                              AND execution_id = ?
+                              AND step_id = ?
+                              AND phase IN ('pending', 'previewed')
+                              AND prepared_json = ?
+                              AND preview_json IS ?""",
+                        (
+                            prepared_json,
+                            preview_json,
+                            int(time.time()),
+                            transaction_id,
+                            effect["operation_id"],
+                            current["mission_id"],
+                            current["execution_id"],
+                            current["node_id"],
+                            effect["prepared_json"],
+                            persisted_preview_json,
+                        ),
+                    )
+                    if effect_cursor.rowcount != 1:
+                        raise ValueError("linked mission effect CAS conflict during revision")
+                    operation_cursor = conn.execute(
+                        """UPDATE agent_operations
+                              SET payload_hash = ?, updated_at = ?
+                            WHERE operation_id = ?
+                              AND kind = 'mission_outbox'
+                              AND destination = ?
+                              AND payload_hash = ?
+                              AND state = 'pending'""",
+                        (
+                            content_hash,
+                            int(time.time()),
+                            effect["operation_id"],
+                            f"outbox:{current['platform']}",
+                            persisted_hash,
+                        ),
+                    )
+                    if operation_cursor.rowcount != 1:
+                        raise ValueError(
+                            "linked mission operation CAS conflict during revision"
+                        )
+            return conn.execute(
+                "SELECT * FROM mission_outbox WHERE outbox_id = ?",
+                (outbox_id,),
+            ).fetchone()
+
+        row = self._execute_write(_revise)
+        return self._outbox_from_row(row) if row is not None else None
+
+    def set_outbox_approval(
+        self,
+        outbox_id: str,
+        *,
+        expected_revision: int,
+        approval: Any,
+    ) -> bool:
+        """Update the approval JSON on a pending outbox row.
+
+        Pending-only CAS keyed on ``expected_revision`` — a stale
+        revision, a missing row, or any non-pending status returns False
+        without mutating the row. ``approval`` is required and canonical
+        JSON: pass a dict / list / string to set it, or ``None`` to
+        clear it to SQL NULL. Every non-None JSON-serializable value —
+        including the literal string ``"null"`` — is canonicalized
+        normally and round-trips back identically. ``status``,
+        ``content``, and the delivery-identity columns are not touched
+        by this method — they're managed by their own dedicated entry
+        points.
+        """
+        if not isinstance(outbox_id, str) or not outbox_id:
+            raise ValueError("outbox_id must be a non-empty string")
+        if not isinstance(expected_revision, int) or isinstance(
+            expected_revision, bool
+        ):
+            raise ValueError("expected_revision must be an int")
+        if expected_revision < 1:
+            raise ValueError("expected_revision must be >= 1")
+        approval_json = self._canonicalize_outbox_optional_payload(approval)
+
+        def _set(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                """UPDATE mission_outbox
+                      SET approval_json = ?,
+                          updated_at = ?
+                    WHERE outbox_id = ?
+                      AND status IN ('pending', 'pending_approval', 'scheduled')
+                      AND revision = ?""",
+                (
+                    approval_json,
+                    int(time.time()),
+                    outbox_id,
+                    expected_revision,
+                ),
+            )
+            return cursor.rowcount
+
+        return self._execute_write(_set) == 1
+
+    def cancel_outbox(
+        self,
+        outbox_id: str,
+        *,
+        expected_revision: int,
+        owner_id: Optional[str] = None,
+        claim_token: Optional[str] = None,
+    ) -> bool:
+        """Cancel a pending outbox row.
+
+        Pending-only CAS keyed on ``expected_revision``: a stale
+        revision, a missing row, or any non-pending status returns False
+        without mutating the row. ``content_json``, ``approval_json``,
+        and ``result_json`` are preserved — cancellation is a status
+        change, not a payload purge. Once ``cancelled`` the row is
+        non-claimable: ``claim_due_outbox`` filters on ``status='pending'
+        OR (status='claimed' AND updated_at <= lease_cutoff)``, and the
+        second branch also requires the row to still be in ``claimed``.
+        """
+        if not isinstance(outbox_id, str) or not outbox_id:
+            raise ValueError("outbox_id must be a non-empty string")
+        if not isinstance(expected_revision, int) or isinstance(
+            expected_revision, bool
+        ):
+            raise ValueError("expected_revision must be an int")
+        if expected_revision < 1:
+            raise ValueError("expected_revision must be >= 1")
+        if owner_id is not None and (not isinstance(owner_id, str) or not owner_id):
+            raise ValueError("owner_id must be a non-empty string")
+        if claim_token is not None and (
+            not isinstance(claim_token, str) or not claim_token
+        ):
+            raise ValueError("claim_token must be a non-empty string")
+
+        def _cancel(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                "SELECT * FROM mission_outbox WHERE outbox_id = ?", (outbox_id,)
+            ).fetchone()
+            if row is None or row["revision"] != expected_revision:
+                return 0
+            status = row["status"]
+            cancellable = status in {"pending", "pending_approval", "scheduled"}
+            if status == "claimed" and claim_token is not None and row["claim_token"] == claim_token:
+                cancellable = owner_id is None or row["lease_owner"] == owner_id
+            if not cancellable:
+                return 0
+
+            next_status = "cancelled"
+            now = int(time.time())
+            if row["mission_id"] is not None:
+                transaction_id = row["transaction_id"]
+                if not isinstance(transaction_id, str) or not transaction_id:
+                    raise RuntimeError("mission outbox cancellation missing transaction_id")
+                effect = conn.execute(
+                    "SELECT * FROM effect_transactions WHERE transaction_id = ?",
+                    (transaction_id,),
+                ).fetchone()
+                if effect is None:
+                    # A mission-linked row must always have a matching effect
+                    # row (materialize() creates both atomically) — a missing
+                    # one is a split ledger, not a normal cancellation. Fail
+                    # closed: a row that was never claimed has nothing in
+                    # flight, so refuse rather than silently erase the
+                    # inconsistency by cancelling; a claimed/in-flight row
+                    # might have a delivery attempt underway with no ledger
+                    # entry to show for it, so it lands on the conservative
+                    # "unknown" outcome instead of a clean "cancelled" one.
+                    if status != "claimed":
+                        raise RuntimeError(
+                            "mission outbox cancellation missing effect; reconciliation required"
+                        )
+                    next_status = "unknown"
+                else:
+                    if not self._mission_outbox_effect_identity_matches(
+                        conn, row, effect
+                    ):
+                        raise RuntimeError("mission outbox cancellation effect identity mismatch")
+                    expected_phase = effect["phase"]
+                    if expected_phase in {"pending", "previewed"}:
+                        next_phase = "cancelled"
+                    elif status == "claimed" and expected_phase == "committing":
+                        next_phase = "unknown_effect"
+                        next_status = "unknown"
+                    else:
+                        raise RuntimeError(
+                            "mission outbox cancellation crossed the delivery boundary"
+                        )
+                    settled = conn.execute(
+                        """UPDATE effect_transactions
+                              SET phase = ?, updated_at = ?
+                            WHERE transaction_id = ? AND phase = ?""",
+                        (next_phase, now, transaction_id, expected_phase),
+                    )
+                    if settled.rowcount != 1:
+                        raise RuntimeError("mission outbox cancellation effect CAS lost")
+
+            params: List[Any] = [next_status, now, outbox_id]
+            status_clause = "status IN ('pending', 'pending_approval', 'scheduled')"
+            if claim_token is not None:
+                status_clause += " OR (status = 'claimed' AND claim_token = ?"
+                params.append(claim_token)
+                if owner_id is not None:
+                    status_clause += " AND lease_owner = ?"
+                    params.append(owner_id)
+                status_clause += ")"
+            params.append(expected_revision)
+            cursor = conn.execute(
+                f"""UPDATE mission_outbox
+                      SET status = ?,
+                          lease_owner = NULL,
+                          lease_expires_at = NULL,
+                          claim_token = NULL,
+                          updated_at = ?
+                    WHERE outbox_id = ?
+                      AND ({status_clause})
+                      AND revision = ?""",
+                tuple(params),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("mission outbox cancellation CAS lost")
+            return 1
+
+        return self._execute_write(_cancel) == 1
+
+    def release_outbox(
+        self,
+        outbox_id: str,
+        *,
+        owner_id: Optional[str],
+        claim_token: str,
+        next_status: str = "scheduled",
+    ) -> bool:
+        """Release a claimed row only with its current fencing credentials."""
+        if not isinstance(outbox_id, str) or not outbox_id:
+            raise ValueError("outbox_id must be a non-empty string")
+        if owner_id is not None and (not isinstance(owner_id, str) or not owner_id):
+            raise ValueError("owner_id must be a non-empty string")
+        if not isinstance(claim_token, str) or not claim_token:
+            raise ValueError("claim_token must be a non-empty string")
+        if next_status not in {"pending", "scheduled"}:
+            raise ValueError("next_status must be 'pending' or 'scheduled'")
+
+        def _release(conn: sqlite3.Connection) -> int:
+            clauses = [
+                "outbox_id = ?",
+                "status = 'claimed'",
+                "claim_token = ?",
+            ]
+            params: List[Any] = [next_status, int(time.time()), outbox_id, claim_token]
+            if owner_id is not None:
+                clauses.append("lease_owner = ?")
+                params.append(owner_id)
+            cursor = conn.execute(
+                "UPDATE mission_outbox SET status = ?, updated_at = ?, "
+                "lease_owner = NULL, lease_expires_at = NULL, claim_token = NULL "
+                f"WHERE {' AND '.join(clauses)}",
+                tuple(params),
+            )
+            return cursor.rowcount
+
+        return self._execute_write(_release) == 1
+
+    def acknowledge_outbox(self, outbox_id: str) -> bool:
+        """Persist terminal acknowledgement exactly once.
+
+        Acknowledgement is deliberately separate from terminal status: the
+        delivery result can be recovered and inspected before the owning
+        consumer confirms it has handled that result.
+        """
+        if not isinstance(outbox_id, str) or not outbox_id:
+            raise ValueError("outbox_id must be a non-empty string")
+
+        def _ack(conn: sqlite3.Connection) -> int:
+            row = conn.execute(
+                """SELECT result_json FROM mission_outbox
+                       WHERE outbox_id = ?
+                         AND status IN ('delivered', 'sent', 'failed', 'unknown', 'cancelled')
+                         AND acknowledged_at IS NULL""",
+                (outbox_id,),
+            ).fetchone()
+            if row is None:
+                return 0
+            result_json = row[0]
+            if result_json is not None:
+                parsed_result = self._effect_parse_json(result_json)
+                result_json = (
+                    self._canonicalize_payload(None)
+                    if parsed_result is None
+                    else self._canonicalize_outbox_optional_payload(parsed_result)
+                )
+                cursor = conn.execute(
+                    """UPDATE mission_outbox
+                          SET acknowledged_at = ?, result_json = ?
+                        WHERE outbox_id = ?
+                          AND acknowledged_at IS NULL""",
+                    (int(time.time()), result_json, outbox_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """UPDATE mission_outbox
+                          SET acknowledged_at = ?
+                        WHERE outbox_id = ?
+                          AND acknowledged_at IS NULL""",
+                    (int(time.time()), outbox_id),
+                )
+            return cursor.rowcount
+
+        return self._execute_write(_ack) == 1
 
 
 class AsyncSessionDB:

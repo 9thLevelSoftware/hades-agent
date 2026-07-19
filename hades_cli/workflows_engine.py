@@ -15,6 +15,7 @@ _TEMPLATE_RE = re.compile(r"^\$\{\s*([^}]+?)\s*\}$")
 _WAITING_NODE_TYPES = {
     "agent_task",
     "wait",
+    "send_message",
 }
 
 
@@ -265,8 +266,9 @@ def run_in_memory_until_waiting(
                 error=error,
             )
 
-        if node.type == "wait" and node_id in completed_wait_nodes:
-            context["node"][node_id] = {"output": {"waited": True}}
+        if node.type in {"wait", "send_message"} and node_id in completed_wait_nodes:
+            output = {"waited": True} if node.type == "wait" else {"delivered": True}
+            context["node"][node_id] = {"output": output}
             _record_branch_output(context, completed_branch_by_node, node_id, branch_key)
             for edge in next_edges(spec, node_id):
                 enqueue(edge.to, branch_key)

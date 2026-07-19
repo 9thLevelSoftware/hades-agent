@@ -118,6 +118,8 @@ class TestLoadConfigDefaults:
             assert config["terminal"]["backend"] == "local"
             assert config["display"]["interim_assistant_messages"] is True
             assert config["tools"]["tool_search"]["absolute_threshold_tokens"] == 20_000
+            assert config["missions"]["outbox"]["max_delay_seconds"] == 604_800
+            assert "outbox" not in config["workflow"]
 
     def test_code_execution_defaults_are_backward_compatible(self, tmp_path):
         with patch.dict(os.environ, {"HADES_HOME": str(tmp_path)}):
@@ -141,6 +143,29 @@ class TestLoadConfigDefaults:
             config = load_config()
             assert config["agent"]["max_turns"] == 42
             assert "max_turns" not in config
+
+    def test_legacy_workflow_outbox_delay_migrates_to_missions_policy(self, tmp_path):
+        with patch.dict(os.environ, {"HADES_HOME": str(tmp_path)}):
+            (tmp_path / "config.yaml").write_text(
+                "workflow:\n  outbox:\n    max_delay_seconds: 10\n",
+                encoding="utf-8",
+            )
+            config = load_config()
+
+        assert config["missions"]["outbox"]["max_delay_seconds"] == 10
+        assert "outbox" not in config["workflow"]
+
+    def test_explicit_missions_outbox_delay_overrides_legacy_policy(self, tmp_path):
+        with patch.dict(os.environ, {"HADES_HOME": str(tmp_path)}):
+            (tmp_path / "config.yaml").write_text(
+                "missions:\n  outbox:\n    max_delay_seconds: 20\n"
+                "workflow:\n  outbox:\n    max_delay_seconds: 10\n",
+                encoding="utf-8",
+            )
+            config = load_config()
+
+        assert config["missions"]["outbox"]["max_delay_seconds"] == 20
+        assert "outbox" not in config["workflow"]
 
 
 class TestLoadConfigParseFailure:
@@ -2049,5 +2074,84 @@ class TestCodexAppServerAutoConfig:
 
             raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
             assert raw["compression"]["codex_app_server_auto"] == "hermes"
+
+
+class TestConfigStateMutationService:
+    """Task 5: revision-checked, non-printing config mutations."""
+
+    def test_absent_key_restores_to_absent_not_null(self, tmp_path, monkeypatch):
+        from hades_cli.config import (
+            apply_config_mutation,
+            prepare_config_mutation,
+            restore_config_mutation,
+            verify_config_mutation,
+        )
+
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        mutation = prepare_config_mutation("display.theme", "night")
+        assert mutation.before["exists"] is False
+        assert mutation.after["value"] == "night"
+
+        apply_config_mutation(mutation)
+        assert verify_config_mutation(mutation)["landed"] is True
+        assert yaml.safe_load((tmp_path / "config.yaml").read_text()) == {
+            "display": {"theme": "night"}
+        }
+
+        restore_config_mutation(mutation)
+        assert yaml.safe_load((tmp_path / "config.yaml").read_text()) == {"display": {}}
+
+    def test_null_value_is_distinct_from_absent_on_restore(self, tmp_path, monkeypatch):
+        from hades_cli.config import (
+            apply_config_mutation,
+            prepare_config_mutation,
+            restore_config_mutation,
+        )
+
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text("display:\n  theme: null\n")
+        mutation = prepare_config_mutation("display.theme", "day")
+        assert mutation.before == {"exists": True, "value": None, "revision": mutation.expected_revision}
+
+        apply_config_mutation(mutation)
+        restore_config_mutation(mutation)
+        assert yaml.safe_load((tmp_path / "config.yaml").read_text()) == {
+            "display": {"theme": None}
+        }
+
+    def test_revision_conflict_refuses_to_overwrite_newer_config(self, tmp_path, monkeypatch):
+        from hades_cli.config import apply_config_mutation, prepare_config_mutation
+
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text("display:\n  theme: day\n")
+        mutation = prepare_config_mutation("display.theme", "night")
+        (tmp_path / "config.yaml").write_text("display:\n  theme: solarized\n")
+
+        with pytest.raises(ValueError, match="revision mismatch"):
+            apply_config_mutation(mutation)
+        assert yaml.safe_load((tmp_path / "config.yaml").read_text()) == {
+            "display": {"theme": "solarized"}
+        }
+
+    @pytest.mark.parametrize("key", ["model.api_key", "gateway.bot_token", "auth.password"])
+    def test_credential_shaped_keys_are_rejected(self, tmp_path, monkeypatch, key):
+        from hades_cli.config import prepare_config_mutation
+
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        with pytest.raises(ValueError, match="credential"):
+            prepare_config_mutation(key, "not-a-secret")
+
+    def test_managed_or_unreadable_config_fails_closed(self, tmp_path, monkeypatch):
+        from hades_cli.config import prepare_config_mutation
+
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setattr("hades_cli.config.is_managed", lambda: True)
+        with pytest.raises(RuntimeError, match="managed"):
+            prepare_config_mutation("display.theme", "night")
+
+        monkeypatch.setattr("hades_cli.config.is_managed", lambda: False)
+        (tmp_path / "config.yaml").write_text("display: [broken\n")
+        with pytest.raises(RuntimeError, match="readable"):
+            prepare_config_mutation("display.theme", "night")
 
 

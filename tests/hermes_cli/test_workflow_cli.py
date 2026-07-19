@@ -78,20 +78,18 @@ def test_validate_reports_bad_edge_target(workflow_home, tmp_path, capsys):
     assert "Traceback" not in err
 
 
-def test_validate_rejects_unsupported_send_message(workflow_home, tmp_path, capsys):
+def test_validate_rejects_unsupported_subworkflow(workflow_home, tmp_path, capsys):
     spec_path = tmp_path / "unsupported.yaml"
     spec_path.write_text(
         """
-id: unsupported_send_message_demo
-name: Unsupported Send Message Demo
+id: unsupported_subworkflow_demo
+name: Unsupported Subworkflow Demo
 version: 1
 triggers:
   - type: manual
 nodes:
   start:
-    type: send_message
-    output:
-      text: hi
+    type: subworkflow
 edges: []
 """.strip(),
         encoding="utf-8",
@@ -101,7 +99,7 @@ edges: []
 
     assert rc == 1
     assert out == ""
-    assert "unsupported node type: send_message on node start" in err
+    assert "unsupported node type: subworkflow on node start" in err
     assert "Traceback" not in err
 
 

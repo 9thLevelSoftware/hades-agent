@@ -1,7 +1,14 @@
 import json
+import sqlite3
 from pathlib import Path
 
+import pytest
+
+from agent.operation_journal import OperationJournal
+from hades_state import SessionDB
+from gateway.mission_outbox import MissionOutboxStore
 from hades_cli import kanban_db as kb
+from hades_cli import missions_db as mdb
 from hades_cli import workflows_db as wfdb
 from hades_cli import workflows_dispatcher
 from hades_cli.workflows_engine import EngineResult
@@ -42,6 +49,97 @@ def _wait_spec() -> WorkflowSpec:
             {"from": "pause", "to": "done"},
         ],
     })
+
+
+def _send_message_spec(
+    *,
+    target: str = "${ input.target }",
+    delay: int = 30,
+    retry: dict | None = None,
+    catch: str | None = None,
+) -> WorkflowSpec:
+    notify = {
+        "type": "send_message",
+        "platform": "local",
+        "target": target,
+        "message": {"text": "${ input.body }"},
+        "not_before_seconds": delay,
+    }
+    if retry is not None:
+        notify["retry"] = retry
+    if catch is not None:
+        notify["catch"] = catch
+    nodes = {"notify": notify}
+    if catch is not None:
+        nodes[catch] = {
+            "type": "pass",
+            "output": {"recovered": "${ error.node }", "message": "${ error.message }"},
+        }
+    return WorkflowSpec.model_validate({
+        "id": "send_message_demo", "name": "Send Message Demo", "version": 1,
+        "triggers": [{"type": "manual", "id": "manual"}],
+        "nodes": nodes,
+    })
+
+
+def _start_mission_send_execution(
+    tmp_path,
+    monkeypatch,
+    *,
+    target: str = "authorized-target",
+    allowed_targets: list[str] | None = None,
+    allowed_effects: list[str] | None = None,
+    expires_at: int | None = 1_000,
+    delay: int = 30,
+    retry: dict | None = None,
+    catch: str | None = None,
+) -> tuple[str, str, Path]:
+    home = tmp_path / ".hades"
+    monkeypatch.setenv("HADES_HOME", str(home))
+    wfdb.init_db()
+    authority: dict[str, object] = {
+        "allowed_effects": allowed_effects if allowed_effects is not None else ["delayed_message"],
+        "message_targets": allowed_targets if allowed_targets is not None else ["authorized-target"],
+    }
+    if expires_at is not None:
+        authority["expires_at"] = expires_at
+    with wfdb.connect() as conn:
+        spec = _send_message_spec(delay=delay, retry=retry, catch=catch)
+        wfdb.deploy_definition(conn, spec, created_by="test")
+        mission, execution = mdb.create_mission_and_execution(
+            conn,
+            workflow_id=spec.id,
+            objective="send a delayed local test notification",
+            constraints=[],
+            authority=authority,
+            evidence={"checks": ["workflow_succeeded"]},
+            input_data={"target": target, "body": "ready"},
+            profile="default",
+            now=10,
+        )
+    return mission.mission_id, execution.execution_id, home / "state.db"
+
+
+def _start_unlinked_send_execution(
+    tmp_path,
+    monkeypatch,
+    *,
+    retry: dict | None = None,
+    catch: str | None = None,
+) -> tuple[str, Path]:
+    home = tmp_path / ".hades"
+    monkeypatch.setenv("HADES_HOME", str(home))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        spec = _send_message_spec(retry=retry, catch=catch)
+        wfdb.deploy_definition(conn, spec, created_by="test")
+        execution_id = wfdb.start_execution(
+            conn,
+            spec.id,
+            input_data={"target": "authorized-target", "body": "ready"},
+            trigger_type="manual",
+        )
+    return execution_id, home / "state.db"
 
 
 def _parallel_spec() -> WorkflowSpec:
@@ -181,6 +279,115 @@ def _execution_state(exec_id: str):
             (exec_id,),
         )]
     return execution, claim, events
+
+
+def _set_effect_phase(state_db: SessionDB, transaction_id: str, phase: str) -> None:
+    paths = {
+        "pending": (),
+        "previewed": ("previewed",),
+        "committing": ("previewed", "committing"),
+        "committed": ("previewed", "committing", "committed"),
+        "unknown_effect": ("previewed", "committing", "unknown_effect"),
+        "failed": ("failed",),
+        "cancelled": ("cancelled",),
+    }
+    effect = state_db.get_effect_transaction(transaction_id)
+    assert effect is not None
+    if effect.phase == phase:
+        return
+    if effect.phase != "pending":
+        # Contradiction tests intentionally model durable corruption that cannot
+        # be reached through the public phase-transition API.
+        state_db._execute_write(
+            lambda conn: conn.execute(
+                "UPDATE effect_transactions SET phase = ? WHERE transaction_id = ?",
+                (phase, transaction_id),
+            )
+        )
+        return
+    for next_phase in paths[phase]:
+        assert state_db.transition_effect_transaction(
+            transaction_id,
+            expected_phase=effect.phase,
+            next_phase=next_phase,
+        )
+        effect = state_db.get_effect_transaction(transaction_id)
+        assert effect is not None
+
+
+def _set_outbox_effect_phase(state_db: SessionDB, outbox_id: str, phase: str) -> None:
+    outbox = state_db.get_outbox_by_id(outbox_id)
+    assert outbox is not None and outbox.transaction_id is not None
+    _set_effect_phase(state_db, outbox.transaction_id, phase)
+
+
+def _terminalize_outbox(
+    state_db_path: Path,
+    outbox_id: str,
+    status: str,
+    *,
+    effect_phase: str | None = None,
+) -> None:
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(
+            now=131,
+            owner_id="projection-test",
+            lease_seconds=60,
+            limit=50,
+        )
+        target = next((row for row in claimed if row.outbox_id == outbox_id), None)
+        assert target is not None
+        for row in claimed:
+            if row.outbox_id != outbox_id:
+                assert store.release(
+                    row.outbox_id,
+                    owner_id="projection-test",
+                    claim_token=row.claim_token,
+                )
+        if status == "delivered":
+            assert store.mark_delivered(
+                outbox_id,
+                owner_id="projection-test",
+                claim_token=target.claim_token,
+                result={"message_id": "projection-7"},
+            )
+        elif status == "unknown":
+            assert store.mark_unknown(
+                outbox_id,
+                owner_id="projection-test",
+                claim_token=target.claim_token,
+                result={"reason": "router timeout"},
+            )
+        elif status == "failed":
+            assert store.mark_failed(
+                outbox_id,
+                owner_id="projection-test",
+                claim_token=target.claim_token,
+                error="router rejected",
+            )
+        elif status == "cancelled":
+            assert store.cancel(
+                outbox_id,
+                expected_revision=target.revision,
+                owner_id="projection-test",
+                claim_token=target.claim_token,
+            )
+        else:
+            raise AssertionError(f"unsupported test status: {status}")
+        if effect_phase is None and target.transaction_id is not None:
+            effect_phase = {
+                "delivered": "committed",
+                "failed": "failed",
+                "cancelled": "cancelled",
+                "unknown": "unknown_effect",
+            }[status]
+        if effect_phase is not None:
+            assert target.transaction_id is not None
+            _set_effect_phase(state_db, target.transaction_id, effect_phase)
+    finally:
+        state_db.close()
 
 
 def test_agent_result_contract_enum_accepts_boolean_values():
@@ -517,6 +724,1306 @@ def test_wait_node_persists_wait_until_then_resumes_when_due(tmp_path, monkeypat
             """,
             (exec_id,),
         ).fetchone()[0] == 1
+
+
+def test_send_message_materializes_authorized_outbox_and_waits(tmp_path, monkeypatch):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, claim, events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "waiting"
+    assert claim == {"claim_lock": None, "claim_expires": None}
+    assert [event["kind"] for event in events] == [
+        "execution_started",
+        "execution_waiting",
+    ]
+    assert len(runs) == 1
+    assert runs[0]["status"] == "waiting"
+    assert runs[0]["wait_until"] is None
+    assert runs[0]["outbox_id"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        outbox = state_db.get_outbox_by_id(runs[0]["outbox_id"])
+    finally:
+        state_db.close()
+    assert outbox is not None
+    assert outbox.mission_id == mission_id
+    assert outbox.execution_id == exec_id
+    assert outbox.node_id == "notify"
+    assert outbox.platform == "local"
+    assert outbox.target == "authorized-target"
+    assert outbox.content == {"text": "ready"}
+    assert outbox.not_before == 130
+    assert outbox.status == "scheduled"
+
+
+def test_cancelled_mission_retry_preserves_links_on_validation_failure_and_requeues_once(
+    tmp_path, monkeypatch
+):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    assert outbox_id
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        current = store.get_by_id(outbox_id)
+        assert current is not None
+        assert store.cancel(outbox_id, expected_revision=current.revision)
+        assert current.transaction_id is not None
+        effect_before = state_db.get_effect_transaction(current.transaction_id)
+        operation_before = OperationJournal(state_db).get(f"{outbox_id}:operation")
+        assert effect_before is not None
+        assert effect_before.phase == "cancelled"
+        assert operation_before is not None
+    finally:
+        state_db.close()
+
+    # Model the workflow transaction having rolled back its node-run link while
+    # the outbox compensation remains durable and cancelled.
+    with wfdb.connect() as conn:
+        conn.execute(
+            "UPDATE workflow_node_runs SET outbox_id = NULL WHERE execution_id = ? AND node_id = ?",
+            (exec_id, "notify"),
+        )
+        execution = wfdb.get_execution(conn, exec_id)
+        bad_context = json.loads(json.dumps(execution.context))
+        bad_context["input"]["body"] = "changed after prepare"
+        with pytest.raises(workflows_dispatcher._SendMessageMaterializationError):
+            workflows_dispatcher._persist_waiting_nodes(
+                conn,
+                execution_id=exec_id,
+                result=EngineResult(
+                    status="waiting", context=bad_context, waiting_nodes=["notify"]
+                ),
+                spec=_send_message_spec(),
+                now=150,
+                state_db_path=state_db_path,
+                workflow_db_path=wfdb.workflows_db_path(),
+            )
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        preserved = state_db.get_outbox_by_id(outbox_id)
+        assert preserved is not None
+        assert preserved.status == "cancelled"
+        assert preserved.transaction_id is not None
+        assert state_db.get_effect_transaction(preserved.transaction_id) == effect_before
+        assert OperationJournal(state_db).get(f"{outbox_id}:operation") == operation_before
+    finally:
+        state_db.close()
+
+    with wfdb.connect() as conn:
+        execution = wfdb.get_execution(conn, exec_id)
+        workflows_dispatcher._persist_waiting_nodes(
+            conn,
+            execution_id=exec_id,
+            result=EngineResult(
+                status="waiting", context=execution.context, waiting_nodes=["notify"]
+            ),
+            spec=_send_message_spec(),
+            now=151,
+            state_db_path=state_db_path,
+            workflow_db_path=wfdb.workflows_db_path(),
+        )
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        requeued = state_db.get_outbox_by_id(outbox_id)
+        assert requeued is not None
+        assert requeued.status == "scheduled"
+        assert requeued.transaction_id is not None
+        identity = state_db.get_outbox_by_identity(exec_id, "notify")
+        assert identity is not None
+        assert identity.outbox_id == outbox_id
+        effect_after = state_db.get_effect_transaction(requeued.transaction_id)
+        assert effect_after is not None
+        assert effect_after.phase == "pending"
+        assert effect_after.prepared == effect_before.prepared
+        assert effect_after.preview == effect_before.preview
+        operation_after = OperationJournal(state_db).get(f"{outbox_id}:operation")
+        assert operation_after is not None
+        assert operation_after.state == "pending"
+        assert operation_after.effect_disposition == "none"
+        assert state_db._execute_read(
+            lambda conn: conn.execute(
+                "SELECT count(*) FROM mission_outbox WHERE execution_id = ? AND node_id = ?",
+                (exec_id, "notify"),
+            ).fetchone()[0]
+        ) == 1
+    finally:
+        state_db.close()
+
+
+
+
+def test_terminal_outbox_fatal_sibling_overrides_earlier_retry_queue(tmp_path, monkeypatch):
+    home = tmp_path / ".hades"
+    monkeypatch.setenv("HADES_HOME", str(home))
+    wfdb.init_db()
+    spec = WorkflowSpec.model_validate(
+        {
+            "id": "parallel_send_failures",
+            "name": "Parallel send failures",
+            "version": 1,
+            "triggers": [{"type": "manual", "id": "manual"}],
+            "nodes": {
+                "fork": {"type": "parallel"},
+                "a_retry": {
+                    "type": "send_message",
+                    "platform": "local",
+                    "target": "authorized-target",
+                    "message": {"text": "retry"},
+                    "retry": {"max_attempts": 2, "backoff_seconds": 60},
+                },
+                "z_fatal": {
+                    "type": "send_message",
+                    "platform": "local",
+                    "target": "authorized-target",
+                    "message": {"text": "fatal"},
+                },
+                "merge": {"type": "join"},
+            },
+            "edges": [
+                {"from": "fork.a_retry", "to": "a_retry"},
+                {"from": "fork.z_fatal", "to": "z_fatal"},
+                {"from": "a_retry", "to": "merge"},
+                {"from": "z_fatal", "to": "merge"},
+            ],
+        }
+    )
+    with wfdb.connect() as conn:
+        wfdb.deploy_definition(conn, spec, created_by="test")
+        execution_id = wfdb.start_execution(
+            conn,
+            spec.id,
+            input_data={},
+            trigger_type="manual",
+            now=10,
+        )
+    with wfdb.connect() as conn:
+        conn.execute(
+            "UPDATE workflow_executions SET status = 'waiting' WHERE execution_id = ?",
+            (execution_id,),
+        )
+    state_db_path = home / "state.db"
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        retry = store.materialize(
+            execution_id=execution_id,
+            node_id="a_retry",
+            platform="local",
+            target="authorized-target",
+            content="retry",
+        )
+        fatal = store.materialize(
+            execution_id=execution_id,
+            node_id="z_fatal",
+            platform="local",
+            target="authorized-target",
+            content="fatal",
+        )
+    finally:
+        state_db.close()
+    with wfdb.connect() as conn:
+        conn.execute(
+            """INSERT INTO workflow_node_runs
+                   (execution_id, node_id, status, outbox_id)
+                 VALUES (?, 'a_retry', 'waiting', ?),
+                        (?, 'z_fatal', 'waiting', ?)""",
+            (execution_id, retry.outbox_id, execution_id, fatal.outbox_id),
+        )
+    retry_outbox_id = retry.outbox_id
+    fatal_outbox_id = fatal.outbox_id
+    assert retry_outbox_id and fatal_outbox_id
+    _terminalize_outbox(state_db_path, retry_outbox_id, "failed")
+    _terminalize_outbox(state_db_path, fatal_outbox_id, "failed")
+
+    assert workflows_dispatcher.tick(limit=1, now=132, state_db_path=state_db_path) == 0
+    execution_state, _, _ = _execution_state(execution_id)
+    assert execution_state.status == "failed"
+    assert workflows_dispatcher.tick(limit=1, now=133, state_db_path=state_db_path) == 0
+
+
+def test_conflicting_profile_hint_and_default_home_never_materializes_outbox(
+    tmp_path, monkeypatch
+):
+    _mission_id, execution_id, state_db_path = _start_mission_send_execution(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setenv("HERMES_PROFILE", "foreign")
+
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 0
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        assert state_db.get_outbox_by_identity(execution_id, "notify") is None
+    finally:
+        state_db.close()
+
+
+
+def test_failed_mission_retry_requeues_fresh_effect_and_claimable_outbox(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    assert outbox_id
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(now=131, owner_id="failed-retry", limit=1)
+        assert [row.outbox_id for row in claimed] == [outbox_id]
+        assert store.mark_failed(
+            outbox_id,
+            owner_id="failed-retry",
+            claim_token=claimed[0].claim_token,
+            error="adapter rejected",
+        )
+        outbox = store.get_by_id(outbox_id)
+        assert outbox is not None and outbox.transaction_id is not None
+        assert state_db.transition_effect_transaction(
+            outbox.transaction_id, expected_phase="pending", next_phase="failed"
+        )
+    finally:
+        state_db.close()
+
+    with wfdb.connect() as conn:
+        conn.execute(
+            "UPDATE workflow_node_runs SET outbox_id = NULL WHERE execution_id = ? AND node_id = ?",
+            (exec_id, "notify"),
+        )
+        execution = wfdb.get_execution(conn, exec_id)
+        workflows_dispatcher._persist_waiting_nodes(
+            conn,
+            execution_id=exec_id,
+            result=EngineResult(
+                status="waiting", context=execution.context, waiting_nodes=["notify"]
+            ),
+            spec=_send_message_spec(),
+            now=151,
+            state_db_path=state_db_path,
+            workflow_db_path=wfdb.workflows_db_path(),
+        )
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        retry = state_db.get_outbox_by_id(outbox_id)
+        assert retry is not None
+        assert retry.status == "scheduled"
+        assert retry.result is None
+        assert retry.transaction_id is not None
+        effect = state_db.get_effect_transaction(retry.transaction_id)
+        assert effect is not None and effect.phase == "pending"
+        operation = OperationJournal(state_db).get(f"{outbox_id}:operation")
+        assert operation is not None and operation.state == "pending"
+        claimed_again = state_db.claim_due_outbox(151, limit=1)
+        assert [row.outbox_id for row in claimed_again] == [outbox_id]
+    finally:
+        state_db.close()
+
+
+def test_foreign_profile_terminal_projection_does_not_insert_review(tmp_path, monkeypatch):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(now=131, owner_id="foreign-profile-test", limit=1)
+        assert store.mark_unknown(
+            outbox_id,
+            owner_id="foreign-profile-test",
+            claim_token=claimed[0].claim_token,
+            result={"reason": "router timeout after dispatch"},
+        )
+    finally:
+        state_db.close()
+
+    with wfdb.connect() as conn:
+        conn.execute(
+            "UPDATE missions SET profile = ? WHERE mission_id = ?",
+            ("foreign", mission_id),
+        )
+        before_reviews = conn.execute(
+            "SELECT count(*) FROM mission_review_items WHERE mission_id = ?",
+            (mission_id,),
+        ).fetchone()[0]
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=131, state_db_path=state_db_path
+    ) == 0
+
+    with wfdb.connect() as conn:
+        after_reviews = conn.execute(
+            "SELECT count(*) FROM mission_review_items WHERE mission_id = ?",
+            (mission_id,),
+        ).fetchone()[0]
+        assert after_reviews == before_reviews
+        assert wfdb.get_execution(conn, exec_id).status == "blocked"
+
+
+def test_authority_platform_scope_supports_dynamic_plugins_without_cross_scope_leakage():
+    from gateway.mission_delivery import _authority_allows_destination as gateway_allows
+
+    authority = {"message_targets": ["irc:42"]}
+    for allows in (workflows_dispatcher._authority_allows_destination, gateway_allows):
+        assert allows(authority, platform="irc", target="42")
+        assert not allows(authority, platform="discord", target="42")
+        assert not allows({"message_targets": ["discord:42"]}, platform="irc", target="42")
+        assert allows({"message_targets": ["42"]}, platform="irc", target="42")
+        assert not allows({"message_targets": ["42"]}, platform="irc", target="discord:42")
+
+
+def test_delivered_send_message_outbox_resumes_waiting_execution_once(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    assert outbox_id
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(
+            now=131,
+            owner_id="delivery-test",
+            lease_seconds=60,
+            limit=1,
+        )
+        assert [row.outbox_id for row in claimed] == [outbox_id]
+        assert store.mark_delivered(
+            outbox_id,
+            owner_id="delivery-test",
+            claim_token=claimed[0].claim_token,
+            result={
+                "message_id": "local-7",
+                "secret": "raw-secret-value",
+                "stdout": "raw-adapter-output",
+            },
+        )
+        _set_outbox_effect_phase(state_db, outbox_id, "committed")
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=131, state_db_path=state_db_path
+    ) == 1
+    execution, claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "succeeded"
+    assert claim == {"claim_lock": None, "claim_expires": None}
+    assert len(runs) == 1
+    assert runs[0]["status"] == "succeeded"
+    assert runs[0]["completed_at"] == 131
+    assert json.loads(runs[0]["output_json"]) == {
+        "outbox_id": outbox_id,
+        "outbox_status": "delivered",
+        "result": {
+            "message_id": "local-7",
+            "secret": "[REDACTED]",
+            "stdout": "[REDACTED]",
+        },
+        "status": "delivered",
+    }
+    assert "raw-secret-value" not in runs[0]["output_json"]
+    assert "raw-adapter-output" not in runs[0]["output_json"]
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=132, state_db_path=state_db_path
+    ) == 0
+    assert len(_node_runs(exec_id, "notify")) == 1
+
+
+_TERMINAL_OUTBOX_EFFECT_PHASES = {
+    "delivered": "committed",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "unknown": "unknown_effect",
+}
+_INCOMPATIBLE_TERMINAL_OUTBOX_PHASES = [
+    (status, phase)
+    for status, required_phase in _TERMINAL_OUTBOX_EFFECT_PHASES.items()
+    for phase in (
+        "pending",
+        "previewed",
+        "committing",
+        "committed",
+        "unknown_effect",
+        "failed",
+        "cancelled",
+    )
+    if phase != required_phase
+]
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "effect_phase"),
+    _INCOMPATIBLE_TERMINAL_OUTBOX_PHASES,
+)
+def test_terminal_outbox_effect_phase_contradiction_blocks_projection(
+    tmp_path, monkeypatch, terminal_status, effect_phase
+):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+
+    _terminalize_outbox(
+        state_db_path,
+        outbox_id,
+        terminal_status,
+        effect_phase=effect_phase,
+    )
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 0
+    execution, _claim, events = _execution_state(exec_id)
+    run = _node_runs(exec_id, "notify")[0]
+    assert execution.status == "blocked"
+    assert run["status"] == "blocked"
+    error = json.loads(run["error"])
+    assert error["reason"] == "unknown_effect"
+    assert error["reconciliation_required"] is True
+    assert "effect phase" in error["identity_mismatch"]
+    assert "execution_failed" not in [event["kind"] for event in events]
+    with wfdb.connect() as conn:
+        mission = mdb.get_mission(conn, mission_id)
+        review = conn.execute(
+            "SELECT kind, status FROM mission_review_items WHERE mission_id = ?",
+            (mission_id,),
+        ).fetchone()
+    assert mission.status == "running"
+    assert mission.verdict is None
+    assert review is not None
+    assert dict(review) == {"kind": "unknown_effect", "status": "pending"}
+
+
+def test_delivered_outbox_with_committed_effect_phase_succeeds(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    _terminalize_outbox(
+        state_db_path,
+        outbox_id,
+        "delivered",
+        effect_phase="committed",
+    )
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 1
+    execution = _execution_state(exec_id)[0]
+    run = _node_runs(exec_id, "notify")[0]
+    assert execution.status == "succeeded"
+    assert run["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("terminal_status", ["delivered", "failed", "cancelled", "unknown"])
+def test_expected_mission_rejects_ordinary_outbox_for_every_terminal_status(
+    tmp_path, monkeypatch, terminal_status
+):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+
+    # Model an ordinary workflow outbox attached to a mission execution.  The
+    # terminal identity fence must reject this before status-specific handling.
+    with sqlite3.connect(state_db_path) as conn:
+        conn.execute(
+            """
+            UPDATE mission_outbox
+               SET mission_id = NULL, transaction_id = NULL, status = ?
+             WHERE outbox_id = ?
+            """,
+            (terminal_status, outbox_id),
+        )
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 0
+    execution, _claim, events = _execution_state(exec_id)
+    run = _node_runs(exec_id, "notify")[0]
+    assert execution.status == "blocked"
+    assert run["status"] == "blocked"
+    assert [item["status"] for item in _node_runs(exec_id, "notify")] == ["blocked"]
+    error = json.loads(run["error"])
+    assert error["reason"] == "unknown_effect"
+    assert error["reconciliation_required"] is True
+    assert error["mission_id"] is None
+    assert error["expected_mission_id"] == mission_id
+    assert "does not match execution mission" in error["identity_mismatch"]
+    assert "execution_failed" not in [event["kind"] for event in events]
+
+    with wfdb.connect() as conn:
+        mission = mdb.get_mission(conn, mission_id)
+        review = conn.execute(
+            "SELECT kind, status FROM mission_review_items WHERE mission_id = ?",
+            (mission_id,),
+        ).fetchone()
+    assert mission.status == "running"
+    assert mission.verdict is None
+    assert review is not None
+    assert dict(review) == {"kind": "unknown_effect", "status": "pending"}
+
+
+@pytest.mark.parametrize("corruption", ["missing_effect", "missing_operation", "effect", "operation"])
+def test_delivered_mission_outbox_requires_complete_identity_graph(
+    tmp_path, monkeypatch, corruption
+):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    assert outbox_id
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(now=131, owner_id="graph-test", limit=1)
+        assert len(claimed) == 1
+        assert store.mark_delivered(
+            outbox_id,
+            owner_id="graph-test",
+            claim_token=claimed[0].claim_token,
+            result={"message_id": "graph-7"},
+        )
+        outbox = store.get_by_id(outbox_id)
+        assert outbox is not None and outbox.transaction_id is not None
+        operation_id = f"{outbox_id}:operation"
+        if corruption == "missing_effect":
+            state_db._execute_write(
+                lambda conn: conn.execute(
+                    "DELETE FROM effect_transactions WHERE transaction_id = ?",
+                    (outbox.transaction_id,),
+                )
+            )
+        elif corruption == "missing_operation":
+            state_db._execute_write(
+                lambda conn: (
+                    conn.execute(
+                        "DELETE FROM effect_transactions WHERE transaction_id = ?",
+                        (outbox.transaction_id,),
+                    ),
+                    conn.execute(
+                        "DELETE FROM agent_operations WHERE operation_id = ?",
+                        (operation_id,),
+                    ),
+                )
+            )
+        elif corruption == "effect":
+            state_db._execute_write(
+                lambda conn: conn.execute(
+                    "UPDATE effect_transactions SET prepared_json = ? WHERE transaction_id = ?",
+                    (json.dumps({"wrong": True}), outbox.transaction_id),
+                )
+            )
+        else:
+            state_db._execute_write(
+                lambda conn: conn.execute(
+                    "UPDATE agent_operations SET payload_hash = ? WHERE operation_id = ?",
+                    ("wrong", operation_id),
+                )
+            )
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 0
+    execution, _claim, _events = _execution_state(exec_id)
+    run = _node_runs(exec_id, "notify")[0]
+    assert execution.status == "blocked"
+    assert run["status"] == "blocked"
+    error = json.loads(run["error"])
+    assert error["reason"] == "unknown_effect"
+    assert error["reconciliation_required"] is True
+    with wfdb.connect() as conn:
+        review = conn.execute(
+            "SELECT kind, status FROM mission_review_items WHERE mission_id = ?",
+            (mission_id,),
+        ).fetchone()
+    assert review is not None
+    assert dict(review) == {"kind": "unknown_effect", "status": "pending"}
+
+
+@pytest.mark.parametrize("result", [0, False, [], ""])
+def test_terminal_outbox_projection_preserves_falsey_result_metadata(tmp_path, monkeypatch, result):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(now=131, owner_id="falsey-test", limit=1)
+        assert store.mark_delivered(
+            outbox_id,
+            owner_id="falsey-test",
+            claim_token=claimed[0].claim_token,
+            result=result,
+        )
+        _set_outbox_effect_phase(state_db, outbox_id, "committed")
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 1
+    output = json.loads(_node_runs(exec_id, "notify")[0]["output_json"])
+    assert output["result"] == result
+
+
+def test_persistence_failure_compensates_preexisting_scheduled_outbox(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    assert outbox_id
+    with wfdb.connect() as conn:
+        conn.execute(
+            "UPDATE workflow_node_runs SET outbox_id = NULL WHERE execution_id = ? AND node_id = ?",
+            (exec_id, "notify"),
+        )
+        execution = wfdb.get_execution(conn, exec_id)
+
+        class FailingConnection:
+            def execute(self, sql, parameters=()):
+                if "UPDATE workflow_node_runs SET outbox_id" in sql:
+                    raise sqlite3.IntegrityError("injected node-link failure")
+                return conn.execute(sql, parameters)
+
+        with pytest.raises(workflows_dispatcher._SendMessageMaterializationError):
+            workflows_dispatcher._persist_waiting_nodes(
+                FailingConnection(),
+                execution_id=exec_id,
+                result=EngineResult(
+                    status="waiting", context=execution.context, waiting_nodes=["notify"]
+                ),
+                spec=_send_message_spec(),
+                now=150,
+                state_db_path=state_db_path,
+                workflow_db_path=wfdb.workflows_db_path(),
+            )
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        orphan = state_db.get_outbox_by_id(outbox_id)
+        assert orphan is not None
+        assert orphan.status == "cancelled"
+        assert state_db.claim_due_outbox(151, limit=10) == []
+    finally:
+        state_db.close()
+
+    with wfdb.connect() as conn:
+        execution = wfdb.get_execution(conn, exec_id)
+        workflows_dispatcher._persist_waiting_nodes(
+            conn,
+            execution_id=exec_id,
+            result=EngineResult(
+                status="waiting", context=execution.context, waiting_nodes=["notify"]
+            ),
+            spec=_send_message_spec(),
+            now=151,
+            state_db_path=state_db_path,
+            workflow_db_path=wfdb.workflows_db_path(),
+        )
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        retry = state_db.get_outbox_by_id(outbox_id)
+        assert retry is not None and retry.status == "scheduled"
+        assert state_db._execute_read(
+            lambda conn: conn.execute(
+                "SELECT count(*) FROM mission_outbox WHERE execution_id = ? AND node_id = ?",
+                (exec_id, "notify"),
+            ).fetchone()[0]
+        ) == 1
+        claimed = state_db.claim_due_outbox(151, limit=10)
+        assert [row.outbox_id for row in claimed] == [outbox_id]
+    finally:
+        state_db.close()
+
+
+def test_persistence_failure_quarantines_preexisting_claimed_outbox(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    assert outbox_id
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(now=131, owner_id="claimed-orphan", limit=1)
+        assert [row.outbox_id for row in claimed] == [outbox_id]
+    finally:
+        state_db.close()
+
+    with wfdb.connect() as conn:
+        conn.execute(
+            "UPDATE workflow_node_runs SET outbox_id = NULL WHERE execution_id = ? AND node_id = ?",
+            (exec_id, "notify"),
+        )
+        execution = wfdb.get_execution(conn, exec_id)
+
+        class FailingConnection:
+            def execute(self, sql, parameters=()):
+                if "UPDATE workflow_node_runs SET outbox_id" in sql:
+                    raise sqlite3.IntegrityError("injected node-link failure")
+                return conn.execute(sql, parameters)
+
+        with pytest.raises(workflows_dispatcher._SendMessageMaterializationError):
+            workflows_dispatcher._persist_waiting_nodes(
+                FailingConnection(),
+                execution_id=exec_id,
+                result=EngineResult(
+                    status="waiting", context=execution.context, waiting_nodes=["notify"]
+                ),
+                spec=_send_message_spec(),
+                now=150,
+                state_db_path=state_db_path,
+                workflow_db_path=wfdb.workflows_db_path(),
+            )
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        quarantined = state_db.get_outbox_by_id(outbox_id)
+        assert quarantined is not None
+        assert quarantined.status == "unknown"
+        assert quarantined.result == {
+            "error": "[REDACTED]",
+            "reconciliation_required": True,
+        }
+    finally:
+        state_db.close()
+
+
+def test_failed_send_message_outbox_fails_waiting_execution(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    assert outbox_id
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(
+            now=131,
+            owner_id="delivery-test",
+            lease_seconds=60,
+            limit=1,
+        )
+        assert store.mark_failed(
+            outbox_id,
+            owner_id="delivery-test",
+            claim_token=claimed[0].claim_token,
+            error="adapter rejected",
+        )
+        _set_outbox_effect_phase(state_db, outbox_id, "failed")
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=131, state_db_path=state_db_path
+    ) == 0
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "delivery failed" in runs[0]["error"]
+
+
+def test_unknown_send_message_outbox_fails_waiting_execution_explicitly_for_ordinary_workflow(tmp_path, monkeypatch):
+    exec_id, state_db_path = _start_unlinked_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    assert outbox_id
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(
+            now=131,
+            owner_id="delivery-test",
+            lease_seconds=60,
+            limit=1,
+        )
+        assert store.mark_unknown(
+            outbox_id,
+            owner_id="delivery-test",
+            claim_token=claimed[0].claim_token,
+            result={"reason": "router timeout after dispatch"},
+        )
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=131, state_db_path=state_db_path
+    ) == 0
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "delivery outcome is unknown" in runs[0]["error"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        outbox = state_db.get_outbox_by_id(outbox_id)
+    finally:
+        state_db.close()
+    assert outbox is not None
+    assert outbox.status == "unknown"
+
+
+def test_unknown_send_message_outbox_is_not_retryable_even_with_retry_policy(tmp_path, monkeypatch):
+    exec_id, state_db_path = _start_unlinked_send_execution(
+        tmp_path,
+        monkeypatch,
+        retry={"max_attempts": 2, "backoff_seconds": 60},
+    )
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(
+            now=131,
+            owner_id="delivery-test",
+            lease_seconds=60,
+            limit=1,
+        )
+        assert store.mark_unknown(
+            outbox_id,
+            owner_id="delivery-test",
+            claim_token=claimed[0].claim_token,
+            result={"reason": "router timeout after dispatch"},
+        )
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=131, state_db_path=state_db_path
+    ) == 0
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert [run["status"] for run in runs] == ["failed"]
+    assert "delivery outcome is unknown" in runs[0]["error"]
+    assert "unknown_effect" not in runs[0]["error"]
+
+
+def test_unknown_send_message_outbox_uses_catch_without_retrying(tmp_path, monkeypatch):
+    exec_id, state_db_path = _start_unlinked_send_execution(
+        tmp_path,
+        monkeypatch,
+        retry={"max_attempts": 2, "backoff_seconds": 60},
+        catch="recover",
+    )
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(
+            now=131,
+            owner_id="delivery-test",
+            lease_seconds=60,
+            limit=1,
+        )
+        assert store.mark_unknown(
+            outbox_id,
+            owner_id="delivery-test",
+            claim_token=claimed[0].claim_token,
+            result={"reason": "router timeout after dispatch"},
+        )
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=131, state_db_path=state_db_path
+    ) == 1
+    execution, _claim, _events = _execution_state(exec_id)
+    assert execution.status == "succeeded"
+    assert [run["status"] for run in _node_runs(exec_id, "notify")] == ["failed"]
+    assert execution.context["node"]["recover"]["output"]["recovered"] == "notify"
+
+
+def test_unknown_mission_outbox_with_missing_mission_blocks_for_reconciliation(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+
+    # Keep a non-null mission link in the outbox, but make its corresponding
+    # workflow aggregate absent to exercise the reconciliation boundary.
+    with sqlite3.connect(state_db_path) as conn:
+        conn.execute(
+            "UPDATE mission_outbox SET mission_id = ? WHERE outbox_id = ?",
+            ("mission-missing", outbox_id),
+        )
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(
+            now=131,
+            owner_id="delivery-test",
+            lease_seconds=60,
+            limit=1,
+        )
+        assert store.mark_unknown(
+            outbox_id,
+            owner_id="delivery-test",
+            claim_token=claimed[0].claim_token,
+            result={"reason": "router timeout after dispatch"},
+        )
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=131, state_db_path=state_db_path
+    ) == 0
+    execution, _claim, events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "blocked"
+    assert runs[0]["status"] == "blocked"
+    assert "unknown_effect" in runs[0]["error"]
+    assert "reconciliation" in runs[0]["error"]
+    assert [event["kind"] for event in events][-1:] == ["execution_blocked"]
+
+
+def test_foreign_delivered_outbox_cannot_project_into_active_workflow(tmp_path, monkeypatch):
+    _mission_id, exec_id, active_state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=active_state_db_path
+    ) == 1
+    active_outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    before_events = _execution_state(exec_id)[2]
+
+    foreign_state_db_path = tmp_path / "foreign" / "state.db"
+    foreign_state_db = SessionDB(db_path=foreign_state_db_path)
+    try:
+        store = MissionOutboxStore(foreign_state_db)
+        outbox = store.materialize(
+            execution_id=exec_id,
+            node_id="notify",
+            platform="local",
+            target="authorized-target",
+            content={"text": "ready"},
+            not_before=130,
+        )
+        claimed = store.claim(
+            now=131,
+            owner_id="foreign-delivery-test",
+            lease_seconds=60,
+            limit=1,
+        )
+        assert [row.outbox_id for row in claimed] == [outbox.outbox_id]
+        assert store.mark_delivered(
+            outbox.outbox_id,
+            owner_id="foreign-delivery-test",
+            claim_token=claimed[0].claim_token,
+            result={"message_id": "foreign-7"},
+        )
+    finally:
+        foreign_state_db.close()
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=131, state_db_path=foreign_state_db_path
+    ) == 0
+    execution, _claim, events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "waiting"
+    assert runs[0]["status"] == "waiting"
+    assert runs[0]["outbox_id"] == active_outbox_id
+    assert events == before_events
+
+
+def test_send_message_supports_ordinary_workflow_without_linked_mission(tmp_path, monkeypatch):
+    exec_id, state_db_path = _start_unlinked_send_execution(tmp_path, monkeypatch)
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "waiting"
+    assert runs[0]["status"] == "waiting"
+    assert runs[0]["outbox_id"] is not None
+
+
+def test_send_message_rejects_cancelled_mission_before_outbox_write(tmp_path, monkeypatch):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    with wfdb.connect() as conn:
+        mdb.set_mission_status(conn, mission_id, "cancelled", now=99)
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "mission status 'cancelled' does not permit materialization" in runs[0]["error"]
+    assert runs[0]["outbox_id"] is None
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        assert state_db.get_outbox_by_identity(exec_id, "notify") is None
+    finally:
+        state_db.close()
+
+
+def test_send_message_rejects_verdicted_mission_before_outbox_write(tmp_path, monkeypatch):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    with wfdb.connect() as conn:
+        mdb.set_mission_verdict(conn, mission_id, "failed", now=99)
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "mission verdict does not permit materialization" in runs[0]["error"]
+    assert runs[0]["outbox_id"] is None
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        assert state_db.get_outbox_by_identity(exec_id, "notify") is None
+    finally:
+        state_db.close()
+
+
+def test_send_message_rejects_revoked_authority_before_outbox_write(tmp_path, monkeypatch):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    with wfdb.connect() as conn:
+        authority = mdb.get_mission(conn, mission_id).authority
+        authority["revoked"] = True
+        conn.execute(
+            """
+            UPDATE missions
+               SET authority_json = ?, authority_version = authority_version + 1, updated_at = ?
+             WHERE mission_id = ?
+            """,
+            (json.dumps(authority), 99, mission_id),
+        )
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "mission authority is revoked or invalid" in runs[0]["error"]
+    assert runs[0]["outbox_id"] is None
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        assert state_db.get_outbox_by_identity(exec_id, "notify") is None
+    finally:
+        state_db.close()
+
+
+def test_send_message_rejects_invalid_authority_before_outbox_write(tmp_path, monkeypatch):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    with wfdb.connect() as conn:
+        authority = mdb.get_mission(conn, mission_id).authority
+        authority["valid"] = False
+        conn.execute(
+            """
+            UPDATE missions
+               SET authority_json = ?, authority_version = authority_version + 1, updated_at = ?
+             WHERE mission_id = ?
+            """,
+            (json.dumps(authority), 99, mission_id),
+        )
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "mission authority is revoked or invalid" in runs[0]["error"]
+    assert runs[0]["outbox_id"] is None
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        assert state_db.get_outbox_by_identity(exec_id, "notify") is None
+    finally:
+        state_db.close()
+
+
+def test_send_message_fails_closed_for_ambiguous_mission_link(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    with wfdb.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO missions (
+                mission_id, profile, objective,
+                constraints_json, authority_json, evidence_json,
+                authority_version, status, verdict, receipt_id,
+                created_at, updated_at, terminal_at
+            ) VALUES (?, 'default', 'duplicate', '[]', '{}',
+                '{"checks":["workflow_succeeded"]}', 1, 'running',
+                NULL, NULL, 10, 10, NULL)
+            """,
+            ("mission_duplicate",),
+        )
+        conn.execute(
+            """
+            INSERT INTO mission_execution_links (
+                mission_id, execution_id, relation, linked_at
+            ) VALUES (?, ?, 'primary', 10)
+            """,
+            ("mission_duplicate", exec_id),
+        )
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "mission lookup failed" in runs[0]["error"]
+
+
+def test_send_message_rejects_target_outside_mission_authority(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(
+        tmp_path,
+        monkeypatch,
+        target="unauthorized-target",
+        allowed_targets=["authorized-target"],
+    )
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert "not authorized" in runs[0]["error"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        assert state_db.get_outbox_by_id(runs[0]["outbox_id"] or "missing") is None
+    finally:
+        state_db.close()
+
+
+def test_send_message_rejects_delay_over_configured_maximum(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(
+        tmp_path, monkeypatch, delay=11
+    )
+    (state_db_path.parent / "config.yaml").write_text(
+        "missions:\n  outbox:\n    max_delay_seconds: 10\n", encoding="utf-8"
+    )
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert len(runs) == 1
+    assert runs[0]["status"] == "failed"
+    assert "configured maximum" in runs[0]["error"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        assert state_db.get_outbox_by_id(runs[0]["outbox_id"] or "missing") is None
+    finally:
+        state_db.close()
+
+
+def test_send_message_fails_closed_for_invalid_delay_configuration(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    (state_db_path.parent / "config.yaml").write_text(
+        "missions:\n  outbox:\n    max_delay_seconds: 0\n", encoding="utf-8"
+    )
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "max_delay_seconds" in runs[0]["error"]
+
+
+def test_send_message_requires_delayed_message_mission_effect(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(
+        tmp_path, monkeypatch, allowed_effects=[]
+    )
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "does not allow delayed_message" in runs[0]["error"]
+
+
+def test_send_message_rejects_expired_mission_authority(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(
+        tmp_path, monkeypatch, expires_at=100
+    )
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "expired" in runs[0]["error"]
+
+
+def test_send_message_requires_authority_expiration(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(
+        tmp_path, monkeypatch, expires_at=None
+    )
+
+    assert workflows_dispatcher.tick(
+        limit=1, now=100, state_db_path=state_db_path
+    ) == 1
+
+    execution, _claim, _events = _execution_state(exec_id)
+    runs = _node_runs(exec_id, "notify")
+    assert execution.status == "failed"
+    assert runs[0]["status"] == "failed"
+    assert "expires_at" in runs[0]["error"]
 
 
 def test_catch_path_wait_resume_does_not_rerun_failed_node(tmp_path, monkeypatch):
@@ -1865,6 +3372,87 @@ def test_repeated_tick_after_final_status_does_not_duplicate_events(tmp_path, mo
     assert len(calls) == 1
 
 
+def test_terminal_outbox_failure_dominates_delivered_sibling_projection(tmp_path, monkeypatch):
+    home = tmp_path / ".hades"
+    monkeypatch.setenv("HADES_HOME", str(home))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        spec = _send_message_spec()
+        wfdb.deploy_definition(conn, spec, created_by="test")
+        execution_id = wfdb.start_execution(
+            conn,
+            spec.id,
+            input_data={"target": "authorized-target", "body": "ready"},
+            trigger_type="manual",
+            now=10,
+        )
+        conn.execute(
+            "UPDATE workflow_executions SET status = 'waiting' WHERE execution_id = ?",
+            (execution_id,),
+        )
+
+    state_db_path = home / "state.db"
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        delivered = store.materialize(
+            execution_id=execution_id,
+            node_id="delivered-node",
+            platform="local",
+            target="authorized-target",
+            content="delivered",
+        )
+        failed = store.materialize(
+            execution_id=execution_id,
+            node_id="failed-node",
+            platform="local",
+            target="authorized-target",
+            content="failed",
+        )
+        state_db._execute_write(
+            lambda conn: conn.execute(
+                "UPDATE mission_outbox SET status = 'delivered' WHERE outbox_id = ?",
+                (delivered.outbox_id,),
+            )
+        )
+        state_db._execute_write(
+            lambda conn: conn.execute(
+                "UPDATE mission_outbox SET status = 'failed' WHERE outbox_id = ?",
+                (failed.outbox_id,),
+            )
+        )
+    finally:
+        state_db.close()
+
+    with wfdb.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO workflow_node_runs (execution_id, node_id, status, outbox_id)
+            VALUES (?, 'delivered-node', 'waiting', ?), (?, 'failed-node', 'waiting', ?)
+            """,
+            (execution_id, delivered.outbox_id, execution_id, failed.outbox_id),
+        )
+        workflows_dispatcher._resume_terminal_outbox_nodes(
+            conn,
+            now=20,
+            state_db_path=state_db_path,
+        )
+        execution_status = conn.execute(
+            "SELECT status FROM workflow_executions WHERE execution_id = ?",
+            (execution_id,),
+        ).fetchone()["status"]
+        node_statuses = [
+            row["status"]
+            for row in conn.execute(
+                "SELECT status FROM workflow_node_runs WHERE execution_id = ? ORDER BY id",
+                (execution_id,),
+            )
+        ]
+
+    assert execution_status == "failed"
+    assert node_statuses == ["succeeded", "failed"]
+
+
 def test_tick_detailed_returns_structured_report(tmp_path, monkeypatch):
     monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
     wfdb.init_db()
@@ -1904,3 +3492,430 @@ def test_tick_detailed_separates_feed_admission_from_execution(tmp_path, monkeyp
     assert report.feed_items_admitted == 1
     assert report.executions_advanced == 1
     assert report.processed == 2
+
+
+def test_ordinary_send_message_materializes_without_effect_transaction_and_resumes(
+    tmp_path, monkeypatch
+):
+    exec_id, state_db_path = _start_unlinked_send_execution(tmp_path, monkeypatch)
+
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    run = _node_runs(exec_id, "notify")[0]
+    assert run["status"] == "waiting"
+    assert run["outbox_id"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        outbox = state_db.get_outbox_by_id(run["outbox_id"])
+        assert outbox is not None
+        assert outbox.mission_id is None
+        assert outbox.transaction_id is None
+        assert outbox.status == "scheduled"
+        claimed = MissionOutboxStore(state_db).claim(
+            now=131, owner_id="ordinary-test", lease_seconds=60, limit=1
+        )
+        assert MissionOutboxStore(state_db).mark_delivered(
+            outbox.outbox_id,
+            owner_id="ordinary-test",
+            claim_token=claimed[0].claim_token,
+            result={"message_id": "ordinary-1"},
+        )
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 1
+    assert _execution_state(exec_id)[0].status == "succeeded"
+
+
+def test_missions_outbox_config_caps_delay_without_workflow_namespace(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(
+        tmp_path, monkeypatch, delay=11
+    )
+    (state_db_path.parent / "config.yaml").write_text(
+        "missions:\n  outbox:\n    max_delay_seconds: 10\n"
+        "workflow:\n  outbox:\n    max_delay_seconds: 999999\n",
+        encoding="utf-8",
+    )
+
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    assert _execution_state(exec_id)[0].status == "failed"
+    assert "configured maximum" in _node_runs(exec_id, "notify")[0]["error"]
+
+
+def test_unknown_linked_outbox_blocks_mission_and_reuses_one_review_item(
+    tmp_path, monkeypatch
+):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(now=131, owner_id="delivery-test", lease_seconds=60, limit=1)
+        assert store.mark_unknown(
+            outbox_id,
+            owner_id="delivery-test",
+            claim_token=claimed[0].claim_token,
+            result={"reason": "router timeout", "token": "secret-token"},
+        )
+        _set_outbox_effect_phase(state_db, outbox_id, "unknown_effect")
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 0
+    execution, _claim, events = _execution_state(exec_id)
+    run = _node_runs(exec_id, "notify")[0]
+    assert execution.status == "blocked"
+    assert run["status"] == "blocked"
+    assert "execution_failed" not in [event["kind"] for event in events]
+
+    with wfdb.connect() as conn:
+        mission = mdb.get_mission(conn, mission_id)
+        reviews = conn.execute(
+            "SELECT * FROM mission_review_items WHERE mission_id = ?",
+            (mission_id,),
+        ).fetchall()
+    assert mission.status == "blocked"
+    assert mission.verdict == "unknown_effect"
+    assert len(reviews) == 1
+    assert reviews[0]["status"] == "pending"
+    assert reviews[0]["kind"] == "unknown_effect"
+    assert "secret-token" not in reviews[0]["detail_json"]
+
+    assert workflows_dispatcher.tick(limit=1, now=132, state_db_path=state_db_path) == 0
+    with wfdb.connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM mission_review_items WHERE mission_id = ?",
+            (mission_id,),
+        ).fetchone()[0] == 1
+
+
+def test_unknown_ordinary_outbox_fails_explicitly_without_mission_review(tmp_path, monkeypatch):
+    exec_id, state_db_path = _start_unlinked_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(now=131, owner_id="delivery-test", lease_seconds=60, limit=1)
+        assert store.mark_unknown(
+            outbox_id,
+            owner_id="delivery-test",
+            claim_token=claimed[0].claim_token,
+            result={"reason": "router timeout"},
+        )
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 0
+    execution, _claim, _events = _execution_state(exec_id)
+    assert execution.status == "failed"
+    assert "ordinary workflow" in _node_runs(exec_id, "notify")[0]["error"]
+    with wfdb.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM mission_review_items").fetchone()[0] == 0
+
+
+def test_send_message_rejects_foreign_active_profile_before_materialization(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_PROFILE", "foreign")
+
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 0
+    assert _execution_state(exec_id)[0].status == "queued"
+    assert _node_runs(exec_id, "notify") == []
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        assert state_db.get_outbox_by_identity(exec_id, "notify") is None
+    finally:
+        state_db.close()
+
+
+def test_send_message_rejects_foreign_state_db_before_materialization(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    foreign_state = tmp_path / "foreign" / "state.db"
+
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=foreign_state) == 0
+    assert _execution_state(exec_id)[0].status == "queued"
+    assert _node_runs(exec_id, "notify") == []
+    assert not foreign_state.exists()
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        assert state_db.get_outbox_by_identity(exec_id, "notify") is None
+    finally:
+        state_db.close()
+
+
+def test_waiting_persistence_failure_cancels_new_outbox_and_is_idempotent(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    original = workflows_dispatcher._materialize_send_message
+
+    def materialize_then_fail(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("injected node-run persistence failure")
+
+    monkeypatch.setattr(workflows_dispatcher, "_materialize_send_message", materialize_then_fail)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    assert _execution_state(exec_id)[0].status == "failed"
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        outbox = state_db.get_outbox_by_identity(exec_id, "notify")
+        assert outbox is not None
+        assert outbox.status == "cancelled"
+        assert state_db.get_outbox_by_identity(exec_id, "notify").status != "scheduled"
+    finally:
+        state_db.close()
+    assert workflows_dispatcher.tick(limit=1, now=101, state_db_path=state_db_path) == 0
+
+
+def test_failed_outbox_uses_send_node_retry_semantics(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(
+        tmp_path,
+        monkeypatch,
+        retry={"max_attempts": 2, "delay_seconds": 0},
+    )
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        claimed = store.claim(now=131, owner_id="delivery-test", lease_seconds=60, limit=1)
+        assert store.mark_failed(
+            outbox_id,
+            owner_id="delivery-test",
+            claim_token=claimed[0].claim_token,
+            error="adapter rejected",
+        )
+        _set_outbox_effect_phase(state_db, outbox_id, "failed")
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 1
+    execution = _execution_state(exec_id)[0]
+    assert execution.status == "queued"
+    runs = _node_runs(exec_id, "notify")
+    assert [run["status"] for run in runs] == ["failed", "queued"]
+    assert "delivery failed" in runs[0]["error"]
+
+
+def test_cancelled_outbox_uses_send_node_catch_semantics(tmp_path, monkeypatch):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(
+        tmp_path, monkeypatch, catch="recover"
+    )
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        assert MissionOutboxStore(state_db).cancel(outbox_id)
+        _set_outbox_effect_phase(state_db, outbox_id, "cancelled")
+    finally:
+        state_db.close()
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 1
+    execution = _execution_state(exec_id)[0]
+    assert execution.status == "succeeded"
+    assert execution.context["node"]["recover"]["output"]["recovered"] == "notify"
+    assert "delivery cancelled" in execution.context["error"]["message"]
+
+
+def test_post_materialization_failure_cancels_outbox_before_workflow_retry(
+    tmp_path, monkeypatch
+):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    original_append_event = workflows_dispatcher._append_event
+
+    def append_event_then_fail(conn, execution_id, kind, payload, now):
+        if kind == "execution_started":
+            raise RuntimeError("injected post-materialization failure")
+        return original_append_event(conn, execution_id, kind, payload, now)
+
+    monkeypatch.setattr(workflows_dispatcher, "_append_event", append_event_then_fail)
+    with pytest.raises(RuntimeError, match="post-materialization"):
+        workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path)
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        outbox = state_db.get_outbox_by_identity(exec_id, "notify")
+        assert outbox is not None
+        assert outbox.status == "cancelled"
+    finally:
+        state_db.close()
+    assert _node_runs(exec_id, "notify") == []
+    assert _execution_state(exec_id)[0].status == "queued"
+
+    monkeypatch.setattr(workflows_dispatcher, "_append_event", original_append_event)
+    assert workflows_dispatcher.tick(limit=1, now=101, state_db_path=state_db_path) == 1
+    runs = _node_runs(exec_id, "notify")
+    assert len(runs) == 1
+    assert runs[0]["status"] == "waiting"
+    with sqlite3.connect(state_db_path) as conn:
+        outbox_count, outbox_status = conn.execute(
+            "SELECT count(*), max(status) FROM mission_outbox WHERE execution_id = ?",
+            (exec_id,),
+        ).fetchone()
+    assert outbox_count == 1
+    assert outbox_status == "scheduled"
+
+
+@pytest.mark.parametrize("terminal_status", ["delivered", "unknown"])
+def test_wrong_same_profile_mission_is_unknown_effect_without_mutating_wrong_mission(
+    tmp_path, monkeypatch, terminal_status
+):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    with wfdb.connect() as conn:
+        wrong_mission, wrong_execution = mdb.create_mission_and_execution(
+            conn,
+            workflow_id="send_message_demo",
+            objective="wrong mission",
+            constraints=[],
+            authority={
+                "allowed_effects": ["delayed_message"],
+                "message_targets": ["local:authorized-target"],
+                "expires_at": 1_000,
+            },
+            evidence={"checks": ["workflow_succeeded"]},
+            input_data={"target": "authorized-target", "body": "wrong"},
+            profile="default",
+            now=11,
+        )
+        conn.execute(
+            "UPDATE workflow_executions SET status = 'succeeded' WHERE execution_id = ?",
+            (wrong_execution.execution_id,),
+        )
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    with sqlite3.connect(state_db_path) as conn:
+        conn.execute(
+            "UPDATE mission_outbox SET mission_id = ? WHERE outbox_id = ?",
+            (wrong_mission.mission_id, outbox_id),
+        )
+    _terminalize_outbox(state_db_path, outbox_id, terminal_status)
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 0
+    execution, _claim, _events = _execution_state(exec_id)
+    run = _node_runs(exec_id, "notify")[0]
+    assert execution.status == "blocked"
+    assert run["status"] == "blocked"
+    assert "unknown_effect" in run["error"]
+    assert "mission_id" in run["error"]
+    with wfdb.connect() as conn:
+        wrong_after = mdb.get_mission(conn, wrong_mission.mission_id)
+        expected_after = mdb.get_mission(conn, mission_id)
+        wrong_reviews = conn.execute(
+            "SELECT count(*) FROM mission_review_items WHERE mission_id = ?",
+            (wrong_mission.mission_id,),
+        ).fetchone()[0]
+    assert wrong_after.status == "running"
+    assert wrong_after.verdict is None
+    assert wrong_reviews == 0
+    assert expected_after.status == "running"
+    assert expected_after.verdict is None
+
+
+@pytest.mark.parametrize("terminal_status", ["delivered", "unknown"])
+def test_missing_mission_is_unknown_effect_for_every_terminal_status(
+    tmp_path, monkeypatch, terminal_status
+):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    with sqlite3.connect(state_db_path) as conn:
+        conn.execute(
+            "UPDATE mission_outbox SET mission_id = ? WHERE outbox_id = ?",
+            ("mission-missing", outbox_id),
+        )
+    _terminalize_outbox(state_db_path, outbox_id, terminal_status)
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 0
+    execution, _claim, _events = _execution_state(exec_id)
+    run = _node_runs(exec_id, "notify")[0]
+    assert execution.status == "blocked"
+    assert run["status"] == "blocked"
+    assert "unknown_effect" in run["error"]
+    assert "reconciliation" in run["error"]
+
+
+def test_unknown_outbox_preserves_terminal_mission_state(tmp_path, monkeypatch):
+    mission_id, exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    outbox_id = _node_runs(exec_id, "notify")[0]["outbox_id"]
+    with wfdb.connect() as conn:
+        mdb.set_mission_status(conn, mission_id, "cancelled", now=120)
+    _terminalize_outbox(state_db_path, outbox_id, "unknown")
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 0
+    execution = _execution_state(exec_id)[0]
+    run = _node_runs(exec_id, "notify")[0]
+    assert execution.status == "blocked"
+    assert run["status"] == "blocked"
+    assert "unknown_effect" in run["error"]
+    with wfdb.connect() as conn:
+        mission = mdb.get_mission(conn, mission_id)
+        review_count = conn.execute(
+            "SELECT count(*) FROM mission_review_items WHERE mission_id = ?",
+            (mission_id,),
+        ).fetchone()[0]
+    assert mission.status == "cancelled"
+    assert mission.verdict is None
+    assert review_count == 1
+
+
+def test_mission_authority_rejects_target_allowed_only_on_another_platform(
+    tmp_path, monkeypatch
+):
+    _mission_id, exec_id, state_db_path = _start_mission_send_execution(
+        tmp_path,
+        monkeypatch,
+        allowed_targets=["telegram:authorized-target"],
+    )
+    assert workflows_dispatcher.tick(limit=1, now=100, state_db_path=state_db_path) == 1
+    execution = _execution_state(exec_id)[0]
+    run = _node_runs(exec_id, "notify")[0]
+    assert execution.status == "failed"
+    assert run["status"] == "failed"
+    assert "not authorized" in run["error"]
+
+
+def test_bad_projection_identity_is_blocked_and_unrelated_terminal_row_resumes(
+    tmp_path, monkeypatch
+):
+    _mission_id, first_exec_id, state_db_path = _start_mission_send_execution(tmp_path, monkeypatch)
+    with wfdb.connect() as conn:
+        second_mission, second_execution = mdb.create_mission_and_execution(
+            conn,
+            workflow_id="send_message_demo",
+            objective="second notification",
+            constraints=[],
+            authority={
+                "allowed_effects": ["delayed_message"],
+                "message_targets": ["authorized-target"],
+                "expires_at": 1_000,
+            },
+            evidence={"checks": ["workflow_succeeded"]},
+            input_data={"target": "authorized-target", "body": "second"},
+            profile="default",
+            now=11,
+        )
+    del second_mission
+    assert workflows_dispatcher.tick(limit=2, now=100, state_db_path=state_db_path) == 2
+    first_outbox_id = _node_runs(first_exec_id, "notify")[0]["outbox_id"]
+    second_outbox_id = _node_runs(second_execution.execution_id, "notify")[0]["outbox_id"]
+    with sqlite3.connect(state_db_path) as conn:
+        conn.execute(
+            "UPDATE mission_outbox SET execution_id = ? WHERE outbox_id = ?",
+            ("foreign-execution", first_outbox_id),
+        )
+    _terminalize_outbox(state_db_path, first_outbox_id, "delivered")
+    _terminalize_outbox(state_db_path, second_outbox_id, "delivered")
+
+    assert workflows_dispatcher.tick(limit=1, now=131, state_db_path=state_db_path) == 1
+    first_execution = _execution_state(first_exec_id)[0]
+    second_execution_after = _execution_state(second_execution.execution_id)[0]
+    first_run = _node_runs(first_exec_id, "notify")[0]
+    second_run = _node_runs(second_execution.execution_id, "notify")[0]
+    assert first_execution.status == "blocked"
+    assert first_run["status"] == "blocked"
+    assert "identity mismatch" in first_run["error"]
+    assert second_execution_after.status == "succeeded"
+    assert second_run["status"] == "succeeded"
