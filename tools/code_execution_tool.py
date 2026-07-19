@@ -117,6 +117,11 @@ class CodeExecutionContext:
     artifact_budget: Optional["ArtifactBudget"] = None
     # Immutable parent-authorized script names used by generic catalog calls.
     allowed_tools: tuple[str, ...] = ()
+    # Internal correlation IDs for receipt artifact provenance.  Populated
+    # from the tool-dispatch observability context; never part of the
+    # model-visible tool schema.
+    turn_id: Optional[str] = None
+    tool_call_id: Optional[str] = None
 
 
 # Keep policy names centralized so every RPC transport applies the same
@@ -696,6 +701,25 @@ def _bound_image_parts(
     return bounded
 
 
+def _current_observability_ids() -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort (turn_id, tool_call_id) from the tool-dispatch layer.
+
+    ``model_tools.execute_tool_call`` binds these contextvars around every
+    dispatch (see ``tools.approval.set_current_observability_context``).
+    They correlate receipt artifact digests with the turn ledger without
+    adding any tool parameter or schema change.
+    """
+    try:
+        from tools.approval import _approval_tool_call_id, _approval_turn_id
+
+        return (
+            _approval_turn_id.get() or None,
+            _approval_tool_call_id.get() or None,
+        )
+    except Exception:
+        return None, None
+
+
 def _artifact_storage_dir() -> str:
     """Return the configured durable tool-result directory."""
     try:
@@ -1036,10 +1060,54 @@ def _prepare_execute_output(
     return cleaned, artifact_path, image_parts
 
 
+def _register_execute_artifact_digest(
+    result: Dict[str, Any],
+    artifact_path: str,
+    context: Optional["CodeExecutionContext"],
+) -> None:
+    """Catalog an already-bounded, fsynced durable artifact for receipts.
+
+    Adds ``artifact_id``/``artifact_sha256``/``artifact_content_hash`` result
+    metadata on success.  Registration failure leaves the artifact path and
+    result usable but records ``artifact_digest_error`` so later verified
+    receipt claims cannot cite an uncataloged artifact.  Never raises and
+    never changes the model-visible tool definition.
+    """
+    if context is None:
+        return
+    try:
+        from agent.receipt_artifacts import ArtifactCatalog
+
+        with ArtifactCatalog.for_profile() as catalog:
+            digest = catalog.register_path(
+                Path(artifact_path),
+                source_kind="execute_code",
+                source_ref=(
+                    f"{context.session_id or ''}:{context.turn_id or ''}:"
+                    f"{context.tool_call_id or ''}"
+                ),
+                allowed_roots=(Path(_artifact_storage_dir()),),
+            )
+        result.update({
+            "artifact_id": digest.artifact_id,
+            "artifact_sha256": digest.sha256,
+            "artifact_content_hash": digest.content_hash,
+        })
+    except Exception as exc:
+        logger.warning(
+            "execute_code artifact digest registration failed for %s: %s",
+            artifact_path, exc,
+        )
+        result["artifact_digest_error"] = (
+            f"{type(exc).__name__}: {_clean_execute_text(str(exc))}"
+        )
+
+
 def _attach_execute_artifacts(
     result: Dict[str, Any],
     image_parts: Iterable[dict] = (),
     artifact_path: Optional[str] = None,
+    context: Optional["CodeExecutionContext"] = None,
 ) -> Dict[str, Any]:
     """Add the common structured-artifact fields without changing text results."""
     parts = list(image_parts)
@@ -1050,6 +1118,7 @@ def _attach_execute_artifacts(
     if artifact_path:
         result["truncated"] = True
         result["artifact_path"] = artifact_path
+        _register_execute_artifact_digest(result, artifact_path, context)
     return result
 
 
@@ -2630,6 +2699,7 @@ def _execute_remote(
         result,
         [*stdout_image_parts, *remote_artifact_images],
         stdout_artifact_path or remote_artifact_file,
+        context=context,
     )
     return json.dumps(result, ensure_ascii=False)
 
@@ -3089,6 +3159,7 @@ class ExecutionKernel:
                 result,
                 [*output_images, *artifact_images],
                 output_artifact or artifact_file,
+                context=self.context,
             )
             return result
 
@@ -3469,12 +3540,15 @@ def execute_code(
     elif not code or not code.strip():
         return tool_error("No code provided.")
 
+    _turn_id, _tool_call_id = _current_observability_ids()
     context = CodeExecutionContext(
         task_id=task_id,
         session_id=session_id,
         enabled_toolsets=tuple(str(name) for name in (enabled_toolsets or ())),
         disabled_toolsets=tuple(str(name) for name in (disabled_toolsets or ())),
         artifact_budget=_config_artifact_budget(_cfg),
+        turn_id=_turn_id,
+        tool_call_id=_tool_call_id,
     )
 
     # Dispatch: remote backends use file-based RPC, local uses UDS
@@ -4024,6 +4098,7 @@ def execute_code(
             result,
             [*stdout_image_parts, *artifact_images],
             stdout_artifact_path or artifact_file,
+            context=context,
         )
         return json.dumps(result, ensure_ascii=False)
 

@@ -1176,6 +1176,56 @@ RECEIPT_SCHEMA_STATEMENTS: tuple = (
         SELECT RAISE(ABORT,
             'receipt observation deletion requires a retention tombstone');
     END""",
+    # ── Artifact digests and locations (agent/receipt_artifacts.py) ──
+    # One content-addressed digest row per unique byte sequence; every
+    # registration keeps its own deduplicated source link in the bounded
+    # artifact_locations table. Raw local locators live ONLY in
+    # locator_json and are excluded from public export; the public digest
+    # carries redacted source references. Digest rows are immutable;
+    # location rows allow updating only the last_checked_at bookkeeping
+    # column written by read-only rechecks.
+    """CREATE TABLE IF NOT EXISTS artifact_digests (
+    artifact_id TEXT PRIMARY KEY,
+    sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    media_type TEXT,
+    display_name TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE
+)""",
+    """CREATE TABLE IF NOT EXISTS artifact_locations (
+    location_id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL REFERENCES artifact_digests(artifact_id),
+    source_kind TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    locator_json TEXT NOT NULL,
+    locator_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_checked_at TEXT,
+    UNIQUE(source_kind, source_ref, locator_hash)
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_artifact_digests_sha256
+    ON artifact_digests(sha256, size_bytes)""",
+    """CREATE INDEX IF NOT EXISTS idx_artifact_locations_artifact
+    ON artifact_locations(artifact_id, created_at)""",
+    """CREATE TRIGGER IF NOT EXISTS artifact_digests_immutable_update
+    BEFORE UPDATE ON artifact_digests
+    BEGIN
+        SELECT RAISE(ABORT, 'artifact digests are immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS artifact_locations_limited_update
+    BEFORE UPDATE ON artifact_locations
+    WHEN NEW.location_id IS NOT OLD.location_id
+        OR NEW.artifact_id IS NOT OLD.artifact_id
+        OR NEW.source_kind IS NOT OLD.source_kind
+        OR NEW.source_ref IS NOT OLD.source_ref
+        OR NEW.locator_json IS NOT OLD.locator_json
+        OR NEW.locator_hash IS NOT OLD.locator_hash
+        OR NEW.created_at IS NOT OLD.created_at
+    BEGIN
+        SELECT RAISE(ABORT,
+            'artifact locations allow only last_checked_at updates');
+    END""",
 )
 
 FTS_SQL = """
