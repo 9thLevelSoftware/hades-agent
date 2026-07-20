@@ -35,6 +35,7 @@ import json
 import keyword
 import logging
 import os
+from hades_constants import env_get, env_pop
 import platform
 import re
 import secrets
@@ -1212,8 +1213,12 @@ _SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
 # import time.  None match _SECRET_SUBSTRINGS.
 _HERMES_CHILD_ALLOWED = frozenset({
     "HADES_HOME",
+    "HERMES_HOME",
+    "HADES_PROFILE",
     "HERMES_PROFILE",
+    "HADES_CONFIG",
     "HERMES_CONFIG",
+    "HADES_ENV",
     "HERMES_ENV",
 })
 
@@ -1297,13 +1302,13 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
         if is_windows and k.upper() in _WINDOWS_ESSENTIAL_ENV_VARS:
             scrubbed[k] = v
             continue
-        if k.startswith("HERMES_"):
+        if k.startswith(("HERMES_", "HADES_")):
             # Non-secret (secrets were already dropped above) and not in any
-            # allowlist — a deliberately-dropped HERMES_* var.
+            # allowlist — a deliberately-dropped HERMES_*/HADES_* var.
             _dropped_hermes.append(k)
     if _dropped_hermes:
         logger.debug(
-            "execute_code: dropped %d non-allowlisted HERMES_* var(s) from the "
+            "execute_code: dropped %d non-allowlisted HERMES_*/HADES_* var(s) from the "
             "sandbox child env (%s). This is intentional hardening (#27303); if "
             "a sandbox script legitimately needs one, declare it via "
             "env_passthrough in the skill/config so it passes by explicit opt-in.",
@@ -1795,7 +1800,7 @@ def _connect():
     """
     global _sock
     if _sock is None:
-        endpoint = os.environ["HADES_RPC_SOCKET"]
+        endpoint = os.environ.get("HADES_RPC_SOCKET") or os.environ["HERMES_RPC_SOCKET"]
         if endpoint.startswith("tcp://"):
             # tcp://host:port  (host is always 127.0.0.1 in practice — we
             # only bind loopback server-side)
@@ -1814,7 +1819,7 @@ def _call(tool_name, args):
     request = json.dumps({
         "tool": tool_name,
         "args": args,
-        "token": os.environ.get("HADES_RPC_TOKEN", ""),
+        "token": os.environ.get("HADES_RPC_TOKEN") or os.environ.get("HERMES_RPC_TOKEN", ""),
         "task_id": _HERMES_RPC_CONTEXT["task_id"],
         "session_id": _HERMES_RPC_CONTEXT["session_id"],
         "enabled_toolsets": _HERMES_RPC_CONTEXT["enabled_toolsets"],
@@ -1849,7 +1854,7 @@ _FILE_TRANSPORT_HEADER = '''\
 import base64
 import json, os, shlex, tempfile, threading, time
 
-_RPC_DIR = os.environ.get("HADES_RPC_DIR") or os.path.join(tempfile.gettempdir(), "hermes_rpc")
+_RPC_DIR = os.environ.get("HADES_RPC_DIR") or os.environ.get("HERMES_RPC_DIR") or os.path.join(tempfile.gettempdir(), "hermes_rpc")
 _seq = 0
 # `_seq += 1` is not atomic (read-modify-write), so concurrent _call()
 # invocations from multiple threads could allocate the same sequence number
@@ -1877,7 +1882,7 @@ def _call(tool_name, args):
             "tool": tool_name,
             "args": args,
             "seq": seq,
-            "token": os.environ.get("HADES_RPC_TOKEN", ""),
+            "token": os.environ.get("HADES_RPC_TOKEN") or os.environ.get("HERMES_RPC_TOKEN", ""),
             "task_id": _HERMES_RPC_CONTEXT["task_id"],
             "session_id": _HERMES_RPC_CONTEXT["session_id"],
             "enabled_toolsets": _HERMES_RPC_CONTEXT["enabled_toolsets"],
@@ -2590,11 +2595,14 @@ def _execute_remote(
         # Build environment variable prefix for the script
         env_prefix = (
             f"HERMES_RPC_DIR={shlex.quote(f'{sandbox_dir}/rpc')} "
+            f"HADES_RPC_DIR={shlex.quote(f'{sandbox_dir}/rpc')} "
             f"HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
+            f"HADES_RPC_TOKEN={shlex.quote(rpc_token)} "
             f"HERMES_ARTIFACTS_DIR={shlex.quote(artifact_dir)} "
+            f"HADES_ARTIFACTS_DIR={shlex.quote(artifact_dir)} "
             f"PYTHONDONTWRITEBYTECODE=1"
         )
-        tz = os.getenv("HADES_TIMEZONE", "").strip()
+        tz = env_get("HADES_TIMEZONE", "").strip()
         if tz:
             env_prefix += f" TZ={shlex.quote(tz)}"
 
@@ -2724,7 +2732,7 @@ import traceback
 
 
 def _connect():
-    endpoint = os.environ["HADES_KERNEL_SOCKET"]
+    endpoint = os.environ.get("HADES_KERNEL_SOCKET") or os.environ["HERMES_KERNEL_SOCKET"]
     if endpoint.startswith("tcp://"):
         host, _, port = endpoint[len("tcp://"):].rpartition(":")
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2750,7 +2758,7 @@ def _new_globals():
 sock = _connect()
 reader = sock.makefile("rb")
 writer = sock.makefile("wb")
-writer.write((json.dumps({"token": os.environ["HADES_KERNEL_TOKEN"]}) + "\n").encode("utf-8"))
+writer.write((json.dumps({"token": os.environ.get("HADES_KERNEL_TOKEN") or os.environ["HERMES_KERNEL_TOKEN"]}) + "\n").encode("utf-8"))
 writer.flush()
 threading.Thread(
     target=_watch_parent,
@@ -2984,10 +2992,15 @@ class ExecutionKernel:
             child_env = _scrub_child_env(os.environ)
             child_env.update({
                 "HERMES_RPC_SOCKET": rpc_endpoint,
+                "HADES_RPC_SOCKET": rpc_endpoint,
                 "HERMES_RPC_TOKEN": rpc_token,
+                "HADES_RPC_TOKEN": rpc_token,
                 "HERMES_KERNEL_SOCKET": control_endpoint,
+                "HADES_KERNEL_SOCKET": control_endpoint,
                 "HERMES_KERNEL_TOKEN": control_token,
+                "HADES_KERNEL_TOKEN": control_token,
                 "HERMES_ARTIFACTS_DIR": os.path.join(self._tmpdir, "artifacts"),
+                "HADES_ARTIFACTS_DIR": os.path.join(self._tmpdir, "artifacts"),
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "PYTHONIOENCODING": "utf-8",
                 "PYTHONUTF8": "1",
@@ -2997,10 +3010,10 @@ class ExecutionKernel:
             # PYTHONPATH) lets persistent scripts import internal modules and
             # read configuration/secrets outside the execution boundary.
             child_env["PYTHONPATH"] = self._tmpdir
-            tz = os.getenv("HADES_TIMEZONE", "").strip()
+            tz = env_get("HADES_TIMEZONE", "").strip()
             if tz:
                 child_env["TZ"] = tz
-            child_env.pop("HERMES_TIMEZONE", None)
+            env_pop("HERMES_TIMEZONE", env=child_env)
             from hades_constants import apply_subprocess_home_env
             apply_subprocess_home_env(child_env)
 
@@ -3247,9 +3260,9 @@ class ExecutionKernelRegistry:
     @staticmethod
     def _profile_scope():
         home = os.path.realpath(
-            os.path.abspath(os.path.expanduser(os.getenv("HADES_HOME") or "~/.hades"))
+            os.path.abspath(os.path.expanduser(env_get("HADES_HOME") or "~/.hades"))
         )
-        profile = os.getenv("HADES_PROFILE", "default").strip() or "default"
+        profile = env_get("HADES_PROFILE", "default").strip() or "default"
         return home, profile
 
     @classmethod
@@ -3831,8 +3844,11 @@ def execute_code(
         # or spawn a subprocess.  See ``_scrub_child_env`` for the rules.
         child_env = _scrub_child_env(os.environ)
         child_env["HERMES_RPC_SOCKET"] = rpc_endpoint
+        child_env["HADES_RPC_SOCKET"] = rpc_endpoint
         child_env["HERMES_RPC_TOKEN"] = rpc_token
+        child_env["HADES_RPC_TOKEN"] = rpc_token
         child_env["HERMES_ARTIFACTS_DIR"] = artifact_dir
+        child_env["HADES_ARTIFACTS_DIR"] = artifact_dir
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
         # Force UTF-8 for the child's stdio and default file encoding.
         #
@@ -3867,10 +3883,10 @@ def execute_code(
         # code reflects the correct wall-clock time.  Only TZ is set —
         # HERMES_TIMEZONE is an internal Hermes setting and must not leak
         # into child processes.
-        _tz_name = os.getenv("HADES_TIMEZONE", "").strip()
+        _tz_name = env_get("HADES_TIMEZONE", "").strip()
         if _tz_name:
             child_env["TZ"] = _tz_name
-        child_env.pop("HERMES_TIMEZONE", None)
+        env_pop("HERMES_TIMEZONE", env=child_env)
 
         from hades_constants import apply_subprocess_home_env
         apply_subprocess_home_env(child_env)

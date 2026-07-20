@@ -42,6 +42,7 @@ import base64
 import json
 import logging
 import os
+from hades_constants import env_get
 import re
 import struct
 import sys
@@ -148,7 +149,7 @@ def _get_backend() -> ComputerUseBackend:
     global _backend
     with _backend_lock:
         if _backend is None:
-            backend_name = os.environ.get("HADES_COMPUTER_USE_BACKEND", "cua").lower()
+            backend_name = env_get("HADES_COMPUTER_USE_BACKEND", "cua").lower()
             if backend_name in {"cua", "cua-driver", ""}:
                 from tools.computer_use.cua_backend import CuaDriverBackend
                 _backend = CuaDriverBackend()

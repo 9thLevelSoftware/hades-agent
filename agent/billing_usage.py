@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from hades_constants import env_get
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -267,7 +268,7 @@ def _dev_fixture_usage_model() -> Optional[UsageModel]:
     Recognized names: ``free | healthy | low | topup | depleted``. Returns
     ``None`` when the env var is unset (real portal path runs).
     """
-    name = (os.getenv("HADES_DEV_CREDITS_FIXTURE") or "").strip().lower()
+    name = (env_get("HADES_DEV_CREDITS_FIXTURE") or "").strip().lower()
     if not name:
         return None
 

@@ -32,6 +32,8 @@ import re
 from typing import Any, Optional
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
+from hades_constants import env_get
+
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -215,7 +217,7 @@ def _global_allow_private_urls() -> bool:
     _cached_allow_private = False  # safe default
 
     # 1. Env var override (highest priority)
-    env_val = os.getenv("HADES_ALLOW_PRIVATE_URLS", "").strip().lower()
+    env_val = env_get("HADES_ALLOW_PRIVATE_URLS", "").strip().lower()
     if env_val in {"true", "1", "yes"}:
         _cached_allow_private = True
         return _cached_allow_private

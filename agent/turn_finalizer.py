@@ -26,6 +26,7 @@ import os
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.turn_outcome import classify_turn_outcome
+from hades_constants import env_get
 
 
 def finalize_turn(
@@ -107,7 +108,7 @@ def finalize_turn(
         # We route through ``_record_task_failure(outcome="timed_out")``
         # rather than ``kanban_block`` so this counts toward the dispatcher's
         # consecutive-failure circuit breaker (#29747 gap 2).
-        _kanban_task = os.environ.get("HADES_KANBAN_TASK")
+        _kanban_task = env_get("HADES_KANBAN_TASK")
         if _kanban_task:
             try:
                 from hades_cli import kanban_db as _kb

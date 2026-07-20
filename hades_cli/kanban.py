@@ -27,6 +27,7 @@ from typing import Any, Optional
 from hades_cli import kanban_db as kb
 from hades_cli import kanban_swarm as ks
 from hades_cli.profiles import get_active_profile_name
+from hades_constants import env_get
 
 
 # ---------------------------------------------------------------------------
@@ -1964,9 +1965,9 @@ def _cmd_attach_rm(args: argparse.Namespace) -> int:
 
 
 def _worker_run_id_for(task_id: str) -> Optional[int]:
-    if os.environ.get("HADES_KANBAN_TASK") != task_id:
+    if env_get("HADES_KANBAN_TASK") != task_id:
         return None
-    raw = os.environ.get("HADES_KANBAN_RUN_ID")
+    raw = env_get("HADES_KANBAN_RUN_ID")
     if not raw:
         return None
     try:

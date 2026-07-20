@@ -16,6 +16,7 @@ from typing import Any, Deque, Optional
 from urllib.parse import unquote, urlparse
 
 import acp
+from hades_constants import env_get, env_pop, env_set
 from acp.schema import (
     AgentCapabilities,
     AgentMessageChunk,
@@ -1507,8 +1508,8 @@ class HermesACPAgent(acp.Agent):
             # the new task so clients can render a per-session board). Save
             # and restore around the agent call so a re-used executor thread
             # never leaks one session's id into the next session's tools.
-            previous_session_id = os.environ.get("HADES_SESSION_ID")
-            os.environ["HADES_SESSION_ID"] = session_id
+            previous_session_id = env_get("HADES_SESSION_ID")
+            env_set("HADES_SESSION_ID", session_id)
             try:
                 result = agent.run_conversation(
                     user_message=user_content,
@@ -1524,11 +1525,13 @@ class HermesACPAgent(acp.Agent):
                 # Restore the interactive contextvar for this context.
                 if interactive_token is not None:
                     reset_hermes_interactive_context(interactive_token)
-                # Restore HERMES_SESSION_ID symmetrically.
+                # Restore the session id env symmetrically (both spellings —
+                # the old code popped HERMES_ but set HADES_, leaking the
+                # stale id across executor-thread reuse).
                 if previous_session_id is None:
-                    os.environ.pop("HERMES_SESSION_ID", None)
+                    env_pop("HADES_SESSION_ID")
                 else:
-                    os.environ["HADES_SESSION_ID"] = previous_session_id
+                    env_set("HADES_SESSION_ID", previous_session_id)
                 if approval_cb:
                     try:
                         from tools import terminal_tool as _terminal_tool

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hades_constants import env_get, env_set
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -579,19 +580,19 @@ def _build_hermes_tools_mcp_entry() -> dict:
     # a sibling test's monkeypatch.setenv("HADES_HOME", tmp_path) would
     # otherwise leak a transient pytest tempdir into the user's real
     # ~/.codex/config.toml and silently brick codex once the tempdir is GC'd.
-    hermes_home = os.environ.get("HADES_HOME") or ""
+    hermes_home = env_get("HADES_HOME") or ""
     if hermes_home and _looks_like_test_tempdir(hermes_home):
         hermes_home = ""
     if hermes_home:
-        env["HADES_HOME"] = hermes_home
+        env_set("HADES_HOME", hermes_home, env=env)
     # PYTHONPATH passes through so a worktree-launched hermes finds the
     # branch's modules instead of the installed package.
     pythonpath = os.environ.get("PYTHONPATH")
     if pythonpath:
         env["PYTHONPATH"] = pythonpath
     # Quiet mode + redaction defaults so the MCP wire stays clean.
-    env["HERMES_QUIET"] = "1"
-    env["HERMES_REDACT_SECRETS"] = env.get("HERMES_REDACT_SECRETS", "true")
+    env_set("HERMES_QUIET", "1", env=env)
+    env_set("HERMES_REDACT_SECRETS", env_get("HERMES_REDACT_SECRETS", "true", env=env), env=env)
 
     out: dict[str, Any] = {
         "command": sys.executable,

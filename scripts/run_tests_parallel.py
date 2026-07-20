@@ -50,6 +50,17 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+# On Windows consoles the streams default to cp1252; the ✓/⚠ glyphs in the
+# progress printer then raise UnicodeEncodeError mid-report, which silently
+# eats the failure summary. Repair in place; errors="replace" keeps output
+# flowing even on exotic codepages.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
 
 # Default test discovery roots.
 _DEFAULT_ROOTS = ["tests"]

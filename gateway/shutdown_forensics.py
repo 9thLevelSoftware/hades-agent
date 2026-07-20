@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+from hades_constants import env_get
 import signal
 import subprocess
 import sys
@@ -168,7 +169,7 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     # _PLANNED_STOP_MARKER_FILENAME); we use string literals here so the
     # signal-handler path stays import-light.
     try:
-        hermes_home_str = os.environ.get("HADES_HOME")
+        hermes_home_str = env_get("HADES_HOME")
         if hermes_home_str:
             takeover_path = Path(hermes_home_str) / ".gateway-takeover.json"
             if takeover_path.exists():

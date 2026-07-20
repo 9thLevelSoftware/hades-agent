@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import os
+from hades_constants import env_get
 from typing import Any
 
 import yaml
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def _check_workflow_mode() -> bool:
-    if os.environ.get("HADES_WORKFLOW_CONTEXT"):
+    if env_get("HADES_WORKFLOW_CONTEXT"):
         return True
     try:
         cfg = load_config()

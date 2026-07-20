@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+from hades_constants import env_get
 import threading
 from pathlib import Path
 from typing import Dict, Optional
@@ -62,7 +63,7 @@ def get_managed_dir() -> Optional[Path]:
     A non-existent directory at either tier resolves to None (no managed scope),
     which is the common case and must be cheap + side-effect-free.
     """
-    override = os.environ.get("HADES_MANAGED_DIR", "").strip()
+    override = env_get("HADES_MANAGED_DIR", "").strip()
     if override:
         p = Path(override)
         return p if p.is_dir() else None

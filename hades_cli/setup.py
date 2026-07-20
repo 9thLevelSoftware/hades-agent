@@ -24,7 +24,7 @@ from typing import Optional, Dict, Any
 from hades_cli.nous_subscription import get_nous_subscription_features
 from tools.tool_backend_helpers import managed_nous_tools_enabled
 from utils import base_url_hostname
-from hades_constants import get_optional_skills_dir
+from hades_constants import get_optional_skills_dir, env_get
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +288,7 @@ def is_noninteractive() -> bool:
     installed (the start path asks "Install it now?" with no one to answer).
     Honour the explicit env flag here so callers fall back to their default.
     """
-    return os.environ.get("HADES_NONINTERACTIVE", "").strip().lower() in {
+    return env_get("HADES_NONINTERACTIVE", "").strip().lower() in {
         "1",
         "true",
         "yes",

@@ -46,8 +46,8 @@ def hermes_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HADES_HOME", str(home))
     # Some modules cache get_hades_home; clear if needed.
     import hades_constants
-    if hasattr(hermes_constants, "_HERMES_HOME_CACHE"):
-        hades_constants._HERMES_HOME_CACHE = None  # type: ignore[attr-defined]
+    if hasattr(hades_constants, "_HADES_HOME_CACHE"):
+        hades_constants._HADES_HOME_CACHE = None  # type: ignore[attr-defined]
     return home
 
 

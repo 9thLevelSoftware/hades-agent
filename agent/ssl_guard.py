@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hades_constants import env_get
 import ssl
 from pathlib import Path
 
@@ -26,7 +27,7 @@ _SKIP_VALUES = {"1", "true", "yes", "on"}
 
 
 def _skip_ssl_guard_enabled() -> bool:
-    return os.getenv("HADES_SKIP_SSL_GUARD", "").strip().lower() in _SKIP_VALUES
+    return env_get("HADES_SKIP_SSL_GUARD", "").strip().lower() in _SKIP_VALUES
 
 
 def _repair_hint() -> str:

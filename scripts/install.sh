@@ -45,7 +45,18 @@ BOLD='\033[1m'
 # Configuration
 REPO_URL_SSH="git@github.com:9thLevelSoftware/hades-agent.git"
 REPO_URL_HTTPS="https://github.com/9thLevelSoftware/hades-agent.git"
-HADES_HOME="${HADES_HOME:-$HOME/.hermes}"
+# Resolve the data home. Precedence: HADES_HOME env > HERMES_HOME env >
+# adopt-in-place default (~/.hades, unless only a legacy ~/.hermes exists —
+# then adopt it rather than orphaning existing data).
+if [ -z "${HADES_HOME:-}" ]; then
+    if [ -n "${HERMES_HOME:-}" ]; then
+        HADES_HOME="$HERMES_HOME"
+    elif [ ! -d "$HOME/.hades" ] && [ -d "$HOME/.hermes" ]; then
+        HADES_HOME="$HOME/.hermes"
+    else
+        HADES_HOME="$HOME/.hades"
+    fi
+fi
 # INSTALL_DIR is resolved AFTER arg parsing and OS detection so we can pick an
 # FHS-style layout for root installs.  Track whether the user gave us an
 # explicit directory — if so we never override it.
@@ -1667,6 +1678,21 @@ exec "$HERMES_BIN" "\$@"
 EOF
     chmod +x "$command_link_dir/hermes"
     log_success "Installed hermes launcher → $command_link_display_dir/hermes"
+
+    # Parallel shim for the hades command (the wheel installs both entry
+    # points; skip silently if this venv predates the hades script).
+    HADES_BIN="$(dirname "$HERMES_BIN")/hades"
+    if [ -x "$HADES_BIN" ]; then
+        rm -f "$command_link_dir/hades"
+        cat > "$command_link_dir/hades" <<EOF
+#!/usr/bin/env bash
+unset PYTHONPATH
+unset PYTHONHOME
+exec "$HADES_BIN" "\$@"
+EOF
+        chmod +x "$command_link_dir/hades"
+        log_success "Installed hades launcher → $command_link_display_dir/hades"
+    fi
 
     if [ "$DISTRO" = "termux" ]; then
         export PATH="$command_link_dir:$PATH"

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from hades_cli.config import get_project_root, get_hades_home, get_env_path
 from hades_cli.env_loader import load_hermes_dotenv
-from hades_constants import display_hades_home
+from hades_constants import display_hades_home, env_get, env_is_set, env_set
 from hades_constants import agent_browser_runnable
 
 PROJECT_ROOT = get_project_root()
@@ -120,7 +120,7 @@ def _is_kanban_worker_env_gate(item: dict) -> bool:
     """Return True when Kanban is unavailable only because this is not a worker process."""
     if item.get("name") != "kanban":
         return False
-    if os.environ.get("HADES_KANBAN_TASK"):
+    if env_get("HADES_KANBAN_TASK"):
         return False
 
     tools = item.get("tools") or []
@@ -129,7 +129,7 @@ def _is_kanban_worker_env_gate(item: dict) -> bool:
 
 def _doctor_tool_availability_detail(toolset: str) -> str:
     """Optional explanatory suffix for toolsets whose doctor status needs context."""
-    if toolset == "kanban" and not os.environ.get("HADES_KANBAN_TASK"):
+    if toolset == "kanban" and not env_get("HADES_KANBAN_TASK"):
         return "(runtime-gated; loaded only for dispatcher-spawned workers)"
     return ""
 
@@ -553,7 +553,7 @@ def managed_scope_check() -> None:
         f"Managed scope active: {n_cfg} config key(s), {n_env} env key(s) "
         f"pinned by {managed_dir}"
     )
-    if os.environ.get("HADES_MANAGED_DIR", "").strip():
+    if env_get("HADES_MANAGED_DIR", "").strip():
         check_info(f"managed dir set via HERMES_MANAGED_DIR={managed_dir}")
 
 
@@ -564,7 +564,10 @@ def run_doctor(args):
 
     # Doctor runs from the interactive CLI, so CLI-gated tool availability
     # checks (like cronjob management) should see the same context as `hermes`.
-    os.environ.setdefault("HERMES_INTERACTIVE", "1")
+    from hades_constants import env_is_set, env_set
+
+    if not env_is_set("HERMES_INTERACTIVE"):
+        env_set("HERMES_INTERACTIVE", "1")
 
     # Handle `hermes doctor --ack <id>` as a fast path. Persist the ack and
     # return without running the rest of the diagnostics — the user has
@@ -699,6 +702,62 @@ def run_doctor(args):
         check_ok("Virtual environment active")
     else:
         check_warn("Not in virtual environment", "(recommended)")
+
+    # Upstream hermes-agent co-install clobbers our hermes compatibility
+    # entry-point scripts (last write wins in <venv>/bin), leaving a mixed
+    # install where `hermes` runs upstream code.
+    try:
+        from hades_cli.upstream_guard import detect_upstream_hermes_dist
+        upstream_version = detect_upstream_hermes_dist()
+    except Exception:  # noqa: BLE001 — diagnostics must never crash
+        upstream_version = None
+    if upstream_version is not None:
+        check_warn(
+            f"Upstream hermes-agent {upstream_version} is co-installed",
+            "(clobbers hades-agent's hermes compatibility shims)",
+        )
+        check_info(
+            "Fix: pip uninstall hermes-agent && "
+            "pip install --force-reinstall hades-agent"
+        )
+        manual_issues.append(
+            "Remove co-installed upstream hermes-agent: "
+            "`pip uninstall hermes-agent && "
+            "pip install --force-reinstall hades-agent`"
+        )
+    else:
+        check_ok("No upstream hermes-agent co-install")
+
+    # Home-dir adoption status: when no env override is set, the runtime
+    # adopts a legacy hermes-named home in place if the hades one is absent.
+    # Surface which dir is active, and flag the both-exist split (hades wins;
+    # a legacy install's state may look "gone" until consolidated).
+    try:
+        from hades_constants import (
+            _default_home_candidates,
+            env_get,
+            get_hades_home,
+        )
+
+        active_home = Path(get_hades_home())
+        if env_get("HADES_HOME"):
+            check_ok(f"Data home: {active_home}", "(from HADES_HOME/HERMES_HOME env)")
+        else:
+            hades_default, legacy = _default_home_candidates()
+            if active_home == legacy:
+                check_info(
+                    f"Using legacy Hermes home {legacy} (adopted in place; "
+                    "set HADES_HOME to override)"
+                )
+            elif hades_default.exists() and legacy.exists():
+                check_warn(
+                    f"Both {hades_default} and {legacy} exist",
+                    f"(using {active_home}; consolidate or set HADES_HOME)",
+                )
+            else:
+                check_ok(f"Data home: {active_home}")
+    except Exception:  # noqa: BLE001 — diagnostics must never crash
+        pass
 
     # Detect drift between pyproject.toml and hermes_cli/__init__.py versions
     # (a git conflict resolution can silently revert one but not the other).

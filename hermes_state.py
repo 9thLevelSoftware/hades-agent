@@ -1,2 +1,7 @@
-"""Backward-compatibility shim — import from hades_state instead."""
-from hades_state import *  # noqa: F401,F403
+"""Backward-compatibility alias — ``hermes_state`` IS ``hades_state``."""
+
+import sys
+
+import hades_state
+
+sys.modules[__name__] = hades_state

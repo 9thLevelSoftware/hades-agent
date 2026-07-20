@@ -97,6 +97,7 @@ import json
 import logging
 import math
 import os
+from hades_constants import env_get
 import re
 import shutil
 import sys
@@ -638,7 +639,7 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
             resolved_command = which_hit
         elif resolved_command in {"npx", "npm", "node"}:
             hermes_home = os.path.expanduser(
-                os.getenv(
+                env_get(
                     "HADES_HOME", os.path.join(os.path.expanduser("~"), ".hades")
                 )
             )
@@ -2215,9 +2216,9 @@ class MCPServerTask:
             raise ImportError(
                 f"MCP server '{self.name}' requires the 'mcp' Python SDK, but "
                 "it is not installed. Install with:\n"
-                "  pip install 'hermes-agent[mcp]'\n"
+                "  pip install 'hades-agent[mcp]'\n"
                 "or (full install):\n"
-                "  pip install 'hermes-agent[all]'"
+                "  pip install 'hades-agent[all]'"
             )
 
         command = config.get("command")

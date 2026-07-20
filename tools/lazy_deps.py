@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hades_constants import env_get
 import re
 import shutil
 import site
@@ -449,7 +450,7 @@ def _allow_lazy_installs() -> bool:
     # (2) Sealed-venv env var: blocks ONLY when there is no safe durable
     # target to redirect into. With a target set, the install goes to the
     # data volume (append-only on sys.path), so the seal is preserved.
-    if os.environ.get("HADES_DISABLE_LAZY_INSTALLS") == "1":
+    if env_get("HADES_DISABLE_LAZY_INSTALLS") == "1":
         return _lazy_install_target() is not None
 
     return True

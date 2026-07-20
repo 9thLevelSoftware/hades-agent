@@ -22,6 +22,9 @@ from hades_constants import (
     get_hades_home_override,
     reset_hades_home_override,
     set_hades_home_override,
+    env_get,
+    env_pop,
+    env_set,
 )
 from hades_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
@@ -141,7 +144,7 @@ _cfg_mtime: float | None = None
 _cfg_path = None
 _session_resume_lock = threading.Lock()
 try:
-    _slash_timeout = float(os.environ.get("HADES_TUI_SLASH_TIMEOUT_S") or "45")
+    _slash_timeout = float(env_get("HADES_TUI_SLASH_TIMEOUT_S") or "45")
 except (ValueError, TypeError):
     _slash_timeout = 45.0
 _SLASH_WORKER_TIMEOUT_S = max(5.0, _slash_timeout)
@@ -158,7 +161,7 @@ _SLASH_WORKER_TIMEOUT_S = max(5.0, _slash_timeout)
 # Set to 0 to disable (park forever, pre-fix behaviour).
 try:
     _ws_orphan_reap_grace = float(
-        os.environ.get("HADES_TUI_WS_ORPHAN_REAP_GRACE_S") or "20"
+        env_get("HADES_TUI_WS_ORPHAN_REAP_GRACE_S") or "20"
     )
 except (ValueError, TypeError):
     _ws_orphan_reap_grace = 20.0
@@ -263,7 +266,7 @@ _LONG_HANDLERS = frozenset(
 
 try:
     _rpc_pool_workers = max(
-        2, int(os.environ.get("HADES_TUI_RPC_POOL_WORKERS") or "8")
+        2, int(env_get("HADES_TUI_RPC_POOL_WORKERS") or "8")
     )
 except (ValueError, TypeError):
     _rpc_pool_workers = 8
@@ -330,7 +333,7 @@ class _SlashWorker:
             # Global-remote / multi-profile sessions: the worker must resolve
             # config/skills/state against the session's profile home, not the
             # gateway's launch HADES_HOME (#40677).
-            env["HADES_HOME"] = str(profile_home)
+            env_set("HADES_HOME", str(profile_home), env=env)
 
         # start_new_session=True detaches the slash worker into its own
         # process group / session. Without this, the worker inherits the
@@ -896,7 +899,7 @@ def _shutdown_sessions() -> None:
 # hours-scale because last_active freezes during a long turn and on passive
 # viewing — running/pending/starting/live-transport are hard exemptions instead.
 try:
-    _SESSION_TTL_S = float(os.environ.get("HADES_TUI_SESSION_TTL_S") or 6 * 3600)
+    _SESSION_TTL_S = float(env_get("HADES_TUI_SESSION_TTL_S") or 6 * 3600)
 except (TypeError, ValueError):
     _SESSION_TTL_S = float(6 * 3600)
 _SESSION_TTL_S = max(0.0, _SESSION_TTL_S)
@@ -1205,7 +1208,7 @@ _compute_host_supervisor_lock = threading.Lock()
 
 
 def _inside_compute_host_child() -> bool:
-    return os.environ.get("HADES_COMPUTE_HOST_CHILD") == "1"
+    return env_get("HADES_COMPUTE_HOST_CHILD") == "1"
 
 
 def _turn_isolation_enabled(cfg: dict | None = None) -> bool:
@@ -2319,9 +2322,11 @@ def _clear_session_context(tokens: list) -> None:
 
 def _enable_gateway_prompts() -> None:
     """Route approvals through gateway callbacks instead of CLI input()."""
-    os.environ["HADES_GATEWAY_SESSION"] = "1"
-    os.environ["HADES_EXEC_ASK"] = "1"
-    os.environ["HADES_INTERACTIVE"] = "1"
+    from hades_constants import env_set
+
+    env_set("HADES_GATEWAY_SESSION", "1")
+    env_set("HADES_EXEC_ASK", "1")
+    env_set("HADES_INTERACTIVE", "1")
 
 
 # ── Blocking prompt factory ──────────────────────────────────────────
@@ -2396,8 +2401,8 @@ def resolve_skin() -> dict:
 
 def _resolve_model() -> str:
     env = (
-        os.environ.get("HADES_MODEL", "")
-        or os.environ.get("HADES_INFERENCE_MODEL", "")
+        env_get("HADES_MODEL", "")
+        or env_get("HADES_INFERENCE_MODEL", "")
     ).strip()
     if env:
         return env
@@ -2436,8 +2441,8 @@ def _resolve_session_platform() -> str:
       * neither set → "tui"
         (standalone ``hermes --tui``.)
     """
-    if is_truthy_value(os.environ.get("HADES_DESKTOP")) and not is_truthy_value(
-        os.environ.get("HADES_DESKTOP_TERMINAL")
+    if is_truthy_value(env_get("HADES_DESKTOP")) and not is_truthy_value(
+        env_get("HADES_DESKTOP_TERMINAL")
     ):
         return "desktop"
     return "tui"
@@ -2494,13 +2499,13 @@ def _config_model_target() -> tuple[str, str]:
 
 def _resolve_startup_runtime() -> tuple[str, str | None]:
     model = _resolve_model()
-    explicit_provider = os.environ.get("HADES_TUI_PROVIDER", "").strip()
+    explicit_provider = env_get("HADES_TUI_PROVIDER", "").strip()
     if explicit_provider:
         return model, explicit_provider
 
     explicit_model = (
-        os.environ.get("HADES_MODEL", "")
-        or os.environ.get("HADES_INFERENCE_MODEL", "")
+        env_get("HADES_MODEL", "")
+        or env_get("HADES_INFERENCE_MODEL", "")
     ).strip()
     if not explicit_model:
         return model, None
@@ -2515,7 +2520,7 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
                 if isinstance(cfg, dict)
                 else ""
             )
-            or os.environ.get("HADES_INFERENCE_PROVIDER", "").strip().lower()
+            or env_get("HADES_INFERENCE_PROVIDER", "").strip().lower()
             or "auto"
         )
         detected = detect_static_provider_for_model(explicit_model, current_provider)
@@ -2922,7 +2927,7 @@ def _load_memory_notifications() -> str:
 
 
 def _load_tool_progress_mode() -> str:
-    env = os.environ.get("HADES_TUI_TOOL_PROGRESS", "").strip().lower()
+    env = env_get("HADES_TUI_TOOL_PROGRESS", "").strip().lower()
     if env in {"off", "new", "all", "verbose"}:
         return env
     raw = (_load_cfg().get("display") or {}).get("tool_progress", "all")
@@ -2937,7 +2942,7 @@ def _load_tool_progress_mode() -> str:
 def _load_enabled_toolsets() -> list[str] | None:
     explicit = [
         item.strip()
-        for item in os.environ.get("HADES_TUI_TOOLSETS", "").split(",")
+        for item in env_get("HADES_TUI_TOOLSETS", "").split(",")
         if item.strip()
     ]
     cfg = None
@@ -3571,7 +3576,7 @@ def _get_usage(agent) -> dict:
         pass
     # Dev-only live credits-spent readout (L0 usage-aware-credits). Gated on
     # HERMES_DEV_CREDITS so the payload stays clean when the flag is off.
-    if is_truthy_value(os.environ.get("HADES_DEV_CREDITS")):
+    if is_truthy_value(env_get("HADES_DEV_CREDITS")):
         try:
             spent = agent.get_credits_spent_micros()
             if spent is not None:
@@ -4456,7 +4461,7 @@ def _apply_personality_to_session(
 
 def _cfg_max_turns(cfg: dict, default: int) -> int:
     try:
-        env_max = int(os.environ.get("HADES_TUI_MAX_TURNS", "") or 0)
+        env_max = int(env_get("HADES_TUI_MAX_TURNS", "") or 0)
         if env_max > 0:
             return env_max
     except (TypeError, ValueError):
@@ -4466,7 +4471,7 @@ def _cfg_max_turns(cfg: dict, default: int) -> int:
 
 
 def _parse_tui_skills_env() -> list[str]:
-    raw = os.environ.get("HADES_TUI_SKILLS", "")
+    raw = env_get("HADES_TUI_SKILLS", "")
     skills: list[str] = []
     seen: set[str] = set()
     for part in raw.replace("\n", ",").split(","):
@@ -5017,10 +5022,10 @@ def _make_agent(
         session_id=session_id or key,
         session_db=session_db if session_db is not None else _get_db(),
         ephemeral_system_prompt=system_prompt or None,
-        checkpoints_enabled=is_truthy_value(os.environ.get("HADES_TUI_CHECKPOINTS")),
-        pass_session_id=is_truthy_value(os.environ.get("HADES_TUI_PASS_SESSION_ID")),
-        skip_context_files=is_truthy_value(os.environ.get("HADES_IGNORE_RULES")),
-        skip_memory=is_truthy_value(os.environ.get("HADES_IGNORE_RULES")),
+        checkpoints_enabled=is_truthy_value(env_get("HADES_TUI_CHECKPOINTS")),
+        pass_session_id=is_truthy_value(env_get("HADES_TUI_PASS_SESSION_ID")),
+        skip_context_files=is_truthy_value(env_get("HADES_IGNORE_RULES")),
+        skip_memory=is_truthy_value(env_get("HADES_IGNORE_RULES")),
         fallback_model=_load_fallback_model(),
         **_agent_cbs(sid),
     )
@@ -7657,7 +7662,7 @@ _PET_REFERENCE_MIME_EXT = {
 try:
     _PET_REFERENCE_MAX_BYTES = max(
         1,
-        int(os.environ.get("HADES_PET_REFERENCE_MAX_BYTES") or str(16 * 1024 * 1024)),
+        int(env_get("HADES_PET_REFERENCE_MAX_BYTES") or str(16 * 1024 * 1024)),
     )
 except (TypeError, ValueError):
     _PET_REFERENCE_MAX_BYTES = 16 * 1024 * 1024
@@ -11445,13 +11450,13 @@ def _(rid, params: dict) -> dict:
                         _session_info(agent, session),
                     )
             else:
-                current = is_truthy_value(os.environ.get("HADES_YOLO_MODE"))
+                current = is_truthy_value(env_get("HADES_YOLO_MODE"))
                 enable = _resolve_toggle(current)
                 if enable:
-                    os.environ["HADES_YOLO_MODE"] = "1"
+                    env_set("HADES_YOLO_MODE", "1")
                     nv = "1"
                 else:
-                    os.environ.pop("HERMES_YOLO_MODE", None)
+                    env_pop("HERMES_YOLO_MODE")
                     nv = "0"
             return _ok(rid, {"key": key, "value": nv, "scope": "session"})
         except Exception as e:
@@ -14886,12 +14891,12 @@ def _voice_mode_enabled() -> bool:
     avoids the TUI auto-starting in REC the next time the user opens it
     just because they happened to enable voice in a prior session.
     """
-    return os.environ.get("HADES_VOICE", "").strip() == "1"
+    return env_get("HADES_VOICE", "").strip() == "1"
 
 
 def _voice_tts_enabled() -> bool:
     """Whether agent replies should be spoken back via TTS (runtime only)."""
-    return os.environ.get("HADES_VOICE_TTS", "").strip() == "1"
+    return env_get("HADES_VOICE_TTS", "").strip() == "1"
 
 
 def _voice_cfg_dict() -> dict:
@@ -14967,7 +14972,7 @@ def _(rid, params: dict) -> dict:
         # Runtime-only flag (CLI parity) — no _write_config_key, so the
         # next TUI launch starts with voice OFF instead of auto-REC from a
         # persisted stale toggle.
-        os.environ["HADES_VOICE"] = "1" if enabled else "0"
+        env_set("HADES_VOICE", "1" if enabled else "0")
 
         if not enabled:
             # Disabling the mode must tear the continuous loop down; the
@@ -14982,7 +14987,7 @@ def _(rid, params: dict) -> dict:
                 logger.warning("voice: stop_continuous failed during toggle off: %s", e)
 
             # Clear TTS so it can be toggled independently after voice is off.
-            os.environ["HADES_VOICE_TTS"] = "0"
+            env_set("HADES_VOICE_TTS", "0")
 
         return _ok(
             rid,
@@ -14998,7 +15003,7 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4014, "enable voice mode first: /voice on")
         new_value = not _voice_tts_enabled()
         # Runtime-only flag (CLI parity) — see voice.toggle on/off above.
-        os.environ["HADES_VOICE_TTS"] = "1" if new_value else "0"
+        env_set("HADES_VOICE_TTS", "1" if new_value else "0")
         # Include ``record_key`` on every branch so a /voice tts toggle
         # doesn't reset the TUI's cached shortcut to the default when a
         # user has a custom binding configured (Copilot review, round 2
@@ -15545,9 +15550,9 @@ def _(rid, params: dict) -> dict:
     try:
         cfg = _load_cfg()
         model = _resolve_model()
-        api_key = os.environ.get("HADES_API_KEY", "") or cfg.get("api_key", "")
+        api_key = env_get("HADES_API_KEY", "") or cfg.get("api_key", "")
         masked = f"****{api_key[-4:]}" if len(api_key) > 4 else "(not set)"
-        base_url = os.environ.get("HADES_BASE_URL", "") or cfg.get("base_url", "")
+        base_url = env_get("HADES_BASE_URL", "") or cfg.get("base_url", "")
 
         sections = [
             {

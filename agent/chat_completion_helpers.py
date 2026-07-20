@@ -27,7 +27,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from hades_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
-from hades_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
+from hades_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH, env_get
 from agent.error_classifier import FailoverReason
 from agent.errors import EmptyStreamError
 from agent.gemini_native_adapter import is_native_gemini_base_url
@@ -677,7 +677,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
         _ttfb_enabled = False
     elif _openai_codex_backend:
         _ttfb_disable_above = _env_float("HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS", 10_000.0)
-        _ttfb_strict = os.environ.get("HADES_CODEX_TTFB_STRICT", "").strip().lower() in {
+        _ttfb_strict = env_get("HADES_CODEX_TTFB_STRICT", "").strip().lower() in {
             "1", "true", "yes", "on"
         }
         if (

@@ -129,7 +129,7 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
-from hades_constants import get_hades_home
+from hades_constants import get_hades_home, env_get
 from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
@@ -843,7 +843,7 @@ def _resolve_effective_accept(
     """
     if accept_hooks_arg:
         return True
-    env = os.environ.get("HADES_ACCEPT_HOOKS", "").strip().lower()
+    env = env_get("HADES_ACCEPT_HOOKS", "").strip().lower()
     if env in {"1", "true", "yes", "on"}:
         return True
     cfg_val = cfg.get("hooks_auto_accept", False)

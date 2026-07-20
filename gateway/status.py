@@ -23,7 +23,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from hades_constants import get_hades_home, _get_platform_default_hades_home
+from hades_constants import get_hades_home, _get_platform_default_hades_home, env_get
 from typing import Any, NamedTuple, Optional
 from utils import atomic_json_write
 
@@ -136,7 +136,7 @@ def _get_process_hades_home() -> Path:
     profile directory when a profile-context task happens to be active at write
     time.  See issue #56986.
     """
-    val = os.environ.get("HADES_HOME", "").strip()
+    val = env_get("HADES_HOME", "").strip()
     if val:
         return Path(val)
     return _get_platform_default_hades_home()
@@ -163,7 +163,7 @@ def _get_runtime_status_path() -> Path:
 
 def _get_lock_dir() -> Path:
     """Return the machine-local directory for token-scoped gateway locks."""
-    override = os.getenv("HADES_GATEWAY_LOCK_DIR")
+    override = env_get("HADES_GATEWAY_LOCK_DIR")
     if override:
         return Path(override)
     state_home = Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local" / "state"))

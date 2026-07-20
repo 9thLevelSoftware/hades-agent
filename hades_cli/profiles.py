@@ -21,6 +21,7 @@ Usage::
 
 import json
 import os
+from hades_constants import env_get, env_is_set, env_pop, env_set
 import re
 import shlex
 import shutil
@@ -1200,11 +1201,13 @@ def seed_profile_skills(profile_dir: Path, quiet: bool = False) -> Optional[dict
         }
     project_root = Path(__file__).parent.parent.resolve()
     try:
+        _seed_env = {**os.environ}
+        env_set("HADES_HOME", str(profile_dir), env=_seed_env)
         result = subprocess.run(
             [sys.executable, "-c",
              "import json; from tools.skills_sync import sync_skills; "
              "r = sync_skills(quiet=True); print(json.dumps(r))"],
-            env={**os.environ, "HADES_HOME": str(profile_dir)},
+            env=_seed_env,
             cwd=str(project_root),
             capture_output=True, text=True, timeout=60,
         )
@@ -1704,9 +1707,9 @@ def _cleanup_gateway_service(name: str, profile_dir: Path) -> None:
 
     # Derive service name for this profile
     # Temporarily set HADES_HOME so _profile_suffix resolves correctly
-    old_home = os.environ.get("HADES_HOME")
+    old_home = env_get("HADES_HOME")
     try:
-        os.environ["HADES_HOME"] = str(profile_dir)
+        env_set("HADES_HOME", str(profile_dir))
         from hades_cli.gateway import get_service_name, get_launchd_plist_path
 
         if _platform.system() == "Linux":
@@ -1741,9 +1744,9 @@ def _cleanup_gateway_service(name: str, profile_dir: Path) -> None:
         print(f"⚠ Service cleanup: {e}")
     finally:
         if old_home is not None:
-            os.environ["HADES_HOME"] = old_home
-        elif "HADES_HOME" in os.environ:
-            del os.environ["HADES_HOME"]
+            env_set("HADES_HOME", old_home)
+        elif env_is_set("HADES_HOME"):
+            env_pop("HADES_HOME")
 
 
 def _stop_gateway_process(profile_dir: Path) -> None:

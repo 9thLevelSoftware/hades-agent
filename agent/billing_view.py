@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hades_constants import env_get
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -361,7 +362,7 @@ def _dev_fixture_billing_state() -> Optional[BillingState]:
     Mirrors ``HERMES_DEV_CREDITS_FIXTURE``; the usage *bar* still comes from
     ``HERMES_DEV_CREDITS_FIXTURE`` (set both to pair a bar with a billing state).
     """
-    name = (os.getenv("HADES_DEV_BILLING_FIXTURE") or "").strip().lower()
+    name = (env_get("HADES_DEV_BILLING_FIXTURE") or "").strip().lower()
     if not name:
         return None
 

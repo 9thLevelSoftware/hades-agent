@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 import logging
 import os
+from hades_constants import env_get
 import random
 import threading
 import time
@@ -96,7 +97,7 @@ def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict, Optional[str]]:
 
 
 def _resolve_concurrent_tool_timeout() -> float | None:
-    raw = os.getenv("HADES_CONCURRENT_TOOL_TIMEOUT_S", "").strip()
+    raw = env_get("HADES_CONCURRENT_TOOL_TIMEOUT_S", "").strip()
     if not raw:
         return _DEFAULT_CONCURRENT_TOOL_TIMEOUT_S
     try:

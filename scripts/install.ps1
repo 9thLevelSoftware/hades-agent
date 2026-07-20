@@ -23,8 +23,16 @@ param(
     # exact ref.  Precedence: Commit > Tag > Branch.
     [string]$Commit = "",
     [string]$Tag = "",
-    [string]$HermesHome = $(if ($env:HADES_HOME) { $env:HADES_HOME } else { "$env:LOCALAPPDATA\hermes" }),
-    [string]$InstallDir = $(if ($env:HADES_HOME) { "$env:HADES_HOME\hermes-agent" } else { "$env:LOCALAPPDATA\hermes\hermes-agent" }),
+    # Home resolution precedence: HADES_HOME env > HERMES_HOME env >
+    # adopt-in-place default (%LOCALAPPDATA%\hades, unless only a legacy
+    # %LOCALAPPDATA%\hermes exists — then adopt it in place).
+    [string]$HermesHome = $(
+        if ($env:HADES_HOME) { $env:HADES_HOME }
+        elseif ($env:HERMES_HOME) { $env:HERMES_HOME }
+        elseif (-not (Test-Path "$env:LOCALAPPDATA\hades") -and (Test-Path "$env:LOCALAPPDATA\hermes")) { "$env:LOCALAPPDATA\hermes" }
+        else { "$env:LOCALAPPDATA\hades" }
+    ),
+    [string]$InstallDir = "$HermesHome\hermes-agent",
 
     # --- Stage protocol (additive; default invocation behaves as before) ----
     # See the "Stage protocol" section near the bottom of the file for the
@@ -1037,9 +1045,12 @@ function Set-GitBashEnvVar {
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path $candidate)) {
             [Environment]::SetEnvironmentVariable("HERMES_GIT_BASH_PATH", $candidate, "User")
+            [Environment]::SetEnvironmentVariable("HADES_GIT_BASH_PATH", $candidate, "User")
             $env:HERMES_GIT_BASH_PATH = $candidate
+            $env:HADES_GIT_BASH_PATH = $candidate
             $script:GitBashPath = $candidate
             Write-Info "Set HERMES_GIT_BASH_PATH=$candidate"
+            Write-Info "Set HADES_GIT_BASH_PATH=$candidate"
             return
         }
     }

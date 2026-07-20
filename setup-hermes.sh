@@ -348,11 +348,14 @@ fi
 echo -e "${CYAN}→${NC} Setting up hermes command..."
 
 HERMES_BIN="$SCRIPT_DIR/venv/bin/hermes"
+HADES_BIN="$SCRIPT_DIR/venv/bin/hades"
 COMMAND_LINK_DIR="$(get_command_link_dir)"
 COMMAND_LINK_DISPLAY_DIR="$(get_command_link_display_dir)"
 mkdir -p "$COMMAND_LINK_DIR"
 ln -sf "$HERMES_BIN" "$COMMAND_LINK_DIR/hermes"
 echo -e "${GREEN}✓${NC} Symlinked hermes → $COMMAND_LINK_DISPLAY_DIR/hermes"
+ln -sf "$HADES_BIN" "$COMMAND_LINK_DIR/hades"
+echo -e "${GREEN}✓${NC} Symlinked hades → $COMMAND_LINK_DISPLAY_DIR/hades"
 
 if is_termux; then
     export PATH="$COMMAND_LINK_DIR:$PATH"

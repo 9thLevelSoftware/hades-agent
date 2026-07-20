@@ -22,7 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hades_constants import get_hades_home
+from hades_constants import env_set, get_hades_home
 from tools.environments.local import hermes_subprocess_env
 
 logger = logging.getLogger(__name__)
@@ -314,7 +314,7 @@ class HostSupervisor:
         env.update(os.environ)
         if self.env:
             env.update(self.env)
-        env["HERMES_COMPUTE_HOST_HEARTBEAT_SECS"] = str(self.heartbeat_secs)
+        env_set("HERMES_COMPUTE_HOST_HEARTBEAT_SECS", str(self.heartbeat_secs), env=env)
         env.setdefault("PYTHONPATH", str(_repo_root()))
         if str(_repo_root()) not in env["PYTHONPATH"].split(os.pathsep):
             env["PYTHONPATH"] = str(_repo_root()) + os.pathsep + env["PYTHONPATH"]

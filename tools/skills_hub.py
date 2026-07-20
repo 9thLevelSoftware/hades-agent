@@ -28,6 +28,7 @@ from pathlib import Path, PurePosixPath
 from hades_constants import get_hades_home
 from hades_cli._subprocess_compat import windows_hide_flags
 from agent.skill_utils import is_excluded_skill_path
+from utils import skill_vendor_metadata
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import unquote, urljoin, urlparse, urlsplit, urlunparse
 
@@ -713,12 +714,7 @@ class GitHubSource(SkillSource):
         skill_name = fm.get("name", skill_path.split("/")[-1])
         description = fm.get("description", "")
 
-        tags = []
-        metadata = fm.get("metadata", {})
-        if isinstance(metadata, dict):
-            hermes_meta = metadata.get("hermes", {})
-            if isinstance(hermes_meta, dict):
-                tags = hermes_meta.get("tags", [])
+        tags = skill_vendor_metadata(fm).get("tags", [])
         if not tags:
             raw_tags = fm.get("tags", [])
             tags = raw_tags if isinstance(raw_tags, list) else []
@@ -1467,13 +1463,9 @@ class UrlSource(SkillSource):
         name = self._resolve_skill_name(fm, url)
         description = str(fm.get("description") or "")
         tags: List[str] = []
-        metadata = fm.get("metadata", {})
-        if isinstance(metadata, dict):
-            hermes_meta = metadata.get("hermes", {})
-            if isinstance(hermes_meta, dict):
-                raw_tags = hermes_meta.get("tags", [])
-                if isinstance(raw_tags, list):
-                    tags = [str(t) for t in raw_tags]
+        raw_tags = skill_vendor_metadata(fm).get("tags", [])
+        if isinstance(raw_tags, list):
+            tags = [str(t) for t in raw_tags]
         return SkillMeta(
             name=name or "",
             description=description,

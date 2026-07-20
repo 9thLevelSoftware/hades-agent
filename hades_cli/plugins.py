@@ -8,10 +8,11 @@ Discovers, loads, and manages plugins from four sources:
    ``memory/`` and ``context_engine/`` subdirs are excluded — they have their
    own discovery paths)
 2. **User plugins**   – ``~/.hades/plugins/<name>/``
-3. **Project plugins** – ``./.hermes/plugins/<name>/`` (opt-in via
-   ``HADES_ENABLE_PROJECT_PLUGINS``)
+3. **Project plugins** – ``./.hades/plugins/<name>/`` or legacy
+   ``./.hermes/plugins/<name>/`` (opt-in via
+   ``HADES_ENABLE_PROJECT_PLUGINS`` / ``HERMES_ENABLE_PROJECT_PLUGINS``)
 4. **Pip plugins**     – packages that expose the ``hades_agent.plugins``
-   entry-point group.
+   or upstream ``hermes_agent.plugins`` entry-point group.
 
 Later sources override earlier ones on name collision, so a user or project
 plugin with the same name as a bundled plugin replaces it.
@@ -46,7 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
-from hades_constants import get_hades_home
+from hades_constants import env_get, get_hades_home
 from utils import env_var_enabled, fast_safe_load
 from hades_cli.config import cfg_get
 from hades_cli.middleware import OBSERVER_SCHEMA_VERSION, VALID_MIDDLEWARE
@@ -59,7 +60,7 @@ def get_bundled_plugins_dir() -> Path:
     installs) so read-only store paths are consulted first.  Falls back to
     the in-repo path used during development.
     """
-    env_override = os.getenv("HADES_BUNDLED_PLUGINS")
+    env_override = env_get("HADES_BUNDLED_PLUGINS")
     if env_override:
         return Path(env_override)
     return Path(__file__).resolve().parent.parent / "plugins"
@@ -93,7 +94,7 @@ logger = logging.getLogger(__name__)
 # The env var is read once at import time; tests that need to flip it
 # mid-process can call ``_install_plugin_debug_handler(force=True)``.
 
-_PLUGINS_DEBUG = os.getenv("HADES_PLUGINS_DEBUG", "").strip().lower() in {
+_PLUGINS_DEBUG = env_get("HADES_PLUGINS_DEBUG", "").strip().lower() in {
     "1", "true", "yes", "on",
 }
 _DEBUG_HANDLER_INSTALLED = False
@@ -107,7 +108,7 @@ def _install_plugin_debug_handler(force: bool = False) -> None:
     """
     global _DEBUG_HANDLER_INSTALLED, _PLUGINS_DEBUG
     if force:
-        _PLUGINS_DEBUG = os.getenv("HADES_PLUGINS_DEBUG", "").strip().lower() in {
+        _PLUGINS_DEBUG = env_get("HADES_PLUGINS_DEBUG", "").strip().lower() in {
             "1", "true", "yes", "on",
         }
     if not _PLUGINS_DEBUG or _DEBUG_HANDLER_INSTALLED:
@@ -214,7 +215,12 @@ VALID_HOOKS: Set[str] = {
     "kanban_task_blocked",
 }
 
-ENTRY_POINTS_GROUP = "hades_agent.plugins"
+# Both vendor spellings are scanned: upstream hermes-ecosystem wheels register
+# under "hermes_agent.plugins", this fork's under "hades_agent.plugins". A
+# plugin registered under both groups loads once (hades group wins).
+ENTRY_POINTS_GROUPS = ("hades_agent.plugins", "hermes_agent.plugins")
+# Backward-compat name — third-party code may import this constant.
+ENTRY_POINTS_GROUP = ENTRY_POINTS_GROUPS[0]
 
 _NS_PARENT = "hermes_plugins"
 
@@ -1353,11 +1359,19 @@ class PluginManager:
         logger.debug("  user: %d manifest(s)", len(user_manifests))
         manifests.extend(user_manifests)
 
-        # 3. Project plugins (./.hermes/plugins/)
+        # 3. Project plugins (./.hades/plugins/ and legacy ./.hermes/plugins/)
         if _env_enabled("HADES_ENABLE_PROJECT_PLUGINS"):
-            project_dir = Path.cwd() / ".hades" / "plugins"
-            logger.debug("Scanning project plugins: %s", project_dir)
-            project_manifests = self._scan_directory(project_dir, source="project")
+            project_manifests: List[PluginManifest] = []
+            seen_keys: set = set()
+            # .hades dir wins on key collision; scan order enforces it.
+            for dirname in (".hades", ".hermes"):
+                project_dir = Path.cwd() / dirname / "plugins"
+                logger.debug("Scanning project plugins: %s", project_dir)
+                for manifest in self._scan_directory(project_dir, source="project"):
+                    if manifest.key in seen_keys:
+                        continue
+                    seen_keys.add(manifest.key)
+                    project_manifests.append(manifest)
             logger.debug("  project: %d manifest(s)", len(project_manifests))
             manifests.extend(project_manifests)
         else:
@@ -1660,15 +1674,25 @@ class PluginManager:
         manifests: List[PluginManifest] = []
         try:
             eps = importlib.metadata.entry_points()
-            # Python 3.12+ returns a SelectableGroups; earlier returns dict
-            if hasattr(eps, "select"):
-                group_eps = eps.select(group=ENTRY_POINTS_GROUP)
-            elif isinstance(eps, dict):
-                group_eps = eps.get(ENTRY_POINTS_GROUP, [])
-            else:
-                group_eps = [ep for ep in eps if ep.group == ENTRY_POINTS_GROUP]
+            group_eps = []
+            for group in ENTRY_POINTS_GROUPS:
+                # Python 3.12+ returns a SelectableGroups; earlier returns dict
+                if hasattr(eps, "select"):
+                    group_eps.extend(eps.select(group=group))
+                elif isinstance(eps, dict):
+                    group_eps.extend(eps.get(group, []))
+                else:
+                    group_eps.extend(ep for ep in eps if ep.group == group)
 
+            # Dedupe by entry-point name with hades-group precedence (groups
+            # were scanned in ENTRY_POINTS_GROUPS order): a dual-registered
+            # plugin must not load — and run its register() side effects —
+            # twice.
+            seen: set = set()
             for ep in group_eps:
+                if ep.name in seen:
+                    continue
+                seen.add(ep.name)
                 manifest = PluginManifest(
                     name=ep.name,
                     source="entrypoint",
@@ -1870,19 +1894,20 @@ class PluginManager:
     def _load_entrypoint_module(self, manifest: PluginManifest) -> types.ModuleType:
         """Load a pip-installed plugin via its entry-point reference."""
         eps = importlib.metadata.entry_points()
-        if hasattr(eps, "select"):
-            group_eps = eps.select(group=ENTRY_POINTS_GROUP)
-        elif isinstance(eps, dict):
-            group_eps = eps.get(ENTRY_POINTS_GROUP, [])
-        else:
-            group_eps = [ep for ep in eps if ep.group == ENTRY_POINTS_GROUP]
+        for group in ENTRY_POINTS_GROUPS:
+            if hasattr(eps, "select"):
+                group_eps = eps.select(group=group)
+            elif isinstance(eps, dict):
+                group_eps = eps.get(group, [])
+            else:
+                group_eps = [ep for ep in eps if ep.group == group]
 
-        for ep in group_eps:
-            if ep.name == manifest.name:
-                return ep.load()
+            for ep in group_eps:
+                if ep.name == manifest.name:
+                    return ep.load()
 
         raise ImportError(
-            f"Entry point '{manifest.name}' not found in group '{ENTRY_POINTS_GROUP}'"
+            f"Entry point '{manifest.name}' not found in groups {ENTRY_POINTS_GROUPS}"
         )
 
     # -----------------------------------------------------------------------

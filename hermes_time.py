@@ -1,2 +1,7 @@
-"""Backward-compatibility shim — import from hades_time instead."""
-from hades_time import *  # noqa: F401,F403
+"""Backward-compatibility alias — ``hermes_time`` IS ``hades_time``."""
+
+import sys
+
+import hades_time
+
+sys.modules[__name__] = hades_time

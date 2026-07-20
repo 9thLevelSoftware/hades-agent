@@ -35,6 +35,7 @@ import importlib.util
 import json
 import logging
 import os
+from hades_constants import env_get, env_is_set, env_pop, env_set
 import platform
 import re
 import time
@@ -207,7 +208,7 @@ def _get_sudo_password_cache_scope() -> str:
 
         session_key = get_session_env("HERMES_SESSION_KEY", "")
     except Exception:
-        session_key = os.getenv("HADES_SESSION_KEY", "")
+        session_key = env_get("HADES_SESSION_KEY", "")
     if session_key:
         return f"session:{session_key}"
 
@@ -453,7 +454,7 @@ def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
             result["done"] = True
     
     try:
-        os.environ["HADES_SPINNER_PAUSE"] = "1"
+        env_set("HADES_SPINNER_PAUSE", "1")
         time.sleep(0.2)
         
         print()
@@ -499,8 +500,8 @@ def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
         sys.stdout.flush()
         return ""
     finally:
-        if "HERMES_SPINNER_PAUSE" in os.environ:
-            del os.environ["HADES_SPINNER_PAUSE"]
+        if env_is_set("HERMES_SPINNER_PAUSE"):
+            env_pop("HADES_SPINNER_PAUSE")
 
 def _safe_command_preview(command: Any, limit: int = 200) -> str:
     """Return a log-safe preview for possibly-invalid command values."""

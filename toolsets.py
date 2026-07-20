@@ -605,6 +605,30 @@ TOOLSETS = {
 
 
 
+def _swap_prefix(name: str) -> Optional[str]:
+    """Return the other-vendor spelling of a ``hermes-``/``hades-`` key.
+
+    Registry keys are historical and mixed (``hermes-cli``, ``hades-acp``,
+    ``hermes-telegram`` …). Rather than renaming keys — which would churn
+    user configs and break upstream-portable references — lookups accept
+    either prefix and normalize to whichever spelling the registry uses.
+    """
+    if name.startswith("hermes-"):
+        return "hades-" + name[len("hermes-"):]
+    if name.startswith("hades-"):
+        return "hermes-" + name[len("hades-"):]
+    return None
+
+
+def _canonical_toolset_name(name: str) -> str:
+    """Normalize *name* to the spelling actually present in ``TOOLSETS``."""
+    if name not in TOOLSETS:
+        swapped = _swap_prefix(name)
+        if swapped and swapped in TOOLSETS:
+            return swapped
+    return name
+
+
 def get_toolset(name: str, *, include_registry: bool = True) -> Optional[Dict[str, Any]]:
     """
     Get a toolset definition by name.
@@ -626,6 +650,7 @@ def get_toolset(name: str, *, include_registry: bool = True) -> Optional[Dict[st
             registry/MCP-only toolsets AND registry-derived aliases return None
             (they have no static counterpart).
     """
+    name = _canonical_toolset_name(name)
     toolset = TOOLSETS.get(name)
 
     if not include_registry:
@@ -739,6 +764,12 @@ def resolve_toolset(name: str, visited: Set[str] = None, *, include_registry: bo
             all_tools.update(resolved)
         return sorted(all_tools)
 
+    # Normalize hermes-/hades- prefix spellings BEFORE the visited check so
+    # both spellings of one toolset share a single visited entry (no
+    # double-resolution, and cycle detection can't be defeated by mixing
+    # spellings in an includes chain).
+    name = _canonical_toolset_name(name)
+
     # Check for cycles / already-resolved (diamond deps).
     # Silently return [] — either this is a diamond (not a bug, tools already
     # collected via another path) or a genuine cycle (safe to skip).
@@ -755,8 +786,8 @@ def resolve_toolset(name: str, visited: Set[str] = None, *, include_registry: bo
         # into a toolset matching the platform name. This is a registry-derived
         # view, so it only applies when registry tools are requested; the static
         # view (include_registry=False) has no plugin-platform definition.
-        if include_registry and name.startswith("hermes-"):
-            platform_name = name[len("hermes-"):]
+        if include_registry and name.startswith(("hermes-", "hades-")):
+            platform_name = name.split("-", 1)[1]
             try:
                 from gateway.platform_registry import platform_registry
                 if platform_registry.is_registered(platform_name):
@@ -894,11 +925,12 @@ def validate_toolset(name: str) -> bool:
     # Accept special alias names for convenience
     if name in {"all", "*"}:
         return True
-    if name in TOOLSETS:
+    canonical = _canonical_toolset_name(name)
+    if canonical in TOOLSETS:
         return True
-    if name in _get_plugin_toolset_names():
+    if canonical in _get_plugin_toolset_names():
         return True
-    return name in _get_registry_toolset_aliases()
+    return canonical in _get_registry_toolset_aliases()
 
 
 def create_custom_toolset(
