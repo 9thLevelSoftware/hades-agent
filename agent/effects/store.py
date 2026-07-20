@@ -279,6 +279,111 @@ class TransactionStore:
             ),
         )
 
+    def create_revision(
+        self,
+        *,
+        transaction_id: str,
+        expected_revision: int,
+        nodes: tuple[RevisionNode, ...],
+        edges: tuple[RevisionEdge, ...],
+        reason: str,
+        superseded_effect_ids: Iterable[str] = (),
+    ) -> "TransactionRevision":
+        """Atomically persist revision ``expected_revision + 1``.
+
+        Single write transaction: the current-revision CAS, revision/node/
+        edge inserts, superseded-attempt transitions, and the
+        ``revision_created`` event all land together or not at all. A CAS
+        miss raises :class:`RevisionConflict` with no partial writes.
+        """
+        from agent.effects.models import RevisionConflict, graph_content_hash
+
+        new_revision = expected_revision + 1
+        graph_hash = graph_content_hash(nodes, edges)
+        superseded = tuple(superseded_effect_ids)
+        now = self._now_ms()
+
+        def _create(conn):
+            row = conn.execute(
+                """SELECT current_revision FROM action_transactions
+                    WHERE transaction_id = ?""",
+                (transaction_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown transaction {transaction_id!r}")
+            current = row["current_revision"]
+            cursor = conn.execute(
+                """UPDATE action_transactions
+                       SET current_revision = ?, status = 'draft',
+                           updated_at_ms = ?
+                     WHERE transaction_id = ? AND current_revision = ?""",
+                (new_revision, now, transaction_id, expected_revision),
+            )
+            if cursor.rowcount != 1:
+                raise RevisionConflict(
+                    f"expected revision {expected_revision}, current {current}"
+                )
+            self._insert_revision_rows(
+                conn,
+                transaction_id=transaction_id,
+                revision=new_revision,
+                base_revision=expected_revision,
+                reason=reason,
+                graph_hash=graph_hash,
+                nodes=nodes,
+                edges=edges,
+                created_at_ms=now,
+            )
+            if superseded:
+                placeholders = ",".join("?" for _ in superseded)
+                conn.execute(
+                    f"""UPDATE transaction_effects
+                           SET phase = 'superseded', updated_at_ms = ?
+                         WHERE effect_id IN ({placeholders})
+                           AND phase IN ('prepared', 'previewed')""",
+                    (now, *superseded),
+                )
+            self._insert_event_row(
+                conn,
+                transaction_id=transaction_id,
+                kind="revision_created",
+                effect_id=None,
+                payload={
+                    "revision": new_revision,
+                    "base_revision": expected_revision,
+                    "reason": reason,
+                    "graph_hash": graph_hash,
+                    "superseded_effects": sorted(superseded),
+                },
+                idempotency_key=f"revision_created:{transaction_id}:{new_revision}",
+                created_at_ms=now,
+            )
+            return True
+
+        self._db._execute_write(_create)
+        return self.get_revision(transaction_id, new_revision)
+
+    def get_node(
+        self, transaction_id: str, revision: int, node_id: str
+    ) -> Optional[RevisionNode]:
+        def _read(conn):
+            return conn.execute(
+                """SELECT * FROM transaction_revision_nodes
+                    WHERE transaction_id = ? AND revision = ? AND node_id = ?""",
+                (transaction_id, revision, node_id),
+            ).fetchone()
+
+        row = self._db._execute_read(_read)
+        if row is None:
+            return None
+        return RevisionNode(
+            node_id=row["node_id"],
+            adapter_id=row["adapter_id"],
+            action=row["action"],
+            args=_decode(row["args_json"]) or {},
+            resource_keys=tuple(_decode(row["resource_keys_json"]) or ()),
+        )
+
     def replace_revision(
         self, transaction_id: str, revision: int, graph: Mapping[str, Any]
     ) -> None:
@@ -329,6 +434,40 @@ class TransactionStore:
             ).fetchone()
 
         return self._effect_record(self._db._execute_write(_create))
+
+    def effect_for(
+        self, transaction_id: str, revision: int, node_id: str
+    ) -> Optional[EffectTransaction]:
+        def _read(conn):
+            return conn.execute(
+                """SELECT * FROM transaction_effects
+                    WHERE transaction_id = ? AND revision = ? AND node_id = ?""",
+                (transaction_id, revision, node_id),
+            ).fetchone()
+
+        row = self._db._execute_read(_read)
+        return self._effect_record(row) if row is not None else None
+
+    def list_effects(self, transaction_id: str) -> tuple[EffectTransaction, ...]:
+        def _read(conn):
+            return conn.execute(
+                """SELECT * FROM transaction_effects
+                    WHERE transaction_id = ?
+                    ORDER BY revision, node_id, effect_id""",
+                (transaction_id,),
+            ).fetchall()
+
+        rows = self._db._execute_read(_read)
+        return tuple(self._effect_record(row) for row in rows)
+
+    def latest_effect_phases(self, transaction_id: str) -> dict[str, str]:
+        """Latest attempt phase per node id (highest revision wins)."""
+        phases: dict[str, str] = {}
+        for effect in self.list_effects(transaction_id):
+            # list_effects is ordered by revision ASC, so later revisions
+            # overwrite earlier ones per node.
+            phases[effect.node_id] = effect.phase
+        return phases
 
     def get_effect(self, effect_id: str) -> Optional[EffectTransaction]:
         def _read(conn):
