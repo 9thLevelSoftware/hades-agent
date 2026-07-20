@@ -99,7 +99,32 @@ __all__ = [
     "build_observation",
     "build_receipt_issuer",
     "build_verification_evidence_digest",
+    "resolve_configured_receipts_mode",
 ]
+
+_CONFIGURED_RECEIPTS_MODES = ("off", "capture", "require")
+
+
+def resolve_configured_receipts_mode() -> str:
+    """The profile's configured ``receipts.mode``, defaulting to ``off``.
+
+    Producers with no agent object (the workflows dispatcher, the effect
+    transaction coordinator) gate issuance on this helper. Unlike
+    :func:`agent.turn_ledger.resolve_receipts_mode` — whose contractually
+    frozen fallback is ``capture`` — anything unreadable here resolves to
+    ``off``: a background producer must never start writing receipts
+    because config loading failed.
+    """
+    try:
+        from hades_cli.config import load_config_readonly
+
+        receipts_cfg = (load_config_readonly() or {}).get("receipts") or {}
+        mode = receipts_cfg.get("mode")
+        if isinstance(mode, str) and mode in _CONFIGURED_RECEIPTS_MODES:
+            return mode
+    except Exception:
+        pass
+    return "off"
 
 _SNAPSHOT_MARKER_KIND = "evidence_snapshot"
 _SNAPSHOT_MARKER_PRODUCER = "hermes.receipt-ingest"

@@ -3548,3 +3548,141 @@ class TestReconcileUnknownDisposition:
         # Journal advanced to confirmed + landed.
         assert journal.rows[opid]["state"] == "confirmed"
         assert journal.rows[opid]["effect_disposition"] == "landed"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Terminal-phase receipt wiring — the coordinator's one transition seam
+# issues the canonical receipt best-effort, gated on config receipts.mode.
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestTerminalReceiptWiring:
+    """Real SessionDB + real OperationJournal end-to-end: a transaction
+    driven to a terminal phase through ``coord.execute`` produces exactly
+    one canonical receipt under ``capture`` and zero rows under ``off``."""
+
+    @staticmethod
+    def _configure_receipts_mode(tmp_path, monkeypatch, mode):
+        home = tmp_path / ".hades"
+        home.mkdir(exist_ok=True)
+        (home / "config.yaml").write_text(
+            f"receipts:\n  mode: {mode}\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("HADES_HOME", str(home))
+
+    @staticmethod
+    def _committed_transaction(tmp_path, *, operation_key="opk-receipt"):
+        """Drive one real transaction to ``committed`` through the
+        module's real API; returns (session_db, coordinator, tx_id)."""
+        from agent.operation_journal import OperationJournal as _OJ
+
+        sdb = _build_real_session_db(tmp_path)
+        journal = _OJ(sdb)
+        registry = AdapterRegistry()
+        registry.register(_StubAdapter("writer.v1", semantic_kind="reversible"))
+        mission = {
+            "mission_id": "m-receipt",
+            "kind": "mutate",
+            "operations": {
+                "writer": {"adapter_id": "writer.v1", "allowed": True},
+            },
+        }
+        coord = build_coordinator(
+            mission_loader=lambda mid: mission,
+            session_db=sdb,
+            operation_journal=journal,
+            adapter_registry=registry,
+            approval_request=lambda payload: None,
+            review_request=lambda payload: None,
+            operation_metadata_loader=_writer_metadata_loader(),
+        )
+        result = coord.execute(
+            tool_name="writer",
+            args={"path": "x"},
+            handler=lambda a: {"wrote": True},
+            operation_key=operation_key,
+            mission_id="m-receipt",
+        )
+        assert result == {"verified": True, "result": {"wrote": True}}
+        tx_id = f"{operation_key}:tx"
+        tx = sdb.get_effect_transaction(tx_id)
+        assert tx is not None and tx.phase == "committed"
+        return sdb, coord, tx_id
+
+    @staticmethod
+    def _receipt_rows(sdb, tx_id):
+        return sdb._execute_read(
+            lambda conn: [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT receipt_id, source_kind, source_id, status "
+                    "FROM receipts WHERE source_kind = 'transaction' "
+                    "AND source_id = ?",
+                    (tx_id,),
+                )
+            ]
+        )
+
+    @staticmethod
+    def _total_receipts(sdb):
+        return sdb._execute_read(
+            lambda conn: conn.execute(
+                "SELECT COUNT(*) FROM receipts"
+            ).fetchone()[0]
+        )
+
+    def test_capture_mode_issues_one_receipt_and_replay_is_idempotent(
+        self, tmp_path, monkeypatch
+    ):
+        from agent.receipts import RECEIPT_STATUSES
+
+        self._configure_receipts_mode(tmp_path, monkeypatch, "capture")
+        sdb, coord, tx_id = self._committed_transaction(tmp_path)
+
+        rows = self._receipt_rows(sdb, tx_id)
+        assert len(rows) == 1
+        assert self._total_receipts(sdb) == 1
+        receipt_row = rows[0]
+        assert receipt_row["source_kind"] == "transaction"
+        assert receipt_row["source_id"] == tx_id
+        assert receipt_row["status"] in RECEIPT_STATUSES
+
+        # The canonical store resolves the same receipt by source key and
+        # its transaction projection column links back (no state mutation
+        # beyond the existing receipt_id projection).
+        from agent.receipt_models import ReceiptSourceKey
+        from agent.receipt_store import ReceiptStore
+
+        receipt = ReceiptStore(sdb).find_by_source(
+            ReceiptSourceKey("transaction", tx_id)
+        )
+        assert receipt is not None
+        assert receipt.receipt_id == receipt_row["receipt_id"]
+        assert receipt.transaction_id == tx_id
+
+        # Replay through the module's real API: the repeat-key
+        # short-circuit returns the stored result without a second
+        # transition and without a second receipt.
+        replay = coord.execute(
+            tool_name="writer",
+            args={"path": "x"},
+            handler=lambda a: {"wrote": True},
+            operation_key="opk-receipt",
+            mission_id="m-receipt",
+        )
+        assert replay == {"wrote": True}
+        assert self._total_receipts(sdb) == 1
+
+        # Re-running the issuance seam itself is idempotent by source key.
+        from agent.effect_transactions import _issue_transaction_receipt_safely
+
+        _issue_transaction_receipt_safely(sdb, tx_id)
+        rows_after = self._receipt_rows(sdb, tx_id)
+        assert len(rows_after) == 1
+        assert rows_after[0]["receipt_id"] == receipt_row["receipt_id"]
+
+    def test_off_mode_writes_zero_receipt_rows(self, tmp_path, monkeypatch):
+        self._configure_receipts_mode(tmp_path, monkeypatch, "off")
+        sdb, _coord, tx_id = self._committed_transaction(tmp_path)
+        assert self._receipt_rows(sdb, tx_id) == []
+        assert self._total_receipts(sdb) == 0
