@@ -591,6 +591,121 @@ class TransactionStore:
 
         return self._db._execute_write(_transition)
 
+    # ── Compensation attempts ────────────────────────────────────────
+
+    @staticmethod
+    def _compensation_record(row):
+        from agent.effects.models import CompensationAttempt
+
+        return CompensationAttempt(
+            compensation_id=row["compensation_id"],
+            effect_id=row["effect_id"],
+            operation_id=row["operation_id"],
+            fidelity=row["fidelity"],
+            status=row["status"],
+            authority=_decode(row["authority_json"]) or {},
+            before=_decode(row["before_json"]),
+            result=_decode(row["result_json"]),
+            verification=_decode(row["verification_json"]),
+            error=row["error"],
+            created_at_ms=row["created_at_ms"],
+            updated_at_ms=row["updated_at_ms"],
+        )
+
+    def insert_compensation(
+        self,
+        *,
+        compensation_id: str,
+        effect_id: str,
+        operation_id: str,
+        fidelity: str,
+        authority: Mapping[str, Any],
+        before: Optional[Mapping[str, Any]] = None,
+    ):
+        now = self._now_ms()
+
+        def _insert(conn):
+            existing = conn.execute(
+                "SELECT * FROM effect_compensations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if existing is not None:
+                return existing
+            conn.execute(
+                """INSERT INTO effect_compensations (
+                       compensation_id, effect_id, operation_id, fidelity,
+                       status, authority_json, before_json, result_json,
+                       verification_json, error, created_at_ms, updated_at_ms
+                   ) VALUES (?, ?, ?, ?, 'running', ?, ?, NULL, NULL, NULL,
+                             ?, ?)""",
+                (
+                    compensation_id, effect_id, operation_id, fidelity,
+                    canonical_json(dict(authority)),
+                    None if before is None else canonical_json(dict(before)),
+                    now, now,
+                ),
+            )
+            return conn.execute(
+                "SELECT * FROM effect_compensations WHERE compensation_id = ?",
+                (compensation_id,),
+            ).fetchone()
+
+        return self._compensation_record(self._db._execute_write(_insert))
+
+    def finish_compensation(
+        self,
+        compensation_id: str,
+        *,
+        status: str,
+        result: Optional[Mapping[str, Any]] = None,
+        verification: Optional[Mapping[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> bool:
+        if status not in {"compensated", "blocked", "failed"}:
+            raise ValueError(f"invalid compensation status {status!r}")
+
+        def _finish(conn):
+            cursor = conn.execute(
+                """UPDATE effect_compensations
+                       SET status = ?, result_json = ?, verification_json = ?,
+                           error = ?, updated_at_ms = ?
+                     WHERE compensation_id = ? AND status = 'running'""",
+                (
+                    status,
+                    None if result is None else canonical_json(dict(result)),
+                    None if verification is None
+                    else canonical_json(dict(verification)),
+                    error, self._now_ms(), compensation_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
+        return self._db._execute_write(_finish)
+
+    def get_compensation_by_operation_id(self, operation_id: str):
+        def _read(conn):
+            return conn.execute(
+                "SELECT * FROM effect_compensations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+
+        row = self._db._execute_read(_read)
+        return self._compensation_record(row) if row is not None else None
+
+    def list_compensations(self, transaction_id: str) -> tuple:
+        def _read(conn):
+            return conn.execute(
+                """SELECT ec.* FROM effect_compensations AS ec
+                     JOIN transaction_effects AS te
+                       ON te.effect_id = ec.effect_id
+                    WHERE te.transaction_id = ?
+                    ORDER BY ec.created_at_ms, ec.compensation_id""",
+                (transaction_id,),
+            ).fetchall()
+
+        rows = self._db._execute_read(_read)
+        return tuple(self._compensation_record(row) for row in rows)
+
     # ── Approval bindings ────────────────────────────────────────────
 
     def insert_approval(self, binding) -> None:

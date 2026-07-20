@@ -98,14 +98,20 @@ class FileBackedAdapter(EffectAdapter):
             "exists": target.exists(),
             "content": target.read_text(encoding="utf-8") if target.exists() else None,
         }
+        descriptor = self.descriptor
         return PreparedEffect(
             node_id=effect.node_id, adapter_id=effect.adapter_id,
             action=effect.action, action_class="workspace.write",
             args=dict(effect.args),
             resources=(f"file:{effect.args['path']}",),
+            # Semantics mirror the descriptor so subclasses can vary
+            # fidelity/window without re-implementing prepare.
             semantics=EffectSemantics(
-                fidelity="exact", reconciliation="query", idempotency="keyed",
-                irreversible_after="never",
+                fidelity=descriptor.compensation,
+                reconciliation=descriptor.reconciliation,
+                idempotency=descriptor.idempotency,
+                irreversible_after=descriptor.irreversible_after,
+                compensation_window_seconds=descriptor.compensation_window_seconds,
             ),
             before=before,
             expected_after={"content_hash": content_hash(effect.args["content"])},

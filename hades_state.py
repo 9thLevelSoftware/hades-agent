@@ -1299,6 +1299,24 @@ CREATE TABLE IF NOT EXISTS transaction_events (
     UNIQUE (transaction_id, idempotency_key)
 );
 
+CREATE TABLE IF NOT EXISTS effect_compensations (
+    compensation_id TEXT PRIMARY KEY,
+    effect_id TEXT NOT NULL REFERENCES transaction_effects(effect_id),
+    operation_id TEXT NOT NULL UNIQUE REFERENCES agent_operations(operation_id),
+    fidelity TEXT NOT NULL,
+    status TEXT NOT NULL,
+    authority_json TEXT NOT NULL,
+    before_json TEXT,
+    result_json TEXT,
+    verification_json TEXT,
+    error TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_effect_compensations_effect
+    ON effect_compensations(effect_id, created_at_ms);
+
 CREATE INDEX IF NOT EXISTS idx_action_transactions_status
     ON action_transactions(status, updated_at_ms);
 CREATE INDEX IF NOT EXISTS idx_transaction_effects_tx_phase

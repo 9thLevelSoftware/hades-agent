@@ -52,9 +52,17 @@ from agent.effects.context import (
 )
 from agent.effects.coordinator import (
     CommitResult,
+    CompensationOutcome,
     PreviewResult,
     ReconcileResult,
     TransactionCoordinator,
+)
+from agent.effects.eligibility import (
+    CompensationPlan,
+    UndoEligibility,
+    eligibility_for_effect,
+    eligibility_for_transaction,
+    plan_compensation,
 )
 from agent.effects.recovery import (
     project_transaction_status,
@@ -88,6 +96,8 @@ __all__ = [
     "CommitOutcome",
     "CommitRequest",
     "CommitResult",
+    "CompensationOutcome",
+    "CompensationPlan",
     "PreviewResult",
     "ReconcileResult",
     "TransactionCoordinator",
@@ -113,8 +123,12 @@ __all__ = [
     "TransactionSnapshot",
     "TransactionStore",
     "TransactionStoreError",
+    "UndoEligibility",
     "VerificationResult",
     "build_action_context",
+    "eligibility_for_effect",
+    "eligibility_for_transaction",
+    "plan_compensation",
     "canonical_json",
     "consume_bound_approval",
     "content_hash",

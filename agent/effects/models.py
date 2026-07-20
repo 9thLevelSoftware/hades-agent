@@ -212,6 +212,24 @@ class TransactionEvent:
 
 
 @dataclass(frozen=True)
+class CompensationAttempt:
+    """One journaled compensation attempt for a committed effect."""
+
+    compensation_id: str
+    effect_id: str
+    operation_id: str
+    fidelity: str
+    status: str  # running | compensated | blocked | failed
+    authority: Mapping[str, Any]
+    before: Optional[Mapping[str, Any]]
+    result: Optional[Mapping[str, Any]]
+    verification: Optional[Mapping[str, Any]]
+    error: Optional[str]
+    created_at_ms: int
+    updated_at_ms: int
+
+
+@dataclass(frozen=True)
 class TransactionSnapshot:
     """One consistent read of a transaction and its durable history."""
 

@@ -32,6 +32,7 @@ from agent.effects.graph import create_revision as graph_create_revision
 from agent.effects.graph import topological_order
 from agent.effects.models import (
     CommitRequest,
+    CompensationRequest,
     EffectBlocked,
     EffectContext,
     EffectSemantics,
@@ -42,6 +43,7 @@ from agent.autonomy import authorize_effect
 
 __all__ = [
     "CommitResult",
+    "CompensationOutcome",
     "PreviewResult",
     "ReconcileResult",
     "TransactionCoordinator",
@@ -69,6 +71,13 @@ class CommitResult:
     status: str  # committed | ready | blocked | failed | unknown_effect
     committed_nodes: tuple[str, ...] = ()
     blocked_node: Optional[str] = None
+    error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class CompensationOutcome:
+    status: str  # compensated | partially_compensated
+    compensated_nodes: tuple[str, ...] = ()
     error: Optional[str] = None
 
 
@@ -700,6 +709,221 @@ class TransactionCoordinator:
         return ReconcileResult(
             status=project_transaction_status(store, transaction_id),
             counts=counts,
+        )
+
+    # ── Compensation ─────────────────────────────────────────────────
+
+    def compensate(
+        self,
+        transaction_id: str,
+        node_id: str,
+        *,
+        cascade: bool = False,
+        requester: str = "system",
+        channel: str = "cli",
+    ) -> "CompensationOutcome":
+        """Compensate *node_id* (and, with cascade, its committed
+        descendants) in reverse topological order, re-evaluating
+        eligibility immediately before every node. Stops at the first
+        changed/unsafe node and reports ``partially_compensated``; it
+        never continues across an unknown or irreversible boundary."""
+        from agent.effects.eligibility import (
+            eligibility_for_effect,
+            plan_compensation,
+        )
+
+        store = self._store
+        transaction = store.get_transaction(transaction_id)
+        if transaction is None:
+            raise KeyError(f"unknown transaction {transaction_id!r}")
+
+        initial = eligibility_for_effect(
+            store, self._adapters, transaction_id, node_id,
+            cascade=cascade,
+            authority_provider_factory=self._authority_provider_factory,
+        )
+        if initial.code == "already_compensated":
+            return CompensationOutcome(status="compensated")
+        if initial.code == "blocked_live_dependents":
+            raise EffectBlocked(
+                f"committed dependents {list(initial.blockers)} remain for "
+                f"node {node_id!r}; pass cascade to include them"
+            )
+        if not initial.can_execute:
+            raise EffectBlocked(initial.reason)
+
+        plan = plan_compensation(store, transaction_id, node_id, cascade=cascade)
+        compensated: list[str] = []
+        stopped_reason: Optional[str] = None
+        for plan_node in plan.node_ids:
+            eligibility = eligibility_for_effect(
+                store, self._adapters, transaction_id, plan_node,
+                cascade=cascade,
+                authority_provider_factory=self._authority_provider_factory,
+            )
+            if eligibility.code == "already_compensated":
+                continue
+            if not eligibility.can_execute:
+                stopped_reason = eligibility.reason
+                break
+            effect = store.effect_for(
+                transaction_id, plan.revision, plan_node
+            )
+            prepared = prepared_from_json(effect.prepared or {})
+            provider = self._authority_provider_factory()
+            decision = authorize_effect(
+                provider,
+                build_action_context(
+                    prepared,
+                    operation_key=(
+                        f"{transaction_id}:{plan.revision}:{plan_node}"
+                        ":compensate"
+                    ),
+                    transaction_id=transaction_id,
+                ),
+                stage="compensate", consume=True,
+            )
+            if not getattr(decision, "allowed", False):
+                stopped_reason = (
+                    f"authority denied compensation for node {plan_node!r}"
+                )
+                break
+
+            verified_hash = content_hash(dict(effect.verification or {}))
+            digest = hashlib.sha256(
+                f"compensate\0{effect.effect_id}\0{verified_hash}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+            operation_id = f"txcomp-{digest[:40]}"
+            existing = store.get_compensation_by_operation_id(operation_id)
+            if existing is not None and existing.status == "compensated":
+                # Idempotent: the terminal attempt already answered this
+                # exact compensation; never execute it twice.
+                compensated.append(plan_node)
+                continue
+            self._journal.create(
+                operation_id=operation_id, kind="effect_compensation",
+                destination=effect.adapter_id, payload_hash=verified_hash,
+            )
+            record = self._journal.get(operation_id)
+            if record.state in {"pending", "failed"}:
+                self._journal.transition(
+                    operation_id, from_states={record.state},
+                    to_state="running", effect_disposition="none",
+                )
+            elif record.state in {"running", "dispatched", "unknown"}:
+                stopped_reason = (
+                    f"compensation operation {operation_id} is "
+                    f"{record.state}; reconcile before retrying"
+                )
+                break
+            if existing is None:
+                store.insert_compensation(
+                    compensation_id=f"cm-{digest[:40]}",
+                    effect_id=effect.effect_id,
+                    operation_id=operation_id,
+                    fidelity=eligibility.fidelity,
+                    authority={
+                        "verdict": getattr(decision, "verdict", ""),
+                        "code": getattr(decision, "code", ""),
+                    },
+                    before=dict(effect.verification or {}),
+                )
+            store.transition_effect(
+                effect.effect_id, {"committed", "verified"}, "compensating",
+            )
+            adapter = self._adapters.get(effect.adapter_id)
+            context = self._effect_context(
+                transaction_id, plan.revision, plan_node
+            )
+            request = CompensationRequest(
+                effect_id=effect.effect_id,
+                prepared=prepared,
+                verified_result_hash=verified_hash,
+                cascade_plan_hash=plan.plan_hash,
+            )
+            try:
+                result = adapter.compensate(request, context)
+            except Exception as exc:
+                result = None
+                error = f"{type(exc).__name__}: {exc}"
+            else:
+                error = result.error
+            if result is not None and result.status == "compensated":
+                self._journal.transition(
+                    operation_id, from_states={"running"},
+                    to_state="confirmed", effect_disposition="landed",
+                    result=dict(result.evidence),
+                )
+                store.finish_compensation(
+                    f"cm-{digest[:40]}", status="compensated",
+                    result=dict(result.evidence),
+                    verification={"fidelity": result.fidelity},
+                )
+                store.transition_effect(
+                    effect.effect_id, {"compensating"}, "compensated",
+                )
+                store.append_event(
+                    transaction_id, "effect_compensated",
+                    effect_id=effect.effect_id,
+                    payload={"node_id": plan_node, "fidelity": result.fidelity},
+                    idempotency_key=f"effect_compensated:{effect.effect_id}",
+                )
+                compensated.append(plan_node)
+                continue
+            # Blocked or failed: roll the phase back and stop the cascade.
+            self._journal.transition_if_current(
+                operation_id, from_states={"running"}, to_state="failed",
+                effect_disposition="none", error=error,
+            )
+            store.finish_compensation(
+                f"cm-{digest[:40]}",
+                status="blocked" if result is not None else "failed",
+                error=error,
+            )
+            store.transition_effect(
+                effect.effect_id, {"compensating"}, "committed",
+            )
+            stopped_reason = error or f"compensation of {plan_node!r} failed"
+            break
+
+        revision = store.get_revision(transaction_id, plan.revision)
+        effects = {
+            effect.node_id: effect
+            for effect in store.list_effects(transaction_id)
+            if effect.revision == plan.revision
+        }
+        all_compensated = all(
+            node.node_id in effects
+            and effects[node.node_id].phase == "compensated"
+            for node in revision.nodes
+        )
+        if stopped_reason is not None:
+            store.transition_status(
+                transaction_id,
+                {"committed", "compensating", "blocked"},
+                "partially_compensated",
+            )
+            return CompensationOutcome(
+                status="partially_compensated",
+                compensated_nodes=tuple(compensated),
+                error=stopped_reason,
+            )
+        target_status = "compensated" if all_compensated else (
+            "partially_compensated" if compensated else transaction.status
+        )
+        if compensated:
+            store.transition_status(
+                transaction_id,
+                {"committed", "compensating", "blocked",
+                 "partially_compensated"},
+                target_status,
+            )
+        return CompensationOutcome(
+            status="compensated" if compensated or not plan.node_ids
+            else "partially_compensated",
+            compensated_nodes=tuple(compensated),
         )
 
     # ── In-transaction tool calls ────────────────────────────────────
