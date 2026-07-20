@@ -279,6 +279,9 @@ class PreparedEffect:
     args: Mapping[str, Any]
     resources: tuple[str, ...]
     semantics: EffectSemantics
+    # Canonical dotted autonomy action class (e.g. "workspace.write").
+    # "unknown.mutation" is the conservative fail-closed default.
+    action_class: str = "unknown.mutation"
     before: Mapping[str, Any] = field(default_factory=dict)
     expected_after: Optional[Mapping[str, Any]] = None
     prepared_token: Mapping[str, Any] = field(default_factory=dict)

@@ -546,6 +546,81 @@ class TransactionStore:
 
         return self._db._execute_write(_transition)
 
+    # ── Approval bindings ────────────────────────────────────────────
+
+    def insert_approval(self, binding) -> None:
+        """Persist one immutable approval binding row."""
+
+        def _insert(conn):
+            conn.execute(
+                """INSERT INTO transaction_approvals (
+                       approval_id, transaction_id, revision, node_id,
+                       operation, args_hash, preview_hash, resources_json,
+                       authority_version, requester, channel, decision,
+                       expires_at_ms, consumed_at_ms, created_at_ms
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    binding.approval_id, binding.transaction_id,
+                    binding.revision, binding.node_id, binding.operation,
+                    binding.args_hash, binding.preview_hash,
+                    canonical_json(sorted(binding.resources)),
+                    binding.authority_version, binding.requester,
+                    binding.channel, binding.decision, binding.expires_at_ms,
+                    binding.consumed_at_ms, binding.created_at_ms,
+                ),
+            )
+
+        self._db._execute_write(_insert)
+
+    def find_approvals(
+        self, transaction_id: str, revision: int, node_id: str
+    ) -> tuple:
+        from agent.effects.authority import ApprovalBinding
+
+        def _read(conn):
+            return conn.execute(
+                """SELECT * FROM transaction_approvals
+                    WHERE transaction_id = ? AND revision = ? AND node_id = ?
+                    ORDER BY created_at_ms, approval_id""",
+                (transaction_id, revision, node_id),
+            ).fetchall()
+
+        rows = self._db._execute_read(_read)
+        return tuple(
+            ApprovalBinding(
+                approval_id=row["approval_id"],
+                transaction_id=row["transaction_id"],
+                revision=row["revision"],
+                node_id=row["node_id"],
+                operation=row["operation"],
+                args_hash=row["args_hash"],
+                preview_hash=row["preview_hash"],
+                resources=tuple(_decode(row["resources_json"]) or ()),
+                authority_version=row["authority_version"],
+                requester=row["requester"],
+                channel=row["channel"],
+                decision=row["decision"],
+                expires_at_ms=row["expires_at_ms"],
+                consumed_at_ms=row["consumed_at_ms"],
+                created_at_ms=row["created_at_ms"],
+            )
+            for row in rows
+        )
+
+    def consume_approval(self, approval_id: str, *, now_ms: int) -> bool:
+        """CAS-mark one approval consumed; False when already consumed."""
+
+        def _consume(conn):
+            cursor = conn.execute(
+                """UPDATE transaction_approvals
+                       SET consumed_at_ms = ?
+                     WHERE approval_id = ? AND consumed_at_ms IS NULL""",
+                (now_ms, approval_id),
+            )
+            return cursor.rowcount == 1
+
+        return self._db._execute_write(_consume)
+
     # ── Events ───────────────────────────────────────────────────────
 
     def _insert_event_row(

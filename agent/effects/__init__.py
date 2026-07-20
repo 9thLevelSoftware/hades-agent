@@ -35,6 +35,14 @@ from agent.effects.models import (
     canonical_json,
     content_hash,
 )
+from agent.effects.authority import (
+    ApprovalBinding,
+    ApprovalConsumption,
+    ApprovalIdentity,
+    build_action_context,
+    consume_bound_approval,
+    request_bound_approval,
+)
 from agent.effects.registry import (
     AdapterContractError,
     AdapterDescriptor,
@@ -56,6 +64,9 @@ __all__ = [
     "ActionTransaction",
     "AdapterContractError",
     "AdapterDescriptor",
+    "ApprovalBinding",
+    "ApprovalConsumption",
+    "ApprovalIdentity",
     "CommitOutcome",
     "CommitRequest",
     "CompensationRequest",
@@ -79,9 +90,12 @@ __all__ = [
     "TransactionStore",
     "TransactionStoreError",
     "VerificationResult",
+    "build_action_context",
     "canonical_json",
+    "consume_bound_approval",
     "content_hash",
     "default_effect_adapter_registry",
     "get_effect_adapter",
     "register_effect_adapter",
+    "request_bound_approval",
 ]

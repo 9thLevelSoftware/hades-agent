@@ -1268,6 +1268,26 @@ CREATE TABLE IF NOT EXISTS transaction_effects (
     UNIQUE (transaction_id, revision, node_id)
 );
 
+CREATE TABLE IF NOT EXISTS transaction_approvals (
+    approval_id TEXT PRIMARY KEY,
+    transaction_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    node_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    args_hash TEXT NOT NULL,
+    preview_hash TEXT NOT NULL,
+    resources_json TEXT NOT NULL,
+    authority_version INTEGER NOT NULL,
+    requester TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    consumed_at_ms INTEGER,
+    created_at_ms INTEGER NOT NULL,
+    UNIQUE (transaction_id, revision, node_id, args_hash, preview_hash,
+            authority_version, requester, channel)
+);
+
 CREATE TABLE IF NOT EXISTS transaction_events (
     event_id TEXT PRIMARY KEY,
     transaction_id TEXT NOT NULL REFERENCES action_transactions(transaction_id),
