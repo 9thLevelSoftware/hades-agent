@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import sqlite3
 import time
@@ -10,9 +11,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent.operation_journal import OperationJournal
+from gateway.mission_outbox import (
+    MissionOutboxStore,
+    _authority_allows_destination,
+    normalize_platform_token,
+)
+from hades_constants import get_hades_home
+from hades_state import SessionDB, _redact_durable_value
 from hades_cli import kanban_db as kb
+from hades_cli import missions_db as mdb
 from hades_cli import workflows_db as wfdb
-from hades_cli.workflows_engine import EngineResult, run_in_memory_until_waiting
+from hades_cli.workflows_engine import EngineResult, render_template, run_in_memory_until_waiting
 from hades_cli.workflows_prompts import render_agent_prompt, render_prompt_text
 from hades_cli.workflows_spec import RESULT_CONTRACT_PRIMITIVES, WorkflowSpec
 
@@ -28,13 +38,85 @@ class TickReport:
 
 
 class _AgentTaskMaterializationError(RuntimeError):
+    phase = "agent_task_materialization"
+
     def __init__(self, node_id: str, message: str):
         super().__init__(message)
         self.node_id = node_id
 
 
+class _SendMessageMaterializationError(RuntimeError):
+    phase = "send_message_materialization"
+
+    def __init__(self, node_id: str, message: str):
+        super().__init__(message)
+        self.node_id = node_id
+
+
+# Terminal outbox state is only authoritative when its linked durable effect
+# transaction reached the corresponding terminal phase.  In particular,
+# ``delivered`` is never inferred from a merely prepared, in-flight, failed,
+# cancelled, or unknown effect.
+_TERMINAL_OUTBOX_EFFECT_PHASES: dict[str, frozenset[str]] = {
+    "delivered": frozenset({"committed"}),
+    "failed": frozenset({"failed"}),
+    "cancelled": frozenset({"cancelled"}),
+    "unknown": frozenset({"unknown_effect"}),
+}
+
+
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _max_outbox_delay_seconds() -> int:
+    from hades_cli.config import load_config
+
+    value = load_config().get("missions", {}).get("outbox", {}).get("max_delay_seconds")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError("missions.outbox.max_delay_seconds must be a positive integer")
+    return value
+
+
+def _active_profile_name() -> str:
+    home = get_hades_home().expanduser().resolve(strict=False)
+    if home.parent.name == "profiles":
+        return home.name
+    return "default"
+
+
+def _profile_path_error(
+    *,
+    workflow_db_path: Path | None,
+    state_db_path: Path | None,
+    node_id: str,
+) -> str | None:
+    """Reject explicit databases that are outside the active profile home."""
+    active_home = get_hades_home().expanduser().resolve(strict=False)
+    configured_profile = os.environ.get("HERMES_PROFILE", "").strip()
+    active_profile = _active_profile_name()
+    if configured_profile and configured_profile != active_profile:
+        return (
+            f"send_message node {node_id!r} rejected: HERMES_PROFILE "
+            f"{configured_profile!r} conflicts with active profile home {active_home}"
+        )
+    expected_workflow = (active_home / "workflows.db").resolve(strict=False)
+    expected_state = (active_home / "state.db").resolve(strict=False)
+    if workflow_db_path is not None:
+        actual = Path(workflow_db_path).expanduser().resolve(strict=False)
+        if actual != expected_workflow:
+            return (
+                f"send_message node {node_id!r} rejected: workflow database "
+                f"{actual} is outside active profile home {active_home}"
+            )
+    if state_db_path is not None:
+        actual = Path(state_db_path).expanduser().resolve(strict=False)
+        if actual != expected_state:
+            return (
+                f"send_message node {node_id!r} rejected: state database "
+                f"{actual} is outside active profile home {active_home}"
+            )
+    return None
 
 
 def _claim_next(
@@ -148,6 +230,481 @@ def _fire_due_schedules(conn: sqlite3.Connection, *, now: int, limit: int) -> in
             )
             started += 1
     return started
+
+
+def _terminal_projection_error(
+    row: sqlite3.Row,
+    outbox: SessionDB.OutboxRecord,
+    *,
+    reason: str,
+    expected_mission_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "message": "terminal outbox identity mismatch; reconciliation required",
+        "node": row["node_id"],
+        "phase": "outbox_terminal",
+        "outbox_id": outbox.outbox_id,
+        "outbox_status": outbox.status,
+        "mission_id": outbox.mission_id,
+        "expected_mission_id": expected_mission_id,
+        "reason": "unknown_effect",
+        "identity_mismatch": reason,
+        "reconciliation_required": True,
+    }
+
+
+def _projected_outbox_result(outbox: SessionDB.OutboxRecord) -> Any:
+    """Return terminal metadata without collapsing legitimate falsey values."""
+    return _redact_durable_value({} if outbox.result is None else outbox.result)
+
+
+def _mission_outbox_identity_error(
+    state_db: SessionDB,
+    outbox: SessionDB.OutboxRecord,
+    *,
+    expected_mission: mdb.MissionRecord | None,
+) -> str | None:
+    """Validate the complete durable identity graph before terminal projection."""
+    expected_mission_id = expected_mission.mission_id if expected_mission is not None else None
+    if outbox.mission_id != expected_mission_id:
+        return (
+            f"outbox mission {outbox.mission_id!r} does not match "
+            f"execution mission {expected_mission_id!r}"
+        )
+    if outbox.mission_id is None:
+        return None
+    if outbox.transaction_id != f"{outbox.outbox_id}:transaction":
+        return "outbox transaction identity does not match derived mission transaction"
+    platform = normalize_platform_token(outbox.platform)
+    if platform is None or platform != outbox.platform:
+        return "outbox platform is not a canonical safe token"
+    expected_operation_id = f"{outbox.outbox_id}:operation"
+    operation = OperationJournal(state_db).get(expected_operation_id)
+    if operation is None:
+        return "linked mission operation journal row is missing"
+    if (
+        operation.operation_id != expected_operation_id
+        or operation.kind != "mission_outbox"
+        or operation.destination != f"outbox:{platform}"
+        or operation.payload_hash != outbox.content_hash
+    ):
+        return "linked mission operation journal identity does not match outbox semantics"
+    if not outbox.transaction_id:
+        return "linked mission effect transaction id is missing"
+    effect = state_db.get_effect_transaction(outbox.transaction_id)
+    if effect is None:
+        return "linked mission effect transaction is missing"
+    semantics = effect.semantics
+    if (
+        not isinstance(semantics, dict)
+        or semantics.get("kind") != "outbound_delivery"
+        or not isinstance(semantics.get("idempotent"), bool)
+        or not isinstance(semantics.get("reconcilable"), bool)
+    ):
+        return "linked mission effect transaction identity does not match outbox semantics"
+    expected_semantics = {
+        "kind": "outbound_delivery",
+        "idempotent": semantics["idempotent"],
+        "reconcilable": semantics["reconcilable"],
+    }
+    expected_prepared = {
+        "delivery_kind": "outbox",
+        "platform": platform,
+        "target": outbox.target,
+        "content_hash": outbox.content_hash,
+        "execution_id": outbox.execution_id,
+        "node_id": outbox.node_id,
+    }
+    if (
+        effect.transaction_id != outbox.transaction_id
+        or effect.operation_id != expected_operation_id
+        or effect.mission_id != outbox.mission_id
+        or effect.execution_id != outbox.execution_id
+        or effect.step_id != outbox.node_id
+        or effect.adapter_id != f"outbox.{platform}"
+        or effect.semantics != expected_semantics
+        or effect.depends_on != []
+        or effect.prepared != expected_prepared
+        or effect.preview != outbox.preview
+    ):
+        return "linked mission effect transaction identity does not match outbox semantics"
+    required_phases = _TERMINAL_OUTBOX_EFFECT_PHASES.get(outbox.status)
+    if required_phases is None or effect.phase not in required_phases:
+        expected = sorted(required_phases or ())
+        return (
+            f"effect phase {effect.phase!r} is incompatible with terminal outbox "
+            f"status {outbox.status!r}; expected one of {expected!r}"
+        )
+    return None
+
+
+def _block_terminal_projection(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    error: dict[str, Any],
+    now: int,
+) -> None:
+    updated = conn.execute(
+        """
+        UPDATE workflow_node_runs
+           SET status = 'blocked', error = ?, completed_at = ?, wait_until = NULL
+         WHERE id = ? AND status = 'waiting'
+        """,
+        (_json_dumps(error), now, row["id"]),
+    ).rowcount
+    if not updated:
+        return
+    try:
+        context = json.loads(row["context_json"] or "{}")
+    except (TypeError, ValueError):
+        context = {"node": {}}
+    conn.execute(
+        """
+        UPDATE workflow_executions
+           SET status = 'blocked', context_json = ?,
+               claim_lock = NULL, claim_expires = NULL, updated_at = ?
+         WHERE execution_id = ? AND status IN ('waiting', 'queued')
+        """,
+        (
+            _json_dumps(_context_with_error(context, error)),
+            now,
+            row["execution_id"],
+        ),
+    )
+    _append_event(conn, row["execution_id"], "execution_blocked", error, now)
+
+
+def _record_reconciliation_review(
+    conn: sqlite3.Connection,
+    mission: mdb.MissionRecord | None,
+    *,
+    outbox: SessionDB.OutboxRecord,
+    detail: dict[str, Any],
+    now: int,
+    suffix: str,
+) -> None:
+    if mission is None or mission.profile != _active_profile_name():
+        # A profile-mismatched mission is foreign state. Keep the diagnostic in
+        # the local workflow projection only; never insert a review row into a
+        # mission aggregate owned by another profile.
+        return
+    try:
+        mdb.upsert_review_item(
+            conn,
+            mission.mission_id,
+            review_id=f"workflow-outbox:{outbox.outbox_id}:{suffix}",
+            kind="unknown_effect",
+            transaction_id=outbox.transaction_id,
+            detail=detail,
+            status="pending",
+            now=now,
+        )
+    except (KeyError, mdb.MissionStateError, sqlite3.Error):
+        # A malformed mission aggregate must not stop unrelated outbox rows
+        # from being projected. The workflow diagnostic remains durable.
+        return
+
+
+def _reconcile_unknown_mission(
+    conn: sqlite3.Connection,
+    mission: mdb.MissionRecord | None,
+    *,
+    outbox: SessionDB.OutboxRecord,
+    error: dict[str, Any],
+    now: int,
+) -> None:
+    if mission is None or mission.profile != _active_profile_name():
+        return
+    # Terminal mission state is authoritative. In particular, a cancelled or
+    # already-verdicted mission must not be rewritten merely because delivery
+    # became uncertain later.
+    if mission.status not in {"succeeded", "failed", "cancelled"} and mission.verdict is None:
+        try:
+            mdb.set_mission_status(conn, mission.mission_id, "blocked", now=now)
+        except mdb.MissionStateError:
+            pass
+        try:
+            mdb.set_mission_verdict(conn, mission.mission_id, "unknown_effect", now=now)
+        except mdb.MissionStateError:
+            pass
+    _record_reconciliation_review(
+        conn,
+        mission,
+        outbox=outbox,
+        detail={
+            "outbox_id": outbox.outbox_id,
+            "execution_id": outbox.execution_id,
+            "node_id": outbox.node_id,
+            "status": outbox.status,
+            "result": _projected_outbox_result(outbox),
+            "error": error,
+        },
+        now=now,
+        suffix="unknown_effect",
+    )
+
+
+def _resume_terminal_outbox_nodes(
+    conn: sqlite3.Connection,
+    *,
+    now: int,
+    state_db_path: Path | None,
+    workflow_db_path: Path | None = None,
+) -> bool:
+    """Project durable outbox terminal states into workflow node runs.
+
+    Delivered rows complete a wait directly. Failed/cancelled rows become a
+    workflow failure input so the node's retry/catch policy remains in charge.
+    Unknown mission-linked rows are a reconciliation boundary: they block the
+    mission and execution and create one deterministic review item.
+    """
+    waiting_rows = conn.execute(
+        """
+        SELECT nr.id, nr.execution_id, nr.node_id, nr.outbox_id,
+               ex.workflow_id, ex.version, ex.context_json
+          FROM workflow_node_runs nr
+          JOIN workflow_executions ex ON ex.execution_id = nr.execution_id
+         WHERE nr.status = 'waiting'
+           AND nr.outbox_id IS NOT NULL
+           AND ex.status = 'waiting'
+         ORDER BY nr.id
+        """
+    ).fetchall()
+    if not waiting_rows:
+        return False
+
+    path_error = _profile_path_error(
+        workflow_db_path=workflow_db_path,
+        state_db_path=state_db_path,
+        node_id=waiting_rows[0]["node_id"],
+    )
+    if path_error is not None:
+        # A terminal row from another profile must never be allowed to mutate
+        # this workflow database. The caller stops the tick before any other
+        # recovery or execution writes occur.
+        return True
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        terminal_outboxes = {
+            row["outbox_id"]: outbox
+            for row in waiting_rows
+            if (outbox := store.get_by_id(row["outbox_id"])) is not None
+            and outbox.status in {"delivered", "failed", "cancelled", "unknown"}
+        }
+    finally:
+        state_db.close()
+    if not terminal_outboxes:
+        return False
+
+    projection_errors: dict[int, dict[str, Any]] = {}
+    expected_missions: dict[int, mdb.MissionRecord | None] = {}
+    identity_db = SessionDB(db_path=state_db_path)
+    try:
+        for row in waiting_rows:
+            outbox = terminal_outboxes.get(row["outbox_id"])
+            if outbox is None:
+                continue
+            expected_mission: mdb.MissionRecord | None = None
+            try:
+                expected_mission = mdb.mission_for_execution(conn, row["execution_id"])
+            except (KeyError, mdb.MissionStateError) as exc:
+                projection_errors[row["id"]] = _terminal_projection_error(
+                    row,
+                    outbox,
+                    reason=f"expected mission resolution failed: {exc}",
+                )
+                continue
+            expected_missions[row["id"]] = expected_mission
+            if (
+                outbox.execution_id != row["execution_id"]
+                or outbox.node_id != row["node_id"]
+            ):
+                projection_errors[row["id"]] = _terminal_projection_error(
+                    row,
+                    outbox,
+                    reason=(
+                        "outbox execution/node identity does not match waiting node "
+                        f"({outbox.execution_id!r}, {outbox.node_id!r})"
+                    ),
+                    expected_mission_id=(
+                        expected_mission.mission_id if expected_mission is not None else None
+                    ),
+                )
+                continue
+            if expected_mission is not None and expected_mission.profile != _active_profile_name():
+                projection_errors[row["id"]] = _terminal_projection_error(
+                    row,
+                    outbox,
+                    reason=(
+                        f"expected mission profile {expected_mission.profile!r} does not "
+                        f"match active profile {_active_profile_name()!r}"
+                    ),
+                    expected_mission_id=expected_mission.mission_id,
+                )
+                continue
+            identity_error = _mission_outbox_identity_error(
+                identity_db,
+                outbox,
+                expected_mission=expected_mission,
+            )
+            if identity_error is not None:
+                projection_errors[row["id"]] = _terminal_projection_error(
+                    row,
+                    outbox,
+                    reason=identity_error,
+                    expected_mission_id=(
+                        expected_mission.mission_id if expected_mission is not None else None
+                    ),
+                )
+    finally:
+        identity_db.close()
+
+    with wfdb.write_txn(conn):
+        delivered_executions: set[str] = set()
+        for row in waiting_rows:
+            outbox = terminal_outboxes.get(row["outbox_id"])
+            if outbox is None:
+                continue
+            status = outbox.status
+            projection_error = projection_errors.get(row["id"])
+            if projection_error is not None:
+                expected_mission = expected_missions.get(row["id"])
+                _record_reconciliation_review(
+                    conn,
+                    expected_mission,
+                    outbox=outbox,
+                    detail={
+                        "outbox_id": outbox.outbox_id,
+                        "execution_id": row["execution_id"],
+                        "node_id": row["node_id"],
+                        "status": status,
+                        "result": _projected_outbox_result(outbox),
+                        "error": projection_error,
+                    },
+                    now=now,
+                    suffix="identity_mismatch",
+                )
+                _block_terminal_projection(
+                    conn, row, error=projection_error, now=now
+                )
+                continue
+            if status == "delivered":
+                output = {
+                    "outbox_id": outbox.outbox_id,
+                    "outbox_status": status,
+                    "result": _projected_outbox_result(outbox),
+                    "status": status,
+                }
+                updated = conn.execute(
+                    """
+                    UPDATE workflow_node_runs
+                       SET status = 'succeeded', output_json = ?, completed_at = ?,
+                           wait_until = NULL
+                     WHERE id = ? AND status = 'waiting'
+                    """,
+                    (_json_dumps(output), now, row["id"]),
+                ).rowcount
+                if updated:
+                    delivered_executions.add(row["execution_id"])
+                continue
+
+            if status == "unknown" and outbox.mission_id is not None:
+                mission = expected_missions.get(row["id"])
+                error = {
+                    "message": "delivery outcome is unknown; mission blocked for reconciliation",
+                    "node": row["node_id"],
+                    "phase": "outbox_terminal",
+                    "outbox_id": outbox.outbox_id,
+                    "outbox_status": status,
+                    "mission_id": outbox.mission_id,
+                    "reason": "unknown_effect",
+                    "reconciliation_required": True,
+                }
+                _reconcile_unknown_mission(
+                    conn,
+                    mission,
+                    outbox=outbox,
+                    error=error,
+                    now=now,
+                )
+                _block_terminal_projection(conn, row, error=error, now=now)
+                continue
+
+            if status == "unknown":
+                error = {
+                    "message": "delivery outcome is unknown for ordinary workflow; explicit reconciliation required",
+                    "node": row["node_id"],
+                    "phase": "outbox_terminal",
+                    "outbox_id": outbox.outbox_id,
+                    "outbox_status": status,
+                }
+            else:
+                error = {
+                    "message": f"delivery {status}",
+                    "node": row["node_id"],
+                    "phase": "outbox_terminal",
+                    "outbox_id": outbox.outbox_id,
+                    "outbox_status": status,
+                    "result": _projected_outbox_result(outbox),
+                }
+            spec = wfdb.get_definition(conn, row["workflow_id"], row["version"])
+            node = spec.nodes.get(row["node_id"])
+            if node is not None and (
+                node.catch or (status != "unknown" and node.retry is not None)
+            ):
+                context = json.loads(row["context_json"])
+                context["_terminal_outbox_error"] = error
+                conn.execute(
+                    """
+                    UPDATE workflow_node_runs
+                       SET status = 'queued', outbox_id = NULL, wait_until = ?
+                     WHERE id = ? AND status = 'waiting'
+                    """,
+                    (now, row["id"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE workflow_executions
+                       SET status = 'queued', context_json = ?,
+                           claim_lock = NULL, claim_expires = NULL, updated_at = ?
+                     WHERE execution_id = ? AND status = 'waiting'
+                    """,
+                    (_json_dumps(context), now, row["execution_id"]),
+                )
+            else:
+                updated = conn.execute(
+                    """
+                    UPDATE workflow_node_runs
+                       SET status = 'failed', error = ?, completed_at = ?, wait_until = NULL
+                     WHERE id = ? AND status = 'waiting'
+                    """,
+                    (_json_dumps(error), now, row["id"]),
+                ).rowcount
+                if updated:
+                    conn.execute(
+                        """
+                        UPDATE workflow_executions
+                           SET status = 'failed', context_json = ?,
+                               claim_lock = NULL, claim_expires = NULL, updated_at = ?
+                         WHERE execution_id = ? AND status IN ('waiting', 'queued')
+                        """,
+                        (_json_dumps(_context_with_error(json.loads(row["context_json"]), error)), now, row["execution_id"]),
+                    )
+                    _append_event(conn, row["execution_id"], "execution_failed", {"error": error}, now)
+        for execution_id in delivered_executions:
+            conn.execute(
+                """
+                UPDATE workflow_executions
+                   SET status = 'queued', claim_lock = NULL,
+                       claim_expires = NULL, updated_at = ?
+                 WHERE execution_id = ? AND status = 'waiting'
+                """,
+                (now, execution_id),
+            )
+    return False
 
 
 def _resume_due_waits(conn: sqlite3.Connection, *, now: int) -> None:
@@ -510,7 +1067,7 @@ def _completed_wait_nodes(conn: sqlite3.Connection, execution_id: str) -> set[st
             SELECT node_id FROM workflow_node_runs
              WHERE execution_id = ?
                AND status = 'succeeded'
-               AND wait_until IS NOT NULL
+               AND (wait_until IS NOT NULL OR outbox_id IS NOT NULL)
             """,
             (execution_id,),
         )
@@ -536,6 +1093,153 @@ def _completed_node_outputs(conn: sqlite3.Connection, execution_id: str) -> dict
     return outputs
 
 
+def _materialize_send_message(
+    conn: sqlite3.Connection,
+    *,
+    execution_id: str,
+    node_id: str,
+    node: Any,
+    context: dict[str, Any],
+    now: int,
+    state_db_path: Path | None,
+    workflow_db_path: Path | None = None,
+    requeue_cancelled: bool = False,
+    requeue_terminal: bool = False,
+) -> str:
+    try:
+        platform = render_template(node.platform, context)
+        target = render_template(node.target, context)
+        content = render_template(node.message, context)
+    except Exception as exc:
+        raise _SendMessageMaterializationError(node_id, f"template render failed: {exc}") from exc
+
+    platform = normalize_platform_token(platform)
+    if platform is None:
+        raise _SendMessageMaterializationError(
+            node_id, "rendered platform must be a safe non-blank token"
+        )
+    if not isinstance(target, str) or not target.strip():
+        raise _SendMessageMaterializationError(node_id, "rendered target must be a non-blank string")
+    target = target.strip()
+    if isinstance(content, str):
+        if not content.strip():
+            raise _SendMessageMaterializationError(node_id, "rendered message must be non-blank")
+    elif not isinstance(content, dict) or not content:
+        raise _SendMessageMaterializationError(
+            node_id, "rendered message must be a non-empty string or mapping"
+        )
+
+    try:
+        max_delay_seconds = _max_outbox_delay_seconds()
+    except ValueError as exc:
+        raise _SendMessageMaterializationError(node_id, str(exc)) from exc
+    if node.not_before_seconds > max_delay_seconds:
+        raise _SendMessageMaterializationError(
+            node_id,
+            "not_before_seconds exceeds configured maximum "
+            f"of {max_delay_seconds} seconds",
+        )
+
+    try:
+        mission = mdb.mission_for_execution(conn, execution_id)
+    except mdb.MissionStateError as exc:
+        raise _SendMessageMaterializationError(node_id, f"mission lookup failed: {exc}") from exc
+    if mission is not None:
+        path_error = _profile_path_error(
+            workflow_db_path=workflow_db_path,
+            state_db_path=state_db_path,
+            node_id=node_id,
+        )
+        if path_error is not None:
+            raise _SendMessageMaterializationError(node_id, path_error)
+        if mission.profile != _active_profile_name():
+            raise _SendMessageMaterializationError(
+                node_id,
+                f"mission profile {mission.profile!r} does not match active profile "
+                f"{_active_profile_name()!r}",
+            )
+    if mission is not None and mission.status != "running":
+        raise _SendMessageMaterializationError(
+            node_id, f"mission status {mission.status!r} does not permit materialization"
+        )
+    if mission is not None and mission.verdict is not None:
+        raise _SendMessageMaterializationError(
+            node_id, "mission verdict does not permit materialization"
+        )
+    if mission is not None:
+        authority = mission.authority
+        if authority.get("revoked", False) is not False or authority.get("valid", True) is not True:
+            raise _SendMessageMaterializationError(
+                node_id, "mission authority is revoked or invalid"
+            )
+        expires_at = authority.get("expires_at")
+        if not isinstance(expires_at, int) or isinstance(expires_at, bool):
+            raise _SendMessageMaterializationError(
+                node_id, "mission authority requires an integer expires_at"
+            )
+        if now >= expires_at:
+            raise _SendMessageMaterializationError(node_id, "mission authority is expired")
+        allowed_effects = authority.get("allowed_effects")
+        if not isinstance(allowed_effects, list) or "delayed_message" not in allowed_effects:
+            raise _SendMessageMaterializationError(
+                node_id, "mission authority does not allow delayed_message"
+            )
+        if not _authority_allows_destination(
+            authority, platform=platform, target=target
+        ):
+            raise _SendMessageMaterializationError(
+                node_id, f"message target {target!r} is not authorized for this mission"
+            )
+
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        materialize = (
+            store.requeue_terminal
+            if requeue_terminal or requeue_cancelled
+            else store.materialize
+        )
+        outbox = materialize(
+            execution_id=execution_id,
+            node_id=node_id,
+            mission_id=mission.mission_id if mission is not None else None,
+            platform=platform,
+            target=target,
+            content=content,
+            not_before=now + node.not_before_seconds,
+        )
+    except Exception as exc:
+        raise _SendMessageMaterializationError(node_id, str(exc)) from exc
+    finally:
+        state_db.close()
+    return outbox.outbox_id
+
+
+def _cancel_unclaimed_outboxes(
+    state_db_path: Path | None,
+    outbox_ids: set[str],
+) -> None:
+    """Compensate outboxes materialized before workflow persistence completed.
+
+    Unclaimed rows are cancelled so stale payloads cannot be delivered. A row
+    that has already been claimed is uncertain and is quarantined as unknown;
+    cancelling it would hide a possible external delivery.
+    """
+    if not outbox_ids:
+        return
+    state_db = SessionDB(db_path=state_db_path)
+    try:
+        store = MissionOutboxStore(state_db)
+        for outbox_id in outbox_ids:
+            outcome = store.compensate(outbox_id)
+            if outcome not in {"cancelled", "unknown", "terminal"}:
+                raise RuntimeError(
+                    f"outbox compensation returned unexpected outcome {outcome!r}"
+                )
+    finally:
+        state_db.close()
+
+
 def _persist_waiting_nodes(
     conn: sqlite3.Connection,
     *,
@@ -543,49 +1247,115 @@ def _persist_waiting_nodes(
     result: EngineResult,
     spec: WorkflowSpec | None,
     now: int,
+    state_db_path: Path | None,
+    workflow_db_path: Path | None = None,
+    materialized_outbox_ids: set[str] | None = None,
 ) -> None:
     if result.status != "waiting":
         return
-    for node_id in result.waiting_nodes:
-        node = spec.nodes.get(node_id) if spec is not None else None
-        if node is not None and node.type == "wait":
-            wait_until = now + node.seconds
-        else:
-            wait_until = None
-        kanban_task_id = None
-        kanban_board = None
-        if spec is not None and node is not None and node.type == "agent_task":
-            try:
-                kanban_task_id, kanban_board = _create_or_get_agent_task(
+    attempted_send_nodes: set[str] = set()
+    attempted_outbox_ids: set[str] = set()
+    current_node_id: str | None = None
+    try:
+        for node_id in result.waiting_nodes:
+            current_node_id = node_id
+            node = spec.nodes.get(node_id) if spec is not None else None
+            if node is not None and node.type == "wait":
+                wait_until = now + node.seconds
+            else:
+                wait_until = None
+            kanban_task_id = None
+            kanban_board = None
+            exists = conn.execute(
+                """
+                SELECT id, kanban_task_id, kanban_board, outbox_id FROM workflow_node_runs
+                 WHERE execution_id = ? AND node_id = ? AND status = 'waiting'
+                """,
+                (execution_id, node_id),
+            ).fetchone()
+            outbox_id = exists["outbox_id"] if exists is not None else None
+            if outbox_id:
+                attempted_outbox_ids.add(outbox_id)
+                if materialized_outbox_ids is not None:
+                    materialized_outbox_ids.add(outbox_id)
+            if spec is not None and node is not None and node.type == "agent_task":
+                try:
+                    kanban_task_id, kanban_board = _create_or_get_agent_task(
+                        execution_id=execution_id,
+                        spec=spec,
+                        node_id=node_id,
+                        node=node,
+                        context=result.context,
+                    )
+                except Exception as exc:
+                    raise _AgentTaskMaterializationError(node_id, str(exc)) from exc
+            elif node is not None and node.type == "send_message" and not outbox_id:
+                attempted_send_nodes.add(node_id)
+                state_db = SessionDB(db_path=state_db_path)
+                try:
+                    preexisting = state_db.get_outbox_by_identity(execution_id, node_id)
+                finally:
+                    state_db.close()
+                requeue_terminal = preexisting is not None and preexisting.status in {
+                    "cancelled",
+                    "failed",
+                }
+                outbox_id = _materialize_send_message(
+                    conn,
                     execution_id=execution_id,
-                    spec=spec,
                     node_id=node_id,
                     node=node,
                     context=result.context,
+                    now=now,
+                    state_db_path=state_db_path,
+                    workflow_db_path=workflow_db_path,
+                    requeue_terminal=requeue_terminal,
                 )
-            except Exception as exc:
-                raise _AgentTaskMaterializationError(node_id, str(exc)) from exc
-        exists = conn.execute(
-            """
-            SELECT id, kanban_task_id, kanban_board FROM workflow_node_runs
-             WHERE execution_id = ? AND node_id = ? AND status = 'waiting'
-            """,
-            (execution_id, node_id),
-        ).fetchone()
-        if exists is None:
-            conn.execute(
-                """
-                INSERT INTO workflow_node_runs (
-                    execution_id, node_id, status, started_at, wait_until, kanban_task_id, kanban_board
-                ) VALUES (?, ?, 'waiting', ?, ?, ?, ?)
-                """,
-                (execution_id, node_id, now, wait_until, kanban_task_id, kanban_board),
-            )
-        elif kanban_task_id and (not exists["kanban_task_id"] or not exists["kanban_board"]):
-            conn.execute(
-                "UPDATE workflow_node_runs SET kanban_task_id = ?, kanban_board = ? WHERE id = ?",
-                (kanban_task_id, kanban_board, exists["id"]),
-            )
+                attempted_outbox_ids.add(outbox_id)
+                if materialized_outbox_ids is not None:
+                    materialized_outbox_ids.add(outbox_id)
+            if exists is None:
+                conn.execute(
+                    """
+                    INSERT INTO workflow_node_runs (
+                        execution_id, node_id, status, started_at, wait_until,
+                        kanban_task_id, kanban_board, outbox_id
+                    ) VALUES (?, ?, 'waiting', ?, ?, ?, ?, ?)
+                    """,
+                    (execution_id, node_id, now, wait_until, kanban_task_id, kanban_board, outbox_id),
+                )
+            elif kanban_task_id and (not exists["kanban_task_id"] or not exists["kanban_board"]):
+                conn.execute(
+                    "UPDATE workflow_node_runs SET kanban_task_id = ?, kanban_board = ? WHERE id = ?",
+                    (kanban_task_id, kanban_board, exists["id"]),
+                )
+            elif outbox_id and not exists["outbox_id"]:
+                conn.execute(
+                    "UPDATE workflow_node_runs SET outbox_id = ? WHERE id = ?",
+                    (outbox_id, exists["id"]),
+                )
+    except Exception as exc:
+        # The outbox lives in state.db, outside the workflow transaction. If
+        # node-run persistence fails after materialization, compensate every
+        # durable identity attached during this attempt, including a reused
+        # scheduled orphan.
+        for node_id in attempted_send_nodes:
+            state_db = SessionDB(db_path=state_db_path)
+            try:
+                current = state_db.get_outbox_by_identity(execution_id, node_id)
+                if current is not None:
+                    attempted_outbox_ids.add(current.outbox_id)
+            finally:
+                state_db.close()
+        _cancel_unclaimed_outboxes(state_db_path, attempted_outbox_ids)
+        if isinstance(exc, (_AgentTaskMaterializationError, _SendMessageMaterializationError)):
+            raise
+        if current_node_id in attempted_send_nodes:
+            raise _SendMessageMaterializationError(
+                current_node_id,
+                f"waiting node persistence failed: {exc}",
+            ) from exc
+        raise
 
 
 def _failed_node_id(result: EngineResult, spec: WorkflowSpec | None) -> str | None:
@@ -629,21 +1399,14 @@ def _materialization_failure_result(
     *,
     execution_id: str,
     result: EngineResult,
-    exc: _AgentTaskMaterializationError,
+    exc: _AgentTaskMaterializationError | _SendMessageMaterializationError,
     now: int,
 ) -> EngineResult:
     error = {
         "message": str(exc),
         "node": exc.node_id,
-        "phase": "agent_task_materialization",
+        "phase": exc.phase,
     }
-    _persist_failed_attempt(
-        conn,
-        execution_id=execution_id,
-        node_id=exc.node_id,
-        error=error,
-        now=now,
-    )
     linked_task_refs = _linked_waiting_kanban_task_refs(conn, execution_id)
     wfdb.block_linked_kanban_tasks(
         [(ref["task_id"], ref["kanban_board"]) for ref in linked_task_refs],
@@ -788,7 +1551,10 @@ def _emit_progress_events(
     result: EngineResult,
     spec: WorkflowSpec | None,
     now: int,
+    state_db_path: Path | None,
+    workflow_db_path: Path | None,
     existing_events: list[sqlite3.Row],
+    materialized_outbox_ids: set[str] | None = None,
 ) -> None:
     emitted_nodes: set[str] = set()
     for event in existing_events:
@@ -808,6 +1574,9 @@ def _emit_progress_events(
         result=result,
         spec=spec,
         now=now,
+        state_db_path=state_db_path,
+        workflow_db_path=workflow_db_path,
+        materialized_outbox_ids=materialized_outbox_ids,
     )
     if not existing_events:
         _append_event(conn, execution_id, "execution_started", {}, now)
@@ -835,7 +1604,7 @@ def _fail_if_waiting_unresumable(
         return result
     rows = conn.execute(
         """
-        SELECT node_id, wait_until, kanban_task_id
+        SELECT node_id, wait_until, kanban_task_id, outbox_id
           FROM workflow_node_runs
          WHERE execution_id = ? AND status = 'waiting'
         """,
@@ -847,7 +1616,9 @@ def _fail_if_waiting_unresumable(
     if not stuck_nodes:
         return result
     resumable = any(
-        row["wait_until"] is not None or row["kanban_task_id"] is not None
+        row["wait_until"] is not None
+        or row["kanban_task_id"] is not None
+        or row["outbox_id"] is not None
         for row in rows
     )
     if resumable:
@@ -863,7 +1634,124 @@ def _fail_if_waiting_unresumable(
     )
 
 
-def _finish(
+def _catch_spec_for_node(
+    spec: WorkflowSpec,
+    *,
+    node_id: str,
+    error: dict[str, Any],
+) -> WorkflowSpec:
+    node = spec.nodes[node_id]
+    if node.type == "fail":
+        return spec
+    # The engine's native catch hook is attached to fail nodes. A terminal
+    # delivery error is already a node failure, so use a validated fail-node
+    # projection solely for catch routing without re-dispatching the message.
+    failed_node = node.model_copy(update={"type": "fail", "output": error})
+    return spec.model_copy(update={"nodes": {**spec.nodes, node_id: failed_node}})
+
+
+def _apply_failure_semantics(
+    conn: sqlite3.Connection,
+    *,
+    execution_id: str,
+    result: EngineResult,
+    spec: WorkflowSpec | None,
+    now: int,
+    token: str,
+    input_json: str,
+    existing_events: list[sqlite3.Row],
+    state_db_path: Path | None,
+    workflow_db_path: Path | None,
+    materialized_outbox_ids: set[str] | None = None,
+) -> tuple[EngineResult, bool]:
+    node_id = _failed_node_id(result, spec)
+    if node_id is None or spec is None:
+        return result, False
+    error = result.error or {}
+    result.context = _context_with_error(result.context, error)
+    result.context.pop("_terminal_outbox_error", None)
+    _persist_failed_attempt(
+        conn,
+        execution_id=execution_id,
+        node_id=node_id,
+        error=error,
+        now=now,
+    )
+    failed_attempts = _failed_attempts(conn, execution_id, node_id)
+    node = spec.nodes[node_id]
+    terminal_unknown = (
+        error.get("phase") == "outbox_terminal"
+        and error.get("outbox_status") == "unknown"
+    )
+    if node.retry is not None and not terminal_unknown and failed_attempts < node.retry.max_attempts:
+        due_at = _retry_due_at(node, failed_attempts=failed_attempts, now=now)
+        status = "waiting" if due_at > now else "queued"
+        conn.execute(
+            """
+            INSERT INTO workflow_node_runs (
+                execution_id, node_id, status, started_at, wait_until
+            ) VALUES (?, ?, 'queued', ?, ?)
+            """,
+            (execution_id, node_id, now, due_at),
+        )
+        _emit_progress_events(
+            conn,
+            execution_id=execution_id,
+            result=result,
+            spec=spec,
+            now=now,
+            state_db_path=state_db_path,
+            workflow_db_path=workflow_db_path,
+            existing_events=existing_events,
+            materialized_outbox_ids=materialized_outbox_ids,
+        )
+        if status == "waiting":
+            _append_event(conn, execution_id, "execution_waiting", {"waiting_nodes": []}, now)
+        conn.execute(
+            """
+            UPDATE workflow_executions
+               SET status = ?, context_json = ?, claim_lock = NULL,
+                   claim_expires = NULL, updated_at = ?
+             WHERE execution_id = ? AND claim_lock = ?
+            """,
+            (status, _json_dumps(result.context), now, execution_id, token),
+        )
+        return result, True
+    if node.catch:
+        completed_wait_nodes = _completed_wait_nodes(conn, execution_id)
+        completed_outputs = _completed_node_outputs(conn, execution_id)
+        kwargs: dict[str, Any] = {
+            "catch_failed_nodes": {node_id},
+            "error_context": error,
+        }
+        if completed_wait_nodes:
+            kwargs["completed_wait_nodes"] = completed_wait_nodes
+        if completed_outputs:
+            kwargs["completed_node_outputs"] = completed_outputs
+        catch_context = _context_with_error(result.context, error)
+        try:
+            result = run_in_memory_until_waiting(
+                _catch_spec_for_node(spec, node_id=node_id, error=error),
+                json.loads(input_json),
+                **kwargs,
+            )
+        except Exception as exc:
+            result = EngineResult(
+                status="failed",
+                context=catch_context,
+                waiting_nodes=[],
+                error={
+                    "message": str(exc),
+                    "catch_node": node.catch,
+                    "caught_node": node_id,
+                },
+            )
+        else:
+            result.context = _context_with_error(result.context, error)
+    return result, False
+
+
+def _finish_transaction(
     conn: sqlite3.Connection,
     *,
     execution_id: str,
@@ -871,6 +1759,9 @@ def _finish(
     result: EngineResult,
     spec: WorkflowSpec | None,
     now: int,
+    state_db_path: Path | None = None,
+    workflow_db_path: Path | None = None,
+    materialized_outbox_ids: set[str] | None = None,
 ) -> bool:
     with wfdb.write_txn(conn):
         row = conn.execute(
@@ -885,81 +1776,21 @@ def _finish(
             (execution_id,),
         ).fetchall()
 
-        node_id = _failed_node_id(result, spec)
-        if node_id is not None and spec is not None:
-            error = result.error or {}
-            result.context = _context_with_error(result.context, error)
-            _persist_failed_attempt(
-                conn,
-                execution_id=execution_id,
-                node_id=node_id,
-                error=error,
-                now=now,
-            )
-            failed_attempts = _failed_attempts(conn, execution_id, node_id)
-            node = spec.nodes[node_id]
-            if node.retry is not None and failed_attempts < node.retry.max_attempts:
-                due_at = _retry_due_at(node, failed_attempts=failed_attempts, now=now)
-                status = "waiting" if due_at > now else "queued"
-                conn.execute(
-                    """
-                    INSERT INTO workflow_node_runs (
-                        execution_id, node_id, status, started_at, wait_until
-                    ) VALUES (?, ?, 'queued', ?, ?)
-                    """,
-                    (execution_id, node_id, now, due_at),
-                )
-                _emit_progress_events(
-                    conn,
-                    execution_id=execution_id,
-                    result=result,
-                    spec=spec,
-                    now=now,
-                    existing_events=existing_events,
-                )
-                if status == "waiting":
-                    _append_event(conn, execution_id, "execution_waiting", {"waiting_nodes": []}, now)
-                conn.execute(
-                    """
-                    UPDATE workflow_executions
-                       SET status = ?, context_json = ?, claim_lock = NULL,
-                           claim_expires = NULL, updated_at = ?
-                     WHERE execution_id = ? AND claim_lock = ?
-                    """,
-                    (status, _json_dumps(result.context), now, execution_id, token),
-                )
-                return True
-            if node.catch:
-                completed_wait_nodes = _completed_wait_nodes(conn, execution_id)
-                completed_outputs = _completed_node_outputs(conn, execution_id)
-                kwargs: dict[str, Any] = {
-                    "catch_failed_nodes": {node_id},
-                    "error_context": error,
-                }
-                if completed_wait_nodes:
-                    kwargs["completed_wait_nodes"] = completed_wait_nodes
-                if completed_outputs:
-                    kwargs["completed_node_outputs"] = completed_outputs
-                catch_context = _context_with_error(result.context, error)
-                try:
-                    result = run_in_memory_until_waiting(
-                        spec,
-                        json.loads(row["input_json"]),
-                        **kwargs,
-                    )
-                except Exception as exc:
-                    result = EngineResult(
-                        status="failed",
-                        context=catch_context,
-                        waiting_nodes=[],
-                        error={
-                            "message": str(exc),
-                            "catch_node": node.catch,
-                            "caught_node": node_id,
-                        },
-                    )
-                else:
-                    result.context = _context_with_error(result.context, error)
+        result, handled_failure = _apply_failure_semantics(
+            conn,
+            execution_id=execution_id,
+            result=result,
+            spec=spec,
+            now=now,
+            token=token,
+            input_json=row["input_json"],
+            existing_events=existing_events,
+            state_db_path=state_db_path,
+            workflow_db_path=workflow_db_path,
+            materialized_outbox_ids=materialized_outbox_ids,
+        )
+        if handled_failure:
+            return True
 
         _persist_successful_queued_attempts(
             conn,
@@ -974,7 +1805,10 @@ def _finish(
                 result=result,
                 spec=spec,
                 now=now,
+                state_db_path=state_db_path,
+                workflow_db_path=workflow_db_path,
                 existing_events=existing_events,
+                materialized_outbox_ids=materialized_outbox_ids,
             )
             result = _fail_if_waiting_unresumable(
                 conn,
@@ -993,7 +1827,7 @@ def _finish(
                     """,
                     (_json_dumps(result.error), now, execution_id),
                 )
-        except _AgentTaskMaterializationError as exc:
+        except (_AgentTaskMaterializationError, _SendMessageMaterializationError) as exc:
             result = _materialization_failure_result(
                 conn,
                 execution_id=execution_id,
@@ -1001,6 +1835,21 @@ def _finish(
                 exc=exc,
                 now=now,
             )
+            result, handled_failure = _apply_failure_semantics(
+                conn,
+                execution_id=execution_id,
+                result=result,
+                spec=spec,
+                now=now,
+                token=token,
+                input_json=row["input_json"],
+                existing_events=existing_events,
+                state_db_path=state_db_path,
+                workflow_db_path=workflow_db_path,
+                materialized_outbox_ids=materialized_outbox_ids,
+            )
+            if handled_failure:
+                return True
         if result.status == "succeeded":
             final_event = "execution_succeeded"
             final_payload = {}
@@ -1023,9 +1872,48 @@ def _finish(
     return True
 
 
+def _finish(
+    conn: sqlite3.Connection,
+    *,
+    execution_id: str,
+    token: str,
+    result: EngineResult,
+    spec: WorkflowSpec | None,
+    now: int,
+    state_db_path: Path | None = None,
+    workflow_db_path: Path | None = None,
+) -> bool:
+    materialized_outbox_ids: set[str] = set()
+    try:
+        return _finish_transaction(
+            conn,
+            execution_id=execution_id,
+            token=token,
+            result=result,
+            spec=spec,
+            now=now,
+            state_db_path=state_db_path,
+            workflow_db_path=workflow_db_path,
+            materialized_outbox_ids=materialized_outbox_ids,
+        )
+    except BaseException:
+        with wfdb.write_txn(conn):
+            conn.execute(
+                """
+                UPDATE workflow_executions
+                   SET claim_lock = NULL, claim_expires = NULL, updated_at = ?
+                 WHERE execution_id = ? AND claim_lock = ?
+                """,
+                (now, execution_id, token),
+            )
+        _cancel_unclaimed_outboxes(state_db_path, materialized_outbox_ids)
+        raise
+
+
 def _tick(
     *,
     db_path: Path | None = None,
+    state_db_path: Path | None = None,
     limit: int = 10,
     now: int | None = None,
     lease_seconds: int = 60,
@@ -1034,10 +1922,29 @@ def _tick(
     if limit <= 0:
         return TickReport()
 
-    tick_now = int(time.time()) if now is None else now
     report = TickReport()
+    if state_db_path is not None and _profile_path_error(
+        workflow_db_path=None,
+        state_db_path=state_db_path,
+        node_id="terminal_outbox",
+    ) is not None:
+        # An explicitly selected state database must belong to the active
+        # profile. Reject before opening the workflow database so no active
+        # workflow, node run, or outbox projection can be touched.
+        return report
+
+    tick_now = int(time.time()) if now is None else now
+    workflow_db_path = Path(db_path) if db_path is not None else None
     wfdb.init_db(db_path)
     with wfdb.connect(db_path) as conn:
+        projection_blocked = _resume_terminal_outbox_nodes(
+            conn,
+            now=tick_now,
+            state_db_path=state_db_path,
+            workflow_db_path=workflow_db_path,
+        )
+        if projection_blocked:
+            return report
         _resume_due_waits(conn, now=tick_now)
         _resume_due_retries(conn, now=tick_now)
         _resume_completed_agent_tasks(conn, now=tick_now)
@@ -1061,19 +1968,56 @@ def _tick(
             try:
                 execution = wfdb.get_execution(conn, execution_id)
                 spec = wfdb.get_definition(conn, execution.workflow_id, execution.version)
-                completed_wait_nodes = _completed_wait_nodes(conn, execution_id)
-                completed_outputs = _completed_node_outputs(conn, execution_id)
-                kwargs: dict[str, Any] = _catch_resume_kwargs(
-                    conn,
-                    execution_id=execution_id,
-                    context=execution.context,
-                    spec=spec,
+                send_node_id = next(
+                    (
+                        node_id
+                        for node_id, node in spec.nodes.items()
+                        if node.type == "send_message"
+                    ),
+                    None,
                 )
-                if completed_wait_nodes:
-                    kwargs["completed_wait_nodes"] = completed_wait_nodes
-                if completed_outputs:
-                    kwargs["completed_node_outputs"] = completed_outputs
-                result = run_in_memory_until_waiting(spec, execution.input, **kwargs)
+                path_error = (
+                    _profile_path_error(
+                        workflow_db_path=workflow_db_path,
+                        state_db_path=state_db_path,
+                        node_id=send_node_id,
+                    )
+                    if send_node_id is not None
+                    else None
+                )
+                terminal_error = execution.context.get("_terminal_outbox_error")
+                if path_error is not None:
+                    result = EngineResult(
+                        status="failed",
+                        context=execution.context,
+                        waiting_nodes=[],
+                        error={
+                            "message": path_error,
+                            "node": send_node_id,
+                            "phase": "send_message_materialization",
+                        },
+                    )
+                elif isinstance(terminal_error, dict):
+                    result = EngineResult(
+                        status="failed",
+                        context=execution.context,
+                        waiting_nodes=[],
+                        error=terminal_error,
+                    )
+                else:
+                    completed_wait_nodes = _completed_wait_nodes(conn, execution_id)
+                    completed_outputs = _completed_node_outputs(conn, execution_id)
+                    kwargs: dict[str, Any] = _catch_resume_kwargs(
+                        conn,
+                        execution_id=execution_id,
+                        context=execution.context,
+                        spec=spec,
+                    )
+                    if completed_wait_nodes:
+                        kwargs["completed_wait_nodes"] = completed_wait_nodes
+                    if completed_outputs:
+                        kwargs["completed_node_outputs"] = completed_outputs
+                    result = run_in_memory_until_waiting(spec, execution.input, **kwargs)
             except Exception as exc:
                 context = execution.context if execution is not None else {"node": {}}
                 result = EngineResult(
@@ -1089,6 +2033,8 @@ def _tick(
                 result=result,
                 spec=spec,
                 now=tick_now,
+                state_db_path=state_db_path,
+                workflow_db_path=workflow_db_path,
             ):
                 report.executions_advanced += 1
                 report.processed += 1
@@ -1108,20 +2054,34 @@ def _tick(
 def tick(
     *,
     db_path: Path | None = None,
+    state_db_path: Path | None = None,
     limit: int = 10,
     now: int | None = None,
     lease_seconds: int = 60,
 ) -> int:
     """Advance up to limit queued cheap workflow executions. Return number processed."""
-    return _tick(db_path=db_path, limit=limit, now=now, lease_seconds=lease_seconds).processed
+    return _tick(
+        db_path=db_path,
+        state_db_path=state_db_path,
+        limit=limit,
+        now=now,
+        lease_seconds=lease_seconds,
+    ).processed
 
 
 def tick_detailed(
     *,
     db_path: Path | None = None,
+    state_db_path: Path | None = None,
     limit: int = 10,
     now: int | None = None,
     lease_seconds: int = 60,
 ) -> TickReport:
     """Advance up to limit queued cheap workflow executions. Return structured report."""
-    return _tick(db_path=db_path, limit=limit, now=now, lease_seconds=lease_seconds)
+    return _tick(
+        db_path=db_path,
+        state_db_path=state_db_path,
+        limit=limit,
+        now=now,
+        lease_seconds=lease_seconds,
+    )

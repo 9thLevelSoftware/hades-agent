@@ -8,6 +8,7 @@ from agent.verification_evidence import (
     classify_verification_command,
     mark_workspace_edited,
     record_terminal_result,
+    receipt_verification_observation,
     session_verification_roots,
     verification_state_for_root,
     verification_status,
@@ -459,3 +460,24 @@ def test_verification_state_for_root_absent_db_is_unverified(tmp_path, monkeypat
     assert state["evidence"] is None
     # The read-only accessor must never create the database file.
     assert not (home / "verification_evidence.db").exists()
+
+
+def test_receipt_observation_uses_existing_ledger_timestamp_and_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    _node_project(tmp_path)
+    record_terminal_result(
+        command="pnpm test",
+        cwd=tmp_path,
+        session_id="receipt-session",
+        exit_code=0,
+        output="all green",
+    )
+
+    observation = receipt_verification_observation(
+        session_id="receipt-session", cwd=tmp_path
+    )
+
+    assert observation["status"] == "passed"
+    assert observation["source"] == "verification_evidence"
+    assert observation["timestamp"]
+    assert observation["evidence"]["canonical_command"] == "pnpm run test"

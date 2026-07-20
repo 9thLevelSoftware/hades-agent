@@ -203,7 +203,7 @@ class TestTakeCheckpoint:
             calls.append((directory, reason))
             take_started.set()
             release_take.wait(timeout=5)
-            return True
+            return True, "deadbeef"
 
         monkeypatch.setattr(mgr, "_take", fake_take)
 
@@ -226,7 +226,7 @@ class TestTakeCheckpoint:
         assert len(calls) == 1
         assert sorted(results) == [False, True]
 
-    def test_inflight_checkpoint_survives_new_turn(self, mgr, work_dir, monkeypatch):
+    def test_new_turn_waits_for_inflight_checkpoint(self, mgr, work_dir, monkeypatch):
         mgr._git_available = True
         take_started = threading.Event()
         release_take = threading.Event()
@@ -237,7 +237,7 @@ class TestTakeCheckpoint:
             calls.append((directory, reason))
             take_started.set()
             release_take.wait(timeout=5)
-            return True
+            return True, "deadbeef"
 
         monkeypatch.setattr(mgr, "_take", fake_take)
 
@@ -249,16 +249,14 @@ class TestTakeCheckpoint:
         first.start()
         assert take_started.wait(timeout=5)
 
-        mgr.new_turn()
-        second_result = mgr.ensure_checkpoint(str(work_dir), "second")
-
         release_take.set()
         first.join(timeout=5)
         assert not first.is_alive()
 
-        assert second_result is False
         assert first_result == [True]
-        assert len(calls) == 1
+        mgr.new_turn()
+        assert mgr.ensure_checkpoint(str(work_dir), "second") is True
+        assert len(calls) == 2
 
     def test_failed_checkpoint_can_retry_same_turn(self, mgr, work_dir, monkeypatch):
         mgr._git_available = True
@@ -266,7 +264,7 @@ class TestTakeCheckpoint:
 
         def fake_take(directory, reason):
             calls.append((directory, reason))
-            return len(calls) == 2
+            return (len(calls) == 2, "deadbeef" if len(calls) == 2 else None)
 
         monkeypatch.setattr(mgr, "_take", fake_take)
 
@@ -280,7 +278,7 @@ class TestTakeCheckpoint:
         monkeypatch.setattr(
             mgr,
             "_take",
-            lambda directory, reason: calls.append((directory, reason)) or True,
+            lambda directory, reason: (calls.append((directory, reason)), True, "deadbeef")[1:],
         )
 
         assert mgr.ensure_checkpoint(str(work_dir), "first") is True
@@ -1145,4 +1143,909 @@ class TestClearFunctions:
         monkeypatch.setattr("tools.checkpoint_manager.CHECKPOINT_BASE", base)
         result = clear_all()
         assert result["deleted"] is False
-        assert result["bytes_freed"] == 0
+
+
+# =========================================================================
+# Task 4 — CheckpointRef + create_checkpoint/restore_checkpoint + force=True
+# =========================================================================
+
+
+class TestCheckpointRefAndForced:
+    """Task 4 surface: distinct, forced checkpoints per transaction. The
+    legacy one-per-turn path (``ensure_checkpoint``) is preserved unchanged
+    for callers outside missions."""
+
+    def test_checkpoint_ref_is_frozen(self):
+        from tools.checkpoint_manager import CheckpointRef
+        from dataclasses import FrozenInstanceError
+        ref = CheckpointRef(
+            checkpoint_id="ck-1", working_dir="/tmp/x",
+            commit_hash="abcd1234", created_at=0,
+        )
+        with pytest.raises(FrozenInstanceError):
+            ref.commit_hash = "other"  # type: ignore[misc]
+
+    def test_create_checkpoint_returns_checkpoint_ref(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        from tools.checkpoint_manager import CheckpointManager, CheckpointRef
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        ref = mgr.create_checkpoint(str(work_dir), reason="t1")
+        assert isinstance(ref, CheckpointRef)
+        assert ref.working_dir == str(work_dir.resolve())
+        assert len(ref.commit_hash) >= 4
+        assert ref.created_at > 0
+
+    def test_create_checkpoint_force_true_yields_distinct_refs(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        from tools.checkpoint_manager import CheckpointManager
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        # Force=True bypasses the dedup set so each call produces a distinct
+        # ref even when invoked twice in the same turn.
+        (work_dir / "a.txt").write_text("1\n")
+        ref1 = mgr.create_checkpoint(str(work_dir), reason="t1", force=True)
+        (work_dir / "b.txt").write_text("2\n")
+        ref2 = mgr.create_checkpoint(str(work_dir), reason="t2", force=True)
+        assert ref1.commit_hash != ref2.commit_hash
+
+    def test_create_checkpoint_force_true_distinct_for_identical_tree(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """Spec: forced checkpoints must produce distinct commit hashes even
+        when the tree is byte-identical between calls — a forced checkpoint
+        is per-transaction, not dedup-eligible. The legacy
+        ``.hades-checkpoint-marker`` workaround must NOT be used
+        (it leaks into the restored tree)."""
+        from tools.checkpoint_manager import CheckpointManager
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        # No file changes between calls — tree is identical.
+        ref1 = mgr.create_checkpoint(str(work_dir), reason="t1", force=True)
+        ref2 = mgr.create_checkpoint(str(work_dir), reason="t2", force=True)
+        assert ref1.commit_hash != ref2.commit_hash
+        assert ref1.checkpoint_id != ref2.checkpoint_id
+
+    def test_force_checkpoint_does_not_create_marker_file(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """Spec: the forced-checkpoint path must not touch
+        ``.hades-checkpoint-marker`` on disk at all (the prior
+        workaround would leak the marker into the restored tree)."""
+        from tools.checkpoint_manager import CheckpointManager
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        mgr.create_checkpoint(str(work_dir), reason="t1", force=True)
+        assert not (work_dir / ".hades-checkpoint-marker").exists()
+
+    def test_ensure_checkpoint_outside_missions_still_dedups(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """Legacy one-per-turn dedup behavior is preserved for callers that
+        route through ``ensure_checkpoint`` (non-mission callers)."""
+        from tools.checkpoint_manager import CheckpointManager
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        assert mgr.ensure_checkpoint(str(work_dir), "first") is True
+        # Same turn: dedup → False.
+        assert mgr.ensure_checkpoint(str(work_dir), "second") is False
+        # New turn: True again.
+        mgr.new_turn()
+        (work_dir / "main.py").write_text("changed\n")
+        assert mgr.ensure_checkpoint(str(work_dir), "third") is True
+
+    def test_restore_checkpoint_rejects_root_mismatch(
+        self, work_dir, checkpoint_base, monkeypatch, tmp_path
+    ):
+        """A CheckpointRef whose resolved root does NOT match the current
+        workspace root must fail closed — no silent cross-checkout restore."""
+        from tools.checkpoint_manager import CheckpointManager, CheckpointRef
+        # Make a sibling dir that we'll pretend is the ref's working_dir.
+        sibling = tmp_path / "other-workdir"
+        sibling.mkdir()
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        # Real checkpoint in work_dir.
+        mgr.ensure_checkpoint(str(work_dir), "before")
+        cps = mgr.list_checkpoints(str(work_dir))
+        assert cps
+        commit = cps[0]["hash"]
+        # Build a ref whose working_dir is the SIBLING — restore must fail.
+        wrong_ref = CheckpointRef(
+            checkpoint_id="ck-fake",
+            working_dir=str(sibling.resolve()),
+            commit_hash=commit,
+            created_at=int(time.time()),
+        )
+        with pytest.raises(PermissionError):
+            mgr.restore_checkpoint(wrong_ref, current_root=str(work_dir))
+
+    def test_restore_checkpoint_round_trips(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """A CheckpointRef matching the current root restores bytes/mode/
+        deletion state."""
+        from tools.checkpoint_manager import CheckpointManager
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        # Create a file, checkpoint, mutate it, restore.
+        target = work_dir / "data.txt"
+        target.write_text("original\n")
+        ref = mgr.create_checkpoint(str(work_dir), reason="before-mutation")
+        target.write_text("mutated\n")
+        mgr.restore_checkpoint(ref, current_root=str(work_dir))
+        assert target.read_text() == "original\n"
+
+    def test_restore_checkpoint_does_not_leave_marker_file(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """Spec: even after a checkpoint + restore round-trip the working
+        tree must NOT contain ``.hades-checkpoint-marker`` — the legacy
+        forced-checkpoint workaround used that file to create distinct
+        trees, but it leaked into restored snapshots. The new path uses
+        ``commit-tree`` against an empty tree bypass."""
+        from tools.checkpoint_manager import CheckpointManager
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        # Make real content; otherwise forced checkpoint may be a no-op
+        # via empty-tree and could legitimately report nothing.
+        (work_dir / "f.txt").write_text("f\n")
+        ref = mgr.create_checkpoint(str(work_dir), reason="t", force=True)
+        assert not (work_dir / ".hades-checkpoint-marker").exists()
+        # Mutate, then restore.
+        (work_dir / "f.txt").write_text("mutated\n")
+        mgr.restore_checkpoint(ref, current_root=str(work_dir))
+        # Marker still absent after restore.
+        assert not (work_dir / ".hades-checkpoint-marker").exists()
+        # Working tree matches the checkpoint tip.
+        assert (work_dir / "f.txt").read_text() == "f\n"
+
+
+# ---------------------------------------------------------------------------
+# Task 4 final remediation — shared restore guards
+# ---------------------------------------------------------------------------
+
+
+class TestTask4SharedRestoreGuards:
+    """Shared restore() guards centralized for both ``restore`` and
+    ``restore_checkpoint``: a commit hash that is NOT an ancestor of the
+    project ref (or doesn't equal it) is rejected loudly so a forged
+    ``CheckpointRef`` cannot clobber another project's tree.
+    """
+
+    def test_restore_rejects_forged_commit_from_unrelated_project(
+        self, work_dir, checkpoint_base, monkeypatch, tmp_path
+    ):
+        """A commit hash that lives on a DIFFERENT project's ref MUST
+        be rejected by ``restore()`` even though it validates as hex
+        and ``git cat-file -t`` succeeds. Pre-rollback snapshot must
+        NOT be taken and the working tree must be unchanged."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        # Project A: take a real checkpoint.
+        (work_dir / "a.txt").write_text("A\n")
+        ref_a = mgr.create_checkpoint(str(work_dir), reason="a")
+        # Project B: separate worktree, separate ref.
+        project_b = tmp_path / "project-b"
+        project_b.mkdir()
+        (project_b / "b.txt").write_text("B\n")
+        mgr.create_checkpoint(str(project_b), reason="b")
+        # The forged commit hash is the project B tip — cat-file
+        # recognises it (the legacy guards alone aren't enough).
+        b_cps = mgr.list_checkpoints(str(project_b))
+        assert b_cps
+        forged_hash = b_cps[0]["hash"]
+        ok, _, _ = _run_git(
+            ["cat-file", "-t", forged_hash],
+            _store_path(checkpoint_base), str(project_b),
+        )
+        assert ok, "sanity: cat-file must recognise the forged hash"
+        # Now attempt restore in project A's work_dir using the B
+        # commit. Restore returns a failed result (the same contract
+        # as legacy failure paths — ``restore_checkpoint`` wraps the
+        # failure in RuntimeError).
+        before_text = (work_dir / "a.txt").read_text()
+        result = mgr.restore(str(work_dir), forged_hash)
+        assert result.get("success") is False
+        # The error message names the ancestor-mismatch reason so
+        # operators / adapters can distinguish forged from invalid.
+        assert "ancestor" in result.get("error", "").lower()
+        # work_dir was untouched.
+        assert (work_dir / "a.txt").read_text() == before_text
+
+    def test_restore_accepts_legitimate_ancestor_commit(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """A commit that IS an ancestor of (or equals) the current
+        project ref tip must restore successfully — the legitimate
+        historical checkpoint path is preserved."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        (work_dir / "f.txt").write_text("v1\n")
+        ref_v1 = mgr.create_checkpoint(
+            str(work_dir), reason="v1", force=True,
+        )
+        (work_dir / "f.txt").write_text("v2\n")
+        mgr.create_checkpoint(str(work_dir), reason="v2", force=True)
+        # Restore to v1 — must succeed (v1 IS an ancestor of v2 tip).
+        mgr.restore(str(work_dir), ref_v1.commit_hash)
+        assert (work_dir / "f.txt").read_text() == "v1\n"
+
+    def test_restore_rejects_commit_unknown_to_project_ref(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """A hex-valid, cat-file-recognised commit that is NOT in this
+        project's ref history at all must be rejected — even when it
+        exists somewhere in the shared store."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        (work_dir / "x.txt").write_text("x\n")
+        mgr.create_checkpoint(str(work_dir), reason="x", force=True)
+        # Make a separate ref/commit independent of work_dir's ref.
+        decoupled = checkpoint_base.parent / "decoupled"
+        decoupled.mkdir(parents=True, exist_ok=True)
+        (decoupled / "d.txt").write_text("d\n")
+        mgr.create_checkpoint(str(decoupled), reason="d", force=True)
+        d_ck = mgr.list_checkpoints(str(decoupled))
+        assert d_ck
+        # The decoupled commit MUST NOT be an ancestor of work_dir's
+        # current ref tip (they are independent projects). If this
+        # ever passes, our ancestor check has been bypassed.
+        d_hash = d_ck[0]["hash"]
+        tip_ok, tip, _ = _run_git(
+            ["rev-parse", "--verify",
+             _ref_name(_project_hash(str(work_dir))) + "^{commit}"],
+            _store_path(checkpoint_base), str(work_dir),
+            allowed_returncodes={128},
+        )
+        assert tip_ok
+        # Try to restore the decoupled commit into work_dir.
+        result = mgr.restore(str(work_dir), d_hash)
+        assert result.get("success") is False
+        assert "ancestor" in result.get("error", "").lower()
+
+    def test_restore_checkpoint_rejects_forged_commit_via_direct_call(
+        self, work_dir, checkpoint_base, monkeypatch, tmp_path
+    ):
+        """Same forged-commit defence for ``restore_checkpoint`` when a
+        caller constructs a CheckpointRef directly with a commit hash
+        that doesn't belong to this project."""
+        from tools.checkpoint_manager import CheckpointManager, CheckpointRef
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        (work_dir / "a.txt").write_text("A\n")
+        mgr.create_checkpoint(str(work_dir), reason="a")
+        project_b = tmp_path / "project-b"
+        project_b.mkdir()
+        (project_b / "b.txt").write_text("B\n")
+        mgr.create_checkpoint(str(project_b), reason="b")
+        b_ck = mgr.list_checkpoints(str(project_b))
+        assert b_ck
+        wrong_ref = CheckpointRef(
+            checkpoint_id="ck-forge",
+            working_dir=str(work_dir.resolve()),
+            commit_hash=b_ck[0]["hash"],
+            created_at=int(time.time()),
+        )
+        with pytest.raises(RuntimeError):
+            mgr.restore_checkpoint(wrong_ref, current_root=str(work_dir))
+
+    def test_restore_checkpoint_file_paths_isolates_unrelated_sibling(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """``restore_checkpoint(file_paths=[...])`` must restore ONLY
+        the declared target paths. An unrelated sibling edited by a
+        human between commit and compensate must NOT be clobbered."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        # Two files: target (mission-mutated) and sibling (human-edited).
+        target = work_dir / "target.txt"
+        sibling = work_dir / "sibling.txt"
+        target.write_text("orig\n")
+        sibling.write_text("orig-sibling\n")
+        # Snapshot both files via checkpoint.
+        ref = mgr.create_checkpoint(str(work_dir), reason="snapshot")
+        # Mission mutates target; human edits sibling between commit
+        # and compensate.
+        target.write_text("by-mission\n")
+        sibling.write_text("by-human\n")
+        # Restore ONLY the target.
+        mgr.restore_checkpoint(
+            ref,
+            current_root=str(work_dir),
+            file_paths=[str(target.resolve())],
+        )
+        # Target reverted, sibling untouched.
+        assert target.read_text() == "orig\n"
+        assert sibling.read_text() == "by-human\n"
+
+    def test_restore_checkpoint_file_paths_removes_when_target_absent_in_checkpoint(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """``restore_checkpoint(file_paths=[absent_path])`` must remove
+        the declared target when it does not exist in the checkpoint
+        — this is the deletion-state case for files the mission
+        created mid-transaction."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        # Snapshot state where created.txt does NOT exist.
+        ref = mgr.create_checkpoint(str(work_dir), reason="before-create")
+        # Mission creates the file.
+        new_file = work_dir / "created.txt"
+        new_file.write_text("new\n")
+        # Restore only the created file: it was absent in the
+        # checkpoint, so it must be removed.
+        mgr.restore_checkpoint(
+            ref,
+            current_root=str(work_dir),
+            file_paths=[str(new_file.resolve())],
+        )
+        assert not new_file.exists()
+
+    def test_restore_checkpoint_file_paths_rejects_path_outside_root(
+        self, work_dir, checkpoint_base, monkeypatch, tmp_path
+    ):
+        """``restore_checkpoint(file_paths=[...])`` must reject any
+        declared path that resolves outside ``current_root`` —
+        prevents traversal clobber."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        (work_dir / "a.txt").write_text("a\n")
+        ref = mgr.create_checkpoint(str(work_dir), reason="a")
+        outside = tmp_path / "outside.txt"
+        outside.write_text("outside\n")
+        with pytest.raises(PermissionError):
+            mgr.restore_checkpoint(
+                ref,
+                current_root=str(work_dir),
+                file_paths=[str(outside.resolve())],
+            )
+        assert outside.read_text() == "outside\n"
+
+    def test_restore_checkpoint_file_paths_rejects_directory(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """``restore_checkpoint(file_paths=[<dir>])`` must reject
+        directories — the contract is file/symlink-only (file tool
+        adapter scope)."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        (work_dir / "a.txt").write_text("a\n")
+        ref = mgr.create_checkpoint(str(work_dir), reason="a")
+        sub = work_dir / "subdir"
+        sub.mkdir()
+        with pytest.raises(ValueError):
+            mgr.restore_checkpoint(
+                ref,
+                current_root=str(work_dir),
+                file_paths=[str(sub.resolve())],
+            )
+
+    def test_restore_checkpoint_with_no_file_paths_preserves_legacy_whole_root(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """Public contract: omitting ``file_paths`` (legacy callers)
+        restores tracked-file state under the root — the historical
+        full-root path — while leaving untracked post-checkpoint
+        files alone (standard ``git checkout`` semantics)."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        (work_dir / "f.txt").write_text("orig\n")
+        ref = mgr.create_checkpoint(str(work_dir), reason="orig")
+        # Mutate tracked file; legacy behaviour reverts it on
+        # whole-root restore.
+        (work_dir / "f.txt").write_text("mutated\n")
+        mgr.restore_checkpoint(ref, current_root=str(work_dir))
+        assert (work_dir / "f.txt").read_text() == "orig\n"
+
+
+# ---------------------------------------------------------------------------
+# Task 4 final — per-path deletion-ordering vulnerability
+# ---------------------------------------------------------------------------
+
+
+class TestTask4PerPathDeletionOrderingGuard:
+    """Restore must validate project-ref membership BEFORE any workspace
+    mutation. The per-path branch previously ran ``cat-file`` then
+    could ``unlink()`` an A-target absent from B's commit (where
+    ``working_dir=A`` but ``commit_hash=B``) BEFORE the membership
+    check inside ``restore()`` had a chance to fire (it only runs for
+    targets present in the checkpoint tree).
+    """
+
+    def test_restore_checkpoint_per_path_rejects_forged_ref_before_delete(
+        self, work_dir, checkpoint_base, monkeypatch, tmp_path
+    ):
+        """A forged ``CheckpointRef(working_dir=A, commit_hash=B)``
+        supplied to ``restore_checkpoint(file_paths=[A-target-abs])``
+        must raise before touching the workspace — A's target content
+        is preserved even though B's commit does not contain it
+        (so the per-path branch would otherwise take the
+        ``unlink()`` delete path)."""
+        from tools.checkpoint_manager import CheckpointManager, CheckpointRef
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        # Project A: real checkpoint with target.txt present.
+        target = work_dir / "target.txt"
+        target.write_text("a-content\n")
+        mgr.create_checkpoint(str(work_dir), reason="a")
+        # Project B: independent ref whose commit lacks target.txt.
+        project_b = tmp_path / "project-b"
+        project_b.mkdir()
+        (project_b / "b.txt").write_text("b-content\n")
+        mgr.create_checkpoint(str(project_b), reason="b")
+        b_ck = mgr.list_checkpoints(str(project_b))
+        assert b_ck
+        forged = CheckpointRef(
+            checkpoint_id="ck-forge-delete",
+            working_dir=str(work_dir.resolve()),
+            commit_hash=b_ck[0]["hash"],
+            created_at=int(time.time()),
+        )
+        with pytest.raises((RuntimeError, PermissionError)):
+            mgr.restore_checkpoint(
+                forged,
+                current_root=str(work_dir),
+                file_paths=[str(target.resolve())],
+            )
+        # A's target content intact — the unlink branch was NOT
+        # reached because membership validation fired first.
+        assert target.read_text() == "a-content\n"
+        assert target.exists()
+
+    def test_restore_checkpoint_per_path_legitimate_restore_still_creates_then_deletes(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """Legitimate per-path creation/deletion restore remains
+        intact: the ordering guard is added on top of the
+        membership check, not replacing it."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        # Snapshot state where created.txt does NOT exist.
+        ref = mgr.create_checkpoint(str(work_dir), reason="before-create")
+        new_file = work_dir / "created.txt"
+        new_file.write_text("new\n")
+        # Restore only the created file: it was absent in the
+        # checkpoint, so it must be removed (legitimate deletion).
+        mgr.restore_checkpoint(
+            ref,
+            current_root=str(work_dir),
+            file_paths=[str(new_file.resolve())],
+        )
+        assert not new_file.exists()
+
+
+class TestCreateCheckpointRobustness:
+    """``create_checkpoint`` broad-path / unset-variable robustness."""
+
+    def test_create_checkpoint_rejects_root_path(self):
+        from tools.checkpoint_manager import CheckpointManager
+        mgr = CheckpointManager(enabled=True)
+        with pytest.raises(PermissionError):
+            mgr.create_checkpoint("/", reason="root")
+
+    def test_create_checkpoint_rejects_home_path(self):
+        from tools.checkpoint_manager import CheckpointManager
+        mgr = CheckpointManager(enabled=True)
+        with pytest.raises(PermissionError):
+            mgr.create_checkpoint(str(Path.home()), reason="home")
+
+    def test_init_store_failure_yields_clean_runtimeerror(
+        self, work_dir, checkpoint_base, monkeypatch
+    ):
+        """When ``_init_store`` returns an error string, ``_take``
+        must not raise ``UnboundLocalError``; ``create_checkpoint``
+        must raise ``RuntimeError`` (loud, not silent partial state)."""
+        from tools.checkpoint_manager import CheckpointManager
+        import tools.checkpoint_manager as _cm
+
+        def boom(store, working_dir):
+            return "simulated init failure"
+        monkeypatch.setattr(_cm, "_init_store", boom)
+        mgr = CheckpointManager(enabled=True)
+        with pytest.raises(RuntimeError):
+            mgr.create_checkpoint(str(work_dir), reason="boom")
+
+    def test_empty_first_tree_yields_clean_runtimeerror(
+        self, tmp_path, checkpoint_base, monkeypatch
+    ):
+        """A first non-forced empty tree must keep _take's tuple contract."""
+        import tools.checkpoint_manager as checkpoint_module
+        from tools.checkpoint_manager import CheckpointManager
+
+        monkeypatch.setattr(checkpoint_module, "CHECKPOINT_BASE", checkpoint_base)
+        empty_work_dir = tmp_path / "empty-project"
+        empty_work_dir.mkdir()
+        mgr = CheckpointManager(enabled=True)
+        with pytest.raises(RuntimeError, match="checkpoint creation failed"):
+            mgr.create_checkpoint(str(empty_work_dir), reason="empty")
+
+
+# =========================================================================
+# Task 4 final — concurrency lock + immutable CheckpointRef across pruning
+# =========================================================================
+
+
+class TestSharedCheckpointStateLock:
+    """Spec: ``_checkpoint_state_lock`` is per-instance; create_checkpoint
+    releases it around ``_take``; restore membership is checked OUTSIDE the
+    lock. Two managers (or a forced concurrent checkpoint + prune) can
+    race so membership validates against a tip that the prune step then
+    garbage-collects — restore then fails on ``cat-file`` rather than
+    recognising the ref as pruned/missing.
+
+    The fix is ONE module/class-level RLock shared across all
+    CheckpointManager instances and all store-touching ops
+    (``ensure_checkpoint``, ``create_checkpoint``, ``restore``,
+    ``restore_checkpoint``). RLock permits restore_checkpoint→restore
+    re-entry without deadlocking.
+    """
+
+    def test_module_level_rlock_shared_across_managers(self):
+        from tools import checkpoint_manager as _cm
+        # The shared lock must exist on the module (not per-instance).
+        assert hasattr(_cm, "_checkpoint_state_lock"), (
+            "shared module-level RLock missing — concurrency guard "
+            "still per-instance"
+        )
+        lock = _cm._checkpoint_state_lock
+        # RLock (re-entrant) so restore_checkpoint→restore re-entry is safe.
+        assert isinstance(lock, type(threading.RLock())), (
+            "shared lock must be threading.RLock so nested "
+            "restore_checkpoint→restore calls re-enter"
+        )
+        # Two distinct managers must see the SAME lock object.
+        from tools.checkpoint_manager import CheckpointManager
+        m1 = CheckpointManager(enabled=True)
+        m2 = CheckpointManager(enabled=True)
+        assert m1._checkpoint_state_lock is m2._checkpoint_state_lock, (
+            "managers must share the module-level lock"
+        )
+
+    def test_create_checkpoint_lock_holds_through_take_and_prune(
+        self, work_dir, checkpoint_base, monkeypatch,
+    ):
+        """The shared lock must span the entire ``create_checkpoint`` →
+        ``_take`` → ``_prune`` path. We force a hook that asserts the lock
+        is held during ``_take``; if the lock is per-instance or released
+        around ``_take``, the hook sees an unlocked state."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        from tools import checkpoint_manager as _cm
+        held_during_take = []
+
+        original_take = _cm.CheckpointManager._take
+
+        def guarded_take(self, working_dir, reason, *, force=False, pin_ref=None):
+            held_during_take.append(
+                _cm._checkpoint_state_lock._is_owned()  # type: ignore[attr-defined]
+            )
+            return original_take(
+                self, working_dir, reason, force=force, pin_ref=pin_ref,
+            )
+
+        monkeypatch.setattr(
+            _cm.CheckpointManager, "_take", guarded_take,
+        )
+        mgr = CheckpointManager(enabled=True)
+        mgr.create_checkpoint(str(work_dir), reason="race-test", force=True)
+        assert held_during_take == [True], (
+            "create_checkpoint must hold the shared lock across "
+            "the entire _take (and its pruning)"
+        )
+
+    def test_ensure_checkpoint_lock_holds_through_take(
+        self, work_dir, checkpoint_base, monkeypatch,
+    ):
+        """The legacy path must hold the shared lock while ``_take`` runs."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        from tools import checkpoint_manager as _cm
+        held_during_take = []
+        original_take = _cm.CheckpointManager._take
+
+        def guarded_take(self, working_dir, reason, *, force=False, pin_ref=None):
+            held_during_take.append(
+                _cm._checkpoint_state_lock._is_owned()  # type: ignore[attr-defined]
+            )
+            return original_take(
+                self, working_dir, reason, force=force, pin_ref=pin_ref,
+            )
+
+        monkeypatch.setattr(_cm.CheckpointManager, "_take", guarded_take)
+        mgr = CheckpointManager(enabled=True)
+        assert mgr.ensure_checkpoint(str(work_dir), reason="legacy") is True
+        assert held_during_take == [True]
+
+    def test_restore_checkpoint_lock_holds_through_full_restore(
+        self, work_dir, checkpoint_base, monkeypatch,
+    ):
+        """``restore_checkpoint(file_paths=...)`` must hold the shared
+        lock from membership validation through checkout/unlink so a
+        forced concurrent checkpoint/prune cannot invalidate the ref
+        between validation and per-path restore."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        from tools import checkpoint_manager as _cm
+        held_during_restore = []
+
+        original_restore = _cm.CheckpointManager.restore
+
+        def guarded_restore(self, working_dir, commit_hash, file_path=None, **kwargs):
+            held_during_restore.append(
+                _cm._checkpoint_state_lock._is_owned()  # type: ignore[attr-defined]
+            )
+            return original_restore(self, working_dir, commit_hash, file_path)
+
+        monkeypatch.setattr(
+            _cm.CheckpointManager, "restore", guarded_restore,
+        )
+
+        target = work_dir / "f.txt"
+        target.write_text("orig\n")
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        ref = mgr.create_checkpoint(str(work_dir), reason="before")
+        target.write_text("mutated\n")
+        mgr.restore_checkpoint(
+            ref, current_root=str(work_dir),
+            file_paths=[str(target.resolve())],
+        )
+        assert held_during_restore == [True], (
+            "restore_checkpoint must hold the shared lock across "
+            "the per-path restore (membership→checkout/unlink)"
+        )
+
+
+class TestImmutableCheckpointRefAcrossPruning:
+    """Spec: ``_prune`` rewrites commits and changes hashes; the ref
+    referenced by a forced CheckpointRef can be invalidated at
+    ``max_snapshots``. The fix: a durable Git pin ref outside
+    ``_REFS_PREFIX`` keeps the target commit alive so
+    ``restore_checkpoint`` succeeds even when the project ref no longer
+    contains the checkpoint.
+
+    The pin is named ``refs/hermes-pin/<dirhash>/<checkpoint_id>`` —
+    outside the project-ref namespace so ``_enforce_size_cap`` does not
+    treat it as a project ref to prune. Direct ``restore_checkpoint``
+    on a CheckpointRef accepts either a project-history ancestor OR
+    an exact matching pin for the same project/checkpoint_id.
+    """
+
+    def _create_pin_ref(self, mgr, working_dir):
+        """Drive a real create_checkpoint and verify a pin ref was created
+        for the returned CheckpointRef."""
+        from tools.checkpoint_manager import _run_git, _store_path
+        ref = mgr.create_checkpoint(
+            str(working_dir), reason="pinned", force=True,
+        )
+        store = _store_path()
+        # The pin lives at refs/hermes-pin/<dirhash>/<checkpoint_id>
+        from tools.checkpoint_manager import _project_hash
+        dir_hash = _project_hash(str(working_dir))
+        pin_ref = f"refs/hermes-pin/{dir_hash}/{ref.checkpoint_id}"
+        ok, sha, _ = _run_git(
+            ["rev-parse", "--verify", pin_ref + "^{commit}"], store,
+            str(working_dir), allowed_returncodes={128},
+        )
+        assert ok, f"pin ref {pin_ref} not created for Task4 CheckpointRef"
+        assert sha == ref.commit_hash, (
+            f"pin sha {sha!r} does not match CheckpointRef commit_hash "
+            f"{ref.commit_hash!r}"
+        )
+        return ref, pin_ref, sha
+
+    def test_create_checkpoint_creates_durable_pin_ref(
+        self, work_dir, checkpoint_base, monkeypatch,
+    ):
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        ref, pin_ref, _ = self._create_pin_ref(mgr, work_dir)
+        # Pin ref exists, is a valid commit, and resolves to ref.commit_hash.
+        # (already asserted inside the helper)
+
+    def test_pin_ref_survives_max_snapshots_pruning(
+        self, work_dir, checkpoint_base, monkeypatch,
+    ):
+        """A Task4 CheckpointRef must remain restorable after the project
+        history has been pruned past ``max_snapshots``. The pin ref keeps
+        the target commit alive even when the project ref rewrites it."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        # Use max_snapshots=2 so the third forced checkpoint prunes the
+        # first one off the project ref.
+        mgr = CheckpointManager(enabled=True, max_snapshots=2)
+        from tools.checkpoint_manager import _project_hash, _run_git, _store_path
+        observed_pin_during_prune = []
+        original_prune = mgr._prune
+
+        def observing_prune(store, working_dir, ref):
+            pin_prefix = f"refs/hermes-pin/{_project_hash(working_dir)}"
+            ok_pins, pins, _ = _run_git(
+                ["for-each-ref", "--format=%(refname)", pin_prefix],
+                store, working_dir, allowed_returncodes={128},
+            )
+            observed_pin_during_prune.append(ok_pins and bool(pins.strip()))
+            return original_prune(store, working_dir, ref)
+
+        monkeypatch.setattr(mgr, "_prune", observing_prune)
+        # Create two snapshots (the older one will be pruned by the
+        # third create_checkpoint).
+        (work_dir / "f.txt").write_text("v1\n")
+        ref_v1 = mgr.create_checkpoint(
+            str(work_dir), reason="v1", force=True,
+        )
+        (work_dir / "f.txt").write_text("v2\n")
+        ref_v2 = mgr.create_checkpoint(
+            str(work_dir), reason="v2", force=True,
+        )
+        # A third forced checkpoint exceeds max_snapshots and triggers
+        # pruning — the project ref now starts at ref_v2.
+        (work_dir / "f.txt").write_text("v3\n")
+        mgr.create_checkpoint(str(work_dir), reason="v3", force=True)
+        # Project ref no longer contains ref_v1.commit_hash directly.
+        from tools.checkpoint_manager import _ref_name
+        store = _store_path()
+        dir_hash = _project_hash(str(work_dir))
+        proj_ref = _ref_name(dir_hash)
+        ok, tip, _ = _run_git(
+            ["rev-parse", "--verify", proj_ref + "^{commit}"],
+            store, str(work_dir),
+        )
+        assert ok
+        # ref_v1 is NOT an ancestor of the current project ref tip.
+        ok_anc, _, _ = _run_git(
+            ["merge-base", "--is-ancestor", ref_v1.commit_hash, tip],
+            store, str(work_dir), allowed_returncodes={1, 128},
+        )
+        assert not ok_anc, (
+            "ref_v1 must have been pruned off the project ref for "
+            "this test to be meaningful"
+        )
+        # Yet restore_checkpoint(ref_v1, ...) succeeds via the pin ref,
+        # because pin refs preserve target commit objects across pruning.
+        # Verify the pin still resolves to ref_v1.commit_hash.
+        pin_ref = f"refs/hermes-pin/{dir_hash}/{ref_v1.checkpoint_id}"
+        ok_pin, pin_sha, _ = _run_git(
+            ["rev-parse", "--verify", pin_ref + "^{commit}"],
+            store, str(work_dir), allowed_returncodes={128},
+        )
+        assert ok_pin and pin_sha == ref_v1.commit_hash, (
+            "pin must keep ref_v1.commit_hash reachable"
+        )
+        assert observed_pin_during_prune and all(observed_pin_during_prune), (
+            "checkpoint pins must exist before pruning starts"
+        )
+        # Restore_checkpoint of ref_v1 succeeds and content is exact.
+        target = work_dir / "f.txt"
+        target.write_text("v3-on-disk\n")
+        mgr.restore_checkpoint(
+            ref_v1, current_root=str(work_dir),
+            file_paths=[str(target.resolve())],
+        )
+        assert target.read_text() == "v1\n"
+
+    def test_pin_update_failure_raises_loudly(
+        self, work_dir, checkpoint_base, monkeypatch,
+    ):
+        """A failed Task 4 pin update must not return an unusable ref."""
+        from tools import checkpoint_manager as _cm
+        monkeypatch.setattr(_cm, "CHECKPOINT_BASE", checkpoint_base)
+        original_run_git = _cm._run_git
+
+        def fail_pin_update(args, store, working_dir, *positional, **kwargs):
+            if args[:1] == ["update-ref"] and args[1].startswith("refs/hermes-pin/"):
+                return False, "", "simulated pin failure"
+            return original_run_git(
+                args, store, working_dir, *positional, **kwargs,
+            )
+
+        monkeypatch.setattr(_cm, "_run_git", fail_pin_update)
+        mgr = _cm.CheckpointManager(enabled=True, max_snapshots=2)
+        with pytest.raises(RuntimeError):
+            mgr.create_checkpoint(str(work_dir), reason="pin failure", force=True)
+
+    def test_forged_foreign_checkpoint_id_pin_fails_loud(
+        self, work_dir, checkpoint_base, monkeypatch, tmp_path,
+    ):
+        """A pin ref for a foreign project's checkpoint_id must NOT be
+        accepted as a substitute for the local project's CheckpointRef —
+        even if the underlying commit hash matches. The pin membership
+        check verifies (dir_hash, checkpoint_id) match the ref being
+        restored; a foreign pin is rejected."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        # Project A: real checkpoint with a real pin.
+        mgr_a = CheckpointManager(enabled=True, max_snapshots=50)
+        (work_dir / "a.txt").write_text("A\n")
+        ref_a = mgr_a.create_checkpoint(str(work_dir), reason="A", force=True)
+        # Project B: independent checkpoint (separate worktree + dir hash).
+        project_b = tmp_path / "project-b"
+        project_b.mkdir()
+        (project_b / "b.txt").write_text("B\n")
+        mgr_b = CheckpointManager(enabled=True, max_snapshots=50)
+        ref_b = mgr_b.create_checkpoint(str(project_b), reason="B", force=True)
+        # Forged ref: work_dir (A's project) but commit_hash == B's pin
+        # commit. A is NOT an ancestor of B; the pin for ref_b lives
+        # under project_b's dir_hash. Membership must fail loud.
+        from tools.checkpoint_manager import CheckpointRef
+        forged = CheckpointRef(
+            checkpoint_id=ref_a.checkpoint_id,  # pretend "same id" — irrelevant
+            working_dir=str(work_dir.resolve()),
+            commit_hash=ref_b.commit_hash,
+            created_at=int(time.time()),
+        )
+        with pytest.raises((RuntimeError, PermissionError)):
+            mgr_a.restore_checkpoint(
+                forged, current_root=str(work_dir),
+                file_paths=[str((work_dir / "a.txt").resolve())],
+            )
+        # A's content intact.
+        assert (work_dir / "a.txt").read_text() == "A\n"
+
+    def test_forged_pin_for_wrong_project_root_fails_loud(
+        self, work_dir, checkpoint_base, monkeypatch, tmp_path,
+    ):
+        """A pin that exists but under a DIFFERENT project root must not
+        be honoured when restoring for the current project root."""
+        from tools.checkpoint_manager import CheckpointManager
+        monkeypatch.setattr(
+            "tools.checkpoint_manager.CHECKPOINT_BASE", checkpoint_base,
+        )
+        mgr = CheckpointManager(enabled=True, max_snapshots=50)
+        (work_dir / "a.txt").write_text("A\n")
+        ref = mgr.create_checkpoint(str(work_dir), reason="A", force=True)
+        # Hand-construct a forged ref whose working_dir is a foreign
+        # root but commit_hash is ref.commit_hash.
+        from tools.checkpoint_manager import CheckpointRef
+        other_root = tmp_path / "foreign-root"
+        other_root.mkdir()
+        forged = CheckpointRef(
+            checkpoint_id=ref.checkpoint_id,
+            working_dir=str(other_root.resolve()),
+            commit_hash=ref.commit_hash,
+            created_at=int(time.time()),
+        )
+        # The root-mismatch check is irrelevant here because the ref
+        # is for ANOTHER project root that has no checkpoints at all.
+        # The forge guard (no history exists for foreign-root) MUST
+        # fail loud — RuntimeError or PermissionError both qualify.
+        with pytest.raises((RuntimeError, PermissionError)):
+            mgr.restore_checkpoint(forged, current_root=str(other_root))

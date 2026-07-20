@@ -1,4 +1,5 @@
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -35,6 +36,95 @@ async def test_cancel_background_tasks_cancels_inflight_message_processing():
     assert adapter._background_tasks == set()
     assert adapter._active_sessions == {}
     assert adapter._pending_messages == {}
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_awaits_watcher_cancellation_before_adapter_disconnect():
+    runner, adapter = make_restart_runner()
+    order: list[str] = []
+    started = asyncio.Event()
+
+    async def watcher():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            order.append("watcher-cancelled")
+
+    watcher_task = asyncio.create_task(watcher())
+    runner._background_tasks.add(watcher_task)
+    await started.wait()
+
+    async def disconnect():
+        order.append("disconnect")
+
+    adapter.disconnect = disconnect
+
+    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+        await runner.stop()
+
+    assert watcher_task.done()
+    assert order.index("watcher-cancelled") < order.index("disconnect")
+
+
+@pytest.mark.asyncio
+async def test_cancel_background_tasks_bounds_wait_for_resistant_watcher(monkeypatch):
+    """A watcher that swallows CancelledError and keeps running must not
+    block shutdown past the configured timeout (P1-4).
+
+    Before the fix, ``_cancel_and_await_background_tasks`` awaited
+    ``asyncio.wait_for(asyncio.gather(*tasks, ...), timeout=...)``:
+    ``wait_for`` cancels the wrapped future on timeout but then still
+    awaits it to completion with no further bound, so one watcher that
+    catches its ``CancelledError`` and keeps running holds the whole
+    ``gather`` open indefinitely — the exact "bounded await" the method's
+    docstring promises did not actually hold.
+    """
+    monkeypatch.setenv("HADES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "0.05")
+    runner, _adapter = make_restart_runner()
+    started = asyncio.Event()
+    swallowed_cancel = asyncio.Event()
+
+    swallow_count = 0
+    allow_stop = False
+
+    async def resistant_watcher():
+        nonlocal swallow_count
+        started.set()
+        while True:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                if allow_stop:
+                    raise
+                # Deliberately ignore cancellation and keep running —
+                # simulates a misbehaving watcher.
+                swallow_count += 1
+                swallowed_cancel.set()
+
+    watcher_task = asyncio.create_task(resistant_watcher())
+    runner._background_tasks.add(watcher_task)
+    await started.wait()
+
+    try:
+        start = time.monotonic()
+        await asyncio.wait_for(runner._cancel_and_await_background_tasks(), timeout=2.0)
+        elapsed = time.monotonic() - start
+
+        # Bounded by the configured timeout, not by whenever the resistant
+        # watcher eventually stops (it never does within this test).
+        assert elapsed < 1.0
+        await asyncio.wait_for(swallowed_cancel.wait(), timeout=1.0)
+        assert not watcher_task.done()
+        assert swallow_count >= 1
+    finally:
+        # Release the watcher for real so this test's own event loop can
+        # tear down cleanly — an immortal task left behind would hang
+        # pytest-asyncio's own cleanup, independent of anything under test.
+        allow_stop = True
+        watcher_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(watcher_task, timeout=1.0)
 
 
 def test_cleanup_agent_resources_reaps_stale_aux_clients():

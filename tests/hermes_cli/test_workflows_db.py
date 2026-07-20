@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sqlite3
 
 import pytest
@@ -39,6 +40,16 @@ def _required_manual_spec(*, version: int = 1) -> WorkflowSpec:
     })
 
 
+def _pre_send_message_spec_json(spec: WorkflowSpec) -> str:
+    """Serialize a definition as the pre-send_message canonical format did."""
+    payload = spec.model_dump(mode="json", by_alias=True)
+    for node in payload["nodes"].values():
+        if node["type"] != "send_message":
+            for field in ("platform", "target", "message", "not_before_seconds"):
+                node.pop(field, None)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def test_init_db_creates_tables(tmp_path, monkeypatch):
     home = tmp_path / ".hades"
     home.mkdir()
@@ -61,6 +72,8 @@ def test_init_db_creates_tables(tmp_path, monkeypatch):
     assert "workflow_input_items" in tables
     assert "kanban_task_id" in node_run_columns
     assert "idx_workflow_node_runs_kanban_task" in node_run_indexes
+    assert "outbox_id" in node_run_columns
+    assert "idx_workflow_node_runs_outbox_id" in node_run_indexes
 
 
 def test_input_feed_enqueue_evaluates_and_claims_ready_items(tmp_path, monkeypatch):
@@ -292,6 +305,75 @@ def test_init_db_migrates_old_node_runs_kanban_task_id(tmp_path):
         }
     assert "kanban_task_id" in node_run_columns
     assert "idx_workflow_node_runs_kanban_task" in node_run_indexes
+    assert "outbox_id" in node_run_columns
+    assert "idx_workflow_node_runs_outbox_id" in node_run_indexes
+
+
+def test_init_db_migrates_outbox_id_on_already_created_db(tmp_path):
+    """An old DB with kanban_task_id but no outbox_id must migrate exactly once."""
+    db_path = tmp_path / "workflows.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+        CREATE TABLE workflow_node_runs (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            execution_id  TEXT NOT NULL,
+            node_id       TEXT NOT NULL,
+            status        TEXT NOT NULL,
+            input_json    TEXT,
+            output_json   TEXT,
+            error         TEXT,
+            started_at    INTEGER,
+            completed_at  INTEGER,
+            wait_until    INTEGER,
+            kanban_task_id TEXT,
+            kanban_board   TEXT
+        );
+        """)
+
+    wfdb.init_db(db_path)
+
+    with wfdb.connect(db_path) as conn:
+        node_run_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(workflow_node_runs)")
+        }
+        node_run_indexes = {
+            row["name"] for row in conn.execute("PRAGMA index_list(workflow_node_runs)")
+        }
+    assert "outbox_id" in node_run_columns
+    assert "idx_workflow_node_runs_outbox_id" in node_run_indexes
+
+
+def test_list_node_runs_exposes_outbox_id(tmp_path, monkeypatch):
+    """Persisted node runs expose their outbox_id; event-only runs get None."""
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        wfdb.deploy_definition(conn, _demo_spec(), created_by="test")
+        exec_id = wfdb.start_execution(conn, "demo", input_data={}, trigger_type="manual")
+        # Insert a persisted node run WITH an outbox_id.
+        node_run_id = conn.execute(
+            """
+            INSERT INTO workflow_node_runs (execution_id, node_id, status, outbox_id)
+            VALUES (?, 'start', 'succeeded', 'obx_abc123')
+            """,
+            (exec_id,),
+        ).lastrowid
+        # Insert a node_succeeded event for a node that has no persisted row.
+        wfdb.append_event(
+            conn, exec_id, "node_succeeded",
+            {"node_id": "extra", "output": {"ok": True}},
+        )
+
+        runs = wfdb.list_node_runs(conn, exec_id)
+
+    persisted = [r for r in runs if r["id"] is not None]
+    event_only = [r for r in runs if r["id"] is None]
+
+    assert len(persisted) == 1
+    assert persisted[0]["outbox_id"] == "obx_abc123"
+
+    assert len(event_only) == 1
+    assert event_only[0]["outbox_id"] is None
 
 
 def test_deploy_definition_and_get_latest(tmp_path, monkeypatch):
@@ -494,6 +576,40 @@ def test_deploy_same_version_different_checksum_requires_bump(tmp_path, monkeypa
         assert wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test") == 1
         with pytest.raises(ValueError, match="different checksum; bump version"):
             wfdb.deploy_definition(conn, changed, created_by="test")
+
+
+def test_deploy_reuses_checksum_for_pre_send_message_non_send_definition(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    spec = _demo_spec(version=1)
+    legacy_raw = _pre_send_message_spec_json(spec)
+    legacy_checksum = hashlib.sha256(legacy_raw.encode("utf-8")).hexdigest()
+
+    with wfdb.connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO workflow_definitions (
+                workflow_id, version, name, enabled, spec_json, checksum,
+                created_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                spec.id,
+                spec.version,
+                spec.name,
+                1,
+                legacy_raw,
+                legacy_checksum,
+                "legacy",
+                1,
+            ),
+        )
+
+        assert wfdb.deploy_definition(conn, spec, created_by="current") == spec.version
+        assert wfdb.deploy_definition(conn, spec, created_by="current") == spec.version
+        record = wfdb.get_definition_record(conn, spec.id, spec.version)
+
+    assert record.checksum == legacy_checksum
 
 
 def test_deploy_auto_bump_redeploys_as_next_version(tmp_path, monkeypatch):
@@ -991,3 +1107,168 @@ def test_get_execution_detail_returns_execution_node_runs_and_events(tmp_path, m
         assert len(detail["node_runs"]) == 1
         assert len(detail["events"]) == 1
         assert detail["events"][0]["kind"] == "execution_started"
+
+# --- Task 5: workflow state mutation service ---
+
+
+def test_snapshot_absent_workflow_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        snap = wfdb.snapshot_workflow_state(conn, "no_such", version=1)
+    assert snap.resource == "no_such"
+    assert snap.version is None
+    assert snap.enabled is None
+    assert snap.checksum is None
+
+
+def test_snapshot_present_workflow_returns_canonical_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
+        snap = wfdb.snapshot_workflow_state(conn, "demo", version=1)
+    assert snap.resource == "demo"
+    assert snap.version == 1
+    assert snap.enabled is True
+    assert snap.checksum is not None
+
+
+def test_prepare_deploy_produces_mutation_with_before_absent(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        snap = wfdb.snapshot_workflow_state(conn, "demo", version=1)
+        mutation = wfdb.prepare_state_mutation(
+            snap, action="deploy", spec=_demo_spec(version=1)
+        )
+    assert mutation.resource == "demo"
+    assert mutation.action == "deploy"
+    assert mutation.before.enabled is None
+    assert mutation.after.enabled is True
+    assert mutation.after.version == 1
+
+
+def test_prepare_disable_produces_mutation_with_before_true(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
+        snap = wfdb.snapshot_workflow_state(conn, "demo", version=1)
+        mutation = wfdb.prepare_state_mutation(snap, action="disable")
+    assert mutation.action == "disable"
+    assert mutation.before.enabled is True
+    assert mutation.after.enabled is False
+
+
+def test_prepare_enable_produces_mutation_with_before_false(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        wfdb.deploy_definition(
+            conn,
+            _demo_spec(version=1).model_copy(update={"enabled": False}),
+            created_by="test",
+        )
+        snap = wfdb.snapshot_workflow_state(conn, "demo", version=1)
+        mutation = wfdb.prepare_state_mutation(snap, action="enable")
+    assert mutation.action == "enable"
+    assert mutation.before.enabled is False
+    assert mutation.after.enabled is True
+
+
+def test_apply_deploy_succeeds_and_is_durably_verified(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        snap = wfdb.snapshot_workflow_state(conn, "demo", version=1)
+        mutation = wfdb.prepare_state_mutation(
+            snap, action="deploy", spec=_demo_spec(version=1)
+        )
+        wfdb.apply_state_mutation(conn, mutation)
+        assert wfdb.verify_state_mutation(conn, mutation) is True
+        snap_after = wfdb.snapshot_workflow_state(conn, "demo", version=1)
+    assert snap_after.version == 1
+    assert snap_after.enabled is True
+    assert snap_after.checksum == mutation.after.checksum
+
+
+def test_apply_revision_mismatch_raises_and_leaves_state_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
+        snap = wfdb.snapshot_workflow_state(conn, "demo", version=1)
+        mutation = wfdb.prepare_state_mutation(snap, action="disable")
+        # Tamper: change expected_revision to stale value
+        tampered = mutation.model_copy(update={"expected_revision": "stale"})
+        with pytest.raises(wfdb.WorkflowStateConflict):
+            wfdb.apply_state_mutation(conn, tampered)
+        # State unchanged
+        record = wfdb.get_definition_record(conn, "demo", 1)
+        assert record.enabled is True
+
+
+def test_rollback_restores_prior_enabled_state_without_touching_spec(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
+        snap_before = wfdb.snapshot_workflow_state(conn, "demo", version=1)
+        original_checksum = snap_before.checksum
+        mutation = wfdb.prepare_state_mutation(snap_before, action="disable")
+        wfdb.apply_state_mutation(conn, mutation)
+        snap_mid = wfdb.snapshot_workflow_state(conn, "demo", version=1)
+        assert snap_mid.enabled is False
+        # Rollback
+        wfdb.rollback_state_mutation(conn, mutation)
+        snap_after = wfdb.snapshot_workflow_state(conn, "demo", version=1)
+    assert snap_after.enabled is True
+    assert snap_after.checksum == original_checksum
+    # spec_json untouched
+    record = wfdb.get_definition_record(conn, "demo", 1)
+    assert record.checksum == original_checksum
+
+
+def test_snapshot_latest_version_when_version_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
+        wfdb.deploy_definition(conn, _demo_spec(version=2), created_by="test")
+        snap = wfdb.snapshot_workflow_state(conn, "demo")
+    assert snap.version == 2
+
+
+def test_rollback_deployed_absent_version_disables_without_editing_definition(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        mutation = wfdb.prepare_state_mutation(
+            wfdb.snapshot_workflow_state(conn, "demo", version=1),
+            action="deploy",
+            spec=_demo_spec(version=1),
+        )
+        wfdb.apply_state_mutation(conn, mutation)
+        checksum = wfdb.get_definition_record(conn, "demo", 1).checksum
+        wfdb.rollback_state_mutation(conn, mutation)
+        restored = wfdb.get_definition_record(conn, "demo", 1)
+
+    assert restored.enabled is False
+    assert restored.checksum == checksum
+
+
+def test_rollback_refuses_to_overwrite_concurrent_workflow_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / ".hades"))
+    wfdb.init_db()
+    with wfdb.connect() as conn:
+        wfdb.deploy_definition(conn, _demo_spec(version=1), created_by="test")
+        mutation = wfdb.prepare_state_mutation(
+            wfdb.snapshot_workflow_state(conn, "demo", version=1), action="disable"
+        )
+        wfdb.apply_state_mutation(conn, mutation)
+        wfdb.set_definition_enabled(conn, "demo", True, version=1)
+        with pytest.raises(wfdb.WorkflowStateConflict, match="revision mismatch"):
+            wfdb.rollback_state_mutation(conn, mutation)
+
+        assert wfdb.get_definition_record(conn, "demo", 1).enabled is True

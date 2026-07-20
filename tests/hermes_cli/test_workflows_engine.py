@@ -5,7 +5,7 @@ from hades_cli.workflows_spec import WorkflowSpec
 import pytest
 
 
-@pytest.mark.parametrize("node_type", ["send_message", "subworkflow"])
+@pytest.mark.parametrize("node_type", ["subworkflow"])
 def test_unimplemented_node_types_fail_instead_of_waiting_forever(node_type):
     spec = WorkflowSpec.model_validate({
         "id": "demo", "name": "Demo", "version": 1,
@@ -19,6 +19,27 @@ def test_unimplemented_node_types_fail_instead_of_waiting_forever(node_type):
     assert result.status == "failed"
     assert result.waiting_nodes == []
     assert result.error == {"node": "unsupported", "message": f"unsupported node type: {node_type}"}
+
+
+def test_send_message_waits_for_dispatcher_materialization():
+    spec = WorkflowSpec.model_validate({
+        "id": "demo", "name": "Demo", "version": 1,
+        "triggers": [{"type": "manual", "id": "manual"}],
+        "nodes": {
+            "notify": {
+                "type": "send_message",
+                "platform": "local",
+                "target": "test-target",
+                "message": "hello",
+            },
+        },
+        "edges": [],
+    })
+
+    result = run_in_memory_until_waiting(spec, input_data={})
+
+    assert result.status == "waiting"
+    assert result.waiting_nodes == ["notify"]
 
 
 def test_pass_then_switch_routes_to_matching_branch():

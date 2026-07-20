@@ -2896,6 +2896,15 @@ DEFAULT_CONFIG = {
         "max_executions_per_tick": 50,
     },
 
+    # Mission and workflow outbox policy. This is deliberately outside the
+    # workflow dispatcher namespace because the same durable outbox is shared
+    # by mission-linked and ordinary workflow effects.
+    "missions": {
+        "outbox": {
+            "max_delay_seconds": 604_800,
+        },
+    },
+
     # execute_code settings — controls the tool used for programmatic tool calls.
     "code_execution": {
         # Execution mode:
@@ -7679,6 +7688,26 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                     user_config["agent"] = agent_user_config
                     user_config.pop("max_turns", None)
 
+                workflow_user_config = user_config.get("workflow")
+                legacy_outbox = (
+                    workflow_user_config.get("outbox")
+                    if isinstance(workflow_user_config, dict)
+                    else None
+                )
+                if isinstance(legacy_outbox, dict) and "max_delay_seconds" in legacy_outbox:
+                    missions_user_config = user_config.get("missions")
+                    if not isinstance(missions_user_config, dict):
+                        missions_user_config = {}
+                        user_config["missions"] = missions_user_config
+                    missions_outbox = missions_user_config.get("outbox")
+                    if not isinstance(missions_outbox, dict):
+                        missions_outbox = {}
+                        missions_user_config["outbox"] = missions_outbox
+                    missions_outbox.setdefault(
+                        "max_delay_seconds", legacy_outbox["max_delay_seconds"]
+                    )
+                    workflow_user_config.pop("outbox", None)
+
                 config = _deep_merge(config, user_config)
             except Exception as e:
                 # Last-known-good fallback (port of openai/codex#31188's
@@ -8838,6 +8867,171 @@ def _default_value_for_key(dotted_key: str):
             return None
         node = node[part]
     return node if not isinstance(node, dict) else None
+
+
+@dataclass(frozen=True)
+class ConfigStateMutation:
+    """One revision-checked, non-printing config.yaml change."""
+
+    resource: str
+    action: str
+    expected_revision: str
+    before: Dict[str, Any]
+    after: Dict[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "before", copy.deepcopy(self.before))
+        object.__setattr__(self, "after", copy.deepcopy(self.after))
+
+
+_CONFIG_STATE_SECRET_MARKERS = ("api", "key", "token", "password", "secret", "credential")
+_CONFIG_STATE_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$")
+
+
+def _validate_config_state_key(key: str) -> None:
+    if not isinstance(key, str) or not _CONFIG_STATE_KEY_RE.fullmatch(key):
+        raise ValueError("config-state key must be a non-empty dotted mapping path")
+    if any(
+        marker in segment.lower()
+        for segment in key.split(".")
+        for marker in _CONFIG_STATE_SECRET_MARKERS
+    ):
+        raise ValueError("config-state refuses credential-shaped keys")
+
+
+def _read_raw_config_strict(config_path: Path) -> Dict[str, Any]:
+    """Read user config without the forgiving fallback used by read-only UI paths."""
+    try:
+        with open(config_path, encoding="utf-8") as stream:
+            data = fast_safe_load(stream) or {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError("config-state requires a readable config.yaml") from exc
+    except Exception as exc:
+        raise RuntimeError("config-state requires a readable config.yaml") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("config-state requires config.yaml to contain a mapping")
+    return data
+
+
+def _config_state_value(data: Dict[str, Any], key: str) -> tuple[bool, Any]:
+    node: Any = data
+    for part in key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False, None
+        node = node[part]
+    return True, copy.deepcopy(node)
+
+
+def _config_state_revision(data: Dict[str, Any]) -> str:
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _config_state_snapshot_from_data(data: Dict[str, Any], key: str) -> Dict[str, Any]:
+    exists, value = _config_state_value(data, key)
+    return {
+        "exists": exists,
+        "value": value,
+        "revision": _config_state_revision(data),
+    }
+
+
+def config_key_snapshot(key: str) -> Dict[str, Any]:
+    """Return the canonical durable state of a non-credential config key."""
+    _validate_config_state_key(key)
+    with _CONFIG_LOCK:
+        return _config_state_snapshot_from_data(_read_raw_config_strict(get_config_path()), key)
+
+
+def prepare_config_mutation(key: str, value: Any) -> ConfigStateMutation:
+    """Prepare one config set without printing or mutating config.yaml."""
+    _validate_config_state_key(key)
+    if is_managed():
+        raise RuntimeError("config-state is unavailable in a managed installation")
+    from hades_cli import managed_scope
+
+    if managed_scope.is_key_managed(key):
+        raise RuntimeError(f"config-state key is managed and cannot be changed: {key}")
+    with _CONFIG_LOCK:
+        before_data = _read_raw_config_strict(get_config_path())
+        before = _config_state_snapshot_from_data(before_data, key)
+        after_data = copy.deepcopy(before_data)
+        _set_nested(after_data, key, copy.deepcopy(value))
+        after = _config_state_snapshot_from_data(after_data, key)
+    return ConfigStateMutation(
+        resource=f"config:{key}",
+        action="set",
+        expected_revision=before["revision"],
+        before=before,
+        after=after,
+    )
+
+
+def _delete_config_state_key(data: Dict[str, Any], key: str) -> None:
+    parts = key.split(".")
+    node: Any = data
+    for part in parts[:-1]:
+        if not isinstance(node, dict) or part not in node:
+            return
+        node = node[part]
+    if not isinstance(node, dict):
+        raise RuntimeError(f"config-state cannot restore non-mapping path: {key}")
+    node.pop(parts[-1], None)
+
+
+def apply_config_mutation(mutation: ConfigStateMutation) -> Dict[str, Any]:
+    """Atomically apply a prepared config mutation if its revision still matches."""
+    if mutation.action != "set" or not mutation.resource.startswith("config:"):
+        raise ValueError("unsupported config-state mutation")
+    key = mutation.resource.split(":", 1)[1]
+    _validate_config_state_key(key)
+    with _CONFIG_LOCK:
+        config_path = get_config_path()
+        current = _read_raw_config_strict(config_path)
+        if _config_state_revision(current) != mutation.expected_revision:
+            raise ValueError(f"config key {key!r} revision mismatch")
+        updated = copy.deepcopy(current)
+        _set_nested(updated, key, copy.deepcopy(mutation.after["value"]))
+        atomic_config_write(config_path, updated, sort_keys=False)
+        landed = _config_state_snapshot_from_data(updated, key)
+    if landed["revision"] != mutation.after["revision"]:
+        raise RuntimeError("config-state canonical revision changed during apply")
+    return landed
+
+
+def verify_config_mutation(mutation: ConfigStateMutation) -> Dict[str, Any]:
+    """Reread durable config state; never rely on an in-memory apply result."""
+    key = mutation.resource.split(":", 1)[1]
+    snap = config_key_snapshot(key)
+    return {"revision": snap["revision"], "landed": snap == mutation.after}
+
+
+def restore_config_mutation(mutation: ConfigStateMutation) -> Dict[str, Any]:
+    """Restore the exact previous key state without clobbering newer config."""
+    if mutation.action != "set" or not mutation.resource.startswith("config:"):
+        raise ValueError("unsupported config-state mutation")
+    key = mutation.resource.split(":", 1)[1]
+    _validate_config_state_key(key)
+    with _CONFIG_LOCK:
+        config_path = get_config_path()
+        current = _read_raw_config_strict(config_path)
+        if _config_state_revision(current) != mutation.after["revision"]:
+            raise ValueError(f"config key {key!r} revision mismatch during restore")
+        restored = copy.deepcopy(current)
+        if mutation.before["exists"]:
+            _set_nested(restored, key, copy.deepcopy(mutation.before["value"]))
+        else:
+            _delete_config_state_key(restored, key)
+        atomic_config_write(config_path, restored, sort_keys=False)
+        snap = _config_state_snapshot_from_data(restored, key)
+    if (
+        snap["exists"] != mutation.before["exists"]
+        or snap["value"] != mutation.before["value"]
+    ):
+        raise RuntimeError("config-state restore did not reproduce the prepared prior key state")
+    return snap
 
 
 def set_config_value(key: str, value: str):

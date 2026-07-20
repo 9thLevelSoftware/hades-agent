@@ -933,25 +933,23 @@ def test_active_mission_hold_blocks_retention(store, home):
 
 
 def test_active_transaction_hold_blocks_retention(store, db):
+    # The real effect_transactions table (missions vertical slice) ships in
+    # SCHEMA_SQL, with an enforced FK to agent_operations — seed parents
+    # first, then rows in the exact live schema.
     db._execute_write(
-        lambda conn: conn.execute(
-            """CREATE TABLE IF NOT EXISTS effect_transactions (
-                transaction_id TEXT PRIMARY KEY,
-                operation_id TEXT NOT NULL,
-                mission_id TEXT NOT NULL,
-                adapter_id TEXT NOT NULL,
-                sequence_no INTEGER NOT NULL,
-                semantics_json TEXT NOT NULL,
-                phase TEXT NOT NULL,
-                depends_on_json TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            )"""
+        lambda conn: conn.executemany(
+            "INSERT INTO agent_operations (operation_id, kind, state, "
+            "effect_disposition, created_at, updated_at) "
+            "VALUES (?, 'effect', 'confirmed', 'landed', 1000, 1000)",
+            [("op1",), ("op2",)],
         )
     )
     db._execute_write(
         lambda conn: conn.executemany(
-            "INSERT INTO effect_transactions VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO effect_transactions (transaction_id, operation_id, "
+            "mission_id, adapter_id, sequence_no, semantics_json, phase, "
+            "depends_on_json, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             [
                 ("tx-open", "op1", "m1", "email", 1, "{}", "prepared", "[]",
                  1000, 1000),

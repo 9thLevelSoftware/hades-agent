@@ -3524,6 +3524,9 @@ class TestConcurrentToolExecution:
             "read_only": False,
             "destructive": True,
             "idempotent": False,
+            "effect_adapter": None,
+            "effect_semantic_kind": None,
+            "effect_overrides": {},
         }
         from model_tools import registry
         assert seen["operation_key"] == registry.operation_key(

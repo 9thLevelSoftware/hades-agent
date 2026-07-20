@@ -15,6 +15,7 @@ Import chain (circular-import safe):
 """
 
 import ast
+import copy
 import hashlib
 import importlib
 import json
@@ -23,7 +24,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -114,13 +115,18 @@ class ToolEntry:
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
         "read_only", "destructive", "idempotent", "authority_context_fn",
+        # Task 3 — metadata-only effect-transaction fields. These never
+        # leak into the model-visible tool schema (see get_definitions).
+        "effect_adapter", "effect_semantic_kind", "effect_overrides",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
                  max_result_size_chars=None, dynamic_schema_overrides=None,
                  read_only=False, destructive=True, idempotent=False,
-                 authority_context_fn=None):
+                 authority_context_fn=None,
+                 effect_adapter=None, effect_semantic_kind=None,
+                 effect_overrides=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -149,6 +155,16 @@ class ToolEntry:
         # model-visible schema; consumed only by agent.autonomy.runtime via
         # get_authority_context().
         self.authority_context_fn = authority_context_fn
+        # Effect-transaction metadata (Task 3). Coordinator-side only:
+        # these fields never appear in get_definitions() output.
+        self.effect_adapter = effect_adapter
+        self.effect_semantic_kind = effect_semantic_kind
+        # Spec 6: defensive deep copy on nested effect_overrides. A
+        # caller that mutates a list inside the dict they passed in
+        # must not corrupt the entry's stored overrides. Stdlib only.
+        self.effect_overrides = (
+            copy.deepcopy(effect_overrides) if effect_overrides else {}
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -324,15 +340,34 @@ class ToolRegistry:
         with self._lock:
             return self._tools.get(name)
 
-    def get_operation_metadata(self, name: str) -> Dict[str, bool]:
-        """Return conservative policy metadata without changing model schemas."""
+    def get_operation_metadata(self, name: str) -> Dict[str, Any]:
+        """Return conservative policy metadata without changing model schemas.
+
+        Effect-transaction fields (Task 3) flow through here for the
+        coordinator. Nested mappings (effect_overrides) are returned as
+        defensive deep copies so a caller mutating the snapshot cannot
+        corrupt the registry's stored value, and the snapshot's nested
+        lists/mappings are isolated from any subsequent snapshot.
+        """
         entry = self.get_entry(name)
         if entry is None:
-            return {"read_only": False, "destructive": True, "idempotent": False}
+            return {
+                "read_only": False,
+                "destructive": True,
+                "idempotent": False,
+                "effect_adapter": None,
+                "effect_semantic_kind": None,
+                "effect_overrides": {},
+            }
         return {
             "read_only": entry.read_only,
             "destructive": entry.destructive,
             "idempotent": entry.idempotent,
+            "effect_adapter": entry.effect_adapter,
+            "effect_semantic_kind": entry.effect_semantic_kind,
+            # Spec 6: deep-copy so a caller mutating the snapshot's
+            # nested list/mapping cannot corrupt the stored value.
+            "effect_overrides": copy.deepcopy(entry.effect_overrides),
         }
 
     # Conservative authority context for tools that declare nothing: an
@@ -535,6 +570,9 @@ class ToolRegistry:
         destructive: Optional[bool] = None,
         idempotent: bool = False,
         authority_context_fn: Optional[Callable] = None,
+        effect_adapter: Optional[str] = None,
+        effect_semantic_kind: Optional[str] = None,
+        effect_overrides: Optional[Dict[str, Any]] = None,
     ):
         """Register a tool.  Called at module-import time by each tool file.
 
@@ -608,6 +646,9 @@ class ToolRegistry:
                 destructive=(not read_only if destructive is None else destructive),
                 idempotent=idempotent,
                 authority_context_fn=authority_context_fn,
+                effect_adapter=effect_adapter,
+                effect_semantic_kind=effect_semantic_kind,
+                effect_overrides=effect_overrides,
             )
             # Availability is now derived per-tool (_toolset_has_exposable_tools),
             # so this map no longer gates a toolset. It is still consumed by

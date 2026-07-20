@@ -10,6 +10,7 @@ from gateway.delivery import DeliveryRouter
 from gateway.run import GatewayRunner, _WORKFLOW_DISPATCH_LIMIT_DEFAULT
 from hades_cli.config import DEFAULT_CONFIG
 from hades_cli import workflows_dispatcher
+from hades_state import AsyncSessionDB, SessionDB
 
 
 def _runner():
@@ -219,6 +220,78 @@ def test_workflow_dispatcher_cancelled_error_propagates(monkeypatch):
         asyncio.run(runner._workflow_dispatcher_watcher(initial_delay=0, sleep=AsyncMock()))
 
 
+class _RecordingOutboxDispatcher:
+    def __init__(self) -> None:
+        self.limits: list[int] = []
+
+    async def drain(self, *, limit: int):
+        self.limits.append(limit)
+
+
+def test_mission_outbox_dispatcher_watcher_drains_on_workflow_cadence(monkeypatch):
+    runner = _runner()
+    dispatcher = _RecordingOutboxDispatcher()
+    runner._mission_outbox_dispatcher = dispatcher
+
+    monkeypatch.setattr(
+        "hades_cli.config.load_config",
+        lambda: {
+            "workflow": {
+                "dispatch_in_gateway": True,
+                "tick_interval_seconds": 1,
+                "max_executions_per_tick": 4,
+            }
+        },
+    )
+
+    async def fake_sleep(delay):
+        assert delay == 1.0
+        runner._running = False
+
+    asyncio.run(
+        runner._mission_outbox_dispatcher_watcher(initial_delay=0, sleep=fake_sleep)
+    )
+
+    assert dispatcher.limits == [4]
+
+
+def test_mission_outbox_dispatcher_watcher_propagates_cancellation(monkeypatch):
+    runner = _runner()
+
+    class _CancelledDispatcher:
+        async def drain(self, *, limit: int):
+            raise asyncio.CancelledError()
+
+    runner._mission_outbox_dispatcher = _CancelledDispatcher()
+    monkeypatch.setattr(
+        "hades_cli.config.load_config",
+        lambda: {"workflow": {"dispatch_in_gateway": True}},
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(runner._mission_outbox_dispatcher_watcher(initial_delay=0))
+
+
+def test_mission_outbox_dispatcher_factory_uses_gateway_state_db(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig(sessions_dir=tmp_path, platforms={})
+        runner.delivery_router = DeliveryRouter(runner.config, {})
+        runner._session_db = AsyncSessionDB(db)
+
+        first = runner._get_mission_outbox_dispatcher()
+        second = runner._get_mission_outbox_dispatcher()
+
+        assert first is not None
+        assert first is second
+        assert first.store.db is db
+        assert first.journal is runner.delivery_router.journal
+        assert first.owner_id.startswith("gateway:")
+    finally:
+        db.close()
+
+
 def test_start_schedules_workflow_dispatcher_watcher(tmp_path):
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(sessions_dir=tmp_path, platforms={})
@@ -242,12 +315,14 @@ def test_start_schedules_workflow_dispatcher_watcher(tmp_path):
     runner._finish_startup_restore = AsyncMock()
     runner._scale_to_zero_should_arm = MagicMock(return_value=False)
     runner._log_scale_to_zero_not_armed_reason = MagicMock()
-    scheduled = []
+    runner._background_tasks = set()
+    scheduled = {}
 
     def fake_create_task(coro):
-        scheduled.append(coro.cr_code.co_name)
+        task = MagicMock()
+        scheduled[coro.cr_code.co_name] = task
         coro.close()
-        return MagicMock()
+        return task
 
     with patch("gateway.status.write_runtime_status"):
         with patch("hades_cli.plugins.discover_plugins"):
@@ -265,6 +340,12 @@ def test_start_schedules_workflow_dispatcher_watcher(tmp_path):
                                 assert asyncio.run(runner.start()) is True
 
     assert "_workflow_dispatcher_watcher" in scheduled
+    assert "_mission_outbox_dispatcher_watcher" in scheduled
+    outbox_watcher = scheduled["_mission_outbox_dispatcher_watcher"]
+    assert outbox_watcher in runner._background_tasks
+    outbox_watcher.add_done_callback.assert_called_once_with(
+        runner._background_tasks.discard
+    )
 
 
 def test_gateway_workflow_slash_command_delegates_to_run_slash(monkeypatch):

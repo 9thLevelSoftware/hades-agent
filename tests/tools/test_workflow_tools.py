@@ -22,7 +22,7 @@ def _isolated_workflow_home(tmp_path, monkeypatch):
     hermes_home = tmp_path / ".hades"
     hermes_home.mkdir()
     monkeypatch.setenv("HADES_HOME", str(hermes_home))
-    monkeypatch.delenv("HERMES_WORKFLOW_CONTEXT", raising=False)
+    monkeypatch.delenv("HADES_WORKFLOW_CONTEXT", raising=False)
     monkeypatch.delenv("HERMES_PLATFORM", raising=False)
     monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
 
@@ -88,10 +88,10 @@ def test_workflow_tools_hidden_without_workflow_toolset():
 def test_workflow_tool_visibility_tracks_env_without_manual_cache_invalidation(monkeypatch):
     assert WORKFLOW_TOOL_NAMES.isdisjoint(_tool_names_for_workflow_toolset())
 
-    monkeypatch.setenv("HERMES_WORKFLOW_CONTEXT", "1")
+    monkeypatch.setenv("HADES_WORKFLOW_CONTEXT", "1")
     assert WORKFLOW_TOOL_NAMES.issubset(_tool_names_for_workflow_toolset())
 
-    monkeypatch.delenv("HERMES_WORKFLOW_CONTEXT", raising=False)
+    monkeypatch.delenv("HADES_WORKFLOW_CONTEXT", raising=False)
     assert WORKFLOW_TOOL_NAMES.isdisjoint(_tool_names_for_workflow_toolset())
 
 
@@ -236,13 +236,13 @@ def test_workflow_validate_rejects_unsupported_primitives(_isolated_workflow_hom
         "name": "Validate Unsupported Demo",
         "version": 1,
         "triggers": [{"type": "manual"}],
-        "nodes": {"start": {"type": "send_message", "output": {"text": "hi"}}},
+        "nodes": {"start": {"type": "subworkflow"}},
     }
 
     payload = json.loads(registry.dispatch("workflow_validate", {"definition": definition}))
 
     assert "error" in payload
-    assert "unsupported node type: send_message on node start" in payload["error"]
+    assert "unsupported node type: subworkflow on node start" in payload["error"]
 
 
 def test_workflow_draft_tool_returns_validated_spec(_isolated_workflow_home, monkeypatch):
@@ -431,13 +431,13 @@ def test_workflow_deploy_rejects_unsupported_primitives(_isolated_workflow_home)
         "name": "Deploy Unsupported Demo",
         "version": 1,
         "triggers": [{"type": "manual"}],
-        "nodes": {"start": {"type": "send_message", "output": {"text": "hi"}}},
+        "nodes": {"start": {"type": "subworkflow"}},
     }
 
     payload = json.loads(registry.dispatch("workflow_deploy", {"definition": definition}))
 
     assert "error" in payload
-    assert "unsupported node type: send_message on node start" in payload["error"]
+    assert "unsupported node type: subworkflow on node start" in payload["error"]
 
 
 def test_workflow_deploy_returns_deployed_version_not_latest(_isolated_workflow_home):

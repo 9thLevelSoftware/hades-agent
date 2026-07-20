@@ -223,6 +223,9 @@ class TestHandleFunctionCall:
             "read_only": True,
             "destructive": False,
             "idempotent": True,
+            "effect_adapter": None,
+            "effect_semantic_kind": None,
+            "effect_overrides": {},
         }
         assert seen["operation_key"] == registry.operation_key(
             "web_search",
@@ -243,6 +246,9 @@ class TestHandleFunctionCall:
             "read_only": False,
             "destructive": True,
             "idempotent": False,
+            "effect_adapter": None,
+            "effect_semantic_kind": None,
+            "effect_overrides": {},
         }
 
     def test_no_execution_middleware_does_not_hash_arguments(self, monkeypatch):

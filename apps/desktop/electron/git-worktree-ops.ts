@@ -177,16 +177,7 @@ async function ensureGitRepo(gitBin, dir) {
     // Inline identity so the seed commit lands even with no global git config.
     await runGit(
       gitBin,
-      [
-        '-c',
-        'user.email=hermes@localhost',
-        '-c',
-        'user.name=Hades',
-        'commit',
-        '--allow-empty',
-        '-m',
-        'Initial commit'
-      ],
+      ['-c', 'user.email=hermes@localhost', '-c', 'user.name=Hades', 'commit', '--allow-empty', '-m', 'Initial commit'],
       dir
     )
   }

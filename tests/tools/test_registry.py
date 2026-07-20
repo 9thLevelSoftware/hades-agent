@@ -44,11 +44,13 @@ class TestRegisterAndDispatch:
             handler=_dummy_handler,
         )
 
-        assert reg.get_operation_metadata("alpha") == {
-            "read_only": False,
-            "destructive": True,
-            "idempotent": False,
-        }
+        # Task 3 added effect-transaction metadata; the legacy fields
+        # (read_only / destructive / idempotent) must keep their existing
+        # default values exactly so old callers keep working.
+        meta = reg.get_operation_metadata("alpha")
+        assert meta["read_only"] is False
+        assert meta["destructive"] is True
+        assert meta["idempotent"] is False
         assert "read_only" not in schema
         assert "destructive" not in schema
         assert "idempotent" not in schema
@@ -75,11 +77,12 @@ class TestRegisterAndDispatch:
         assert reg.operation_key(
             "lookup", {"path": "bad\udcffname"}, task_id="task", tool_call_id="call"
         )
-        assert reg.get_operation_metadata("lookup") == {
-            "read_only": True,
-            "destructive": False,
-            "idempotent": True,
-        }
+        # Legacy fields stay exactly as they were. Effect-transaction
+        # fields default to None/{} when no effect metadata is supplied.
+        meta = reg.get_operation_metadata("lookup")
+        assert meta["read_only"] is True
+        assert meta["destructive"] is False
+        assert meta["idempotent"] is True
 
     def test_positional_override_slot_remains_backward_compatible(self):
         reg = ToolRegistry()
@@ -498,6 +501,195 @@ class TestEmojiMetadata:
         reg = ToolRegistry()
         assert reg.get_emoji("nonexistent") == "⚡"
         assert reg.get_emoji("nonexistent", default="❓") == "❓"
+
+
+class TestEffectMetadataExtension:
+    """Task 3: metadata-only registry extension for effect transactions.
+
+    The registry gains an optional ``effect_adapter`` reference + minimal
+    semantic override metadata. The contract that matters most is that the
+    model-visible tool schema (and its cache) must NOT change when only
+    effect metadata is added — adapters are coordinator-side metadata.
+    """
+
+    def test_register_accepts_effect_adapter_and_semantic_overrides(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="writer",
+            toolset="core",
+            schema=_make_schema("writer"),
+            handler=_dummy_handler,
+            effect_adapter="workspace.v1",
+            effect_semantic_kind="reversible",
+        )
+
+        entry = reg.get_entry("writer")
+        assert entry.effect_adapter == "workspace.v1"
+        assert entry.effect_semantic_kind == "reversible"
+        assert entry.effect_overrides == {}
+
+    def test_register_accepts_effect_overrides_mapping(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="sender",
+            toolset="core",
+            schema=_make_schema("sender"),
+            handler=_dummy_handler,
+            effect_adapter="telegram.v1",
+            effect_overrides={"requires_approval": True, "ttl_seconds": 60},
+        )
+
+        entry = reg.get_entry("sender")
+        assert entry.effect_overrides == {
+            "requires_approval": True,
+            "ttl_seconds": 60,
+        }
+
+    def test_register_without_effect_metadata_defaults_clean(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="plain",
+            toolset="core",
+            schema=_make_schema("plain"),
+            handler=_dummy_handler,
+        )
+
+        entry = reg.get_entry("plain")
+        assert entry.effect_adapter is None
+        assert entry.effect_semantic_kind is None
+        assert entry.effect_overrides == {}
+
+    def test_get_operation_metadata_returns_defensive_copy_with_effect_fields(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="writer",
+            toolset="core",
+            schema=_make_schema("writer"),
+            handler=_dummy_handler,
+            effect_adapter="workspace.v1",
+            effect_semantic_kind="reversible",
+            effect_overrides={"requires_approval": False},
+        )
+
+        snapshot = reg.get_operation_metadata("writer")
+        assert snapshot["effect_adapter"] == "workspace.v1"
+        assert snapshot["effect_semantic_kind"] == "reversible"
+        assert snapshot["effect_overrides"] == {"requires_approval": False}
+
+        # Defensive copy: caller must not be able to mutate stored metadata
+        # through the returned dict or its nested mapping.
+        snapshot["effect_overrides"]["requires_approval"] = True
+        snapshot["effect_overrides"]["new"] = "value"
+        again = reg.get_operation_metadata("writer")
+        assert again["effect_overrides"] == {"requires_approval": False}
+        assert "new" not in again["effect_overrides"]
+
+    def test_get_operation_metadata_unknown_tool_returns_defaults(self):
+        reg = ToolRegistry()
+        snapshot = reg.get_operation_metadata("nope")
+        assert snapshot["read_only"] is False
+        assert snapshot["destructive"] is True
+        assert snapshot["idempotent"] is False
+        assert snapshot["effect_adapter"] is None
+        assert snapshot["effect_semantic_kind"] is None
+        assert snapshot["effect_overrides"] == {}
+
+    def test_get_definitions_unchanged_when_only_effect_metadata_added(self):
+        """The model-visible tool schema must be byte-identical whether or
+        not effect metadata is attached — adapters never leak into the
+        function schema."""
+        reg = ToolRegistry()
+        schema = _make_schema("writer")
+        reg.register(
+            name="writer",
+            toolset="core",
+            schema=schema,
+            handler=_dummy_handler,
+        )
+        before = reg.get_definitions({"writer"})
+
+        # Register a second tool with effect metadata; the FIRST tool's
+        # definition must remain identical.
+        reg.register(
+            name="writer2",
+            toolset="core",
+            schema=_make_schema("writer2"),
+            handler=_dummy_handler,
+            effect_adapter="workspace.v1",
+            effect_semantic_kind="reversible",
+            effect_overrides={"k": 1},
+        )
+        after = reg.get_definitions({"writer"})
+
+        assert before == after
+        # And the new tool's schema carries no effect keys.
+        writer2_def = next(d for d in reg.get_definitions({"writer2"}) if d["function"]["name"] == "writer2")
+        assert "effect_adapter" not in writer2_def["function"]
+        assert "effect_semantic_kind" not in writer2_def["function"]
+        assert "effect_overrides" not in writer2_def["function"]
+
+    def test_cached_definitions_snapshot_unchanged_by_effect_metadata_only(self):
+        """A cached get_definitions() result must not be invalidated by
+        effect-metadata additions (the cache key is generation, which only
+        bumps on structural changes — adding metadata to a NEW tool does
+        not change generation since this is a new registration, but we
+        verify it stays valid for the OLD tool)."""
+        reg = ToolRegistry()
+        reg.register(
+            name="writer",
+            toolset="core",
+            schema=_make_schema("writer"),
+            handler=_dummy_handler,
+        )
+        first = reg.get_definitions({"writer"})
+        gen_before = reg._generation
+
+        reg.register(
+            name="writer2",
+            toolset="core",
+            schema=_make_schema("writer2"),
+            handler=_dummy_handler,
+            effect_adapter="workspace.v1",
+        )
+        # Generation bumps on any register call; that's structural. But the
+        # schema payload for ``writer`` is independent of the new tool.
+        assert reg._generation > gen_before
+        again = reg.get_definitions({"writer"})
+        assert first == again
+
+
+class TestToolSchemaByteIdentity:
+    """Hard-pin that effect-metadata is invisible in the JSON schema sent
+    to the model. Catches accidental field bleed."""
+
+    def test_schema_has_no_effect_keys_for_plain_tool(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="plain",
+            toolset="core",
+            schema=_make_schema("plain"),
+            handler=_dummy_handler,
+        )
+        defs = reg.get_definitions({"plain"})
+        func = defs[0]["function"]
+        for key in ("effect_adapter", "effect_semantic_kind", "effect_overrides"):
+            assert key not in func
+
+    def test_schema_has_no_effect_keys_for_effect_metadata_tool(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="writer",
+            toolset="core",
+            schema=_make_schema("writer"),
+            handler=_dummy_handler,
+            effect_adapter="workspace.v1",
+            effect_semantic_kind="reversible",
+            effect_overrides={"requires_approval": True},
+        )
+        defs = reg.get_definitions({"writer"})
+        func = defs[0]["function"]
+        for key in ("effect_adapter", "effect_semantic_kind", "effect_overrides"):
+            assert key not in func
 
     def test_emoji_empty_string_treated_as_unset(self):
         reg = ToolRegistry()
@@ -1146,3 +1338,48 @@ class TestAuthorityContext:
             pass
         else:  # pragma: no cover - defensive
             raise AssertionError("expected KeyError for unknown tool")
+class TestSpec6DeepDefensiveCopiesRegistry:
+    """Spec 6: registry must deep-copy ``effect_overrides`` so a caller
+    mutating a nested value cannot corrupt the stored entry, and a
+    caller mutating the metadata snapshot cannot corrupt the entry.
+    """
+
+    def test_register_deep_copies_nested_effect_overrides(self):
+        reg = ToolRegistry()
+        nested = {"requires_approval": True, "tags": ["x", "y"]}
+        reg.register(
+            name="writer",
+            toolset="core",
+            schema=_make_schema("writer"),
+            handler=_dummy_handler,
+            effect_adapter="writer.v1",
+            effect_overrides=nested,
+        )
+        # Mutate the caller-side mapping after register().
+        nested["requires_approval"] = False
+        nested["tags"].append("z")
+        nested["new_top"] = "added"
+        entry = reg.get_entry("writer")
+        # The stored entry must be unaffected.
+        assert entry.effect_overrides == {
+            "requires_approval": True, "tags": ["x", "y"],
+        }
+
+    def test_get_operation_metadata_deep_copies_nested_effect_overrides(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="sender",
+            toolset="core",
+            schema=_make_schema("sender"),
+            handler=_dummy_handler,
+            effect_adapter="telegram.v1",
+            effect_overrides={"tags": ["alpha", "beta"]},
+        )
+        snap1 = reg.get_operation_metadata("sender")
+        # Mutate nested value in the snapshot.
+        snap1["effect_overrides"]["tags"].append("evil")
+        snap1["effect_overrides"]["new"] = "value"
+        snap2 = reg.get_operation_metadata("sender")
+        # The second snapshot must not see the mutations.
+        assert snap2["effect_overrides"] == {"tags": ["alpha", "beta"]}
+        assert "new" not in snap2["effect_overrides"]

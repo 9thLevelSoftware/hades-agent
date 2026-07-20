@@ -283,6 +283,39 @@ class OperationJournal:
         rows = self._db._execute_read(_read)
         return [self._record(row) for row in rows]
 
+    def get_by_operation_id(self, operation_id: str) -> Optional[OperationRecord]:
+        """Alias for :meth:`get` — coordinator-side naming preferred by
+        the effect-transactions contract (Task 3). Behavior is identical:
+        returns ``None`` for missing rows; a frozen ``OperationRecord``
+        for hits.
+        """
+        return self.get(operation_id)
+
+    def terminal_result(self, operation_id: str) -> Any:
+        """Return the decoded result payload for a *terminal*, *landed*
+        operation, or ``None`` for anything else.
+
+        Coordinator contract (Task 3): ``None`` is the signal that the
+        caller must NOT replay the prior result — it must reconcile or
+        refuse. The function returns the decoded payload only when the
+        operation is in a state the coordinator treats as a confirmed
+        effect (``confirmed`` + ``landed``); for ``unknown`` / running /
+        dispatched / pending / failed it returns ``None``.
+        """
+        record = self.get(operation_id)
+        if record is None:
+            return None
+        if record.state != "confirmed":
+            return None
+        if record.effect_disposition != "landed":
+            return None
+        if record.result_json is None:
+            return None
+        try:
+            return json.loads(record.result_json)
+        except Exception:
+            return None
+
     def list_unacknowledged(self, kind: Optional[str] = None) -> list[OperationRecord]:
         query = "SELECT * FROM agent_operations WHERE acknowledged_at IS NULL"
         params: list[str] = []

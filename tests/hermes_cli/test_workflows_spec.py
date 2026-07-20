@@ -677,3 +677,259 @@ def test_load_spec_from_object_strict_ingestion():
 
     spec = load_spec_from_object(_minimal_spec())
     assert spec.id == "demo"
+
+
+def test_send_message_node_requires_nonempty_delivery_fields_and_delay_floor():
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = {
+        "type": "send_message",
+        "platform": "telegram",
+        "target": "123",
+        "message": "Mission complete",
+        "not_before_seconds": 30,
+    }
+
+    spec = load_spec_from_object(raw)
+    node = spec.nodes["start"]
+    assert node.platform == "telegram"
+    assert node.target == "123"
+    assert node.message == "Mission complete"
+    assert node.not_before_seconds == 30
+
+    for field, value in (("platform", " "), ("target", ""), ("message", "")):
+        invalid = _minimal_spec()
+        invalid["nodes"]["start"] = {
+            "type": "send_message",
+            "platform": "telegram",
+            "target": "123",
+            "message": "ok",
+            field: value,
+        }
+        with pytest.raises(ValueError, match=field):
+            load_spec_from_object(invalid)
+
+    invalid_delay = _minimal_spec()
+    invalid_delay["nodes"]["start"] = {
+        "type": "send_message", "platform": "telegram", "target": "123",
+        "message": "ok", "not_before_seconds": 0,
+    }
+    with pytest.raises(ValidationError, match="not_before_seconds"):
+        load_spec_from_object(invalid_delay)
+
+
+def test_send_message_node_defaults_not_before_seconds_to_30_when_omitted():
+    """Omitting ``not_before_seconds`` must fall back to the 30s default."""
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = {
+        "type": "send_message",
+        "platform": "local",
+        "target": "hermes-test-channel",
+        "message": "Vertical-slice delivery for three-effect mission.",
+        # not_before_seconds intentionally omitted
+    }
+
+    spec = load_spec_from_object(raw)
+    node = spec.nodes["start"]
+    assert node.type == "send_message"
+    assert node.not_before_seconds == 30, (
+        f"omitted not_before_seconds must default to 30 on send_message; "
+        f"got {node.not_before_seconds!r}"
+    )
+
+
+@pytest.mark.parametrize("value", [True, 30.0, "30"])
+def test_send_message_node_rejects_non_integer_not_before_seconds(value):
+    """Delay values must remain primitive integers at the schema boundary."""
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = {
+        "type": "send_message",
+        "platform": "local",
+        "target": "hermes-test-channel",
+        "message": "Vertical-slice delivery for three-effect mission.",
+        "not_before_seconds": value,
+    }
+
+    with pytest.raises(ValidationError, match="not_before_seconds"):
+        load_spec_from_object(raw)
+
+
+
+def test_send_message_node_accepts_integer_not_before_seconds():
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = {
+        "type": "send_message",
+        "platform": "local",
+        "target": "hermes-test-channel",
+        "message": "Vertical-slice delivery for three-effect mission.",
+        "not_before_seconds": 30,
+    }
+
+    spec = load_spec_from_object(raw)
+
+    assert spec.nodes["start"].not_before_seconds == 30
+
+
+def test_not_before_seconds_schema_description_advertises_missions_outbox_cap():
+    """P2-5: the authored schema must point authors at the config key the
+    runtime dispatcher actually reads (``missions.outbox.max_delay_seconds``
+    — see ``hades_cli.workflows_dispatcher._max_outbox_delay_seconds`` and
+    ``DEFAULT_CONFIG["missions"]["outbox"]``), not the legacy
+    ``workflow.outbox.max_delay_seconds`` path that config migration retires
+    on read.
+    """
+    from hades_cli.workflows_spec import NodeSpec
+
+    description = NodeSpec.model_fields["not_before_seconds"].description
+    assert description is not None
+    assert "missions.outbox.max_delay_seconds" in description
+    assert "workflow.outbox.max_delay_seconds" not in description
+
+
+
+def test_send_message_node_trims_whitespace_around_platform_and_target():
+    """Leading/trailing whitespace on platform/target is stripped to the trimmed value.
+
+    This keeps the contract strict (non-blank after trim) while tolerating
+    the way authors sometimes quote YAML scalar blocks. The message field is
+    not trimmed — it preserves authored whitespace because delivery semantics
+    depend on the exact bytes.
+    """
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = {
+        "type": "send_message",
+        "platform": "  local  ",
+        "target": "\t hermes-test-channel \n",
+        "message": "Vertical-slice delivery for three-effect mission.",
+    }
+
+    spec = load_spec_from_object(raw)
+    node = spec.nodes["start"]
+    assert node.platform == "local", (
+        f"platform must be trimmed to its non-whitespace core; got {node.platform!r}"
+    )
+    assert node.target == "hermes-test-channel", (
+        f"target must be trimmed to its non-whitespace core; got {node.target!r}"
+    )
+
+
+def _send_message_node(message: object = "Mission complete", *, include_message=True):
+    node: dict[str, object] = {
+        "type": "send_message",
+        "platform": "telegram",
+        "target": "123",
+    }
+    if include_message:
+        node["message"] = message
+    return node
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("platform", 123),
+        ("platform", {"name": "telegram"}),
+        ("platform", ["telegram"]),
+        ("target", 123),
+        ("target", {"id": 123}),
+        ("target", ["123"]),
+    ],
+)
+def test_send_message_node_rejects_non_string_platform_and_target(field, bad_value):
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    node = _send_message_node("Mission complete")
+    node[field] = bad_value
+    raw["nodes"]["start"] = node
+
+    with pytest.raises(ValidationError, match=field):
+        load_spec_from_object(raw)
+
+
+def test_send_message_required_field_validation_is_deferred_to_graph_validation():
+    """Schema construction stays separate from runtime primitive capability gating."""
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = {"type": "send_message"}
+
+    spec = WorkflowSpec.model_validate(raw)
+    with pytest.raises(ValueError, match="platform is required for send_message"):
+        validate_graph(spec)
+
+    with pytest.raises(ValueError, match="platform is required for send_message"):
+        load_spec_from_object(raw)
+
+
+@pytest.mark.parametrize("message", ["", "   ", chr(9) + chr(10)])
+def test_send_message_node_rejects_empty_or_blank_scalar_message(message):
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = _send_message_node(message)
+
+    with pytest.raises(ValueError, match="message is required for send_message"):
+        load_spec_from_object(raw)
+
+
+def test_send_message_node_rejects_omitted_message():
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = _send_message_node(include_message=False)
+
+    with pytest.raises(ValueError, match="message is required for send_message"):
+        load_spec_from_object(raw)
+
+
+def test_send_message_node_accepts_nonblank_scalar_message():
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = _send_message_node("Mission complete")
+
+    spec = load_spec_from_object(raw)
+    assert spec.nodes["start"].message == "Mission complete"
+
+
+def test_send_message_node_accepts_nonempty_template_mapping_as_schema_data():
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    message = {"template": "Mission {{ status }}", "status": "complete"}
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = _send_message_node(message)
+
+    spec = load_spec_from_object(raw)
+    assert spec.nodes["start"].message == message
+
+
+@pytest.mark.parametrize("message", [{}, [], ["Mission complete"], 1, True])
+def test_send_message_node_rejects_non_string_and_empty_mapping_message(message):
+    from hades_cli.workflows_spec import load_spec_from_object
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = _send_message_node(message)
+
+    with pytest.raises(ValueError, match="message"):
+        load_spec_from_object(raw)
+
+
+def test_send_message_is_runtime_supported():
+    from hades_cli.workflows_capabilities import IMPLEMENTED_NODE_TYPES, implemented_primitive_errors
+
+    raw = _minimal_spec()
+    raw["nodes"]["start"] = _send_message_node("Mission complete")
+    spec = WorkflowSpec.model_validate(raw)
+
+    assert "send_message" in IMPLEMENTED_NODE_TYPES
+    assert implemented_primitive_errors(spec) == []
