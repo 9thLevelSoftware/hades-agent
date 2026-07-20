@@ -149,6 +149,7 @@ const renderTransactionResult = (action: string, r: TransactionExecResponse, ctx
   const { page, sys } = ctx.transcript
 
   const statuses = [r.status ?? '', r.transaction?.status ?? '']
+
   if (statuses.includes('unknown_effect') || (r.counts?.['unknown'] ?? 0) > 0) {
     sys(
       'warning: unknown_effect — do not retry; run ' +
@@ -158,9 +159,11 @@ const renderTransactionResult = (action: string, r: TransactionExecResponse, ctx
 
   const text = r.output || '(no output)'
   const pageActions = new Set(['list', 'show', 'graph', 'preview', 'eligibility', 'receipt', 'outbox'])
+
   if (pageActions.has(r.action || action) && isLongText(text)) {
-    return page(text, `Transaction ${(r.action || action) || 'help'}`)
+    return page(text, `Transaction ${r.action || action || 'help'}`)
   }
+
   return sys(text)
 }
 
