@@ -389,7 +389,7 @@ def install_deps() -> bool:
     except Exception as exc:
         print(f"ERROR: Failed to install dependencies: {exc}")
         print("Or install via the optional extra:")
-        print("  pip install 'hermes-agent[google_chat]'")
+        print("  pip install 'hades-agent[google_chat]'")
         return False
 
 

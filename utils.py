@@ -41,12 +41,12 @@ def skill_vendor_metadata(frontmatter: dict) -> dict:
     if not isinstance(metadata, dict):
         return {}
     hermes_meta = metadata.get("hermes")
-    if isinstance(hermes_meta, dict) and hermes_meta:
+    if isinstance(hermes_meta, dict):
         return hermes_meta
     hades_meta = metadata.get("hades")
     if isinstance(hades_meta, dict):
         return hades_meta
-    return hermes_meta if isinstance(hermes_meta, dict) else {}
+    return {}
 
 
 def is_truthy_value(value: Any, default: bool = False) -> bool:

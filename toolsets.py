@@ -925,11 +925,12 @@ def validate_toolset(name: str) -> bool:
     # Accept special alias names for convenience
     if name in {"all", "*"}:
         return True
-    if name in TOOLSETS:
+    canonical = _canonical_toolset_name(name)
+    if canonical in TOOLSETS:
         return True
-    if name in _get_plugin_toolset_names():
+    if canonical in _get_plugin_toolset_names():
         return True
-    return name in _get_registry_toolset_aliases()
+    return canonical in _get_registry_toolset_aliases()
 
 
 def create_custom_toolset(

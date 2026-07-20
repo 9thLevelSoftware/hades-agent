@@ -88,7 +88,9 @@ def test_no_pip_install_hermes_agent_strings_remain():
     repo_root = Path(__file__).resolve().parent.parent
     pattern = re.compile(r"pip install ['\"]?hermes-agent")
     offenders = []
-    for top in ("tools", "hades_cli", "agent", "gateway", "cron"):
+    for top in ("tools", "hades_cli", "agent", "gateway", "cron",
+                 "plugins", "providers", "acp_adapter", "acp_registry",
+                 "tui_gateway", "scripts"):
         top_dir = repo_root / top
         if not top_dir.is_dir():
             continue

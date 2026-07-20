@@ -101,16 +101,17 @@ class CodexAppServerClient:
         # root. Without this, codex-runtime workers finish their actual work
         # but crash/block when kanban_complete/kanban_block writes SQLite.
         if env_get("HERMES_KANBAN_TASK", env=spawn_env):
-            kanban_db = spawn_env.get("HERMES_KANBAN_DB")
+            kanban_db = env_get("HERMES_KANBAN_DB", env=spawn_env)
             kanban_root = (
                 os.path.dirname(kanban_db)
                 if kanban_db
-                else spawn_env.get(
+                else env_get(
                     "HERMES_KANBAN_ROOT",
-                    os.path.join(
-                        spawn_env.get("HADES_HOME", os.path.expanduser("~/.hades")),
+                    default=os.path.join(
+                        env_get("HADES_HOME", default=os.path.expanduser("~/.hades"), env=spawn_env),
                         "kanban",
                     ),
+                    env=spawn_env,
                 )
             )
             app_server_args.extend(
