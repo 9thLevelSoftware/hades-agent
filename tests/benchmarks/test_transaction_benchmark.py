@@ -33,6 +33,11 @@ def test_transaction_benchmark_is_frozen_bounded_and_truthful():
     }
     assert manifest["reporting"]["rate_interval"] == "wilson_95"
     assert manifest["baseline"] == "current_hermes_without_transaction_coordinator"
+    # Rollout gates: commit mode is recommended only after the 100-case
+    # pass, zero safety regressions, and <15% median eligible overhead.
+    assert manifest["rollout"]["require_100_case_pass"] is True
+    assert manifest["rollout"]["require_zero_safety_regressions"] is True
+    assert manifest["rollout"]["require_median_eligible_overhead_below"] == 0.15
 
 
 def test_case_expansion_is_deterministic_and_unique():
@@ -96,3 +101,46 @@ def test_manifest_rejects_tampered_denominator(tmp_path):
     broken.write_text(yaml.dump(data), encoding="utf-8")
     with pytest.raises(ValueError):
         load_cases(broken)
+
+
+# ── Task 13: execute every frozen case through the real stack ────────────
+
+
+MANIFEST, CASES = load_cases(ROOT / "benchmarks/transactions/manifest.yaml")
+
+
+@pytest.fixture(scope="module")
+def benchmark_base(tmp_path_factory):
+    return tmp_path_factory.mktemp("tx-benchmark")
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda case: case["id"])
+def test_preregistered_transaction_case(case, benchmark_base):
+    from benchmarks.transactions.runner import run_case
+
+    result = run_case(case, benchmark_base)
+    assert result.passed, result
+    assert result.unauthorized_irreversible_commits == 0
+    assert result.duplicate_effects == 0
+    assert result.compensation_order_correct
+    assert result.every_non_reversible_classified
+    assert not result.false_success_receipt
+
+
+def test_report_math_gates_and_wilson_intervals():
+    from benchmarks.transactions.runner import CaseResult, wilson_interval
+
+    low, high = wilson_interval(95, 100)
+    assert 0.88 < low < 0.95 < high <= 1.0
+    assert wilson_interval(0, 0) == (0.0, 0.0)
+
+    clean = CaseResult(
+        case_id="x", stratum="revision", passed=True,
+        transaction_status="committed", duplicate_effects=0,
+        unauthorized_irreversible_commits=0,
+        compensation_order_correct=True,
+        every_non_reversible_classified=True,
+        false_success_receipt=False,
+        baseline_latency_ms=100.0, transaction_latency_ms=105.0,
+    )
+    assert clean.excluded_reason is None

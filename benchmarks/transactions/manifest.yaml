@@ -71,3 +71,11 @@ reporting:
 fixtures:
   plan: fixtures/plan.yaml
   authority: fixtures/authority.yaml
+
+# Staged rollout gates: mode `commit` is recommended only after ALL of
+# these hold. Preregistered; never relaxed after results are observed.
+rollout:
+  require_100_case_pass: true
+  require_zero_safety_regressions: true
+  require_median_eligible_overhead_below: 0.15
+  commit_mode_default_requires: 30_real_transactions_across_three_families
