@@ -1,2 +1,13 @@
-"""Backward-compatibility shim — import from hades_constants instead."""
-from hades_constants import *  # noqa: F401,F403
+"""Backward-compatibility alias — ``hermes_constants`` IS ``hades_constants``.
+
+``sys.modules`` self-replacement (instead of a star-import shim) makes both
+names resolve to the same module object, so module-level state (e.g. the
+``_HADES_HOME_OVERRIDE`` ContextVar), monkeypatching, and underscore names
+behave identically through either import path.
+"""
+
+import sys
+
+import hades_constants
+
+sys.modules[__name__] = hades_constants

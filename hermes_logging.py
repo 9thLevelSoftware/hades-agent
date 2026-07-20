@@ -1,2 +1,7 @@
-"""Backward-compatibility shim — import from hades_logging instead."""
-from hades_logging import *  # noqa: F401,F403
+"""Backward-compatibility alias — ``hermes_logging`` IS ``hades_logging``."""
+
+import sys
+
+import hades_logging
+
+sys.modules[__name__] = hades_logging
