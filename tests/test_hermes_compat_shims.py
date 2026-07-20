@@ -257,6 +257,75 @@ def test_entry_point_scan_dedupes_dual_registered(monkeypatch):
     assert dual[0].path == "hades_variant:register"
 
 
+# ── Home-dir adopt-in-place ──────────────────────────────────────────────────
+
+
+@pytest.fixture
+def _home_pair(tmp_path, monkeypatch):
+    """Patch platform home candidates to a tmp pair and clear the memo."""
+    import hades_constants
+
+    hades_home = tmp_path / "hades-home"
+    hermes_home = tmp_path / "hermes-home"
+    monkeypatch.setattr(
+        hades_constants,
+        "_default_home_candidates",
+        lambda: (hades_home, hermes_home),
+    )
+    monkeypatch.setattr(hades_constants, "_home_adoption_cache", {})
+    monkeypatch.delenv("HADES_HOME", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    return hades_home, hermes_home
+
+
+def test_home_default_when_neither_exists(_home_pair):
+    from hades_constants import _get_platform_default_hades_home
+
+    hades_home, _ = _home_pair
+    assert _get_platform_default_hades_home() == hades_home
+
+
+def test_home_adopts_legacy_hermes_dir(_home_pair):
+    from hades_constants import _get_platform_default_hades_home
+
+    hades_home, hermes_home = _home_pair
+    hermes_home.mkdir()
+    assert _get_platform_default_hades_home() == hermes_home
+
+
+def test_home_prefers_hades_when_both_exist(_home_pair):
+    from hades_constants import _get_platform_default_hades_home
+
+    hades_home, hermes_home = _home_pair
+    hades_home.mkdir()
+    hermes_home.mkdir()
+    assert _get_platform_default_hades_home() == hades_home
+
+
+def test_home_env_overrides_adoption(_home_pair, monkeypatch, tmp_path):
+    from hades_constants import _hades_home_from_env
+
+    _, hermes_home = _home_pair
+    hermes_home.mkdir()
+    override = tmp_path / "explicit"
+    monkeypatch.setenv("HERMES_HOME", str(override))
+    assert _hades_home_from_env() == override
+
+    monkeypatch.setenv("HADES_HOME", str(tmp_path / "explicit2"))
+    assert _hades_home_from_env() == tmp_path / "explicit2"
+
+
+def test_home_adoption_memoized_per_candidate_pair(_home_pair):
+    import hades_constants
+
+    hades_home, hermes_home = _home_pair
+    assert hades_constants._get_platform_default_hades_home() == hades_home
+    # Creating the legacy dir after the first decision does not flip it
+    # within the same process (decision is stable per candidate pair).
+    hermes_home.mkdir()
+    assert hades_constants._get_platform_default_hades_home() == hades_home
+
+
 # ── Skills vendor-metadata namespace ─────────────────────────────────────────
 
 

@@ -43,13 +43,46 @@ def get_hades_home_override() -> str | None:
     return str(override)
 
 
-def _get_platform_default_hades_home() -> Path:
-    """Return the platform-native default Hades home path."""
+# Adopt-in-place decisions, keyed by (hades_default, legacy) path pair so
+# monkeypatched homes in tests get fresh evaluation while a real process
+# makes the decision once (two stat() calls) and keeps it stable.
+_home_adoption_cache: dict = {}
+
+
+def _default_home_candidates() -> "tuple[Path, Path]":
+    """Return (hades_default, legacy_hermes) platform home candidates."""
     if sys.platform == "win32":
         local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
         base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
-        return base / "hades"
-    return Path.home() / ".hades"
+        return base / "hades", base / "hermes"
+    return Path.home() / ".hades", Path.home() / ".hermes"
+
+
+def _get_platform_default_hades_home() -> Path:
+    """Return the platform-native default Hades home path.
+
+    Adopt-in-place compatibility: installer-provisioned machines (and any
+    machine that ran upstream hermes-agent) keep state under the legacy
+    hermes-named dir. When no HADES_HOME/HERMES_HOME env override is in
+    play and the hades-named default does not exist but the legacy dir
+    does, use the legacy dir directly — no data is copied or moved, and a
+    co-installed upstream hermes pointed at the same dir keeps sharing
+    state. If BOTH exist, the hades dir wins (``hades doctor`` surfaces
+    the split).
+    """
+    hades_default, legacy = _default_home_candidates()
+    key = (str(hades_default), str(legacy))
+    cached = _home_adoption_cache.get(key)
+    if cached is not None:
+        return cached
+    result = hades_default
+    try:
+        if not hades_default.exists() and legacy.exists():
+            result = legacy
+    except OSError:
+        pass
+    _home_adoption_cache[key] = result
+    return result
 
 
 def _hades_home_from_env() -> Path:
