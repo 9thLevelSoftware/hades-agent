@@ -86,6 +86,7 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes sessions` | Browse, export, prune, rename, and delete sessions. |
 | `hermes insights` | Show token/cost/activity analytics. |
 | `hermes receipt` (alias `receipts`) | Inspect verified outcome & artifact receipts — immutable, independently scored records of what a turn/mission/transaction really changed. See [Outcome Receipts](../user-guide/features/outcome-receipts.md). |
+| `hermes transaction` (alias `tx`) | Preview, revise, commit, reconcile, and compensate bounded action transactions: `create`, `list`, `show`, `graph`, `preview`, `revise`, `commit`, `reconcile`, `eligibility`, `compensate`, `receipt`, `outbox`. Commit/compensate are gated by `transactions.mode` in config.yaml. See [Action Transactions](../user-guide/features/action-transactions.md). |
 | `hermes claw` | OpenClaw migration helpers. |
 | `hermes dashboard` | Launch the web dashboard for managing config, API keys, and sessions. |
 | `hermes desktop` (alias `gui`) | Build and launch the native Electron desktop app. |

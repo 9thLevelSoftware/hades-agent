@@ -13,7 +13,8 @@ import type {
   SlashExecResponse,
   SpawnTreeListResponse,
   SpawnTreeLoadResponse,
-  ToolsConfigureResponse
+  ToolsConfigureResponse,
+  TransactionExecResponse
 } from '../../../gatewayTypes.js'
 import type { PanelSection } from '../../../types.js'
 import { applyDelegationStatus, getDelegationState } from '../../delegationStore.js'
@@ -134,6 +135,35 @@ const renderAutonomyResult = (action: string, r: AutonomyExecResponse, ctx: Slas
 // receipt or observation.
 const UNKNOWN_EFFECT_WARNING = 'unknown_effect — Do not retry the effect; recheck/reconcile evidence.'
 
+/**
+ * Render one structured `transaction.exec` result.
+ *
+ * `output` carries the SAME truthful text rendering as
+ * `hermes transaction ...` (one renderer, no second authority surface).
+ * list/show/graph/preview/eligibility/receipt render as pages/panels;
+ * short mutating results (commit/revise/reconcile/outbox) as system
+ * lines; any unknown_effect carries a persistent warning naming the
+ * reconcile command.
+ */
+const renderTransactionResult = (action: string, r: TransactionExecResponse, ctx: SlashRunCtx): void => {
+  const { page, sys } = ctx.transcript
+
+  const statuses = [r.status ?? '', r.transaction?.status ?? '']
+  if (statuses.includes('unknown_effect') || (r.counts?.['unknown'] ?? 0) > 0) {
+    sys(
+      'warning: unknown_effect — do not retry; run ' +
+        `/transaction reconcile ${r.transaction?.transaction_id ?? '<tx>'} first.`
+    )
+  }
+
+  const text = r.output || '(no output)'
+  const pageActions = new Set(['list', 'show', 'graph', 'preview', 'eligibility', 'receipt', 'outbox'])
+  if (pageActions.has(r.action || action) && isLongText(text)) {
+    return page(text, `Transaction ${(r.action || action) || 'help'}`)
+  }
+  return sys(text)
+}
+
 const receiptStatuses = (r: ReceiptExecResponse): string[] => [
   ...(r.receipt ? [r.receipt.status] : []),
   ...(r.receipts?.map(summary => summary.status) ?? []),
@@ -229,6 +259,25 @@ const renderReceiptResult = (action: string, r: ReceiptExecResponse, ctx: SlashR
 }
 
 export const opsCommands: SlashCommand[] = [
+  {
+    aliases: ['tx'],
+    help: 'preview, revise, commit, reconcile, and compensate bounded actions',
+    name: 'transaction',
+    run: (arg, ctx) => {
+      // Existing slash tokenizer semantics (whitespace split) — never a shell.
+      const tokens = arg.trim().split(/\s+/).filter(Boolean)
+      const argv = tokens.length ? tokens : ['--help']
+
+      // Native route only: commit/revise/compensate/outbox mutate durable
+      // state, so transaction commands must never reach the slash-worker
+      // fallback (slash.exec) — see slashParity.test.ts.
+      ctx.gateway
+        .rpc<TransactionExecResponse>('transaction.exec', { argv, session_id: ctx.sid })
+        .then(ctx.guarded<TransactionExecResponse>(r => renderTransactionResult(argv[0]!, r, ctx)))
+        .catch(ctx.guardedErr)
+    }
+  },
+
   {
     aliases: ['receipts'],
     help: 'inspect verified outcome receipts (evidence, artifacts, rechecks)',

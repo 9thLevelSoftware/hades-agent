@@ -1565,6 +1565,30 @@ class CLICommandsMixin:
         if output:
             print(output)
 
+    def _handle_transaction_command(self, cmd: str):
+        """Handle the /transaction command — delegate to the shared CLI.
+
+        Mirrors ``_handle_workflow_command``: strip the leading
+        ``/transaction`` (or ``/tx``) and hand the remainder to
+        ``transactions.run_slash``, the same parser/service behind
+        ``hermes transaction ...``.
+        """
+        from hades_cli.transactions import run_slash
+
+        rest = cmd.strip()
+        if rest.startswith("/"):
+            rest = rest.lstrip("/")
+        for prefix in ("transaction", "tx"):
+            if rest.startswith(prefix):
+                rest = rest[len(prefix):].lstrip()
+                break
+        try:
+            output = run_slash(rest)
+        except Exception as exc:  # pragma: no cover - defensive
+            output = f"(._.) transaction error: {exc}"
+        if output:
+            print(output)
+
     def _handle_receipt_command(self, cmd: str):
         """Handle the /receipt command — delegate to the shared receipt CLI.
 

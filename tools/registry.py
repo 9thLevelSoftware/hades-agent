@@ -118,6 +118,7 @@ class ToolEntry:
         # Task 3 — metadata-only effect-transaction fields. These never
         # leak into the model-visible tool schema (see get_definitions).
         "effect_adapter", "effect_semantic_kind", "effect_overrides",
+        "effect_action",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
@@ -126,7 +127,7 @@ class ToolEntry:
                  read_only=False, destructive=True, idempotent=False,
                  authority_context_fn=None,
                  effect_adapter=None, effect_semantic_kind=None,
-                 effect_overrides=None):
+                 effect_overrides=None, effect_action=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -165,6 +166,15 @@ class ToolEntry:
         self.effect_overrides = (
             copy.deepcopy(effect_overrides) if effect_overrides else {}
         )
+        # Action-transaction routing (agent/effects): the adapter action
+        # this tool maps to inside a transaction. Requires effect_adapter —
+        # an action with no adapter is unroutable. effect_adapter without
+        # effect_action stays legal for vertical-slice-era registrations.
+        if effect_action is not None and effect_adapter is None:
+            raise ValueError(
+                f"tool {name!r}: effect_action requires effect_adapter"
+            )
+        self.effect_action = effect_action
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +368,7 @@ class ToolRegistry:
                 "effect_adapter": None,
                 "effect_semantic_kind": None,
                 "effect_overrides": {},
+                "effect_action": None,
             }
         return {
             "read_only": entry.read_only,
@@ -368,6 +379,7 @@ class ToolRegistry:
             # Spec 6: deep-copy so a caller mutating the snapshot's
             # nested list/mapping cannot corrupt the stored value.
             "effect_overrides": copy.deepcopy(entry.effect_overrides),
+            "effect_action": entry.effect_action,
         }
 
     # Conservative authority context for tools that declare nothing: an
@@ -573,6 +585,7 @@ class ToolRegistry:
         effect_adapter: Optional[str] = None,
         effect_semantic_kind: Optional[str] = None,
         effect_overrides: Optional[Dict[str, Any]] = None,
+        effect_action: Optional[str] = None,
     ):
         """Register a tool.  Called at module-import time by each tool file.
 
@@ -649,6 +662,7 @@ class ToolRegistry:
                 effect_adapter=effect_adapter,
                 effect_semantic_kind=effect_semantic_kind,
                 effect_overrides=effect_overrides,
+                effect_action=effect_action,
             )
             # Availability is now derived per-tool (_toolset_has_exposable_tools),
             # so this map no longer gates a toolset. It is still consumed by

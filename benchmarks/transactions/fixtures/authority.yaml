@@ -1,0 +1,23 @@
+# Bounded, expiring benchmark authority. The expiry is driven by the
+# fixture-controlled clock inside each case harness, never wall time.
+# Irreversible effects always require an exact bound approval ("ask").
+authority_version: 1
+irreversible_policy: ask
+
+# Fixture clock epoch is 1_000_000 ms; authority lives for one hour of
+# fixture time so stale-authority cases can expire it deterministically.
+issued_at_ms: 1000000
+expires_at_ms: 4600000
+
+allowed_actions:
+  - write_file
+  - set
+  - send
+
+allowed_resources:
+  - "file:{case_worktree}/notes/benchmark.md"
+  - "config:ui.timezone"
+  - "message:faketest:benchmark-channel"
+
+requester: benchmark-operator
+channel: cli
