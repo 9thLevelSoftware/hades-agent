@@ -194,6 +194,69 @@ def test_env_int_dual_reads(monkeypatch):
     assert env_int("HADES_COMPAT_INT", 0) == 7
 
 
+# ── Plugin entry-point dual-group scan ───────────────────────────────────────
+
+
+def _fake_ep(name, group, value="fake_mod:register"):
+    from unittest.mock import MagicMock
+
+    ep = MagicMock()
+    ep.name = name
+    ep.value = value
+    ep.group = group
+    return ep
+
+
+def test_entry_point_scan_covers_both_groups(monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from hades_cli.plugins import ENTRY_POINTS_GROUPS, PluginManager
+
+    assert ENTRY_POINTS_GROUPS == ("hades_agent.plugins", "hermes_agent.plugins")
+
+    hades_ep = _fake_ep("hades_only", "hades_agent.plugins")
+    hermes_ep = _fake_ep("hermes_only", "hermes_agent.plugins")
+
+    def fake_entry_points():
+        result = MagicMock()
+        result.select = lambda group: {
+            "hades_agent.plugins": [hades_ep],
+            "hermes_agent.plugins": [hermes_ep],
+        }.get(group, [])
+        return result
+
+    with patch("importlib.metadata.entry_points", fake_entry_points):
+        manifests = PluginManager()._scan_entry_points()
+
+    names = {m.name for m in manifests}
+    assert names == {"hades_only", "hermes_only"}
+
+
+def test_entry_point_scan_dedupes_dual_registered(monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from hades_cli.plugins import PluginManager
+
+    hades_ep = _fake_ep("dual", "hades_agent.plugins", value="hades_variant:register")
+    hermes_ep = _fake_ep("dual", "hermes_agent.plugins", value="hermes_variant:register")
+
+    def fake_entry_points():
+        result = MagicMock()
+        result.select = lambda group: {
+            "hades_agent.plugins": [hades_ep],
+            "hermes_agent.plugins": [hermes_ep],
+        }.get(group, [])
+        return result
+
+    with patch("importlib.metadata.entry_points", fake_entry_points):
+        manifests = PluginManager()._scan_entry_points()
+
+    dual = [m for m in manifests if m.name == "dual"]
+    assert len(dual) == 1
+    # hades group scanned first → wins.
+    assert dual[0].path == "hades_variant:register"
+
+
 # ── Toolset key aliasing ─────────────────────────────────────────────────────
 
 

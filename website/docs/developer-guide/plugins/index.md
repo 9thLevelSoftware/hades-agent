@@ -1203,13 +1203,23 @@ For STT, point `HERMES_LOCAL_STT_COMMAND` at a shell template. Supported placeho
 
 ## Distribute via pip
 
-For sharing plugins publicly, add an entry point to your Python package:
+For sharing plugins publicly, add an entry point to your Python package.
+Declare **both** vendor groups so the plugin loads on hades-agent *and* on
+stock upstream hermes-agent (hades scans both groups and loads a
+dual-registered plugin once; upstream only reads the hermes group):
 
 ```toml
 # pyproject.toml
 [project.entry-points."hades_agent.plugins"]
 my-plugin = "my_plugin_package"
+
+[project.entry-points."hermes_agent.plugins"]
+my-plugin = "my_plugin_package"
 ```
+
+Do **not** declare a dependency on the `hades-agent` or `hermes-agent`
+distribution itself — installing one fork's package into the other fork's
+environment clobbers its compatibility shims on disk.
 
 ```bash
 pip install hermes-plugin-calculator
