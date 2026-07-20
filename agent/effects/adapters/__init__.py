@@ -17,7 +17,13 @@ def register_builtin_adapters(
     *,
     workspace_root,
     transaction_lookup: Optional[Callable] = None,
+    workflow_conn_factory: Optional[Callable] = None,
 ) -> None:
+    from agent.effects.adapters.hermes_state import (
+        HermesConfigAdapter,
+        HermesCronAdapter,
+        HermesWorkflowAdapter,
+    )
     from agent.effects.adapters.workspace import (
         WorkspaceAdapter,
         WorkspaceGitAdapter,
@@ -32,3 +38,9 @@ def register_builtin_adapters(
     registry.register(
         WorkspaceGitAdapter(transaction_lookup=transaction_lookup)
     )
+    registry.register(HermesConfigAdapter())
+    registry.register(HermesCronAdapter())
+    if workflow_conn_factory is not None:
+        registry.register(
+            HermesWorkflowAdapter(conn_factory=workflow_conn_factory)
+        )
