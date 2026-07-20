@@ -468,7 +468,15 @@ class WorkspaceEffectAdapter:
                     new_content = old_content.replace(old_str, new_str, 1 if not args.get("replace_all") else -1)
                     preview_diff = _unified_diff(old_content, new_content, "a/", "b/")
 
-        # Force a distinct checkpoint for this transaction.
+        # Force a distinct checkpoint for this transaction. The
+        # checkpoint root must be a DIRECTORY the later restore can match
+        # against ``authority.workspace_root``: use the git root when the
+        # target lives in a repo (mission worktrees — workspace_root IS
+        # the worktree root), otherwise the authorized workspace root
+        # itself. The previous fallback passed the target FILE path,
+        # which both failed shadow-repo init and could never satisfy
+        # restore_checkpoint's root equality check.
+        checkpoint_root = str(git_root or self._authority.workspace_root)
         checkpoint_base = self._checkpoint_base_override
         if checkpoint_base is not None:
             import tools.checkpoint_manager as _cm
@@ -476,7 +484,7 @@ class WorkspaceEffectAdapter:
             try:
                 _cm.CHECKPOINT_BASE = checkpoint_base
                 cp_ref = self._mgr.create_checkpoint(
-                    str(git_root or resolved_targets[0]),
+                    checkpoint_root,
                     reason=f"tx:{request.operation_key}",
                     force=True,
                 )
@@ -484,7 +492,7 @@ class WorkspaceEffectAdapter:
                 _cm.CHECKPOINT_BASE = _orig
         else:
             cp_ref = self._mgr.create_checkpoint(
-                str(git_root or resolved_targets[0]),
+                checkpoint_root,
                 reason=f"tx:{request.operation_key}",
                 force=True,
             )

@@ -512,6 +512,18 @@ class TransactionStore:
         row = self._db._execute_read(_read)
         return self._effect_record(row) if row is not None else None
 
+    def get_effect_by_operation_id(
+        self, operation_id: str
+    ) -> Optional[EffectTransaction]:
+        def _read(conn):
+            return conn.execute(
+                "SELECT * FROM transaction_effects WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+
+        row = self._db._execute_read(_read)
+        return self._effect_record(row) if row is not None else None
+
     def transition_effect(
         self,
         effect_id: str,
