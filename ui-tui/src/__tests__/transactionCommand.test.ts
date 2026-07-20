@@ -3,9 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { findSlashCommand } from '../app/slash/registry.js'
 import type { TransactionExecResponse } from '../gatewayTypes.js'
 
-const transactionResponse = (
-  overrides: Partial<TransactionExecResponse> = {}
-): TransactionExecResponse => ({
+const transactionResponse = (overrides: Partial<TransactionExecResponse> = {}): TransactionExecResponse => ({
   action: 'show',
   exit_code: 0,
   ok: true,
@@ -17,6 +15,7 @@ const buildCtx = (result: Partial<TransactionExecResponse> = {}, { stale = false
   const rpc = vi.fn((_method: string, _params?: Record<string, unknown>) =>
     Promise.resolve(transactionResponse(result))
   )
+
   const request = vi.fn(() => Promise.resolve({}))
   const sys = vi.fn()
   const page = vi.fn()
