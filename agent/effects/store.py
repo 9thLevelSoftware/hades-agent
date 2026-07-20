@@ -591,6 +591,25 @@ class TransactionStore:
 
         return self._db._execute_write(_transition)
 
+    def set_receipt_id(self, transaction_id: str, receipt_id: str) -> bool:
+        """Project the issued shared-receipt id onto the aggregate row."""
+
+        def _set(conn):
+            # Deliberately does NOT touch updated_at_ms: projecting the
+            # receipt id is bookkeeping, not a state change, and evidence
+            # timestamps derive from updated_at_ms for deterministic
+            # re-issue.
+            cursor = conn.execute(
+                """UPDATE action_transactions
+                       SET receipt_id = ?
+                     WHERE transaction_id = ?
+                       AND (receipt_id IS NULL OR receipt_id = ?)""",
+                (receipt_id, transaction_id, receipt_id),
+            )
+            return cursor.rowcount == 1
+
+        return self._db._execute_write(_set)
+
     # ── Compensation attempts ────────────────────────────────────────
 
     @staticmethod
