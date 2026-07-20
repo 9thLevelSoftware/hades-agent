@@ -1189,6 +1189,103 @@ CREATE INDEX IF NOT EXISTS idx_autonomy_rule_events_rule
 CREATE INDEX IF NOT EXISTS idx_autonomy_cost_rule_window
     ON autonomy_cost_ledger(rule_id, window_started_at_ms);
 
+-- ── Reversible & Revisable Action Transactions (agent/effects/store.py) ──
+-- Additive tables; no SCHEMA_VERSION bump required. Revisions, nodes,
+-- edges, and events are immutable once written: the store only ever
+-- INSERTs them, and state changes go through explicit CAS UPDATEs on
+-- action_transactions.status / transaction_effects.phase. Timestamps are
+-- integer Unix milliseconds so event ordering can use
+-- (created_at_ms, event_id) without float ambiguity.
+-- Naming: the per-node attempt table is `transaction_effects` (not the
+-- plan draft's `effect_transactions`) because the missions vertical slice
+-- already owns a live, differently-shaped `effect_transactions` table
+-- above; the Python contract name remains EffectTransaction.
+CREATE TABLE IF NOT EXISTS action_transactions (
+    transaction_id TEXT PRIMARY KEY,
+    profile TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    current_revision INTEGER NOT NULL,
+    authority_version INTEGER NOT NULL,
+    authority_json TEXT NOT NULL,
+    failure_policy TEXT NOT NULL,
+    receipt_id TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS transaction_revisions (
+    transaction_id TEXT NOT NULL REFERENCES action_transactions(transaction_id),
+    revision INTEGER NOT NULL,
+    base_revision INTEGER,
+    reason TEXT NOT NULL,
+    graph_hash TEXT NOT NULL,
+    preview_hash TEXT,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (transaction_id, revision),
+    UNIQUE (transaction_id, graph_hash)
+);
+
+CREATE TABLE IF NOT EXISTS transaction_revision_nodes (
+    transaction_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    node_id TEXT NOT NULL,
+    adapter_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    args_json TEXT NOT NULL,
+    resource_keys_json TEXT NOT NULL,
+    PRIMARY KEY (transaction_id, revision, node_id),
+    FOREIGN KEY (transaction_id, revision)
+        REFERENCES transaction_revisions(transaction_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS transaction_revision_edges (
+    transaction_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    parent_node_id TEXT NOT NULL,
+    child_node_id TEXT NOT NULL,
+    PRIMARY KEY (transaction_id, revision, parent_node_id, child_node_id)
+);
+
+CREATE TABLE IF NOT EXISTS transaction_effects (
+    effect_id TEXT PRIMARY KEY,
+    transaction_id TEXT NOT NULL REFERENCES action_transactions(transaction_id),
+    revision INTEGER NOT NULL,
+    node_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL UNIQUE REFERENCES agent_operations(operation_id),
+    adapter_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    semantics_json TEXT NOT NULL,
+    prepared_json TEXT,
+    preview_json TEXT,
+    preview_hash TEXT,
+    authority_json TEXT,
+    result_json TEXT,
+    verification_json TEXT,
+    reconciliation_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    UNIQUE (transaction_id, revision, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS transaction_events (
+    event_id TEXT PRIMARY KEY,
+    transaction_id TEXT NOT NULL REFERENCES action_transactions(transaction_id),
+    kind TEXT NOT NULL,
+    effect_id TEXT,
+    payload_json TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    UNIQUE (transaction_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_transactions_status
+    ON action_transactions(status, updated_at_ms);
+CREATE INDEX IF NOT EXISTS idx_transaction_effects_tx_phase
+    ON transaction_effects(transaction_id, phase);
+CREATE INDEX IF NOT EXISTS idx_transaction_events_tx_created
+    ON transaction_events(transaction_id, created_at_ms, event_id);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
