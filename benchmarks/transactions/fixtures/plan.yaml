@@ -1,0 +1,37 @@
+# Three-family transaction graph used by every benchmark case:
+# workspace file write -> hermes config set -> delayed outbound message.
+# Paths are relative to the per-case disposable worktree; the destination
+# is a fake test platform target. No credential appears anywhere here.
+transaction:
+  title: benchmark three-family bounded change
+  failure_policy: stop
+
+worktree_root: "{case_worktree}"
+
+nodes:
+  - node_id: workspace_write
+    adapter_id: workspace.v1
+    action: write_file
+    args:
+      path: notes/benchmark.md
+      content: "benchmark write for {case_id}\n"
+  - node_id: config_set
+    adapter_id: hermes-config.v1
+    action: set
+    args:
+      key: ui.timezone
+      value: "UTC"
+  - node_id: delayed_message
+    adapter_id: message-outbox.v1
+    action: send
+    args:
+      platform: faketest
+      target: "faketest:benchmark-channel"
+      message: "benchmark delivery for {case_id}"
+      not_before_seconds: 30
+
+edges:
+  - parent: workspace_write
+    child: config_set
+  - parent: config_set
+    child: delayed_message
