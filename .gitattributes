@@ -8,3 +8,8 @@ web/package-lock.json linguist-generated=true
 Dockerfile  text eol=lf
 *.dockerfile text eol=lf
 docker/entrypoint.sh text eol=lf
+
+# Repo-root CLI launchers: a CRLF shebang line breaks on Unix with
+# "env: python3\r: No such file or directory".
+/hermes     text eol=lf
+/hades      text eol=lf
