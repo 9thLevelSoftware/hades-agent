@@ -3134,6 +3134,23 @@ class BasePlatformAdapter(ABC):
         return None
 
 
+    @property
+    def supports_message_edit(self) -> bool:
+        """True only when the concrete class overrides ``edit_message``.
+
+        Truthful capability detection for the transaction outbox: a
+        platform "proves" edit compensation by overriding the method,
+        never by optimistic platform-name lists.
+        """
+        return type(self).edit_message is not BasePlatformAdapter.edit_message
+
+    @property
+    def supports_message_delete(self) -> bool:
+        """True only when the concrete class overrides ``delete_message``."""
+        return (
+            type(self).delete_message is not BasePlatformAdapter.delete_message
+        )
+
     async def edit_message(
         self,
         chat_id: str,
