@@ -39,7 +39,7 @@ from typing import Any, List, Optional
 # the module) fail with ModuleNotFoundError for hermes_time et al.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hades_constants import env_get, get_hades_home
+from hades_constants import env_get, get_hades_home, env_set
 from hades_cli._subprocess_compat import windows_hide_flags
 from hades_cli.config import load_config, _expand_env_vars
 from hades_cli.fallback_config import get_fallback_chain
@@ -2040,7 +2040,7 @@ def _get_script_timeout() -> int:
         except Exception:
             logger.warning("Invalid patched _SCRIPT_TIMEOUT=%r; using env/config/default", _SCRIPT_TIMEOUT)
 
-    env_value = os.getenv("HADES_CRON_SCRIPT_TIMEOUT", "").strip()
+    env_value = env_get("HADES_CRON_SCRIPT_TIMEOUT", "").strip()
     if env_value:
         try:
             timeout = int(float(env_value))
@@ -2820,7 +2820,7 @@ def run_job(
         # Resolve timeout: env override → config.yaml → default 10s.
         # Mirrors the script_timeout_seconds resolution pattern.
         _session_db_timeout: float | None = None
-        _raw_env_timeout = os.getenv("HADES_CRON_SESSION_DB_TIMEOUT", "").strip()
+        _raw_env_timeout = env_get("HADES_CRON_SESSION_DB_TIMEOUT", "").strip()
         if _raw_env_timeout:
             try:
                 _session_db_timeout = float(_raw_env_timeout)
@@ -3134,7 +3134,7 @@ def run_job(
         prefill_messages = None
         agent_cfg = _cfg.get("agent", {}) if isinstance(_cfg.get("agent", {}), dict) else {}
         prefill_file = (
-            os.getenv("HADES_PREFILL_MESSAGES_FILE", "")
+            env_get("HADES_PREFILL_MESSAGES_FILE", "")
             or _cfg.get("prefill_messages_file", "")
             or agent_cfg.get("prefill_messages_file", "")
         )
@@ -3386,7 +3386,7 @@ def run_job(
         #
         # Uses the agent's built-in activity tracker (updated by
         # _touch_activity() on every tool call, API call, and stream delta).
-        _raw_cron_timeout = os.getenv("HADES_CRON_TIMEOUT", "").strip()
+        _raw_cron_timeout = env_get("HADES_CRON_TIMEOUT", "").strip()
         if _raw_cron_timeout:
             try:
                 _cron_timeout = float(_raw_cron_timeout)
@@ -3960,7 +3960,7 @@ def tick(
         # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
         _max_workers: Optional[int] = None
         try:
-            _env_par = os.getenv("HADES_CRON_MAX_PARALLEL", "").strip()
+            _env_par = env_get("HADES_CRON_MAX_PARALLEL", "").strip()
             if _env_par:
                 _max_workers = int(_env_par) or None
         except (ValueError, TypeError):

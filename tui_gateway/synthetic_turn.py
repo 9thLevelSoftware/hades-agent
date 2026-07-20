@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+from hades_constants import env_get
 import threading
 import time
 from typing import Any, Callable, Optional
@@ -39,7 +40,7 @@ from typing import Any, Callable, Optional
 
 def synth_turn_armed() -> bool:
     """True when the synthetic-turn test seam is armed via env."""
-    return os.environ.get("HADES_ISO_CERTIFY_SYNTH_TURN") == "1"
+    return env_get("HADES_ISO_CERTIFY_SYNTH_TURN") == "1"
 
 
 def _env_float(name: str, default: float) -> float:

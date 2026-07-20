@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from hades_constants import display_hades_home
+from hades_constants import display_hades_home, env_get
 from agent.skill_preprocessing import (
     expand_inline_shell as _expand_inline_shell,
     load_skills_config as _load_skills_config,
@@ -128,11 +128,11 @@ def _resolve_skill_commands_platform() -> Optional[str]:
         from gateway.session_context import get_session_env
 
         resolved_platform = (
-            os.getenv("HADES_PLATFORM")
+            env_get("HADES_PLATFORM")
             or get_session_env("HERMES_SESSION_PLATFORM")
         )
     except Exception:
-        resolved_platform = os.getenv("HADES_PLATFORM")
+        resolved_platform = env_get("HADES_PLATFORM")
     return resolved_platform or None
 
 def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tuple[dict[str, Any], Path | None, str] | None:

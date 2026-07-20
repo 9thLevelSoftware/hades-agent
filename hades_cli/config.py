@@ -18,6 +18,7 @@ import copy
 import json
 import logging
 import os
+from hades_constants import env_get
 import platform
 import re
 import shutil
@@ -704,7 +705,7 @@ def get_container_exec_info() -> Optional[dict]:
     container.enable = true. It tells the host CLI to exec into the container
     instead of running locally.
     """
-    if os.environ.get("HADES_DEV") == "1":
+    if env_get("HADES_DEV") == "1":
         return None
 
     from hades_constants import is_container
@@ -775,8 +776,8 @@ def _resolve_hermes_uid_gid() -> tuple[Optional[int], Optional[int]]:
     """
     if sys.platform == "win32":
         return None, None
-    uid_str = os.environ.get("HADES_UID", "").strip()
-    gid_str = os.environ.get("HADES_GID", "").strip()
+    uid_str = env_get("HADES_UID", "").strip()
+    gid_str = env_get("HADES_GID", "").strip()
     try:
         uid = int(uid_str) if uid_str else None
     except ValueError:
@@ -838,7 +839,7 @@ def _secure_dir(path):
     if is_managed():
         return
     try:
-        mode_str = os.environ.get("HADES_HOME_MODE", "").strip()
+        mode_str = env_get("HADES_HOME_MODE", "").strip()
         mode = int(mode_str, 8) if mode_str else 0o700
     except ValueError:
         mode = 0o700
@@ -858,7 +859,7 @@ def _is_container() -> bool:
     permissions.
     """
     # Explicit opt-out
-    if os.environ.get("HADES_CONTAINER") or os.environ.get("HADES_SKIP_CHMOD"):
+    if env_get("HADES_CONTAINER") or env_get("HADES_SKIP_CHMOD"):
         return True
     # Docker / Podman marker file
     if os.path.exists("/.dockerenv"):
@@ -5885,7 +5886,7 @@ def warn_deprecated_cwd_env_vars(config: Optional[Dict[str, Any]] = None) -> Non
             f"this is deprecated."
         )
     if lines:
-        hint_path = os.environ.get("HADES_HOME", "~/.hades")
+        hint_path = env_get("HADES_HOME", "~/.hades")
         lines.insert(0, "\033[33m⚠ Deprecated .env settings detected:\033[0m")
         lines.append(
             "  \033[2mMove to config.yaml instead:  "
@@ -5974,7 +5975,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     if current_ver < 5:
         config = read_raw_config()
         if "timezone" not in config:
-            old_tz = os.getenv("HADES_TIMEZONE", "")
+            old_tz = env_get("HADES_TIMEZONE", "")
             if old_tz and old_tz.strip():
                 config["timezone"] = old_tz.strip()
                 results["config_added"].append(f"timezone={old_tz.strip()} (from HERMES_TIMEZONE)")

@@ -262,7 +262,7 @@ def heartbeat_current_worker_from_env() -> bool:
     try:
         kb, conn = _connect()
         try:
-            claim_lock = os.environ.get("HADES_KANBAN_CLAIM_LOCK")
+            claim_lock = env_get("HADES_KANBAN_CLAIM_LOCK")
             try:
                 kb.heartbeat_claim(conn, tid, claimer=claim_lock)
             except Exception:
@@ -779,7 +779,7 @@ def _handle_heartbeat(args: dict, **kw) -> str:
             # (see _default_spawn in kanban_db.py); falling back to the
             # default _claimer_id() covers locally-driven workers that
             # never went through the dispatcher path.
-            claim_lock = os.environ.get("HADES_KANBAN_CLAIM_LOCK")
+            claim_lock = env_get("HADES_KANBAN_CLAIM_LOCK")
             kb.heartbeat_claim(conn, tid, claimer=claim_lock)
 
             ok = kb.heartbeat_worker(
@@ -1075,7 +1075,7 @@ def _handle_create(args: dict, **kw) -> str:
         )
     body = args.get("body")
     parents = args.get("parents") or []
-    tenant = args.get("tenant") or os.environ.get("HADES_TENANT")
+    tenant = args.get("tenant") or env_get("HADES_TENANT")
     # Stamp the originating session id when the agent loop runs under
     # ACP (which sets HERMES_SESSION_ID before invoking tools). NULL on
     # CLI / dashboard paths and on legacy hosts that don't set the env.
@@ -1246,7 +1246,7 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             # poller keys on HERMES_SESSION_KEY.
             session_key = (
                 get_session_env("HERMES_SESSION_KEY", "")
-                or os.environ.get("HADES_SESSION_KEY", "")
+                or env_get("HADES_SESSION_KEY", "")
             )
             if not session_key:
                 return False  # CLI / cron / test — no persistent channel

@@ -60,7 +60,7 @@ def get_bundled_plugins_dir() -> Path:
     installs) so read-only store paths are consulted first.  Falls back to
     the in-repo path used during development.
     """
-    env_override = os.getenv("HADES_BUNDLED_PLUGINS")
+    env_override = env_get("HADES_BUNDLED_PLUGINS")
     if env_override:
         return Path(env_override)
     return Path(__file__).resolve().parent.parent / "plugins"

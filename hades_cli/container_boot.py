@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from hades_constants import env_get
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
@@ -222,7 +223,7 @@ def _maybe_migrate_legacy_gateway_run_state(
     if state_file.exists():
         return None
 
-    if os.environ.get("HADES_GATEWAY_NO_SUPERVISE", "").lower() in ("1", "true", "yes"):
+    if env_get("HADES_GATEWAY_NO_SUPERVISE", "").lower() in ("1", "true", "yes"):
         return None
 
     argv = tuple(container_argv) if container_argv is not None else _read_container_argv()
@@ -571,7 +572,7 @@ def main() -> int:
         )
         return 0
 
-    hermes_home = Path(os.environ.get("HADES_HOME", "/opt/data"))
+    hermes_home = Path(env_get("HADES_HOME", "/opt/data"))
     scandir = Path(os.environ.get("S6_PROFILE_GATEWAY_SCANDIR", "/run/service"))
     actions = reconcile_profile_gateways(
         hermes_home=hermes_home, scandir=scandir,

@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from hades_constants import env_get
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -133,7 +134,7 @@ def _profile_author() -> str:
     """Mirror of ``hades_cli.kanban._profile_author``. Kept local to
     avoid a circular import when kanban.py imports this module."""
     return (
-        os.environ.get("HADES_PROFILE")
+        env_get("HADES_PROFILE")
         or os.environ.get("USER")
         or "specifier"
     )

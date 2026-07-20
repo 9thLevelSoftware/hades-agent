@@ -15,7 +15,7 @@ from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
 from hades_cli._subprocess_compat import windows_hide_flags
-from hades_constants import env_get
+from hades_constants import env_get, env_set
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -397,7 +397,7 @@ def _inject_context_hermes_home(env: dict) -> None:
 
         value = get_hades_home_override()
         if value:
-            env["HADES_HOME"] = value
+            env_set("HADES_HOME", value, env=env)
     except Exception:
         pass
 

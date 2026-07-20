@@ -35,6 +35,7 @@ import json
 import keyword
 import logging
 import os
+from hades_constants import env_get, env_pop
 import platform
 import re
 import secrets
@@ -2532,7 +2533,7 @@ def _execute_remote(
             f"HADES_ARTIFACTS_DIR={shlex.quote(artifact_dir)} "
             f"PYTHONDONTWRITEBYTECODE=1"
         )
-        tz = os.getenv("HADES_TIMEZONE", "").strip()
+        tz = env_get("HADES_TIMEZONE", "").strip()
         if tz:
             env_prefix += f" TZ={shlex.quote(tz)}"
 
@@ -2939,10 +2940,10 @@ class ExecutionKernel:
             # PYTHONPATH) lets persistent scripts import internal modules and
             # read configuration/secrets outside the execution boundary.
             child_env["PYTHONPATH"] = self._tmpdir
-            tz = os.getenv("HADES_TIMEZONE", "").strip()
+            tz = env_get("HADES_TIMEZONE", "").strip()
             if tz:
                 child_env["TZ"] = tz
-            child_env.pop("HERMES_TIMEZONE", None)
+            env_pop("HERMES_TIMEZONE", env=child_env)
             from hades_constants import apply_subprocess_home_env
             apply_subprocess_home_env(child_env)
 
@@ -3188,9 +3189,9 @@ class ExecutionKernelRegistry:
     @staticmethod
     def _profile_scope():
         home = os.path.realpath(
-            os.path.abspath(os.path.expanduser(os.getenv("HADES_HOME") or "~/.hades"))
+            os.path.abspath(os.path.expanduser(env_get("HADES_HOME") or "~/.hades"))
         )
-        profile = os.getenv("HADES_PROFILE", "default").strip() or "default"
+        profile = env_get("HADES_PROFILE", "default").strip() or "default"
         return home, profile
 
     @classmethod
@@ -3808,10 +3809,10 @@ def execute_code(
         # code reflects the correct wall-clock time.  Only TZ is set —
         # HERMES_TIMEZONE is an internal Hermes setting and must not leak
         # into child processes.
-        _tz_name = os.getenv("HADES_TIMEZONE", "").strip()
+        _tz_name = env_get("HADES_TIMEZONE", "").strip()
         if _tz_name:
             child_env["TZ"] = _tz_name
-        child_env.pop("HERMES_TIMEZONE", None)
+        env_pop("HERMES_TIMEZONE", env=child_env)
 
         from hades_constants import apply_subprocess_home_env
         apply_subprocess_home_env(child_env)

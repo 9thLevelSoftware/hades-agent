@@ -1967,7 +1967,7 @@ def _cmd_attach_rm(args: argparse.Namespace) -> int:
 def _worker_run_id_for(task_id: str) -> Optional[int]:
     if env_get("HADES_KANBAN_TASK") != task_id:
         return None
-    raw = os.environ.get("HADES_KANBAN_RUN_ID")
+    raw = env_get("HADES_KANBAN_RUN_ID")
     if not raw:
         return None
     try:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+from hades_constants import env_get
 import sys
 from pathlib import Path
 
@@ -200,7 +201,7 @@ def slack_manifest_command(args) -> int:
 
                 target = Path(get_hades_home()) / "slack-manifest.json"
             except Exception:
-                target = Path(os.environ.get("HADES_HOME") or str(Path.home() / ".hades")) / "slack-manifest.json"
+                target = Path(env_get("HADES_HOME") or str(Path.home() / ".hades")) / "slack-manifest.json"
         else:
             target = Path(write_target).expanduser()
         target.parent.mkdir(parents=True, exist_ok=True)

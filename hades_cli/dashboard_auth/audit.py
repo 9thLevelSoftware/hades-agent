@@ -16,6 +16,7 @@ import enum
 import json
 import logging
 import os
+from hades_constants import env_get
 import threading
 from pathlib import Path
 from typing import Any
@@ -58,7 +59,7 @@ def _resolve_log_path() -> Path:
     else ``~/.hades``. A local copy avoids an import cycle with the
     middleware which lives below ``hermes_cli``.
     """
-    home = os.environ.get("HADES_HOME") or str(Path.home() / ".hades")
+    home = env_get("HADES_HOME") or str(Path.home() / ".hades")
     return Path(home) / "logs" / "dashboard-auth.log"
 
 

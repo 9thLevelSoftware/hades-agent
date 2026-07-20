@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import logging
 import os
+from hades_constants import env_get
 import json
 import threading
 import uuid
@@ -48,7 +49,7 @@ def auto_continue_freshness_window() -> float:
     disables the freshness gate (restores the pre-fix "always fresh" behaviour
     for users who want to opt out).
     """
-    raw = os.environ.get("HADES_AUTO_CONTINUE_FRESHNESS")
+    raw = env_get("HADES_AUTO_CONTINUE_FRESHNESS")
     if raw is None or raw == "":
         return float(_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT)
     try:

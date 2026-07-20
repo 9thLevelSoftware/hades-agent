@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hades_constants import env_get
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -122,7 +123,7 @@ def _resolve_spill_dir(directory_override: Optional[str], session_id: Optional[s
             base = Path(get_hades_home()) / "hook_outputs"
         except Exception:
             # Last-resort fallback: HADES_HOME env var, then ~/.hades
-            home = os.environ.get("HADES_HOME") or os.path.expanduser("~/.hades")
+            home = env_get("HADES_HOME") or os.path.expanduser("~/.hades")
             base = Path(home) / "hook_outputs"
 
     # Group by session so spills are contained per conversation.

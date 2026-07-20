@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+from hades_constants import env_get
 import re
 from pathlib import Path
 from datetime import datetime
@@ -425,7 +426,7 @@ class DeliveryRouter:
         otherwise the ``gateway.filter_silence_narration`` config flag wins
         (default True).
         """
-        env = os.getenv("HADES_FILTER_SILENCE_NARRATION")
+        env = env_get("HADES_FILTER_SILENCE_NARRATION")
         if env is not None:
             return env.strip().lower() in ("1", "true", "yes", "on")
         return bool(getattr(self.config, "filter_silence_narration", True))

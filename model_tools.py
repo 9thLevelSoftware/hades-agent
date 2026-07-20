@@ -323,7 +323,7 @@ def get_tool_definitions(
             registry._generation,
             cfg_fp,
             bool(env_get("HADES_KANBAN_TASK")),
-            bool(os.environ.get("HADES_WORKFLOW_CONTEXT")),
+            bool(env_get("HADES_WORKFLOW_CONTEXT")),
             bool(skip_tool_search_assembly),
         )
         cached = _tool_defs_cache.get(cache_key)

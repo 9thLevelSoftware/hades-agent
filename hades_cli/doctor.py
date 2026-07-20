@@ -12,7 +12,7 @@ from pathlib import Path
 
 from hades_cli.config import get_project_root, get_hades_home, get_env_path
 from hades_cli.env_loader import load_hermes_dotenv
-from hades_constants import display_hades_home, env_get
+from hades_constants import display_hades_home, env_get, env_is_set, env_set
 from hades_constants import agent_browser_runnable
 
 PROJECT_ROOT = get_project_root()
@@ -553,7 +553,7 @@ def managed_scope_check() -> None:
         f"Managed scope active: {n_cfg} config key(s), {n_env} env key(s) "
         f"pinned by {managed_dir}"
     )
-    if os.environ.get("HADES_MANAGED_DIR", "").strip():
+    if env_get("HADES_MANAGED_DIR", "").strip():
         check_info(f"managed dir set via HERMES_MANAGED_DIR={managed_dir}")
 
 

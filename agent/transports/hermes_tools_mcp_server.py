@@ -48,6 +48,7 @@ import inspect
 import json
 import logging
 import os
+from hades_constants import env_is_set, env_set
 import sys
 from typing import Any, Optional
 
@@ -258,8 +259,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     # Quiet mode: keep Hades' own banners off stdout (which is the MCP wire).
-    os.environ.setdefault("HERMES_QUIET", "1")
-    os.environ.setdefault("HERMES_REDACT_SECRETS", "true")
+    if not env_is_set("HERMES_QUIET"):
+        env_set("HERMES_QUIET", "1")
+    if not env_is_set("HERMES_REDACT_SECRETS"):
+        env_set("HERMES_REDACT_SECRETS", "true")
 
     try:
         server = _build_server()

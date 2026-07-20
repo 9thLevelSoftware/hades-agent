@@ -31,6 +31,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+from hades_constants import env_get, env_set
 import tempfile
 import uuid
 import threading
@@ -897,7 +898,7 @@ def compress_context(
                     try:
                         agent._session_db.create_session(
                             session_id=agent.session_id,
-                            source=agent.platform or os.environ.get("HADES_SESSION_SOURCE", "cli"),
+                            source=agent.platform or env_get("HADES_SESSION_SOURCE", "cli"),
                             model=agent.model,
                             model_config=agent._session_init_model_config,
                             parent_session_id=old_session_id,

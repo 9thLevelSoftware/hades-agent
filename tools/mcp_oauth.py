@@ -52,7 +52,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
-from hades_constants import secure_parent_dir
+from hades_constants import secure_parent_dir, env_get
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ def _get_token_dir(hermes_home: str | Path | None = None) -> Path:
         from hades_constants import get_hades_home
         base = Path(hermes_home) if hermes_home is not None else Path(get_hades_home())
     except ImportError:
-        base = Path(os.environ.get("HADES_HOME", str(Path.home() / ".hades")))
+        base = Path(env_get("HADES_HOME", str(Path.home() / ".hades")))
     return base / "mcp-tokens"
 
 

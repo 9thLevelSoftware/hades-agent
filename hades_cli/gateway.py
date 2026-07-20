@@ -1002,10 +1002,10 @@ def _sync_hermes_home_from_systemd_unit(system: bool) -> None:
         unit_home = _read_systemd_unit_environment(system=True).get("HADES_HOME", "").strip()
     if not unit_home:
         return
-    current = os.environ.get("HADES_HOME", "").strip()
+    current = env_get("HADES_HOME", "").strip()
     if current == unit_home:
         return
-    os.environ["HADES_HOME"] = unit_home
+    env_set("HADES_HOME", unit_home)
 
 
 def _read_systemd_unit_properties(
@@ -1627,7 +1627,7 @@ def is_linux() -> bool:
     return sys.platform.startswith("linux")
 
 
-from hades_constants import is_container, is_termux, is_wsl
+from hades_constants import is_container, is_termux, is_wsl, env_get, env_set
 
 
 def _wsl_systemd_operational() -> bool:
@@ -1706,7 +1706,7 @@ def _windows_gateway_should_absorb_console_controls() -> bool:
     if not is_windows():
         return False
 
-    detached = os.getenv("HADES_GATEWAY_DETACHED", "").strip().lower()
+    detached = env_get("HADES_GATEWAY_DETACHED", "").strip().lower()
     if detached in {"1", "true", "yes", "on"}:
         return True
 
@@ -2625,7 +2625,7 @@ def _hermes_home_for_target_user(target_home_dir: str) -> str:
       /root/.hermes/profiles/coder     → /home/alice/.hermes/profiles/coder
       /opt/custom-hermes               → /opt/custom-hermes  (kept as-is)
     """
-    current_hermes_raw = os.environ.get("HADES_HOME", "").strip()
+    current_hermes_raw = env_get("HADES_HOME", "").strip()
     current_hermes = (
         Path(current_hermes_raw).expanduser()
         if current_hermes_raw
@@ -3182,7 +3182,7 @@ def _print_system_scope_remediation(action: str) -> None:
 
 def _get_restart_drain_timeout() -> float:
     """Return the configured gateway restart drain timeout in seconds."""
-    raw = os.getenv("HADES_RESTART_DRAIN_TIMEOUT", "").strip()
+    raw = env_get("HADES_RESTART_DRAIN_TIMEOUT", "").strip()
     if not raw:
         cfg = read_raw_config()
         agent_cfg = cfg.get("agent", {}) if isinstance(cfg, dict) else {}
@@ -4757,7 +4757,7 @@ def _guard_official_docker_root_gateway() -> None:
     """Refuse gateway startup when the official Docker privilege drop was bypassed."""
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         return
-    if _truthy_env(os.getenv("HADES_ALLOW_ROOT_GATEWAY")):
+    if _truthy_env(env_get("HADES_ALLOW_ROOT_GATEWAY")):
         return
     if not _is_official_docker_checkout():
         return
@@ -4881,7 +4881,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
     from datetime import datetime as _dt, timezone as _tz
 
     def _exit_diag(tag: str, **extra: object) -> None:
-        if os.environ.get("HADES_GATEWAY_EXIT_DIAG", "1") != "1":
+        if env_get("HADES_GATEWAY_EXIT_DIAG", "1") != "1":
             return
         try:
             from hades_constants import get_hades_home as _ghh
@@ -4948,13 +4948,13 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
             pass
         # Env vars override config for escape-hatch use.
         try:
-            _env_starts = os.getenv("HADES_GATEWAY_MAX_STARTS")
+            _env_starts = env_get("HADES_GATEWAY_MAX_STARTS")
             if _env_starts is not None:
                 _max_starts = int(_env_starts)
         except ValueError:
             pass
         try:
-            _env_win = os.getenv("HADES_GATEWAY_START_WINDOW_S")
+            _env_win = env_get("HADES_GATEWAY_START_WINDOW_S")
             if _env_win is not None:
                 _win = float(_env_win)
         except ValueError:
@@ -6586,10 +6586,10 @@ def _maybe_redirect_run_to_s6_supervision(args) -> bool:
     Returns True iff dispatched (caller should ``return``).
     """
     no_supervise = getattr(args, "no_supervise", False) or \
-        os.environ.get("HADES_GATEWAY_NO_SUPERVISE", "").lower() in ("1", "true", "yes")
+        env_get("HADES_GATEWAY_NO_SUPERVISE", "").lower() in ("1", "true", "yes")
     if no_supervise:
         return False
-    if os.environ.get("HADES_S6_SUPERVISED_CHILD"):
+    if env_get("HADES_S6_SUPERVISED_CHILD"):
         # We ARE the supervised child s6-supervise is running. Fall
         # through to the foreground code path so the gateway actually
         # starts.

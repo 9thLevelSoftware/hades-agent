@@ -8,6 +8,7 @@ finish immediately after editing code without fresh evidence.
 from __future__ import annotations
 
 import os
+from hades_constants import env_get
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
@@ -116,15 +117,15 @@ def _session_is_messaging_surface() -> bool:
         from gateway.session_context import get_session_env
 
         platform = (
-            os.getenv("HADES_PLATFORM")
+            env_get("HADES_PLATFORM")
             or get_session_env("HERMES_SESSION_PLATFORM", "")
         )
         source = get_session_env("HERMES_SESSION_SOURCE", "")
     except Exception:
-        platform = os.getenv("HADES_PLATFORM", "") or os.environ.get(
+        platform = env_get("HADES_PLATFORM", "") or env_get(
             "HERMES_SESSION_PLATFORM", ""
         )
-        source = os.environ.get("HADES_SESSION_SOURCE", "")
+        source = env_get("HADES_SESSION_SOURCE", "")
     for identity in (platform, source):
         identity = str(identity or "").strip().lower()
         if identity and identity not in _NON_MESSAGING_SESSION_SURFACES:
@@ -144,7 +145,7 @@ def verify_on_stop_enabled(config: dict[str, Any] | None = None) -> bool:
     bool forces the behavior in either direction. A missing or unrecognized
     value falls back to the surface-aware ``"auto"`` default.
     """
-    env = os.environ.get("HADES_VERIFY_ON_STOP")
+    env = env_get("HADES_VERIFY_ON_STOP")
     if env is not None:
         return env.strip().lower() not in {"0", "false", "no", "off"}
     if config is None:

@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from hades_constants import get_hades_home
+from hades_constants import get_hades_home, env_get
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ def _bundles_dir() -> Path:
     Honors ``HERMES_BUNDLES_DIR`` for tests; falls back to
     ``<HADES_HOME>/skill-bundles``.
     """
-    override = os.environ.get("HADES_BUNDLES_DIR")
+    override = env_get("HADES_BUNDLES_DIR")
     if override:
         return Path(override).expanduser()
     return get_hades_home() / "skill-bundles"

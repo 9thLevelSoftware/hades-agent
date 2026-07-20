@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hades_constants import env_get
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Optional
@@ -378,7 +379,7 @@ def dev_fixture_subscription_state() -> Optional[SubscriptionState]:
     Returns ``None`` when the env var is unset/empty (the real portal path runs).
     Throwaway scaffolding — mirrors ``HERMES_DEV_CREDITS_FIXTURE``.
     """
-    name = (os.getenv("HADES_DEV_SUBSCRIPTION_FIXTURE") or "").strip().lower()
+    name = (env_get("HADES_DEV_SUBSCRIPTION_FIXTURE") or "").strip().lower()
     if not name:
         return None
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from hades_constants import env_get, env_pop, env_set
 import sqlite3
 import time
 from pathlib import Path
@@ -140,7 +141,7 @@ class GatewayKanbanWatchersMixin:
         except Exception:
             logger.warning("kanban notifier: config loader unavailable; disabled")
             return
-        env_override = os.environ.get("HADES_KANBAN_DISPATCH_IN_GATEWAY", "").strip().lower()
+        env_override = env_get("HADES_KANBAN_DISPATCH_IN_GATEWAY", "").strip().lower()
         if env_override in {"0", "false", "no", "off"}:
             logger.info("kanban notifier: disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY env")
             return
@@ -768,7 +769,7 @@ class GatewayKanbanWatchersMixin:
         except Exception:
             logger.warning("kanban dispatcher: config loader unavailable; disabled")
             return
-        env_override = os.environ.get("HADES_KANBAN_DISPATCH_IN_GATEWAY", "").strip().lower()
+        env_override = env_get("HADES_KANBAN_DISPATCH_IN_GATEWAY", "").strip().lower()
         if env_override in {"0", "false", "no", "off"}:
             logger.info("kanban dispatcher: disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY env")
             return
@@ -1157,9 +1158,9 @@ class GatewayKanbanWatchersMixin:
                 # pattern as the dashboard specify endpoint. The
                 # decomposer module connects with no board kwarg and
                 # relies on the env var.
-                prev_env = os.environ.get("HADES_KANBAN_BOARD")
+                prev_env = env_get("HADES_KANBAN_BOARD")
                 try:
-                    os.environ["HADES_KANBAN_BOARD"] = slug
+                    env_set("HADES_KANBAN_BOARD", slug)
                     try:
                         triage_ids = _decomp.list_triage_ids()
                     except Exception as exc:
@@ -1203,9 +1204,9 @@ class GatewayKanbanWatchersMixin:
                             )
                 finally:
                     if prev_env is None:
-                        os.environ.pop("HERMES_KANBAN_BOARD", None)
+                        env_pop("HERMES_KANBAN_BOARD")
                     else:
-                        os.environ["HADES_KANBAN_BOARD"] = prev_env
+                        env_set("HADES_KANBAN_BOARD", prev_env)
             return successes
 
         logger.info(

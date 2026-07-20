@@ -13,7 +13,7 @@ import contextvars
 from collections import OrderedDict
 from pathlib import Path
 
-from hades_constants import get_hades_home, get_skills_dir, is_wsl
+from hades_constants import get_hades_home, get_skills_dir, is_wsl, env_get
 from typing import Optional
 
 from agent.runtime_cwd import resolve_agent_cwd
@@ -1189,7 +1189,7 @@ def build_environment_hints() -> str:
     # it's part of the stable, cache-safe system prompt. The env var is the
     # build-time/embedder mechanism (set in a container ENV); config.yaml
     # ``agent.environment_hint`` is the user-facing surface. Env var wins.
-    extra = (os.getenv("HADES_ENVIRONMENT_HINT") or "").strip()
+    extra = (env_get("HADES_ENVIRONMENT_HINT") or "").strip()
     if not extra:
         try:
             from hades_cli.config import load_config
@@ -1465,7 +1465,7 @@ def _skill_should_show(
 
 def _current_session_platform_hint() -> str:
     """Return the active platform without importing the gateway package on CLI startup."""
-    platform = os.environ.get("HADES_PLATFORM") or os.environ.get("HADES_SESSION_PLATFORM")
+    platform = env_get("HADES_PLATFORM") or env_get("HADES_SESSION_PLATFORM")
     if platform:
         return platform
 

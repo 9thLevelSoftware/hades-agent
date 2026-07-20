@@ -99,7 +99,7 @@ def _session_source_for_agent(platform: Optional[str]) -> str:
 
         source = get_session_env("HERMES_SESSION_SOURCE", "")
     except Exception:
-        source = os.environ.get("HADES_SESSION_SOURCE", "")
+        source = env_get("HADES_SESSION_SOURCE", "")
     source = str(source or "").strip()
     if source:
         return source
@@ -1389,7 +1389,7 @@ class AIAgent:
         if cfg is not None:
             return cfg, False
 
-        env_timeout = os.getenv("HADES_API_CALL_STALE_TIMEOUT")
+        env_timeout = env_get("HADES_API_CALL_STALE_TIMEOUT")
         if env_timeout is not None:
             return float(env_timeout), False
 
@@ -2445,7 +2445,7 @@ class AIAgent:
 
     @staticmethod
     def _hook_payload_max_chars() -> int:
-        raw = os.getenv("HADES_PLUGIN_PAYLOAD_MAX_CHARS", "50000")
+        raw = env_get("HADES_PLUGIN_PAYLOAD_MAX_CHARS", "50000")
         try:
             return max(1000, int(raw))
         except (TypeError, ValueError):
@@ -3066,8 +3066,7 @@ class AIAgent:
         the private ``_turn_failed_file_mutations`` state dict.
         """
         try:
-            import os as _os
-            env = _os.environ.get("HADES_FILE_MUTATION_VERIFIER")
+            env = env_get("HADES_FILE_MUTATION_VERIFIER")
             if env is not None:
                 return env.strip().lower() not in {"0", "false", "no", "off"}
             # Read from the persisted config.yaml so gateway and CLI share
@@ -3163,8 +3162,7 @@ class AIAgent:
         mirroring ``_file_mutation_verifier_enabled``.
         """
         try:
-            import os as _os
-            env = _os.environ.get("HADES_TURN_COMPLETION_EXPLAINER")
+            env = env_get("HADES_TURN_COMPLETION_EXPLAINER")
             if env is not None:
                 return env.strip().lower() not in {"0", "false", "no", "off"}
             # Read from the persisted config.yaml so gateway and CLI share
@@ -3363,7 +3361,7 @@ class AIAgent:
         headers = getattr(http_response, "headers", None)
         if not headers:
             return
-        _dev = is_truthy_value(os.environ.get("HADES_DEV_CREDITS"))
+        _dev = is_truthy_value(env_get("HADES_DEV_CREDITS"))
 
         # ── Parse (fail-open → miss; never overwrite good state with None) ──
         try:

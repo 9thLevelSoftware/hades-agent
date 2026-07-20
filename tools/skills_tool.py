@@ -70,7 +70,7 @@ import json
 import logging
 import time
 
-from hades_constants import get_hades_home, display_hades_home
+from hades_constants import get_hades_home, display_hades_home, env_get
 import os
 import re
 from enum import Enum
@@ -652,7 +652,7 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         from hades_cli.config import load_config
         config = load_config()
         skills_cfg = config.get("skills", {})
-        resolved_platform = platform or os.getenv("HADES_PLATFORM") or _get_session_platform()
+        resolved_platform = platform or env_get("HADES_PLATFORM") or _get_session_platform()
         global_disabled = skills_cfg.get("disabled", [])
         if resolved_platform:
             platform_disabled = cfg_get(skills_cfg, "platform_disabled", resolved_platform)

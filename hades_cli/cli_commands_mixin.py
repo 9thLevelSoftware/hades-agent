@@ -27,7 +27,7 @@ from rich import box as rich_box
 from rich.markup import escape as _escape
 from rich.panel import Panel
 
-from hades_constants import display_hades_home, is_termux as _is_termux_environment
+from hades_constants import display_hades_home, is_termux as _is_termux_environment, env_get
 from hades_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL,
     discover_local_cdp_url,
@@ -948,7 +948,7 @@ class CLICommandsMixin:
         try:
             self._session_db.create_session(
                 session_id=new_session_id,
-                source=os.environ.get("HADES_SESSION_SOURCE", "cli"),
+                source=env_get("HADES_SESSION_SOURCE", "cli"),
                 model=self.model,
                 model_config={
                     "max_iterations": self.max_turns,

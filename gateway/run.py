@@ -1398,7 +1398,7 @@ _ensure_ssl_certs()
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Resolve Hades home directory (respects HADES_HOME override)
-from hades_constants import get_hades_home, get_hades_home_override
+from hades_constants import get_hades_home, get_hades_home_override, env_get, env_is_set, env_set
 from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
 _hermes_home = get_hades_home()
 
@@ -1464,14 +1464,14 @@ def _bridge_max_turns_from_config(home: "Path") -> None:
 
     agent_cfg = cfg.get("agent", {})
     if isinstance(agent_cfg, dict) and "max_turns" in agent_cfg:
-        os.environ["HADES_MAX_ITERATIONS"] = str(agent_cfg["max_turns"])
+        env_set("HADES_MAX_ITERATIONS", str(agent_cfg["max_turns"]))
 
 
 def _current_max_iterations() -> int:
     """Return the current per-turn iteration budget after runtime env refresh."""
     _reload_runtime_env_preserving_config_authority()
     try:
-        return int(os.getenv("HADES_MAX_ITERATIONS", "90"))
+        return int(env_get("HADES_MAX_ITERATIONS", "90"))
     except (TypeError, ValueError):
         return 90
 
@@ -1734,55 +1734,55 @@ if _config_path.exists():
         _agent_cfg = _cfg.get("agent", {})
         if _agent_cfg and isinstance(_agent_cfg, dict):
             if "max_turns" in _agent_cfg:
-                os.environ["HADES_MAX_ITERATIONS"] = str(_agent_cfg["max_turns"])
+                env_set("HADES_MAX_ITERATIONS", str(_agent_cfg["max_turns"]))
             if "gateway_timeout" in _agent_cfg:
-                os.environ["HADES_AGENT_TIMEOUT"] = str(_agent_cfg["gateway_timeout"])
+                env_set("HADES_AGENT_TIMEOUT", str(_agent_cfg["gateway_timeout"]))
             if "gateway_timeout_warning" in _agent_cfg:
-                os.environ["HADES_AGENT_TIMEOUT_WARNING"] = str(_agent_cfg["gateway_timeout_warning"])
+                env_set("HADES_AGENT_TIMEOUT_WARNING", str(_agent_cfg["gateway_timeout_warning"]))
             if "gateway_notify_interval" in _agent_cfg:
-                os.environ["HADES_AGENT_NOTIFY_INTERVAL"] = str(_agent_cfg["gateway_notify_interval"])
+                env_set("HADES_AGENT_NOTIFY_INTERVAL", str(_agent_cfg["gateway_notify_interval"]))
             if "restart_drain_timeout" in _agent_cfg:
-                os.environ["HADES_RESTART_DRAIN_TIMEOUT"] = str(_agent_cfg["restart_drain_timeout"])
+                env_set("HADES_RESTART_DRAIN_TIMEOUT", str(_agent_cfg["restart_drain_timeout"]))
             if "gateway_auto_continue_freshness" in _agent_cfg:
-                os.environ["HADES_AUTO_CONTINUE_FRESHNESS"] = str(
-                    _agent_cfg["gateway_auto_continue_freshness"]
+                env_set(
+                    "HADES_AUTO_CONTINUE_FRESHNESS",
+                    str(_agent_cfg["gateway_auto_continue_freshness"]),
                 )
         _display_cfg = _cfg.get("display", {})
         if _display_cfg and isinstance(_display_cfg, dict):
             if "busy_input_mode" in _display_cfg:
-                os.environ["HADES_GATEWAY_BUSY_INPUT_MODE"] = str(_display_cfg["busy_input_mode"])
+                env_set("HADES_GATEWAY_BUSY_INPUT_MODE", str(_display_cfg["busy_input_mode"]))
             if "busy_text_mode" in _display_cfg:
-                os.environ["HADES_GATEWAY_BUSY_TEXT_MODE"] = str(_display_cfg["busy_text_mode"])
+                env_set("HADES_GATEWAY_BUSY_TEXT_MODE", str(_display_cfg["busy_text_mode"]))
             if "busy_ack_enabled" in _display_cfg:
-                os.environ["HADES_GATEWAY_BUSY_ACK_ENABLED"] = str(_display_cfg["busy_ack_enabled"])
+                env_set("HADES_GATEWAY_BUSY_ACK_ENABLED", str(_display_cfg["busy_ack_enabled"]))
             # This process-level env var is documented as an override for
             # service managers, so preserve it when already set. Other display
             # bridges stay config-authoritative for backwards compatibility.
             if (
                 "busy_steer_ack_enabled" in _display_cfg
-                and "HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED" not in os.environ
+                and not env_is_set("HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED")
             ):
-                os.environ["HADES_GATEWAY_BUSY_STEER_ACK_ENABLED"] = str(
-                    _display_cfg["busy_steer_ack_enabled"]
+                env_set(
+                    "HADES_GATEWAY_BUSY_STEER_ACK_ENABLED",
+                    str(_display_cfg["busy_steer_ack_enabled"]),
                 )
         # Timezone: bridge config.yaml → HERMES_TIMEZONE env var.
         _tz_cfg = _cfg.get("timezone", "")
         if _tz_cfg and isinstance(_tz_cfg, str):
-            os.environ["HADES_TIMEZONE"] = _tz_cfg.strip()
+            env_set("HADES_TIMEZONE", _tz_cfg.strip())
         # Security settings
         _security_cfg = _cfg.get("security", {})
         if isinstance(_security_cfg, dict):
             _redact = _security_cfg.get("redact_secrets")
             if _redact is not None:
-                os.environ["HADES_REDACT_SECRETS"] = str(_redact).lower()
+                env_set("HADES_REDACT_SECRETS", str(_redact).lower())
         # Gateway settings (media delivery allowlist + recency trust + strict mode)
         _gateway_cfg = _cfg.get("gateway", {})
         if isinstance(_gateway_cfg, dict):
             _strict = _gateway_cfg.get("strict")
             if _strict is not None:
-                os.environ["HADES_MEDIA_DELIVERY_STRICT"] = (
-                    "1" if _strict else "0"
-                )
+                env_set("HADES_MEDIA_DELIVERY_STRICT", "1" if _strict else "0")
             _allow_dirs = _gateway_cfg.get("media_delivery_allow_dirs")
             if _allow_dirs:
                 if isinstance(_allow_dirs, str):
@@ -1792,15 +1792,13 @@ if _config_path.exists():
                 else:
                     _allow_dirs_str = ""
                 if _allow_dirs_str:
-                    os.environ["HADES_MEDIA_ALLOW_DIRS"] = _allow_dirs_str
+                    env_set("HADES_MEDIA_ALLOW_DIRS", _allow_dirs_str)
             _trust_recent = _gateway_cfg.get("trust_recent_files")
             if _trust_recent is not None:
-                os.environ["HADES_MEDIA_TRUST_RECENT_FILES"] = (
-                    "1" if _trust_recent else "0"
-                )
+                env_set("HADES_MEDIA_TRUST_RECENT_FILES", "1" if _trust_recent else "0")
             _trust_recent_seconds = _gateway_cfg.get("trust_recent_files_seconds")
             if _trust_recent_seconds is not None:
-                os.environ["HADES_MEDIA_TRUST_RECENT_SECONDS"] = str(_trust_recent_seconds)
+                env_set("HADES_MEDIA_TRUST_RECENT_SECONDS", str(_trust_recent_seconds))
             # Bridge gateway.platform_connect_timeout → the internal env var the
             # connect path + Discord adapter ready-wait both read (#19776).
             # Unlike the agent.*/display.* bridges above (config-authoritative),
@@ -1808,10 +1806,11 @@ if _config_path.exists():
             # already set explicitly; otherwise config.yaml supplies the value.
             if (
                 "platform_connect_timeout" in _gateway_cfg
-                and not os.environ.get("HADES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
+                and not env_get("HADES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
             ):
-                os.environ["HADES_GATEWAY_PLATFORM_CONNECT_TIMEOUT"] = str(
-                    _gateway_cfg["platform_connect_timeout"]
+                env_set(
+                    "HADES_GATEWAY_PLATFORM_CONNECT_TIMEOUT",
+                    str(_gateway_cfg["platform_connect_timeout"]),
                 )
     except Exception as _bridge_err:
         # Previously this was silent (`except Exception: pass`), which
@@ -2092,7 +2091,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
 
     model_cfg = _get_model_config()
     max_tokens = None
-    _env_mt = os.environ.get("HADES_MAX_TOKENS")
+    _env_mt = env_get("HADES_MAX_TOKENS")
     if _env_mt:
         try:
             max_tokens = int(_env_mt)
@@ -3776,7 +3775,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     def _adapter_disconnect_timeout_secs(self) -> float:
         """Return the per-adapter disconnect timeout used during shutdown."""
-        raw = os.getenv("HADES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "").strip()
+        raw = env_get("HADES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "").strip()
         if raw:
             try:
                 timeout = float(raw)
@@ -3791,7 +3790,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     def _platform_connect_timeout_secs(self) -> float:
         """Return the per-platform connect timeout used during startup/retry."""
-        raw = os.getenv("HADES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
+        raw = env_get("HADES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
         if raw:
             try:
                 timeout = float(raw)
@@ -5156,7 +5155,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         agent.prefill_messages_file is accepted as a legacy fallback.
         Relative paths are resolved from ~/.hades/.
         """
-        file_path = os.getenv("HADES_PREFILL_MESSAGES_FILE", "")
+        file_path = env_get("HADES_PREFILL_MESSAGES_FILE", "")
         if not file_path:
             cfg = _load_gateway_runtime_config()
             file_path = str(cfg.get("prefill_messages_file", "") or "")
@@ -5188,7 +5187,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         Checks HERMES_EPHEMERAL_SYSTEM_PROMPT env var first, then falls back to
         agent.system_prompt in ~/.hades/config.yaml.
         """
-        prompt = os.getenv("HADES_EPHEMERAL_SYSTEM_PROMPT", "")
+        prompt = env_get("HADES_EPHEMERAL_SYSTEM_PROMPT", "")
         if prompt:
             return prompt
         cfg = _load_gateway_runtime_config()
@@ -5362,7 +5361,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     @staticmethod
     def _load_busy_input_mode() -> str:
         """Load gateway drain-time busy-input behavior from config/env."""
-        mode = os.getenv("HADES_GATEWAY_BUSY_INPUT_MODE", "").strip().lower()
+        mode = env_get("HADES_GATEWAY_BUSY_INPUT_MODE", "").strip().lower()
         if not mode:
             cfg = _load_gateway_runtime_config()
             mode = str(cfg_get(cfg, "display", "busy_input_mode", default="") or "").strip().lower()
@@ -5384,7 +5383,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         ``busy_input_mode`` and maps to non-queue text handling here).
         """
         # Legacy explicit override wins for backward compat.
-        legacy = os.getenv("HADES_GATEWAY_BUSY_TEXT_MODE", "").strip().lower()
+        legacy = env_get("HADES_GATEWAY_BUSY_TEXT_MODE", "").strip().lower()
         if not legacy:
             cfg = _load_gateway_runtime_config()
             legacy = str(cfg_get(cfg, "display", "busy_text_mode", default="") or "").strip().lower()
@@ -5399,7 +5398,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     @staticmethod
     def _load_restart_drain_timeout() -> float:
         """Load graceful gateway restart/stop drain timeout in seconds."""
-        raw = os.getenv("HADES_RESTART_DRAIN_TIMEOUT", "").strip()
+        raw = env_get("HADES_RESTART_DRAIN_TIMEOUT", "").strip()
         if not raw:
             cfg = _load_gateway_runtime_config()
             raw = str(cfg_get(cfg, "agent", "restart_drain_timeout", default="") or "").strip()
@@ -5425,7 +5424,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
           - ``error``  — only the final message when exit code is non-zero
           - ``off``    — no watcher messages at all
         """
-        mode = os.getenv("HADES_BACKGROUND_NOTIFICATIONS", "")
+        mode = env_get("HADES_BACKGROUND_NOTIFICATIONS", "")
         if not mode:
             cfg = _load_gateway_runtime_config()
             raw = cfg_get(cfg, "display", "background_process_notifications")
@@ -5990,7 +5989,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Check if busy ack is disabled — skip sending but still process the input.
         # Placed before debounce so we don't stamp a "last ack" timestamp that was
         # never actually delivered.
-        busy_ack_enabled = os.environ.get("HADES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() == "true"
+        busy_ack_enabled = env_get("HADES_GATEWAY_BUSY_ACK_ENABLED", "true").lower() == "true"
         if not busy_ack_enabled:
             logger.debug("Busy ack suppressed for session %s", session_key)
             return True  # input still processed, just no ack sent
@@ -6012,7 +6011,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # like STT transcript echo suppression: keep the behavior, drop only
         # the confirmation bubble.
         if is_steer_mode:
-            steer_ack_env = os.environ.get("HADES_GATEWAY_BUSY_STEER_ACK_ENABLED")
+            steer_ack_env = env_get("HADES_GATEWAY_BUSY_STEER_ACK_ENABLED")
             if steer_ack_env is not None:
                 steer_ack_enabled = steer_ack_env.strip().lower() in {"1", "true", "yes", "on"}
             else:
@@ -7245,7 +7244,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # config.yaml → env bridge did the right thing at a glance (instead
         # of silently running at a stale .env value for weeks).
         try:
-            _effective_max_iter = int(os.getenv("HADES_MAX_ITERATIONS", "90"))
+            _effective_max_iter = int(env_get("HADES_MAX_ITERATIONS", "90"))
             logger.info(
                 "Agent budget: max_iterations=%d (agent.max_turns from config.yaml, "
                 "or HERMES_MAX_ITERATIONS from .env, or default 90)",
@@ -7259,7 +7258,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # state at import time, so this log line is the source of truth
         # for this process's lifetime.
         try:
-            _redact_raw = os.getenv("HADES_REDACT_SECRETS", "true")
+            _redact_raw = env_get("HADES_REDACT_SECRETS", "true")
             _redact_on = _redact_raw.lower() in {"1", "true", "yes", "on"}
             if _redact_on:
                 logger.info(
@@ -10611,7 +10610,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return None
 
             _telegram_followup_grace = float(
-                os.getenv("HADES_TELEGRAM_FOLLOWUP_GRACE_SECONDS", "3.0")
+                env_get("HADES_TELEGRAM_FOLLOWUP_GRACE_SECONDS", "3.0")
             )
             _started_at = self._running_agents_ts.get(_quick_key, 0)
             if (
@@ -18586,7 +18585,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Tool progress mode — resolved per-platform with env var fallback
         _resolved_tp = resolve_display_setting(user_config, platform_key, "tool_progress")
-        _env_tp = os.getenv("HADES_TOOL_PROGRESS_MODE")
+        _env_tp = env_get("HADES_TOOL_PROGRESS_MODE")
         _display_cfg = display_config if isinstance(display_config, dict) else {}
         _platforms_cfg = _display_cfg.get("platforms") or {}
         _platform_cfg = _platforms_cfg.get(platform_key) or {}

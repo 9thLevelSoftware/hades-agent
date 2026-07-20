@@ -64,6 +64,9 @@ except ModuleNotFoundError:
 import os
 import sys
 
+# stdlib-only module; needed by the pre-import TUI hot path below.
+from hades_constants import env_get
+
 
 def _set_process_title() -> None:
     """Set the process title to 'hermes' so tools like 'ps', 'top', and
@@ -121,7 +124,7 @@ def _config_default_interface_early() -> str:
         return _EARLY_INTERFACE_CACHE[0]
     value = "cli"
     try:
-        home = os.environ.get("HADES_HOME")
+        home = env_get("HADES_HOME")
         if home:
             cfg_path = os.path.join(home, "config.yaml")
         else:
@@ -164,7 +167,7 @@ def _wants_tui_early(argv: "list[str] | None" = None) -> bool:
         argv = sys.argv[1:]
     if "--cli" in argv:
         return False
-    if os.environ.get("HADES_TUI") == "1" or "--tui" in argv:
+    if env_get("HADES_TUI") == "1" or "--tui" in argv:
         return True
     try:
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -183,7 +186,7 @@ def _wants_tui_early(argv: "list[str] | None" = None) -> bool:
 # `entry.tsx`; this is just the earlier cousin. ``HERMES_TUI_NO_EARLY_DISABLE``
 # escapes the behaviour for diagnostics.
 def _suppress_mouse_residue_early() -> None:
-    if os.environ.get("HADES_TUI_NO_EARLY_DISABLE") == "1":
+    if env_get("HADES_TUI_NO_EARLY_DISABLE") == "1":
         return
     if not _wants_tui_early():
         return
@@ -255,7 +258,7 @@ def _print_fast_version_info() -> None:
 
 def _try_termux_ultrafast_version() -> bool:
     """Handle ``hermes --version`` before config/logging imports on Termux."""
-    if os.environ.get("HADES_TERMUX_DISABLE_FAST_CLI") == "1":
+    if env_get("HADES_TERMUX_DISABLE_FAST_CLI") == "1":
         return False
     if not _is_termux_startup_environment_fast():
         return False
@@ -280,7 +283,7 @@ from pathlib import Path
 from typing import Optional
 
 
-from hades_constants import env_set
+from hades_constants import env_set, env_get, env_is_set, env_pop
 
 from hades_cli.subcommands._shared import add_accept_hooks_flag as _add_accept_hooks_flag
 from hades_cli.subcommands.cron import build_cron_parser
@@ -469,7 +472,7 @@ def _apply_profile_override() -> None:
     # still read active_profile — the user may have switched profiles via
     # `hermes profile use` and the gateway should honour that choice.
     # See issue #22502.
-    hermes_home_env = os.environ.get("HADES_HOME", "")
+    hermes_home_env = env_get("HADES_HOME", "")
     if profile_name is None and hermes_home_env:
         if Path(hermes_home_env).parent.name == "profiles":
             return
@@ -486,7 +489,7 @@ def _apply_profile_override() -> None:
     # would silently redirect the default gateway into that profile — yielding a
     # duplicate gateway for the active profile and no real default gateway. See
     # the "Docker & Profiles & Dashboard" report.
-    if profile_name is None and not os.environ.get("HADES_S6_SUPERVISED_CHILD"):
+    if profile_name is None and not env_get("HADES_S6_SUPERVISED_CHILD"):
         try:
             from hades_constants import get_default_hades_root
 
@@ -520,7 +523,7 @@ def _apply_profile_override() -> None:
                 file=sys.stderr,
             )
             return
-        os.environ["HADES_HOME"] = hermes_home
+        env_set("HADES_HOME", hermes_home)
         # Strip the flag from argv so argparse doesn't choke
         if consume > 0 and profile_index is not None:
             start = profile_index + 1  # +1 because argv is sys.argv[1:]
@@ -565,12 +568,12 @@ try:
             _early_cfg_raw = managed_scope.apply_managed_overlay(_early_cfg_raw)
         except Exception:
             pass
-        if "HERMES_REDACT_SECRETS" not in os.environ:
+        if not env_is_set("HERMES_REDACT_SECRETS"):
             _early_sec_cfg = _early_cfg_raw.get("security", {})
             if isinstance(_early_sec_cfg, dict):
                 _early_redact = _early_sec_cfg.get("redact_secrets")
                 if _early_redact is not None:
-                    os.environ["HADES_REDACT_SECRETS"] = str(_early_redact).lower()
+                    env_set("HADES_REDACT_SECRETS", str(_early_redact).lower())
         _early_net_cfg = _early_cfg_raw.get("network", {})
         if isinstance(_early_net_cfg, dict) and _early_net_cfg.get("force_ipv4"):
             _FORCE_IPV4_EARLY = True
@@ -738,7 +741,7 @@ def _termux_bundled_skills_stamp_path() -> Path:
 def _termux_bundled_skills_sync_needed() -> bool:
     if not _is_termux_startup_environment():
         return True
-    if os.environ.get("HADES_TERMUX_FORCE_SKILLS_SYNC") == "1":
+    if env_get("HADES_TERMUX_FORCE_SKILLS_SYNC") == "1":
         return True
     try:
         stamp = _termux_bundled_skills_stamp_path()
@@ -778,7 +781,7 @@ def _sync_bundled_skills_for_startup() -> bool:
 def _termux_should_prefetch_update_check() -> bool:
     if not _is_termux_startup_environment():
         return True
-    return os.environ.get("HADES_TERMUX_PREFETCH_UPDATES") == "1"
+    return env_get("HADES_TERMUX_PREFETCH_UPDATES") == "1"
 
 
 def _relative_time(ts) -> str:
@@ -1591,7 +1594,7 @@ def _tui_need_rebuild(root: Path) -> bool:
     check still rebuilds immediately after source updates, dependency updates,
     or local edits. Set ``HERMES_TUI_FORCE_BUILD=1`` to force the old behaviour.
     """
-    force = (os.environ.get("HADES_TUI_FORCE_BUILD") or "").strip().lower()
+    force = (env_get("HADES_TUI_FORCE_BUILD") or "").strip().lower()
     if force in {"1", "true", "yes", "on"}:
         return True
 
@@ -1625,25 +1628,27 @@ def _ensure_tui_node() -> None:
     """
     if shutil.which("node") and shutil.which("npm"):
         return
-    if os.environ.get("HADES_SKIP_NODE_BOOTSTRAP"):
+    if env_get("HADES_SKIP_NODE_BOOTSTRAP"):
         return
 
     helper = PROJECT_ROOT / "scripts" / "lib" / "node-bootstrap.sh"
     if not helper.is_file():
         return
 
-    hermes_home = os.environ.get("HADES_HOME") or str(Path.home() / ".hades")
+    hermes_home = env_get("HADES_HOME") or str(Path.home() / ".hades")
     try:
         # Helper writes logs to stderr; we ask bash to print `command -v node`
         # on stdout once ensure_node succeeds. Subshell PATH edits don't leak
         # back into Python, so the stdout capture is the bridge.
+        _node_env = {**os.environ}
+        env_set("HADES_HOME", hermes_home, env=_node_env)
         result = subprocess.run(
             [
                 "bash",
                 "-c",
                 f'source "{helper}" >&2 && ensure_node >&2 && command -v node',
             ],
-            env={**os.environ, "HADES_HOME": hermes_home},
+            env=_node_env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1717,7 +1722,7 @@ def _ensure_tui_workspace(tui_dir: Path) -> None:
         return
 
     if _restore_tui_workspace(tui_dir):
-        if not os.environ.get("HADES_QUIET"):
+        if not env_get("HADES_QUIET"):
             print(f"Restored missing TUI workspace: {tui_dir}")
         return
 
@@ -1741,7 +1746,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
 
     def _node_bin(bin: str) -> str:
         if bin == "node":
-            env_node = os.environ.get("HADES_NODE")
+            env_node = env_get("HADES_NODE")
             if env_node and os.path.isfile(env_node) and os.access(env_node, os.X_OK):
                 return env_node
         path = shutil.which(bin)
@@ -1758,7 +1763,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         return path
 
     # Footgun: --dev against a prebuilt bundle that has no source/node_modules.
-    ext_dir = os.environ.get("HADES_TUI_DIR")
+    ext_dir = env_get("HADES_TUI_DIR")
     if tui_dev and ext_dir:
         print(
             f"Error: --dev is incompatible with HERMES_TUI_DIR={ext_dir}\n"
@@ -1804,7 +1809,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
         and _tui_need_npm_install(tui_dir)
     ):
         npm = _node_bin("npm")
-        if not os.environ.get("HADES_QUIET"):
+        if not env_get("HADES_QUIET"):
             print("Installing TUI dependencies…")
         npm_cwd = _workspace_root(tui_dir)
         # --workspace ui-tui avoids resolving apps/desktop (Electron + node-pty).
@@ -2160,7 +2165,7 @@ def _launch_tui(
     # found" with no live session.  Only forward a resume id that argparse
     # resolved for this invocation; direct `node ui-tui/dist/entry.js` users can
     # still set HERMES_TUI_RESUME themselves.
-    env.pop("HERMES_TUI_RESUME", None)
+    env_pop("HERMES_TUI_RESUME", env=env)
     if resume_session_id:
         env_set("HERMES_TUI_RESUME", resume_session_id, env=env)
 
@@ -2211,12 +2216,12 @@ def _pin_kanban_board_env() -> None:
     calls hit board B (#20074). Pinning at chat boot mirrors what the
     dispatcher already does for spawned workers.
     """
-    if os.environ.get("HADES_KANBAN_BOARD"):
+    if env_get("HADES_KANBAN_BOARD"):
         return
     try:
         from hades_cli.kanban_db import get_current_board
 
-        os.environ["HADES_KANBAN_BOARD"] = get_current_board()
+        env_set("HADES_KANBAN_BOARD", get_current_board())
     except Exception:
         pass
 
@@ -2273,7 +2278,7 @@ def _resolve_use_tui(args) -> bool:
             return False
     except Exception:
         return False
-    if os.environ.get("HADES_TUI") == "1":
+    if env_get("HADES_TUI") == "1":
         return True
     try:
         from hades_cli.config import load_config
@@ -2423,7 +2428,7 @@ def cmd_chat(args):
     # _YOLO_MODE_FROZEN.  This redundant set is a safety net for callers
     # that invoke cmd_chat directly (e.g. subcommand dispatch).
     if getattr(args, "yolo", False):
-        os.environ["HADES_YOLO_MODE"] = "1"
+        env_set("HADES_YOLO_MODE", "1")
 
     # --ignore-user-config: make load_cli_config() / load_config() skip the
     # user's ~/.hades/config.yaml and return built-in defaults. Set BEFORE
@@ -2431,17 +2436,17 @@ def cmd_chat(args):
     # import time). Credentials in .env are still loaded — this flag only
     # ignores behavioral/config settings.
     if getattr(args, "ignore_user_config", False):
-        os.environ["HADES_IGNORE_USER_CONFIG"] = "1"
+        env_set("HADES_IGNORE_USER_CONFIG", "1")
 
     # --ignore-rules: skip auto-injection of AGENTS.md/SOUL.md/.cursorrules
     # (rules), memory entries, and any preloaded skills coming from user config.
     # Maps to AIAgent(skip_context_files=True, skip_memory=True).
     if getattr(args, "ignore_rules", False):
-        os.environ["HADES_IGNORE_RULES"] = "1"
+        env_set("HADES_IGNORE_RULES", "1")
 
     # --source: tag session source for filtering (e.g. 'tool' for third-party integrations)
     if getattr(args, "source", None):
-        os.environ["HADES_SESSION_SOURCE"] = args.source
+        env_set("HADES_SESSION_SOURCE", args.source)
 
     _pin_kanban_board_env()
 
@@ -2858,7 +2863,7 @@ def select_provider_and_model(args=None):
         config_provider = model_cfg.get("provider")
 
     effective_provider = (
-        config_provider or os.getenv("HADES_INFERENCE_PROVIDER") or "auto"
+        config_provider or env_get("HADES_INFERENCE_PROVIDER") or "auto"
     )
     compatible_custom_providers = get_compatible_custom_providers(config)
     def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
@@ -5734,7 +5739,7 @@ def cmd_gui(args: argparse.Namespace):
     # Electron app already reads; an explicit env var still wins over config so
     # `HERMES_DESKTOP_DISABLE_GPU=... hermes desktop` keeps working.
     config_electron_flags, config_disable_gpu = _desktop_launch_options()
-    if config_disable_gpu != "auto" and "HERMES_DESKTOP_DISABLE_GPU" not in os.environ:
+    if config_disable_gpu != "auto" and not env_is_set("HERMES_DESKTOP_DISABLE_GPU"):
         env_set("HERMES_DESKTOP_DISABLE_GPU", config_disable_gpu, env=env)
 
     source_mode = getattr(args, "source", False)
@@ -6201,7 +6206,7 @@ def _kill_stale_dashboard_processes(
     # backend child, it sets HERMES_DESKTOP_CHILD_PID so that the update
     # path can skip killing the desktop-managed process.  (#37532)
     exclude: set[int] | None = None
-    raw_pid = os.environ.get("HADES_DESKTOP_CHILD_PID")
+    raw_pid = env_get("HADES_DESKTOP_CHILD_PID")
     if raw_pid:
         # The desktop may manage several backends (one per active profile) and
         # passes them comma-separated; a lone int still parses for back-compat.
@@ -12420,7 +12425,7 @@ def cmd_dashboard(args):
         and not getattr(args, "isolated", False)
         and not getattr(args, "open_profile", "")
         # Desktop pool backends are intentionally per-profile.
-        and os.environ.get("HADES_DESKTOP") != "1"
+        and env_get("HADES_DESKTOP") != "1"
     ):
         url = f"http://{args.host or '127.0.0.1'}:{args.port}/?profile={_launch_profile}"
         if _dashboard_listening(args.host, args.port):
@@ -12472,7 +12477,7 @@ def cmd_dashboard(args):
         except Exception:
             # Best-effort: if root resolution fails, fall back to the prior
             # behaviour (drop HADES_HOME) rather than block the reroute.
-            env.pop("HADES_HOME", None)
+            env_pop("HADES_HOME", env=env)
         # On Windows, os.execvpe() does not truly replace the process — it
         # spawns via CreateProcess then the parent exits.  Under Python 3.14+
         # this can crash with STATUS_ACCESS_VIOLATION (0xC0000005) when
@@ -12532,8 +12537,8 @@ def cmd_dashboard(args):
     if _headless_backend:
         # Don't build the SPA, and tell mount_spa() (read at web_server import
         # below) to disable it even if a stray dist exists. Set it first.
-        os.environ["HADES_SERVE_HEADLESS"] = "1"
-    elif "HERMES_WEB_DIST" not in os.environ and not getattr(args, "skip_build", False):
+        env_set("HADES_SERVE_HEADLESS", "1")
+    elif not env_is_set("HERMES_WEB_DIST") and not getattr(args, "skip_build", False):
         if not _build_web_ui(PROJECT_ROOT / "web", fatal=True):
             sys.exit(1)
     elif getattr(args, "skip_build", False):
@@ -12541,8 +12546,8 @@ def cmd_dashboard(args):
         # Verify the dist actually exists; otherwise the server will start
         # and serve 404s with no obvious cause (issue #23817).
         _dist_root = (
-            Path(os.environ["HADES_WEB_DIST"])
-            if "HERMES_WEB_DIST" in os.environ
+            Path(env_get("HADES_WEB_DIST"))
+            if env_is_set("HERMES_WEB_DIST")
             else PROJECT_ROOT / "hermes_cli" / "web_dist"
         )
         if not (_dist_root / "index.html").exists():
@@ -12557,7 +12562,7 @@ def cmd_dashboard(args):
         # same way the --skip-build branch does — otherwise the server starts
         # and serves 404s with no obvious cause (same failure mode as #23817,
         # via the env-var path).
-        _dist_root = Path(os.environ["HADES_WEB_DIST"]).expanduser()
+        _dist_root = Path(env_get("HADES_WEB_DIST")).expanduser()
         if not (_dist_root / "index.html").exists():
             print(f"✗ HERMES_WEB_DIST is set but no web dist found at: {_dist_root}")
             print("  Pre-build first:  npm install --workspace web && npm run build -w web")
@@ -12566,7 +12571,7 @@ def cmd_dashboard(args):
         # Write the expanded path back: web_server reads HERMES_WEB_DIST raw
         # at import (no expanduser), so a validated "~/dist" would otherwise
         # pass here and still 404 there.
-        os.environ["HADES_WEB_DIST"] = str(_dist_root)
+        env_set("HADES_WEB_DIST", str(_dist_root))
         print(f"→ Using web dist from HERMES_WEB_DIST: {_dist_root}")
 
     # Discover and load plugins so any DashboardAuthProvider plugin
@@ -12828,7 +12833,7 @@ _AGENT_SUBCOMMANDS = {
 
 
 def _is_tui_chat_launch(args) -> bool:
-    return bool(getattr(args, "tui", False) or os.environ.get("HADES_TUI") == "1")
+    return bool(getattr(args, "tui", False) or env_get("HADES_TUI") == "1")
 
 
 def _command_has_dedicated_mcp_startup(args) -> bool:
@@ -12857,7 +12862,7 @@ def _prepare_agent_startup(args) -> None:
     # so the guarantee lives here where the import is actually triggered
     # (#60328).
     if getattr(args, "yolo", False):
-        os.environ["HADES_YOLO_MODE"] = "1"
+        env_set("HADES_YOLO_MODE", "1")
     _apply_safe_mode(args)
 
     _sub_attr, _sub_set = _AGENT_SUBCOMMANDS.get(args.command, (None, None))
@@ -12952,7 +12957,7 @@ def _try_termux_fast_cli_launch() -> bool:
     """Run obvious Termux non-TUI chat/oneshot/version paths on a light parser."""
     if not _is_termux_startup_environment():
         return False
-    if os.environ.get("HADES_TERMUX_DISABLE_FAST_CLI") == "1":
+    if env_get("HADES_TERMUX_DISABLE_FAST_CLI") == "1":
         return False
 
     argv = sys.argv[1:]
@@ -13010,10 +13015,10 @@ def _try_termux_fast_cli_launch() -> bool:
             # Bare Termux CLI should reach the prompt first and do agent-only
             # discovery on the first submitted turn instead of before input.
             setattr(args, "compact", True)
-            os.environ["HADES_DEFER_AGENT_STARTUP"] = "1"
-            os.environ["HADES_FAST_STARTUP_BANNER"] = "1"
+            env_set("HADES_DEFER_AGENT_STARTUP", "1")
+            env_set("HADES_FAST_STARTUP_BANNER", "1")
             if getattr(args, "accept_hooks", False):
-                os.environ["HADES_ACCEPT_HOOKS"] = "1"
+                env_set("HADES_ACCEPT_HOOKS", "1")
         else:
             _prepare_agent_startup(args)
         cmd_chat(args)
@@ -15186,7 +15191,7 @@ def main():
     # If the env var is set only later (e.g. inside cmd_chat), the frozen
     # value is already False and --yolo silently does nothing.
     if getattr(args, "yolo", False):
-        os.environ["HADES_YOLO_MODE"] = "1"
+        env_set("HADES_YOLO_MODE", "1")
 
     # Discover Python plugins and register shell hooks once, before any
     # command that can fire lifecycle hooks.  Both are idempotent; gated
