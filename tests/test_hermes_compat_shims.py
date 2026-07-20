@@ -446,6 +446,15 @@ def test_resolve_toolset_visited_normalizes_spellings():
     assert resolve_toolset("hermes-cli", visited) == []
 
 
+def test_validate_toolset_accepts_both_prefixes():
+    from toolsets import validate_toolset
+
+    assert validate_toolset("hades-cli") is True
+    assert validate_toolset("hermes-cli") is True
+    assert validate_toolset("hermes-acp") is True
+    assert validate_toolset("hades-acp") is True
+
+
 def test_packaging_declares_hermes_shims():
     """Wheels must ship the hermes compat names, not just git checkouts."""
     import tomllib

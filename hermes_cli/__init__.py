@@ -25,12 +25,12 @@ _REAL = "hades_cli"
 class _AliasLoader(importlib.abc.Loader):
     """Loader that hands back the already-imported ``hades_cli`` module."""
 
-    def __init__(self, real_module):
-        self._real = real_module
-        self._real_spec = real_module.__spec__
+    def __init__(self, real_name, real_spec):
+        self._real_name_str = real_name
+        self._real_spec = real_spec
 
     def create_module(self, spec):
-        return self._real
+        return importlib.import_module(self._real_name_str)
 
     def exec_module(self, module):
         # module_from_spec() just stamped the alias identity (__name__,
@@ -44,18 +44,16 @@ class _AliasLoader(importlib.abc.Loader):
             module.__loader__ = spec.loader
             module.__package__ = spec.parent
 
-    def _real_name(self, fullname):
+    def _to_real(self, fullname):
         return _REAL + fullname[len(_ALIAS):]
 
     # runpy (``python -m hermes_cli.X``) requires code access; delegate to the
     # real module's loader so execution matches ``python -m hades_cli.X``.
     def get_code(self, fullname):
-        real = self._real_name(fullname)
-        return importlib.util.find_spec(real).loader.get_code(real)
+        return self._real_spec.loader.get_code(self._to_real(fullname))
 
     def get_source(self, fullname):
-        real = self._real_name(fullname)
-        return importlib.util.find_spec(real).loader.get_source(real)
+        return self._real_spec.loader.get_source(self._to_real(fullname))
 
 
 class _AliasFinder(importlib.abc.MetaPathFinder):
@@ -69,11 +67,15 @@ class _AliasFinder(importlib.abc.MetaPathFinder):
             return None
         real_name = _REAL + fullname[len(_ALIAS):]
         try:
-            real = importlib.import_module(real_name)
-        except ImportError:
+            real_spec = importlib.util.find_spec(real_name)
+        except (ImportError, ModuleNotFoundError, ValueError):
+            return None
+        if real_spec is None:
             return None
         return importlib.util.spec_from_loader(
-            fullname, _AliasLoader(real), is_package=hasattr(real, "__path__")
+            fullname,
+            _AliasLoader(real_name, real_spec),
+            is_package=real_spec.submodule_search_locations is not None,
         )
 
 
