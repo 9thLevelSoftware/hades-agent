@@ -22,7 +22,9 @@ const NATIVE_MUTATING_COMMANDS = new Set([
   'receipts',
   'reload-mcp',
   'rollback',
-  'stop'
+  'stop',
+  'transaction',
+  'tx'
 ])
 
 const MUTATING_COMMANDS = [
@@ -47,6 +49,7 @@ const MUTATING_COMMANDS = [
   'stop',
   'title',
   'tools',
+  'transaction',
   'undo',
   'verbose',
   'voice',
