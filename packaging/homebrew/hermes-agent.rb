@@ -26,13 +26,14 @@ class HermesAgent < Formula
 
     pkgshare.install "skills", "optional-skills"
 
-    %w[hermes hermes-agent hermes-acp].each do |exe|
+    %w[hades hades-agent hades-acp hermes hermes-agent hermes-acp].each do |exe|
       next unless (libexec/"bin"/exe).exist?
 
       (bin/exe).write_env_script(
         libexec/"bin"/exe,
         HADES_BUNDLED_SKILLS: pkgshare/"skills",
         HADES_OPTIONAL_SKILLS: pkgshare/"optional-skills",
+        HADES_MANAGED: "homebrew",
         HERMES_MANAGED: "homebrew"
       )
     end

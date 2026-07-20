@@ -1598,7 +1598,7 @@ def resolve_runtime_provider(
                 "in ~/.hades/.env, or run 'gcloud auth application-default "
                 "login' for ADC. Set the GCP project/region under vertex: in "
                 "config.yaml if they aren't embedded in the credentials. "
-                "Install the extra with: pip install 'hermes-agent[vertex]'."
+                "Install the extra with: pip install 'hades-agent[vertex]'."
             )
         return {
             "provider": "vertex",

@@ -9227,6 +9227,7 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
         # gaslight the user while nothing can run.
         managed_markers = (
             PROJECT_ROOT / ".hermes-bootstrap-complete",
+            PROJECT_ROOT / ".hades-bootstrap-complete",
             _update_marker_path(),
         )
         if any(m.exists() for m in managed_markers):
@@ -9888,7 +9889,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 return
             print("✗ Not a git repository. Please reinstall:")
             print(
-                "  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
+                "  curl -fsSL https://raw.githubusercontent.com/9thLevelSoftware/hades-agent/main/scripts/install.sh | bash"
             )
             sys.exit(1)
 
@@ -13233,6 +13234,15 @@ def main():
     try:
         from hades_cli.stdio import configure_windows_stdio
         configure_windows_stdio()
+    except Exception:
+        pass
+
+    # Warn (once, to stderr) if the upstream hermes-agent PyPI package is
+    # co-installed — it clobbers our hermes compatibility entry points.
+    # Must never break startup.
+    try:
+        from hades_cli.upstream_guard import warn_if_upstream_present
+        warn_if_upstream_present()
     except Exception:
         pass
 
