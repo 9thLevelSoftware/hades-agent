@@ -25,6 +25,21 @@ if TYPE_CHECKING:  # pragma: no cover - type-only
 
 logger = logging.getLogger(__name__)
 
+
+class DeliveryEffectUnknown(RuntimeError):
+    """The message flew but its durable confirmation could not be persisted.
+
+    Raised instead of returning success when the confirmed/landed journal
+    write fails after a successful adapter send: the caller must treat the
+    delivery as ambiguous, never as a clean success it could retry. Carries
+    the bounded acknowledgement (message id / platform / chat id — never
+    content or credentials).
+    """
+
+    def __init__(self, message: str, acknowledgement: dict):
+        super().__init__(message)
+        self.acknowledgement = dict(acknowledgement)
+
 # Cap before gateway-level truncation of cron output for non-chunking platform
 # delivery.  Telegram's hard API limit is 4096; the headroom covers the "full
 # output saved to …" footer appended on truncation.  Adapters that split long
@@ -851,10 +866,33 @@ class DeliveryRouter:
                     result=self._journal_receipt(target, result),
                 )
             except Exception as journal_exc:  # noqa: BLE001
+                # The send succeeded but the durable confirmation did not.
+                # Never log-and-return-success: quarantine the journal row
+                # to unknown (best-effort) and surface the ambiguity to
+                # the caller with the bounded acknowledgement attached.
                 logger.warning(
                     "journal transition to confirmed/landed failed for %s: %s",
                     delivery_id, journal_exc,
                 )
+                acknowledgement = self._journal_receipt(target, result)
+                try:
+                    self.journal.transition(
+                        delivery_id,
+                        from_states={"running", "dispatched"},
+                        to_state="unknown",
+                        effect_disposition="unknown",
+                        error=f"confirm persist failed: {journal_exc}",
+                    )
+                except Exception as quarantine_exc:  # noqa: BLE001
+                    logger.warning(
+                        "journal quarantine to unknown failed for %s: %s",
+                        delivery_id, quarantine_exc,
+                    )
+                raise DeliveryEffectUnknown(
+                    f"delivery {delivery_id!r} dispatched but its durable "
+                    "confirmation could not be persisted",
+                    acknowledgement,
+                ) from journal_exc
         return result
 
 

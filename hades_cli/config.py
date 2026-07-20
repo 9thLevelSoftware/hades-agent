@@ -2976,6 +2976,30 @@ DEFAULT_CONFIG = {
         },
     },
 
+    # Reversible & revisable action transactions (agent/effects).
+    # Stable behavioral settings only; no environment-variable bridge.
+    "transactions": {
+        # off — no transaction CLI commit/preview; schema and recovery
+        #   reads remain available for existing records.
+        # preview (default) — create/revise/preview/reconcile/eligibility/
+        #   receipt work; commit/release/compensate return a clear
+        #   config-gate error.
+        # commit — all three first adapter families are enabled, subject
+        #   to authority and exact approvals.
+        "mode": "preview",
+        # Run bounded transaction recovery after the owner-fenced journal
+        # pass at CLI/TUI/gateway startup.
+        "auto_reconcile_on_start": True,
+        # Oldest in-flight effects processed per recovery pass (1..1000).
+        "recovery_batch_size": 100,
+        # Upper bound for outbox not_before delays in seconds (1..604800).
+        "outbox_max_delay_seconds": 86400,
+        # manual (default) — failed commits stop and wait for a human.
+        # compensate_prefix — optionally compensate the eligible committed
+        #   prefix after a separate authority recheck.
+        "compensation_default": "manual",
+    },
+
     # Tool Search (progressive disclosure for large tool surfaces).
     # When the model is connected to many MCP servers or non-core plugin
     # tools, their JSON schemas can consume a substantial fraction of the
@@ -5598,7 +5622,8 @@ def check_config_version() -> Tuple[int, int]:
 _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
     "fallback_providers", "credential_pool_strategies", "toolsets",
-    "agent", "terminal", "code_execution", "receipts", "display", "compression", "delegation",
+    "agent", "terminal", "code_execution", "receipts", "transactions",
+    "display", "compression", "delegation",
     "auxiliary", "moa", "custom_providers", "context", "memory", "gateway",
     "sessions", "streaming", "updates", "mcp_servers",
 }
@@ -5875,6 +5900,69 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                             "Signing credentials stay in a secret store or .env, "
                             "never in config.yaml",
                         ))
+
+    # ── transactions settings (reversible action transactions) ───────────
+    transactions = config.get("transactions")
+    if transactions is not None:
+        if not isinstance(transactions, dict):
+            issues.append(ConfigIssue(
+                "error",
+                f"transactions must be a mapping, got {type(transactions).__name__}",
+                "Use transactions: with mode and bounded settings underneath it",
+            ))
+        else:
+            tx_mode = transactions.get("mode")
+            if "mode" in transactions and tx_mode is not False and (
+                not isinstance(tx_mode, str)
+                or tx_mode.strip().lower() not in {"off", "preview", "commit"}
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "transactions.mode must be 'off', 'preview', or 'commit'",
+                    "Set mode: preview (default), off, or commit; invalid "
+                    "values fall back to preview at runtime",
+                ))
+            auto = transactions.get("auto_reconcile_on_start")
+            if "auto_reconcile_on_start" in transactions and not isinstance(
+                auto, bool
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "transactions.auto_reconcile_on_start must be a boolean",
+                    "Set auto_reconcile_on_start: true (default) or false",
+                ))
+            batch = transactions.get("recovery_batch_size")
+            if "recovery_batch_size" in transactions and (
+                not isinstance(batch, int) or isinstance(batch, bool)
+                or not 1 <= batch <= 1000
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "transactions.recovery_batch_size must be an integer in 1..1000",
+                    "Set recovery_batch_size: 100 (default)",
+                ))
+            delay = transactions.get("outbox_max_delay_seconds")
+            if "outbox_max_delay_seconds" in transactions and (
+                not isinstance(delay, int) or isinstance(delay, bool)
+                or not 1 <= delay <= 604800
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "transactions.outbox_max_delay_seconds must be an integer "
+                    "in 1..604800",
+                    "Set outbox_max_delay_seconds: 86400 (default, one day)",
+                ))
+            comp = transactions.get("compensation_default")
+            if "compensation_default" in transactions and (
+                not isinstance(comp, str)
+                or comp.strip().lower() not in {"manual", "compensate_prefix"}
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "transactions.compensation_default must be 'manual' or "
+                    "'compensate_prefix'",
+                    "Set compensation_default: manual (default)",
+                ))
 
     cp = config.get("custom_providers")
     if cp is not None:

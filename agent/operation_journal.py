@@ -316,6 +316,75 @@ class OperationJournal:
         except Exception:
             return None
 
+    def get_by_identity(
+        self, kind: str, destination: str, payload_hash: str
+    ) -> Optional[OperationRecord]:
+        """Return the newest operation matching the exact identity triple.
+
+        Coordinator seam (action transactions): lets recovery find the
+        journal row for a durable effect without guessing operation ids.
+        """
+
+        def _read(conn):
+            return conn.execute(
+                """SELECT * FROM agent_operations
+                    WHERE kind = ? AND destination = ? AND payload_hash = ?
+                    ORDER BY created_at DESC, operation_id DESC LIMIT 1""",
+                (kind, destination, payload_hash),
+            ).fetchone()
+
+        row = self._db._execute_read(_read)
+        return self._record(row) if row is not None else None
+
+    def list_inflight(self, kind: Optional[str] = None) -> list[OperationRecord]:
+        """List running/dispatched operations, oldest first."""
+        query = (
+            "SELECT * FROM agent_operations "
+            "WHERE state IN ('running', 'dispatched')"
+        )
+        params: list[str] = []
+        if kind is not None:
+            query += " AND kind = ?"
+            params.append(kind)
+        query += " ORDER BY created_at, operation_id"
+
+        def _read(conn):
+            return conn.execute(query, params).fetchall()
+
+        rows = self._db._execute_read(_read)
+        return [self._record(row) for row in rows]
+
+    def transition_if_current(
+        self,
+        operation_id: str,
+        *,
+        from_states: set[str],
+        to_state: str,
+        effect_disposition: str,
+        result: Any = None,
+        error: Optional[str] = None,
+    ) -> Optional[OperationRecord]:
+        """Like :meth:`transition`, but a CAS miss returns ``None``.
+
+        Transition legality is still validated up front — this helper
+        never adds paths (there is deliberately no ``unknown -> running``).
+        """
+        try:
+            return self.transition(
+                operation_id,
+                from_states=from_states,
+                to_state=to_state,
+                effect_disposition=effect_disposition,
+                result=result,
+                error=error,
+            )
+        except ValueError as exc:
+            if "stale operation state" in str(exc):
+                return None
+            raise
+        except KeyError:
+            return None
+
     def list_unacknowledged(self, kind: Optional[str] = None) -> list[OperationRecord]:
         query = "SELECT * FROM agent_operations WHERE acknowledged_at IS NULL"
         params: list[str] = []

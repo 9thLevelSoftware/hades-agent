@@ -247,6 +247,10 @@ _LONG_HANDLERS = frozenset(
         # keep it off the main stdin loop. All receipt writes are immutable
         # appends, so pool concurrency cannot corrupt ordering.
         "receipt.exec",
+        # transaction.exec drives real profile-local I/O — SQLite reads and
+        # writes, adapter preparation, checkpoint creation — keep it off the
+        # main stdin loop for the same reason as receipt.exec.
+        "transaction.exec",
         "session.branch",
         "session.compress",
         "session.list",
@@ -9780,6 +9784,13 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
                     "restored %d unacknowledged terminal rows onto completion queue",
                     _moved, _restored,
                 )
+            # Bounded action-transaction recovery runs AFTER the
+            # owner-fenced journal pass (agent/effects/recovery.py).
+            from agent.effects.recovery import recover_transactions_at_startup
+
+            _tx_counts = recover_transactions_at_startup(_db)
+            if any(_tx_counts.values()):
+                logger.info("Action transaction recovery: %s", _tx_counts)
     except Exception as _e:  # noqa: BLE001
         logger.debug(
             "Async delegation durable journal startup skipped: %s", _e,
@@ -13006,6 +13017,85 @@ def _(rid, params: dict) -> dict:
         ("retention_plan_hash", payload.get("retention_plan_hash")),
         ("warning", payload.get("warning")),
     ):
+        if value is not None:
+            response[key] = value
+    return _ok(rid, response)
+
+
+_TRANSACTION_MAX_ARGV_ENTRIES = 64
+_TRANSACTION_MAX_ARGV_BYTES = 64 * 1024
+
+
+@method("transaction.exec")
+def _(rid, params: dict) -> dict:
+    argv = params.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(entry, str) for entry in argv)
+        or len(argv) > _TRANSACTION_MAX_ARGV_ENTRIES
+        or sum(len(entry.encode("utf-8")) for entry in argv)
+        > _TRANSACTION_MAX_ARGV_BYTES
+    ):
+        # Deliberately does not echo any argument content.
+        return _err(
+            rid,
+            4006,
+            "transaction.exec: argv must be a non-empty list[str] of at "
+            f"most {_TRANSACTION_MAX_ARGV_ENTRIES} entries and "
+            f"{_TRANSACTION_MAX_ARGV_BYTES} UTF-8 bytes total",
+        )
+
+    # Profile isolation mirrors receipt.exec: only the session registry's
+    # recorded profile_home steers resolution; caller paths are never
+    # accepted. Mutations run in THIS live gateway process — never in a
+    # _SlashWorker subprocess.
+    session = _sessions.get(params.get("session_id") or "") or {}
+    profile_home = session.get("profile_home")
+    home_token = set_hades_home_override(str(profile_home)) if profile_home else None
+    try:
+        import hades_cli.transactions as _transactions_cli
+
+        result = _transactions_cli.run_argv(list(argv), output="text")
+        exit_ok = _transactions_cli.EXIT_OK
+        exit_validation = _transactions_cli.EXIT_VALIDATION
+    except Exception:
+        # Redacted: no tracebacks or raw paths on the wire.
+        logger.exception("transaction.exec failed")
+        return _err(
+            rid,
+            5045,
+            "transaction.exec: internal failure (details withheld; run "
+            "`hermes transaction list` in a terminal)",
+        )
+    finally:
+        if home_token is not None:
+            reset_hades_home_override(home_token)
+
+    payload = result.payload or {}
+    if result.exit_code == exit_validation:
+        return _err(
+            rid, 4007, payload.get("error") or "transaction: validation error"
+        )
+    if result.exit_code != exit_ok:
+        # Bounded, already-redacted error text from the shared surface.
+        return _err(
+            rid, 5044, payload.get("error") or result.output
+            or "transaction: command failed",
+        )
+    response = {
+        "ok": True,
+        "action": str(payload.get("action") or argv[0].strip().lower()),
+        "exit_code": result.exit_code,
+        "output": result.output,
+    }
+    for key in (
+        "transaction", "transactions", "nodes", "preview", "preview_hash",
+        "eligibility", "receipt", "observation", "status", "counts",
+        "committed_nodes", "compensated_nodes", "blocked_node", "revision",
+        "rows", "error",
+    ):
+        value = payload.get(key)
         if value is not None:
             response[key] = value
     return _ok(rid, response)

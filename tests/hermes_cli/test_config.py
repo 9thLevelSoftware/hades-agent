@@ -2155,3 +2155,65 @@ class TestConfigStateMutationService:
             prepare_config_mutation("display.theme", "night")
 
 
+
+
+# ── Action transactions config (plan Task 14) ───────────────────────────
+
+
+class TestTransactionConfigDefaults:
+    def test_transaction_defaults_are_safe_and_non_secret(self):
+        from hades_cli.config import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["transactions"] == {
+            "mode": "preview",
+            "auto_reconcile_on_start": True,
+            "recovery_batch_size": 100,
+            "outbox_max_delay_seconds": 86400,
+            "compensation_default": "manual",
+        }
+
+    def test_invalid_transaction_mode_falls_back_to_preview(self, tmp_path, monkeypatch):
+        from hades_cli.transactions import _configured_mode
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "transactions:\n  mode: unrestricted\n", encoding="utf-8",
+        )
+        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        assert _configured_mode() == "preview"
+
+    def test_transaction_validation_flags_bad_values(self):
+        from hades_cli.config import validate_config_structure
+
+        issues = validate_config_structure({
+            "transactions": {
+                "mode": "unrestricted",
+                "recovery_batch_size": 100000,
+                "outbox_max_delay_seconds": 0,
+                "compensation_default": "yolo",
+                "auto_reconcile_on_start": "yes",
+            },
+        })
+        messages = "\n".join(issue.message for issue in issues)
+        assert "transactions.mode" in messages
+        assert "recovery_batch_size" in messages
+        assert "outbox_max_delay_seconds" in messages
+        assert "compensation_default" in messages
+        assert "auto_reconcile_on_start" in messages
+
+    def test_valid_transaction_section_produces_no_issues(self):
+        from hades_cli.config import validate_config_structure
+
+        issues = [
+            issue for issue in validate_config_structure({
+                "transactions": {
+                    "mode": "commit",
+                    "auto_reconcile_on_start": False,
+                    "recovery_batch_size": 10,
+                    "outbox_max_delay_seconds": 3600,
+                    "compensation_default": "compensate_prefix",
+                },
+            })
+            if "transactions" in issue.message
+        ]
+        assert issues == []

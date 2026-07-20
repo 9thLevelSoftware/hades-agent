@@ -4383,6 +4383,13 @@ def cmd_receipt(args):
     sys.exit(int(receipt_command(args) or 0))
 
 
+def cmd_transaction(args):
+    """Reversible & revisable action transactions."""
+    from hades_cli.transactions import transaction_command
+
+    sys.exit(int(transaction_command(args) or 0))
+
+
 def cmd_project(args):
     """Manage projects (named, multi-folder workspaces)."""
     from hades_cli.projects_cmd import projects_command
@@ -13571,6 +13578,14 @@ def main():
 
     workflow_parser = _build_workflow_parser(subparsers)
     workflow_parser.set_defaults(func=cmd_workflow)
+
+    # =========================================================================
+    # transaction command — reversible & revisable action transactions
+    # =========================================================================
+    from hades_cli.transactions import build_parser as _build_transaction_parser
+
+    transaction_parser = _build_transaction_parser(subparsers)
+    transaction_parser.set_defaults(func=cmd_transaction)
 
     # =========================================================================
     # receipt command — verified outcome & artifact receipt viewer
