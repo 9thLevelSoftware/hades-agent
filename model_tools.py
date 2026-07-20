@@ -1297,9 +1297,9 @@ def handle_function_call(
                 _dispatch,
                 original_args=_tool_original_args,
                 operation_metadata=operation_metadata,
-                operation_key_factory=lambda: registry.operation_key(
+                operation_key_factory=lambda effective=None: registry.operation_key(
                     function_name,
-                    function_args,
+                    effective if effective is not None else function_args,
                     task_id=task_id or "",
                     tool_call_id=tool_call_id or "",
                 ),

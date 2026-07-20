@@ -14781,6 +14781,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     "Async delegation durable journal: reconciled %d in-flight, restored %d unacknowledged terminal rows",
                     _moved, _restored,
                 )
+            # Bounded action-transaction recovery runs AFTER the
+            # owner-fenced journal pass (agent/effects/recovery.py).
+            from agent.effects.recovery import recover_transactions_at_startup
+
+            _tx_counts = recover_transactions_at_startup(_session_db)
+            if any(_tx_counts.values()):
+                logger.info(
+                    "Action transaction recovery: %s", _tx_counts,
+                )
         except Exception:
             logger.debug("Async delegation durable journal startup skipped", exc_info=True)
 

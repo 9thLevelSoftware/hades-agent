@@ -26,6 +26,7 @@ __all__ = [
     "CommitRequest",
     "CompensationRequest",
     "CompensationResult",
+    "EffectBlocked",
     "EffectContext",
     "EffectPreview",
     "EffectSemantics",
@@ -84,6 +85,10 @@ class ImmutableRecordError(TransactionStoreError):
 
 class RevisionConflict(TransactionStoreError):
     """Optimistic revision CAS failed or a frozen node was altered."""
+
+
+class EffectBlocked(TransactionStoreError):
+    """The effect cannot proceed — authority, phase, boundary, or safety."""
 
 
 # ── Canonical serialization ──────────────────────────────────────────────

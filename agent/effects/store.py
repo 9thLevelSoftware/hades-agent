@@ -363,6 +363,39 @@ class TransactionStore:
         self._db._execute_write(_create)
         return self.get_revision(transaction_id, new_revision)
 
+    def set_revision_preview_hash(
+        self, transaction_id: str, revision: int, preview_hash: str
+    ) -> bool:
+        """Stamp the ordered-preview hash on a revision (once per preview)."""
+
+        def _set(conn):
+            cursor = conn.execute(
+                """UPDATE transaction_revisions SET preview_hash = ?
+                    WHERE transaction_id = ? AND revision = ?""",
+                (preview_hash, transaction_id, revision),
+            )
+            return cursor.rowcount == 1
+
+        return self._db._execute_write(_set)
+
+    def list_transactions_by_status(
+        self, statuses: set[str]
+    ) -> tuple[ActionTransaction, ...]:
+        for status in statuses:
+            validate_status(status)
+        placeholders = ",".join("?" for _ in statuses)
+
+        def _read(conn):
+            return conn.execute(
+                f"""SELECT * FROM action_transactions
+                     WHERE status IN ({placeholders})
+                     ORDER BY created_at_ms, transaction_id""",
+                tuple(statuses),
+            ).fetchall()
+
+        rows = self._db._execute_read(_read)
+        return tuple(self._transaction_record(row) for row in rows)
+
     def get_node(
         self, transaction_id: str, revision: int, node_id: str
     ) -> Optional[RevisionNode]:
