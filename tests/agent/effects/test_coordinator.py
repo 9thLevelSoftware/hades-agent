@@ -267,3 +267,59 @@ def test_commit_tool_effect_fails_closed_on_unplanned_node(harness):
             execution=execution,
         )
     assert harness.adapter.commit_calls == 0
+
+
+# ── Review fixes: frozen effects across revisions ───────────────────────
+
+
+def test_revision_after_partial_commit_never_reexecutes_frozen_node(harness):
+    harness.create(node_ids=("write-a", "write-b"),
+                   edges=(("write-a", "write-b"),))
+    harness.preview("tx-1")
+    harness.coordinator.commit("tx-1", through_node="write-a")
+    assert harness.adapter.commit_calls == 1
+
+    # Revise the still-pending node; the committed one is frozen.
+    revised = harness.graph(("write-a", "write-b"), edges=(("write-a", "write-b"),))
+    revised["nodes"][1]["args"]["content"] = "revised content\n"
+    harness.coordinator.revise(
+        "tx-1", expected_revision=1, graph=revised, reason="edit pending",
+    )
+    assert harness.preview("tx-1").status == "ready"
+    # Preview must NOT have minted a fresh attempt for the frozen node.
+    frozen = harness.store.latest_effects_by_node("tx-1")["write-a"]
+    assert frozen.revision == 1
+    assert frozen.phase == "verified"
+
+    result = harness.coordinator.commit("tx-1")
+    assert result.status == "committed"
+    # The frozen node executed exactly once across both commits.
+    assert harness.adapter.commit_calls == 2
+    assert (harness.workspace / "write-b.txt").read_text(
+        encoding="utf-8"
+    ) == "revised content\n"
+
+
+def test_commit_enforces_transaction_authority_contract(tmp_path):
+    harness = TxHarness(tmp_path)
+    try:
+        harness.store.create_transaction(
+            transaction_id="tx-narrow", profile="default", title="narrow",
+            authority={
+                "authority_version": 1,
+                "allowed_actions": ["some_other_action"],
+            },
+            graph=harness.graph(("workspace_write",)),
+            failure_policy="stop",
+        )
+        assert harness.coordinator.preview("tx-narrow").status == "ready"
+        result = harness.coordinator.commit("tx-narrow")
+        assert result.status == "blocked"
+        # The stored contract denied before any handler ran.
+        assert harness.adapter.commit_calls == 0
+        events = [
+            e.kind for e in harness.store.load_snapshot("tx-narrow").events
+        ]
+        assert "authority_blocked" in events
+    finally:
+        harness.close()

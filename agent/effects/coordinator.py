@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
@@ -201,9 +202,22 @@ class TransactionCoordinator:
         node_map = {node.node_id: node for node in revision.nodes}
         order = topological_order((revision.nodes, revision.edges))
         previews: list[tuple[str, dict]] = []
+        latest_effects = self._store.latest_effects_by_node(transaction_id)
         try:
             for node_id in order:
                 node = node_map[node_id]
+                # Cross-revision truth: a node frozen at an EARLIER
+                # revision (committed/verified/…) is never re-prepared —
+                # its stored preview is carried forward as-is. Without
+                # this, a post-partial-commit revision would mint a fresh
+                # attempt and commit would execute the effect twice.
+                existing = latest_effects.get(node_id)
+                if existing is not None and existing.phase in {
+                    "committed", "verified", "compensating", "compensated",
+                    "committing", "unknown_effect",
+                }:
+                    previews.append((node_id, dict(existing.preview or {})))
+                    continue
                 try:
                     adapter = self._adapters.get(node.adapter_id)
                 except KeyError as exc:
@@ -236,13 +250,6 @@ class TransactionCoordinator:
                         operation_id=operation_id,
                         adapter_id=node.adapter_id,
                     )
-                elif effect.phase in {
-                    "committed", "verified", "compensating", "compensated",
-                    "committing", "unknown_effect",
-                }:
-                    # Frozen work is never re-prepared.
-                    previews.append((node_id, dict(effect.preview or {})))
-                    continue
                 prepared_json = dataclasses.asdict(prepared)
                 preview_json = dataclasses.asdict(preview)
                 self._store.transition_effect(
@@ -276,6 +283,10 @@ class TransactionCoordinator:
             effect = self._store.effect_for(
                 transaction_id, revision_number, node_id
             )
+            if effect is None:
+                # Frozen node carried forward from an earlier revision —
+                # no attempt exists at THIS revision, and none may.
+                continue
             if effect.phase == "prepared":
                 self._store.transition_effect(
                     effect.effect_id, {"prepared"}, "previewed",
@@ -352,11 +363,7 @@ class TransactionCoordinator:
             if through_node is not None and node_id == through_node:
                 break
 
-        effects = {
-            effect.node_id: effect
-            for effect in self._store.list_effects(transaction_id)
-            if effect.revision == revision_number
-        }
+        effects = self._store.latest_effects_by_node(transaction_id)
         all_done = all(
             effects.get(node.node_id) is not None
             and effects[node.node_id].phase in {"committed", "verified"}
@@ -399,7 +406,9 @@ class TransactionCoordinator:
                 {"reason": "revision changed mid-commit"},
             )
             return "blocked"
-        effect = store.effect_for(transaction_id, revision_number, node_id)
+        # Cross-revision lookup: a node committed at an earlier revision
+        # is this node's truth and must be skipped, never re-executed.
+        effect = store.latest_effects_by_node(transaction_id).get(node_id)
         if effect is None:
             self._block_transaction(
                 transaction_id, {"committing"}, "commit_blocked",
@@ -428,10 +437,9 @@ class TransactionCoordinator:
                 {"reason": f"node {node_id} preview is stale"},
             )
             return "blocked"
+        latest_effects = store.latest_effects_by_node(transaction_id)
         for parent in sorted(parents):
-            parent_effect = store.effect_for(
-                transaction_id, revision_number, parent
-            )
+            parent_effect = latest_effects.get(parent)
             if parent_effect is None or parent_effect.phase not in {
                 "committed", "verified",
             }:
@@ -445,24 +453,49 @@ class TransactionCoordinator:
         context = self._effect_context(transaction_id, revision_number, node_id)
         prepared = prepared_from_json(effect.prepared or {})
 
-        # Authority is reloaded immediately before the effect.
-        provider = self._authority_provider_factory()
-        action_context = build_action_context(
-            prepared,
-            operation_key=f"{transaction_id}:{revision_number}:{node_id}",
-            transaction_id=transaction_id,
-            profile_id=self._profile,
+        # The transaction's own stored authority contract narrows first:
+        # actions/resources/expiry declared at creation bind every commit.
+        from agent.effects.authority import enforce_transaction_authority
+
+        contract_ok, contract_reason = enforce_transaction_authority(
+            transaction, prepared, now_ms=int(time.time() * 1000),
         )
-        decision = authorize_effect(
-            provider, action_context, stage="commit", consume=True
-        )
-        if not getattr(decision, "allowed", False):
+        if not contract_ok:
             store.transition_effect(effect.effect_id, {"previewed"}, "blocked")
             self._block_transaction(
                 transaction_id, {"committing"}, "authority_blocked",
-                {"node_id": node_id, "code": getattr(decision, "code", "")},
+                {"node_id": node_id, "code": "transaction_authority",
+                 "reason": contract_reason},
             )
             return "blocked"
+
+        # Profile-wide authority is reloaded immediately before the
+        # effect. A factory returning None means no profile evaluator is
+        # configured (autonomy mode off) — mirroring the runtime
+        # authority_gate — and the transaction contract plus exact
+        # approvals still bind.
+        provider = self._authority_provider_factory()
+        decision = None
+        if provider is not None:
+            action_context = build_action_context(
+                prepared,
+                operation_key=f"{transaction_id}:{revision_number}:{node_id}",
+                transaction_id=transaction_id,
+                profile_id=self._profile,
+            )
+            decision = authorize_effect(
+                provider, action_context, stage="commit", consume=True
+            )
+            if not getattr(decision, "allowed", False):
+                store.transition_effect(
+                    effect.effect_id, {"previewed"}, "blocked"
+                )
+                self._block_transaction(
+                    transaction_id, {"committing"}, "authority_blocked",
+                    {"node_id": node_id,
+                     "code": getattr(decision, "code", "")},
+                )
+                return "blocked"
         self._trace("authority_rechecked")
 
         preview_payload = effect.preview or {}
@@ -766,28 +799,41 @@ class TransactionCoordinator:
             if not eligibility.can_execute:
                 stopped_reason = eligibility.reason
                 break
-            effect = store.effect_for(
-                transaction_id, plan.revision, plan_node
+            effect = store.latest_effects_by_node(transaction_id).get(
+                plan_node
             )
             prepared = prepared_from_json(effect.prepared or {})
-            provider = self._authority_provider_factory()
-            decision = authorize_effect(
-                provider,
-                build_action_context(
-                    prepared,
-                    operation_key=(
-                        f"{transaction_id}:{plan.revision}:{plan_node}"
-                        ":compensate"
-                    ),
-                    transaction_id=transaction_id,
-                ),
-                stage="compensate", consume=True,
+            from agent.effects.authority import enforce_transaction_authority
+
+            contract_ok, contract_reason = enforce_transaction_authority(
+                transaction, prepared, now_ms=int(time.time() * 1000),
             )
-            if not getattr(decision, "allowed", False):
+            if not contract_ok:
                 stopped_reason = (
-                    f"authority denied compensation for node {plan_node!r}"
+                    f"transaction authority denies compensation of "
+                    f"{plan_node!r}: {contract_reason}"
                 )
                 break
+            provider = self._authority_provider_factory()
+            decision = None
+            if provider is not None:
+                decision = authorize_effect(
+                    provider,
+                    build_action_context(
+                        prepared,
+                        operation_key=(
+                            f"{transaction_id}:{plan.revision}:{plan_node}"
+                            ":compensate"
+                        ),
+                        transaction_id=transaction_id,
+                    ),
+                    stage="compensate", consume=True,
+                )
+                if not getattr(decision, "allowed", False):
+                    stopped_reason = (
+                        f"authority denied compensation for node {plan_node!r}"
+                    )
+                    break
 
             verified_hash = content_hash(dict(effect.verification or {}))
             digest = hashlib.sha256(
@@ -889,11 +935,7 @@ class TransactionCoordinator:
             break
 
         revision = store.get_revision(transaction_id, plan.revision)
-        effects = {
-            effect.node_id: effect
-            for effect in store.list_effects(transaction_id)
-            if effect.revision == plan.revision
-        }
+        effects = store.latest_effects_by_node(transaction_id)
         all_compensated = all(
             node.node_id in effects
             and effects[node.node_id].phase == "compensated"
@@ -974,7 +1016,7 @@ class TransactionCoordinator:
             raise EffectBlocked(
                 f"in-transaction tool call for node {node_id!r} was {outcome}"
             )
-        effect = self._store.effect_for(transaction_id, revision_number, node_id)
+        effect = self._store.latest_effects_by_node(transaction_id).get(node_id)
         result = dict(effect.result or {})
         raw = result.get("result")
         return raw if raw is not None else result

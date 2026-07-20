@@ -105,3 +105,49 @@ def test_recovery_respects_limit_and_reports_skips(harness):
     )
     assert counts["not_landed"] == 2
     assert counts["skipped"] == 1
+
+
+def test_missing_adapter_skips_instead_of_freezing(harness):
+    from agent.effects.recovery import reconcile_effect
+    from agent.effects.registry import EffectAdapterRegistry
+
+    harness.create()
+    harness.crash_at("after_handler_return")
+    harness.restart()
+    empty_registry = EffectAdapterRegistry()
+    effect = harness.store.effect_for("tx-1", 1, "workspace_write")
+    disposition = reconcile_effect(
+        harness.store, harness.journal, empty_registry, effect,
+    )
+    # An unregistered adapter must never freeze the effect as a
+    # projected unknown — it stays classifiable by a later pass.
+    assert disposition == "skipped"
+    untouched = harness.store.effect_for("tx-1", 1, "workspace_write")
+    assert untouched.phase == "committing"
+    assert untouched.reconciliation is None
+    # With the adapter present, the same effect classifies normally.
+    counts = recover_transactions(
+        harness.store, harness.journal, harness.adapters,
+    )
+    assert counts["landed"] == 1
+
+
+def test_startup_seam_populates_builtin_adapters(tmp_path, monkeypatch):
+    import tools.checkpoint_manager as checkpoint_manager_module
+
+    monkeypatch.setattr(
+        checkpoint_manager_module, "CHECKPOINT_BASE",
+        tmp_path / "checkpoints",
+    )
+    monkeypatch.chdir(tmp_path)
+    from agent.effects.recovery import recover_transactions_at_startup
+    from hades_state import SessionDB
+
+    db = SessionDB(tmp_path / "startup-state.db")
+    try:
+        counts = recover_transactions_at_startup(db)
+        assert counts == {
+            "landed": 0, "not_landed": 0, "unknown": 0, "skipped": 0,
+        }
+    finally:
+        db.close()

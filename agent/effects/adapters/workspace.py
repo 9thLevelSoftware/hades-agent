@@ -215,6 +215,25 @@ class WorkspaceAdapter(EffectAdapter):
             requires_approval=False,
         )
 
+    @staticmethod
+    def _handler_error(raw) -> Optional[str]:
+        """Extract an error signal from a tool handler's return value.
+
+        File tool handlers commonly report failure WITHOUT raising — a
+        mapping with ``error``/``success: False`` or an error-prefixed
+        string. A commit whose handler reported failure must never
+        verify.
+        """
+        if isinstance(raw, Mapping):
+            if raw.get("error"):
+                return str(raw["error"])
+            if raw.get("success") is False:
+                return str(raw.get("message") or "handler reported failure")
+            return None
+        if isinstance(raw, str) and raw.strip().lower().startswith("error"):
+            return raw.strip()
+        return None
+
     def commit(
         self, request: CommitRequest, context: EffectContext
     ) -> CommitOutcome:
@@ -225,30 +244,73 @@ class WorkspaceAdapter(EffectAdapter):
                 "invoke callback"
             )
         raw = request.invoke(dict(request.prepared.args))
-        targets = list(request.prepared.before.get("targets") or [])
+        prepared = request.prepared
+        targets = list(prepared.before.get("targets") or [])
+        before_hashes = {
+            state.get("path"): state.get("sha256")
+            for state in prepared.before.get("targets_with_state") or []
+        }
         return CommitOutcome(
             status="committed",
             result={"result": raw},
-            evidence={"targets": targets},
+            evidence={
+                "targets": targets,
+                "expected_after": dict(prepared.expected_after or {}),
+                "before_hashes": before_hashes,
+                "handler_error": self._handler_error(raw),
+            },
         )
 
     def verify(
         self, outcome: CommitOutcome, context: EffectContext
     ) -> VerificationResult:
         targets = list(outcome.evidence.get("targets") or [])
+        expected_after = dict(outcome.evidence.get("expected_after") or {})
+        before_hashes = dict(outcome.evidence.get("before_hashes") or {})
+        handler_error = outcome.evidence.get("handler_error")
         after_hashes: dict[str, Optional[str]] = {}
         for target in targets:
             path = Path(target)
             after_hashes[target] = (
                 _sha256_file(path) if path.exists() or path.is_symlink() else None
             )
-        return VerificationResult(
-            verified=bool(targets),
-            evidence={
-                "changed_paths": targets,
-                "after_hashes": after_hashes,
-            },
+        evidence = {"changed_paths": targets, "after_hashes": after_hashes}
+
+        if not targets:
+            return VerificationResult(
+                verified=False, evidence=evidence,
+                reason="no declared targets to verify",
+            )
+        if handler_error:
+            return VerificationResult(
+                verified=False, evidence=evidence,
+                reason=f"handler reported failure: {handler_error}",
+            )
+        # Strict when the expected content is known (write_file): the
+        # observed bytes must match. Otherwise (patch), the observed
+        # state must at least differ from the recorded before-state — a
+        # handler that wrote nothing never certifies.
+        if expected_after:
+            for target, expected in expected_after.items():
+                if after_hashes.get(target) != expected:
+                    return VerificationResult(
+                        verified=False, evidence=evidence,
+                        reason=(
+                            f"{target} does not match the expected "
+                            "after-state"
+                        ),
+                    )
+            return VerificationResult(verified=True, evidence=evidence)
+        changed = any(
+            after_hashes.get(target) != before_hashes.get(target)
+            for target in targets
         )
+        if not changed:
+            return VerificationResult(
+                verified=False, evidence=evidence,
+                reason="no observable change against the before-state",
+            )
+        return VerificationResult(verified=True, evidence=evidence)
 
     def reconcile(
         self, effect: EffectTransaction, context: EffectContext

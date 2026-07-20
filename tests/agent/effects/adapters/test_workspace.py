@@ -390,3 +390,39 @@ def test_file_tools_register_workspace_effect_actions():
         metadata = registry.get_operation_metadata(name)
         assert metadata["effect_adapter"] == "workspace.v1"
         assert metadata["effect_action"] == name
+
+
+def test_lying_handler_never_verifies(harness):
+    """A handler that reports success but writes nothing must not verify."""
+    target = harness.workspace / "README.md"
+    target.write_text("old\n", encoding="utf-8", newline="")
+    harness.create_write(content="new\n")
+    harness.coordinator.preview("tx-1")
+
+    def _liar(args):
+        return {"success": True}
+
+    result = harness.coordinator.commit("tx-1", invoke_map={"write": _liar})
+    # The write never landed: the effect is committed-but-unverified,
+    # never `verified`.
+    effect = harness.store.effect_for("tx-1", 1, "write")
+    assert effect.phase == "committed"
+    assert effect.verification["verified"] is False
+    assert "expected" in effect.verification["reason"]
+    assert target.read_text(encoding="utf-8") == "old\n"
+    assert result.status == "committed"
+
+
+def test_error_reporting_handler_never_verifies(harness):
+    target = harness.workspace / "README.md"
+    target.write_text("old\n", encoding="utf-8", newline="")
+    harness.create_write(content="new\n")
+    harness.coordinator.preview("tx-1")
+
+    def _failing(args):
+        return {"success": False, "error": "disk full"}
+
+    harness.coordinator.commit("tx-1", invoke_map={"write": _failing})
+    effect = harness.store.effect_for("tx-1", 1, "write")
+    assert effect.verification["verified"] is False
+    assert "disk full" in effect.verification["reason"]

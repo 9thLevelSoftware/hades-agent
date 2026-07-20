@@ -151,11 +151,13 @@ def test_commit_works_when_mode_commit(tmp_path, monkeypatch):
     ])
     assert run_argv(["preview", "tx-commit"]).exit_code == EXIT_OK
     result = run_argv(["commit", "tx-commit"])
-    # The workspace adapter requires the terminal tool handler for
-    # write_file commits from the CLI; a blocked commit is an honest
-    # outcome here — what matters is the gate opened and the
-    # coordinator ran.
+    # The CLI wires the registered write_file handler into workspace
+    # commits: the write actually lands.
     assert result.payload.get("error") != "mode_gate"
+    assert result.payload.get("status") == "committed", result.output
+    written = tmp_path / "cli-note.md"
+    assert written.exists()
+    assert written.read_text(encoding="utf-8") == "hello\n"
 
     receipt = run_argv(["receipt", "tx-commit"])
     assert receipt.exit_code == EXIT_OK
@@ -209,3 +211,99 @@ def test_help_exits_zero_without_starting_chat():
     result = run_argv(["--help"])
     assert result.exit_code == 0
     assert "transaction" in result.output
+
+
+def test_outbox_release_requires_durable_exact_approval(tmp_path, monkeypatch):
+    """Release fails closed without a consumed approval binding: there is
+    no flag that bypasses the gate, and no human present means no
+    release."""
+    config_path = get_hades_home() / "config.yaml"
+    existing = {}
+    if config_path.exists():
+        existing = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    existing["transactions"] = {"mode": "commit"}
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump(existing), encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "plan.yaml"
+    plan.write_text(yaml.dump({
+        "transaction": {"title": "release test"},
+        "nodes": [{
+            "node_id": "send", "adapter_id": "message-outbox.v1",
+            "action": "send",
+            "args": {
+                "platform": "faketest", "target": "faketest:chan",
+                "message": "hello", "not_before_seconds": 3600,
+            },
+        }],
+        "edges": [],
+    }), encoding="utf-8")
+    authority = tmp_path / "authority.yaml"
+    authority.write_text(yaml.dump({
+        "authority_version": 1, "irreversible_policy": "ask",
+    }), encoding="utf-8")
+    run_argv([
+        "create", "--plan", str(plan), "--authority", str(authority),
+        "--transaction-id", "tx-release",
+    ])
+    assert run_argv(["preview", "tx-release"]).exit_code == EXIT_OK
+    assert run_argv(["commit", "tx-release"]).payload.get("status") == "committed"
+
+    listed = run_argv(["outbox", "list", "tx-release"], output="json")
+    rows = listed.payload.get("rows") or []
+    assert rows and rows[0]["status"] == "pending_approval"
+    outbox_id = rows[0]["outbox_id"]
+
+    # No approval binding + no interactive human → refused, fail closed.
+    result = run_argv(["outbox", "release", outbox_id])
+    assert result.exit_code != EXIT_OK
+    assert "approval" in result.output.lower()
+
+    # The parser no longer accepts any bypass flag.
+    bypass = run_argv(["outbox", "release", outbox_id, "--approved"])
+    assert bypass.exit_code == EXIT_VALIDATION
+
+    # A durable exact approval binding makes the same command succeed.
+    from agent.effects.authority import ApprovalBinding
+    from agent.effects.models import content_hash
+    from agent.effects.store import TransactionStore
+    from gateway.mission_outbox import MissionOutboxStore
+    from hades_state import SessionDB
+    import os as _os
+    import time as _time
+
+    db = SessionDB(get_hades_home() / "state.db")
+    try:
+        store = TransactionStore(db)
+        outbox = MissionOutboxStore(db)
+        row = outbox.get_by_id(outbox_id)
+        effect = store.latest_effects_by_node("tx-release")["send"]
+        transaction = store.get_transaction("tx-release")
+        requester = (
+            _os.environ.get("USERNAME") or _os.environ.get("USER") or "user"
+        )
+        store.insert_approval(ApprovalBinding(
+            approval_id="ap-release-test",
+            transaction_id="tx-release",
+            revision=effect.revision,
+            node_id="send",
+            operation="release",
+            args_hash=content_hash(dict(row.content or {})),
+            preview_hash=row.content_hash,
+            resources=(f"message:{row.platform}:{row.target}",),
+            authority_version=transaction.authority_version,
+            requester=requester,
+            channel="cli",
+            decision="approved",
+            expires_at_ms=int(_time.time() * 1000) + 300_000,
+            consumed_at_ms=None,
+            created_at_ms=int(_time.time() * 1000),
+        ))
+    finally:
+        db.close()
+
+    released = run_argv(["outbox", "release", outbox_id])
+    assert released.exit_code == EXIT_OK, released.output
+    confirm = run_argv(["outbox", "list", "tx-release"], output="json")
+    assert (confirm.payload.get("rows") or [])[0]["status"] == "scheduled"

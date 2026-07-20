@@ -100,11 +100,7 @@ def plan_compensation(
     if transaction is None:
         raise KeyError(f"unknown transaction {transaction_id!r}")
     revision = store.get_revision(transaction_id, transaction.current_revision)
-    effects = {
-        effect.node_id: effect
-        for effect in store.list_effects(transaction_id)
-        if effect.revision == revision.revision
-    }
+    effects = store.latest_effects_by_node(transaction_id)
     selected = {target_node_id}
     if cascade:
         selected |= _descendants(revision, target_node_id)
@@ -165,11 +161,7 @@ def eligibility_for_effect(
     if transaction is None:
         raise KeyError(f"unknown transaction {transaction_id!r}")
     revision = store.get_revision(transaction_id, transaction.current_revision)
-    effects = {
-        effect.node_id: effect
-        for effect in store.list_effects(transaction_id)
-        if effect.revision == revision.revision
-    }
+    effects = store.latest_effects_by_node(transaction_id)
     effect = effects.get(node_id)
     if effect is None:
         return _result(
@@ -266,16 +258,33 @@ def eligibility_for_effect(
                 fidelity, blockers=(candidate,),
             )
 
-    # 7. Current authority for the compensate stage.
-    if authority_provider_factory is not None:
-        prepared = prepared_from_json(effect.prepared or {})
+    # 7. Authority for the compensate stage: the transaction's own stored
+    # contract narrows first, then the current profile-wide provider.
+    prepared = prepared_from_json(effect.prepared or {})
+    from agent.effects.authority import enforce_transaction_authority
+
+    contract_ok, contract_reason = enforce_transaction_authority(
+        transaction, prepared, now_ms=now,
+    )
+    if not contract_ok:
+        return _result(
+            "blocked_authority",
+            f"transaction authority denies compensation of {node_id!r}: "
+            f"{contract_reason}",
+            fidelity,
+        )
+    provider = (
+        authority_provider_factory()
+        if authority_provider_factory is not None else None
+    )
+    if provider is not None:
         context = build_action_context(
             prepared,
             operation_key=f"{transaction_id}:{revision.revision}:{node_id}:compensate",
             transaction_id=transaction_id,
         )
         decision = authorize_effect(
-            authority_provider_factory(), context, stage="compensate",
+            provider, context, stage="compensate",
             consume=False,
         )
         if not getattr(decision, "allowed", False):

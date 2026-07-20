@@ -54,6 +54,13 @@ def reconcile_effect(
     )
     try:
         adapter = adapters.get(effect.adapter_id)
+    except KeyError:
+        # No adapter registered in THIS process: leave the effect
+        # untouched so a later pass with the adapter available can still
+        # classify it. Freezing it as a projected unknown here would
+        # permanently skip it.
+        return "skipped"
+    try:
         result = adapter.reconcile(effect, context)
         disposition = result.disposition
         evidence: Mapping[str, Any] = dict(result.evidence)
@@ -111,11 +118,7 @@ def project_transaction_status(store, transaction_id: str) -> str:
     if transaction is None:
         raise KeyError(f"unknown transaction {transaction_id!r}")
     revision = store.get_revision(transaction_id, transaction.current_revision)
-    effects = {
-        effect.node_id: effect
-        for effect in store.list_effects(transaction_id)
-        if effect.revision == transaction.current_revision
-    }
+    effects = store.latest_effects_by_node(transaction_id)
     phases = [
         effects[node.node_id].phase if node.node_id in effects else "planned"
         for node in revision.nodes
@@ -191,12 +194,34 @@ def recover_transactions(store, journal, adapters, limit: int = 100) -> dict:
 
 
 def recover_transactions_at_startup(db, *, limit: int = 100) -> dict:
-    """Convenience seam for CLI/TUI/gateway startup over one SessionDB."""
-    from agent.effects.registry import default_effect_adapter_registry
+    """Convenience seam for CLI/TUI/gateway startup over one SessionDB.
+
+    Constructs the built-in adapter families the same way the CLI service
+    does — the process-global registry starts empty in production, and an
+    empty registry must never cause in-flight effects to be frozen as
+    unknown. Effects owned by unregistered (e.g. plugin) adapters are
+    skipped untouched for a later pass.
+    """
+    from pathlib import Path
+
+    from agent.effects.adapters import register_builtin_adapters
+    from agent.effects.adapters.message_outbox import MessageOutboxAdapter
+    from agent.effects.registry import EffectAdapterRegistry
     from agent.effects.store import TransactionStore
     from agent.operation_journal import OperationJournal
 
     store = TransactionStore(db)
     journal = OperationJournal(db)
-    adapters = default_effect_adapter_registry()
+    adapters = EffectAdapterRegistry()
+    try:
+        register_builtin_adapters(
+            adapters,
+            workspace_root=Path.cwd(),
+            transaction_lookup=store.get_effect_by_operation_id,
+        )
+        adapters.register(MessageOutboxAdapter(db_factory=lambda: db))
+    except Exception:
+        # A partially populated registry is still safer than an empty
+        # one; unregistered adapters lead to skips, never freezes.
+        pass
     return recover_transactions(store, journal, adapters, limit=limit)

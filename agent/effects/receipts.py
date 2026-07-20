@@ -124,11 +124,7 @@ class TransactionReceiptBuilder:
         revision = store.get_revision(
             transaction_id, transaction.current_revision
         )
-        effects = {
-            effect.node_id: effect
-            for effect in store.list_effects(transaction_id)
-            if effect.revision == revision.revision
-        }
+        effects = store.latest_effects_by_node(transaction_id)
         compensations = {
             attempt.effect_id: attempt
             for attempt in store.list_compensations(transaction_id)

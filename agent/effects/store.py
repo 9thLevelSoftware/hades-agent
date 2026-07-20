@@ -493,14 +493,42 @@ class TransactionStore:
         rows = self._db._execute_read(_read)
         return tuple(self._effect_record(row) for row in rows)
 
-    def latest_effect_phases(self, transaction_id: str) -> dict[str, str]:
-        """Latest attempt phase per node id (highest revision wins)."""
-        phases: dict[str, str] = {}
+    def latest_effects_by_node(
+        self, transaction_id: str
+    ) -> dict[str, EffectTransaction]:
+        """Latest attempt per node id (highest revision wins).
+
+        Frozen effects live at the revision that committed them; every
+        consumer that asks "what is the truth for this node" must look
+        across revisions, never only at the current one — a committed
+        node from revision 1 stays the node's truth in revision 2.
+        """
+        frozen_phases = {
+            "committing", "committed", "verified", "compensating",
+            "compensated", "unknown_effect",
+        }
+        latest: dict[str, EffectTransaction] = {}
+        frozen: set[str] = set()
         for effect in self.list_effects(transaction_id):
             # list_effects is ordered by revision ASC, so later revisions
-            # overwrite earlier ones per node.
-            phases[effect.node_id] = effect.phase
-        return phases
+            # overwrite earlier ones per node — EXCEPT that a frozen
+            # attempt is the node's permanent truth: a stray later
+            # pending attempt can never shadow committed history.
+            if effect.node_id in frozen:
+                continue
+            latest[effect.node_id] = effect
+            if effect.phase in frozen_phases:
+                frozen.add(effect.node_id)
+        return latest
+
+    def latest_effect_phases(self, transaction_id: str) -> dict[str, str]:
+        """Latest attempt phase per node id (highest revision wins)."""
+        return {
+            node_id: effect.phase
+            for node_id, effect in self.latest_effects_by_node(
+                transaction_id
+            ).items()
+        }
 
     def get_effect(self, effect_id: str) -> Optional[EffectTransaction]:
         def _read(conn):

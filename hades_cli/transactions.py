@@ -116,6 +116,16 @@ class _Services:
         self.adapters.register(MessageOutboxAdapter(db_factory=lambda: self.db))
 
         def _provider():
+            # Mirror the runtime authority_gate: autonomy mode "off"
+            # means no profile evaluator is configured. The transaction's
+            # own stored contract and exact approvals still bind.
+            try:
+                from agent.autonomy.runtime import _load_autonomy_section
+
+                if _load_autonomy_section().get("mode", "off") == "off":
+                    return None
+            except Exception:
+                pass  # unreadable section: enforce (fail closed)
             from agent.autonomy import StoredAuthorityProvider
 
             return StoredAuthorityProvider(db=self.db)
@@ -395,13 +405,41 @@ def _cmd_revise(services: _Services, args) -> TransactionCommandResult:
     ), {"ok": True, "action": "revise", "revision": record.revision})
 
 
+def _workspace_invoke_map(services: _Services, transaction) -> dict:
+    """Registered terminal tool handlers for workspace nodes.
+
+    The workspace adapter refuses to mutate without the real handler —
+    CLI commits therefore wire the registered ``write_file``/``patch``
+    handlers in. A missing handler stays absent so the adapter blocks
+    honestly instead of improvising a write path.
+    """
+    revision = services.store.get_revision(
+        transaction.transaction_id, transaction.current_revision
+    )
+    needed = [
+        node for node in revision.nodes if node.adapter_id == "workspace.v1"
+    ]
+    if not needed:
+        return {}
+    import tools.file_tools  # noqa: F401 — registers the file handlers
+    from model_tools import registry as tool_registry
+
+    invoke_map: dict = {}
+    for node in needed:
+        entry = tool_registry.get_entry(node.action)
+        if entry is not None and entry.handler is not None:
+            invoke_map[node.node_id] = entry.handler
+    return invoke_map
+
+
 def _cmd_commit(services: _Services, args) -> TransactionCommandResult:
-    _require_transaction(services, args.transaction_id)
+    transaction = _require_transaction(services, args.transaction_id)
     result = services.coordinator.commit(
         args.transaction_id,
         through_node=args.through_node,
         requester=os.environ.get("USERNAME") or os.environ.get("USER") or "user",
         channel="cli",
+        invoke_map=_workspace_invoke_map(services, transaction),
     )
     ok = result.status in {"committed", "ready"}
     output = (
@@ -562,19 +600,88 @@ def _cmd_outbox(services: _Services, args) -> TransactionCommandResult:
             {"ok": bool(cancelled), "action": "outbox"},
         )
     if sub == "release":
+        from agent.effects.authority import (
+            ApprovalIdentity,
+            consume_bound_approval,
+            request_bound_approval,
+        )
+        from agent.effects.models import content_hash
         from gateway.transaction_outbox import release_transaction_outbox
-        from types import SimpleNamespace
 
-        # Release requires a consumed exact approval; the CLI path uses
-        # the interactive approval gate before calling this.
+        row = outbox.get_by_id(args.outbox_id)
+        if row is None:
+            raise _usage(f"unknown outbox row {args.outbox_id!r}")
+        if not (row.execution_id or "").startswith("tx:"):
+            raise _usage(
+                "outbox row is not owned by an action transaction"
+            )
+        transaction_id = row.execution_id[3:]
+        transaction = _require_transaction(services, transaction_id)
+        effect = services.store.latest_effects_by_node(transaction_id).get(
+            row.node_id
+        )
+        if effect is None:
+            raise _usage(
+                f"outbox row {args.outbox_id!r} has no transaction effect"
+            )
+        requester = (
+            os.environ.get("USERNAME") or os.environ.get("USER") or "user"
+        )
+        identity = ApprovalIdentity(
+            transaction_id=transaction_id,
+            revision=effect.revision,
+            node_id=row.node_id,
+            operation="release",
+            args_hash=content_hash(dict(row.content or {})),
+            preview_hash=row.content_hash,
+            resources=(f"message:{row.platform}:{row.target}",),
+            authority_version=transaction.authority_version,
+            requester=requester,
+            channel="cli",
+        )
+        # The dispatch boundary is irreversible: release consumes a
+        # DURABLE exact approval. Missing binding → escalate through the
+        # interactive human gate (fails closed with no human present);
+        # session/permanent allowlisting never substitutes.
+        consumption = consume_bound_approval(services.store, identity)
+        if not consumption.approved:
+            binding = request_bound_approval(
+                services.store,
+                transaction_id=transaction_id,
+                revision=effect.revision,
+                node_id=row.node_id,
+                operation="release",
+                args_hash=identity.args_hash,
+                preview_hash=identity.preview_hash,
+                resources=identity.resources,
+                authority_version=transaction.authority_version,
+                requester=requester,
+                channel="cli",
+                adapter_id="message-outbox.v1",
+                action="send",
+                reason=(
+                    f"release delayed message to {row.platform}:{row.target} "
+                    f"(revision {row.revision}); irreversible after dispatch"
+                ),
+                ttl_ms=5 * 60 * 1000,
+            )
+            if binding is not None:
+                consumption = consume_bound_approval(
+                    services.store, binding.identity(),
+                )
+        if not consumption.approved:
+            return TransactionCommandResult(EXIT_ERROR, (
+                "release refused: an exact consumed approval is required "
+                f"(approval state: {consumption.code})"
+            ), {"ok": False, "action": "outbox",
+                "error": consumption.code})
         released = release_transaction_outbox(
-            outbox, args.outbox_id,
-            approval=SimpleNamespace(approved=bool(args.approved)),
+            outbox, args.outbox_id, approval=consumption,
         )
         return TransactionCommandResult(
             EXIT_OK if released else EXIT_ERROR,
             "released for dispatch" if released else (
-                "release refused: an exact consumed approval is required"
+                "release refused: the row is not awaiting approval"
             ),
             {"ok": bool(released), "action": "outbox"},
         )
@@ -674,8 +781,6 @@ def build_parser(parent_subparsers) -> argparse.ArgumentParser:
     p.add_argument("outbox_id")
     p = outbox_sub.add_parser("release", help="Release for dispatch")
     p.add_argument("outbox_id")
-    p.add_argument("--approved", action="store_true",
-                   help=argparse.SUPPRESS)
 
     return parser
 

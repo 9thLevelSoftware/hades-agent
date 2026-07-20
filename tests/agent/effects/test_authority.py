@@ -320,3 +320,82 @@ def test_request_bound_approval_only_persists_on_explicit_approve(
         "authority_version", "requester", "channel",
     ):
         assert field in identity_args
+
+
+# ── Review fixes: the stored per-transaction contract narrows ────────────
+
+
+class TestEnforceTransactionAuthority:
+    def _transaction(self, authority, created_at_ms=1_000_000):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            authority=authority, created_at_ms=created_at_ms,
+        )
+
+    def test_allowed_actions_and_resources_narrow(self):
+        from agent.effects.authority import enforce_transaction_authority
+
+        transaction = self._transaction({
+            "allowed_actions": ["write_file"],
+            "allowed_resources": ["file:notes.md"],
+        })
+        ok, _ = enforce_transaction_authority(
+            transaction, prepared_effect(), now_ms=NOW_MS,
+        )
+        assert ok
+        denied_action = prepared_effect(action="send")
+        ok, reason = enforce_transaction_authority(
+            transaction, denied_action, now_ms=NOW_MS,
+        )
+        assert not ok and "allowed_actions" in reason
+        denied_resource = prepared_effect(resources=("file:secrets.md",))
+        ok, reason = enforce_transaction_authority(
+            transaction, denied_resource, now_ms=NOW_MS,
+        )
+        assert not ok and "allowed_resources" in reason
+
+    def test_resource_suffix_matching_bridges_absolute_paths(self):
+        from agent.effects.authority import enforce_transaction_authority
+
+        transaction = self._transaction({
+            "allowed_resources": ["file:notes/status.md"],
+        })
+        absolute = prepared_effect(
+            resources=(r"file:C:\work\project\notes\status.md",),
+        )
+        ok, _ = enforce_transaction_authority(
+            transaction, absolute, now_ms=NOW_MS,
+        )
+        assert ok
+        outside = prepared_effect(resources=("file:/tmp/other/status2.md",))
+        ok, _ = enforce_transaction_authority(
+            transaction, outside, now_ms=NOW_MS,
+        )
+        assert not ok
+
+    def test_expiry_window_is_anchored_at_transaction_creation(self):
+        from agent.effects.authority import enforce_transaction_authority
+
+        # issued/expires define a one-hour lifetime relative to creation.
+        transaction = self._transaction(
+            {"issued_at_ms": 1_000_000, "expires_at_ms": 4_600_000},
+            created_at_ms=NOW_MS,
+        )
+        ok, _ = enforce_transaction_authority(
+            transaction, prepared_effect(), now_ms=NOW_MS + 60_000,
+        )
+        assert ok
+        ok, reason = enforce_transaction_authority(
+            transaction, prepared_effect(), now_ms=NOW_MS + 3_600_001,
+        )
+        assert not ok and "expired" in reason
+
+    def test_absent_constraints_impose_nothing(self):
+        from agent.effects.authority import enforce_transaction_authority
+
+        transaction = self._transaction({"authority_version": 1})
+        ok, _ = enforce_transaction_authority(
+            transaction, prepared_effect(), now_ms=NOW_MS,
+        )
+        assert ok

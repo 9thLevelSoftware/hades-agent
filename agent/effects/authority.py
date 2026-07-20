@@ -27,6 +27,7 @@ __all__ = [
     "ApprovalIdentity",
     "build_action_context",
     "consume_bound_approval",
+    "enforce_transaction_authority",
     "request_bound_approval",
 ]
 
@@ -79,6 +80,82 @@ def build_action_context(
         profile_id=profile_id,
         uncertainty_ppm=prepared.uncertainty_ppm or None,
     )
+
+
+# ── Transaction-stored authority contract ───────────────────────────────
+
+
+def _resource_allowed(resource: str, allowed: str) -> bool:
+    """Order-insensitive, separator-safe match of one declared resource.
+
+    Exact match always passes. Otherwise both sides must share a scheme
+    (the text before the first ``:``) and the allowed entry's path must
+    be a whole-segment suffix of the concrete resource path — plans
+    declare workspace-relative paths while adapters resolve absolutes.
+    """
+    if resource == allowed:
+        return True
+    scheme, _, resource_path = resource.partition(":")
+    allowed_scheme, _, allowed_path = allowed.partition(":")
+    if not allowed_path or scheme != allowed_scheme:
+        return False
+    normalized = resource_path.replace("\\", "/")
+    tail = allowed_path.replace("\\", "/")
+    if normalized == tail:
+        return True
+    return normalized.endswith("/" + tail) or normalized.endswith(":" + tail)
+
+
+def enforce_transaction_authority(
+    transaction, prepared: PreparedEffect, *, now_ms: int
+) -> tuple[bool, str]:
+    """Enforce the DURABLE per-transaction authority contract.
+
+    The profile-wide Autonomy Center still evaluates afterwards; this
+    check only narrows: an effect outside the transaction's declared
+    ``allowed_actions``/``allowed_resources`` or past its expiry is
+    denied even when profile authority would allow it. Expiry semantics:
+    with ``issued_at_ms`` present the lifetime ``expires - issued`` is
+    anchored at the transaction's creation time (fixture-controlled
+    clocks stay meaningful); without it ``expires_at_ms`` is an absolute
+    wall-clock deadline. Falsy/absent fields impose no constraint.
+    """
+    authority = dict(transaction.authority or {})
+
+    allowed_actions = authority.get("allowed_actions")
+    if allowed_actions is not None and prepared.action not in set(
+        str(action) for action in allowed_actions
+    ):
+        return False, (
+            f"action {prepared.action!r} is outside the transaction "
+            f"authority's allowed_actions"
+        )
+
+    allowed_resources = authority.get("allowed_resources")
+    if allowed_resources is not None:
+        allowed_list = [str(entry) for entry in allowed_resources]
+        for resource in prepared.resources:
+            if not any(
+                _resource_allowed(str(resource), entry)
+                for entry in allowed_list
+            ):
+                return False, (
+                    f"resource {resource!r} is outside the transaction "
+                    f"authority's allowed_resources"
+                )
+
+    expires_at_ms = authority.get("expires_at_ms")
+    if expires_at_ms:
+        issued_at_ms = authority.get("issued_at_ms")
+        if issued_at_ms:
+            lifetime = max(0, int(expires_at_ms) - int(issued_at_ms))
+            deadline = int(transaction.created_at_ms) + lifetime
+        else:
+            deadline = int(expires_at_ms)
+        if now_ms >= deadline:
+            return False, "the transaction authority has expired"
+
+    return True, ""
 
 
 # ── Exact approval bindings ─────────────────────────────────────────────
