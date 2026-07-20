@@ -103,28 +103,27 @@ def test_manifest_rejects_tampered_denominator(tmp_path):
         load_cases(broken)
 
 
-# ── Task 13: execute every frozen case through the real stack ────────────
+# ── Task 13: the 100-case execution lives in per-stratum files ───────────
+# (test_transaction_cases_<stratum>.py) so the corpus parallelizes across
+# the per-file runner. This file keeps the frozen contract and the
+# report/gate math.
 
 
 MANIFEST, CASES = load_cases(ROOT / "benchmarks/transactions/manifest.yaml")
 
 
-@pytest.fixture(scope="module")
-def benchmark_base(tmp_path_factory):
-    return tmp_path_factory.mktemp("tx-benchmark")
+def test_stratum_files_cover_the_whole_frozen_corpus():
+    """The six per-stratum case files must partition all 100 cases."""
+    import importlib
 
-
-@pytest.mark.parametrize("case", CASES, ids=lambda case: case["id"])
-def test_preregistered_transaction_case(case, benchmark_base):
-    from benchmarks.transactions.runner import run_case
-
-    result = run_case(case, benchmark_base)
-    assert result.passed, result
-    assert result.unauthorized_irreversible_commits == 0
-    assert result.duplicate_effects == 0
-    assert result.compensation_order_correct
-    assert result.every_non_reversible_classified
-    assert not result.false_success_receipt
+    covered: list[str] = []
+    for stratum in sorted({case["stratum"] for case in CASES}):
+        module = importlib.import_module(
+            f"tests.benchmarks.test_transaction_cases_{stratum}"
+        )
+        covered.extend(case["id"] for case in module.CASES)
+    assert sorted(covered) == sorted(case["id"] for case in CASES)
+    assert len(covered) == 100
 
 
 def test_report_math_gates_and_wilson_intervals():

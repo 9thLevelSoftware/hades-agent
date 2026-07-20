@@ -323,3 +323,86 @@ def test_commit_enforces_transaction_authority_contract(tmp_path):
         assert "authority_blocked" in events
     finally:
         harness.close()
+
+
+# ── Review round 2: compensate_prefix failure policy ─────────────────────
+
+
+def test_compensate_prefix_policy_unwinds_committed_prefix(tmp_path):
+    import dataclasses as _dataclasses
+
+    from agent.effects.models import CommitOutcome as _CommitOutcome
+    from tests.agent.effects.effect_harness import FileBackedAdapter
+
+    class FailingAdapter(FileBackedAdapter):
+        descriptor = _dataclasses.replace(
+            FileBackedAdapter.descriptor, adapter_id="failing.v1",
+        )
+
+        def commit(self, request, context):
+            return _CommitOutcome(
+                status="failed", result={}, evidence={},
+                error="simulated downstream failure",
+            )
+
+    harness = TxHarness(tmp_path)
+    try:
+        harness.adapters.register(FailingAdapter(harness.workspace))
+        graph = harness.graph(("first", "second"), edges=(("first", "second"),))
+        graph["nodes"][1]["adapter_id"] = "failing.v1"
+        harness.store.create_transaction(
+            transaction_id="tx-prefix", profile="default", title="prefix",
+            authority={"authority_version": 1},
+            graph=graph, failure_policy="compensate_prefix",
+        )
+        assert harness.coordinator.preview("tx-prefix").status == "ready"
+        result = harness.coordinator.commit("tx-prefix")
+        assert result.status == "failed"
+        assert result.blocked_node == "second"
+        # The committed prefix was compensated under the stored policy.
+        assert result.compensated_prefix == ("first",)
+        assert not (harness.workspace / "first.txt").exists()
+        first = harness.store.latest_effects_by_node("tx-prefix")["first"]
+        assert first.phase == "compensated"
+        events = [
+            e.kind for e in harness.store.load_snapshot("tx-prefix").events
+        ]
+        assert "prefix_compensated" in events
+    finally:
+        harness.close()
+
+
+def test_default_stop_policy_never_compensates(tmp_path):
+    import dataclasses as _dataclasses
+
+    from agent.effects.models import CommitOutcome as _CommitOutcome
+    from tests.agent.effects.effect_harness import FileBackedAdapter
+
+    class FailingAdapter(FileBackedAdapter):
+        descriptor = _dataclasses.replace(
+            FileBackedAdapter.descriptor, adapter_id="failing.v1",
+        )
+
+        def commit(self, request, context):
+            return _CommitOutcome(
+                status="failed", result={}, evidence={},
+                error="simulated downstream failure",
+            )
+
+    harness = TxHarness(tmp_path)
+    try:
+        harness.adapters.register(FailingAdapter(harness.workspace))
+        graph = harness.graph(("first", "second"), edges=(("first", "second"),))
+        graph["nodes"][1]["adapter_id"] = "failing.v1"
+        harness.store.create_transaction(
+            transaction_id="tx-stop", profile="default", title="stop",
+            authority={"authority_version": 1},
+            graph=graph, failure_policy="stop",
+        )
+        harness.coordinator.preview("tx-stop")
+        result = harness.coordinator.commit("tx-stop")
+        assert result.status == "failed"
+        assert result.compensated_prefix == ()
+        assert (harness.workspace / "first.txt").exists()
+    finally:
+        harness.close()

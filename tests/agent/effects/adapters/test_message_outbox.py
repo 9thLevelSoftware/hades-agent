@@ -245,3 +245,35 @@ def test_normalize_rejects_malformed_sends(harness):
             failure_policy="stop",
         )
         assert harness.coordinator.preview(transaction_id).status == "blocked"
+
+
+def test_revised_row_still_reconciles_and_cancels(harness):
+    """A legitimate pre-release content revision must not strand the
+    effect: reconcile stays landed (revision-aware) and compensation can
+    still cancel the row."""
+    harness.create(message="first", delay=3600)
+    harness.coordinator.preview("tx-1")
+    harness.coordinator.commit("tx-1")
+    row, effect = harness.outbox_row()
+    revised = harness.outbox.revise(
+        row.outbox_id, content={"message": "final"},
+        expected_revision=row.revision, not_before=row.not_before,
+    )
+    assert revised.revision == row.revision + 1
+
+    context = EffectContext(transaction_id="tx-1", revision=1, node_id="send")
+    reconciliation = harness.adapter.reconcile(effect, context)
+    assert reconciliation.disposition == "landed"
+    assert reconciliation.evidence["revised"] is True
+    assert reconciliation.evidence["revision"] == revised.revision
+
+    from agent.effects.eligibility import eligibility_for_effect
+
+    eligibility = eligibility_for_effect(
+        harness.store, harness.adapters, "tx-1", "send",
+    )
+    assert eligibility.code == "eligible_compensation"
+
+    outcome = harness.coordinator.compensate("tx-1", "send")
+    assert outcome.status == "compensated"
+    assert harness.outbox.get_by_id(row.outbox_id).status == "cancelled"

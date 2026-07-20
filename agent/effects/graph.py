@@ -264,4 +264,8 @@ def create_revision(
         edges=new_edges,
         reason=reason,
         superseded_effect_ids=superseded,
+        # Atomic with the install: the storage CAS re-reads phases inside
+        # its write transaction and conflicts on any drift from this
+        # snapshot (e.g. a racing commit moving previewed → committing).
+        expected_phases=phases,
     )

@@ -40,7 +40,10 @@ def register_builtin_adapters(
     )
     registry.register(HermesConfigAdapter())
     registry.register(HermesCronAdapter())
-    if workflow_conn_factory is not None:
-        registry.register(
-            HermesWorkflowAdapter(conn_factory=workflow_conn_factory)
-        )
+    # Registered unconditionally: without a caller-owned connection
+    # factory the adapter opens/closes the profile workflows.db per
+    # operation, so the documented hermes-workflow.v1 family is always
+    # available to CLI/slash/TUI plans.
+    registry.register(
+        HermesWorkflowAdapter(conn_factory=workflow_conn_factory)
+    )

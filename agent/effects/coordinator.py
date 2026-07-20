@@ -73,6 +73,9 @@ class CommitResult:
     committed_nodes: tuple[str, ...] = ()
     blocked_node: Optional[str] = None
     error: Optional[str] = None
+    # Nodes compensated by the compensate_prefix failure policy after a
+    # failed node stopped the commit; empty under the default policy.
+    compensated_prefix: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -355,9 +358,23 @@ class TransactionCoordinator:
             if outcome == "skipped":
                 continue
             if outcome != "committed":
+                compensated_prefix: tuple[str, ...] = ()
+                if (
+                    outcome == "failed"
+                    and transaction.failure_policy == "compensate_prefix"
+                ):
+                    # The accepted policy: after a known failure, the
+                    # eligible committed prefix compensates in reverse
+                    # order under its own separately authorized
+                    # eligibility checks. Never across unknown effects —
+                    # only a clean `failed` triggers it.
+                    compensated_prefix = self._compensate_prefix(
+                        transaction_id, committed,
+                    )
                 return CommitResult(
                     status=outcome, committed_nodes=tuple(committed),
                     blocked_node=node_id,
+                    compensated_prefix=compensated_prefix,
                 )
             committed.append(node_id)
             if through_node is not None and node_id == through_node:
@@ -743,6 +760,35 @@ class TransactionCoordinator:
             status=project_transaction_status(store, transaction_id),
             counts=counts,
         )
+
+    def _compensate_prefix(
+        self, transaction_id: str, committed: list[str]
+    ) -> tuple[str, ...]:
+        """Compensate the just-committed prefix in reverse commit order.
+
+        Each node passes through the full eligibility + authority path of
+        :meth:`compensate`; the pass stops at the first node that cannot
+        compensate safely rather than forcing through danger.
+        """
+        compensated: list[str] = []
+        for node_id in reversed(committed):
+            try:
+                outcome = self.compensate(transaction_id, node_id)
+            except (EffectBlocked, KeyError):
+                break
+            if outcome.status != "compensated":
+                break
+            compensated.extend(outcome.compensated_nodes)
+        if compensated:
+            self._store.append_event(
+                transaction_id, "prefix_compensated",
+                payload={"nodes": list(compensated)},
+                idempotency_key=(
+                    f"prefix_compensated:{transaction_id}:"
+                    f"{'-'.join(compensated)}"
+                ),
+            )
+        return tuple(compensated)
 
     # ── Compensation ─────────────────────────────────────────────────
 

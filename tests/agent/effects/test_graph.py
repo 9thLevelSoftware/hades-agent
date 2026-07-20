@@ -303,3 +303,41 @@ def test_frozen_node_edge_between_frozen_nodes_cannot_be_removed(store):
     }
     with pytest.raises(RevisionConflict, match="frozen"):
         create_revision(store, "tx-1", 1, stripped, "strip edge")
+
+
+# ── Review round 2: revise/commit race is atomic at the store ────────────
+
+
+def test_revision_conflicts_when_phases_drift_after_validation(store):
+    seed_mixed_graph(store)
+    phases_snapshot = store.latest_effect_phases("tx-1")
+    # A racing commit moves the pending node to committing AFTER the
+    # caller validated but BEFORE the install.
+    assert store.transition_effect("ef-tx-1-1-message", {"prepared"}, "previewed")
+    assert store.transition_effect("ef-tx-1-1-message", {"previewed"}, "committing")
+    from agent.effects.models import normalize_graph_input
+
+    nodes, edges = normalize_graph_input(
+        graph_with_changed_pending_message_and_new_audit_node()
+    )
+    with pytest.raises(RevisionConflict, match="phases changed"):
+        store.create_revision(
+            transaction_id="tx-1", expected_revision=1,
+            nodes=nodes, edges=edges, reason="stale phases",
+            expected_phases=phases_snapshot,
+        )
+    # No partial writes: still at revision 1.
+    assert store.get_transaction("tx-1").current_revision == 1
+
+
+def test_revision_refuses_mid_commit_transaction(store):
+    seed_mixed_graph(store)
+    assert store.transition_status("tx-1", {"draft"}, "previewing")
+    assert store.transition_status("tx-1", {"previewing"}, "ready")
+    assert store.transition_status("tx-1", {"ready"}, "committing")
+    with pytest.raises(RevisionConflict, match="committing"):
+        create_revision(
+            store, "tx-1", 1,
+            graph_with_changed_pending_message_and_new_audit_node(),
+            "mid-commit revise",
+        )

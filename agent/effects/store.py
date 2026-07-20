@@ -288,6 +288,7 @@ class TransactionStore:
         edges: tuple[RevisionEdge, ...],
         reason: str,
         superseded_effect_ids: Iterable[str] = (),
+        expected_phases: Optional[Mapping[str, str]] = None,
     ) -> "TransactionRevision":
         """Atomically persist revision ``expected_revision + 1``.
 
@@ -295,6 +296,15 @@ class TransactionStore:
         edge inserts, superseded-attempt transitions, and the
         ``revision_created`` event all land together or not at all. A CAS
         miss raises :class:`RevisionConflict` with no partial writes.
+
+        ``expected_phases`` makes the caller's frozen-node validation
+        atomic with the install: the latest per-node effect phases are
+        re-read INSIDE this write transaction and any drift from the
+        snapshot the validation saw (for example a node moving
+        ``previewed → committing`` under a racing commit) raises
+        :class:`RevisionConflict` instead of installing a graph that
+        rewrites executing work. A transaction that is mid-commit or
+        mid-compensation refuses revision outright.
         """
         from agent.effects.models import RevisionConflict, graph_content_hash
 
@@ -305,13 +315,50 @@ class TransactionStore:
 
         def _create(conn):
             row = conn.execute(
-                """SELECT current_revision FROM action_transactions
+                """SELECT current_revision, status FROM action_transactions
                     WHERE transaction_id = ?""",
                 (transaction_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"unknown transaction {transaction_id!r}")
             current = row["current_revision"]
+            if row["status"] in {"committing", "compensating"}:
+                raise RevisionConflict(
+                    f"transaction {transaction_id!r} is {row['status']}; "
+                    "revise after the in-flight work settles"
+                )
+            if expected_phases is not None:
+                # Atomic re-validation: the phases the caller's frozen-node
+                # truth table saw must still hold inside THIS write
+                # transaction. Frozen wins over later pending attempts,
+                # mirroring latest_effects_by_node().
+                frozen_phases = (
+                    "committing", "committed", "verified", "compensating",
+                    "compensated", "unknown_effect",
+                )
+                live: dict[str, str] = {}
+                frozen_nodes: set[str] = set()
+                for phase_row in conn.execute(
+                    """SELECT node_id, phase FROM transaction_effects
+                        WHERE transaction_id = ?
+                        ORDER BY revision, node_id, effect_id""",
+                    (transaction_id,),
+                ).fetchall():
+                    if phase_row["node_id"] in frozen_nodes:
+                        continue
+                    live[phase_row["node_id"]] = phase_row["phase"]
+                    if phase_row["phase"] in frozen_phases:
+                        frozen_nodes.add(phase_row["node_id"])
+                drifted = sorted(
+                    node_id
+                    for node_id in set(live) | set(expected_phases)
+                    if live.get(node_id) != expected_phases.get(node_id)
+                )
+                if drifted:
+                    raise RevisionConflict(
+                        f"effect phases changed under revision for nodes "
+                        f"{drifted}; re-validate against current state"
+                    )
             cursor = conn.execute(
                 """UPDATE action_transactions
                        SET current_revision = ?, status = 'draft',

@@ -67,6 +67,14 @@ class _StateBridge(EffectAdapter):
     def _legacy(self):  # pragma: no cover — overridden per family
         raise NotImplementedError
 
+    def _with_legacy(self, fn):
+        """Run one operation against the owning legacy adapter.
+
+        Families whose owner needs per-call resource lifecycle (the
+        workflow adapter's database connection) override this.
+        """
+        return fn(self._legacy())
+
     def normalize(
         self, node: RevisionNode, context: EffectContext
     ) -> NormalizedEffect:
@@ -98,7 +106,7 @@ class _StateBridge(EffectAdapter):
             ),
         )
         try:
-            legacy = self._legacy().prepare(request)
+            legacy = self._with_legacy(lambda owner: owner.prepare(request))
         except (PermissionError, ValueError, KeyError) as exc:
             raise EffectBlocked(str(exc)) from exc
         payload = dict(legacy.compensation or {})
@@ -143,7 +151,9 @@ class _StateBridge(EffectAdapter):
         self, request: CommitRequest, context: EffectContext
     ) -> CommitOutcome:
         record = _compensation_record(request.prepared)
-        raw = self._legacy().commit(record, lambda _args: None)
+        raw = self._with_legacy(
+            lambda owner: owner.commit(record, lambda _args: None)
+        )
         return CommitOutcome(
             status="committed",
             result=dict(raw),
@@ -156,7 +166,9 @@ class _StateBridge(EffectAdapter):
         record = SimpleNamespace(
             compensation=dict(outcome.evidence.get("compensation") or {}),
         )
-        result = self._legacy().verify(record, dict(outcome.result))
+        result = self._with_legacy(
+            lambda owner: owner.verify(record, dict(outcome.result))
+        )
         return VerificationResult(
             verified=bool(result.get("landed")),
             evidence=dict(result),
@@ -172,7 +184,7 @@ class _StateBridge(EffectAdapter):
             return ReconciliationResult(disposition="unknown", evidence={})
         record = SimpleNamespace(compensation=compensation)
         try:
-            result = self._legacy().reconcile(record)
+            result = self._with_legacy(lambda owner: owner.reconcile(record))
         except Exception:
             return ReconciliationResult(disposition="unknown", evidence={})
         disposition = result.get("disposition", "unknown")
@@ -186,7 +198,7 @@ class _StateBridge(EffectAdapter):
     ) -> CompensationResult:
         record = _compensation_record(request.prepared)
         try:
-            result = self._legacy().compensate(record)
+            result = self._with_legacy(lambda owner: owner.compensate(record))
         except Exception as exc:
             return CompensationResult(
                 fidelity="semantic", status="blocked", evidence={},
@@ -211,11 +223,27 @@ class HermesWorkflowAdapter(_StateBridge):
     )
     action_class_prefix = "workflow"
 
-    def __init__(self, *, conn_factory: Callable[[], Any]):
+    def __init__(self, *, conn_factory: Optional[Callable[[], Any]] = None):
+        # A caller-supplied factory (tests, long-lived services) owns the
+        # connection lifecycle. Without one, each operation opens the
+        # profile workflows.db, runs, and closes — safe for the shared
+        # CLI/slash/TUI service where no connection outlives a command.
         self._conn_factory = conn_factory
 
     def _legacy(self) -> HermesWorkflowStateAdapter:
         return HermesWorkflowStateAdapter(self._conn_factory())
+
+    def _with_legacy(self, fn):
+        if self._conn_factory is not None:
+            return fn(self._legacy())
+        from hades_cli import workflows_db as wfdb
+
+        wfdb.init_db()
+        conn = wfdb.connect()
+        try:
+            return fn(HermesWorkflowStateAdapter(conn))
+        finally:
+            conn.close()
 
 
 class HermesCronAdapter(_StateBridge):

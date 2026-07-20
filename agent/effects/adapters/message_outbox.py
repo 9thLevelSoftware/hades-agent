@@ -204,6 +204,12 @@ class MessageOutboxAdapter(EffectAdapter):
     def reconcile(
         self, effect: EffectTransaction, context: EffectContext
     ) -> ReconciliationResult:
+        """The effect under reconciliation is the ENQUEUE, and the durable
+        row itself is its evidence: an existing row with this identity is
+        ``landed`` regardless of later legitimate lifecycle — content
+        revisions before release (tracked by the row's own revision
+        counter) and status transitions are the row living its life, not
+        drift. Only a missing row is ``not_landed``."""
         token = dict((effect.prepared or {}).get("prepared_token") or {})
         outbox_id = token.get("outbox_id", "")
         if not outbox_id:
@@ -214,14 +220,17 @@ class MessageOutboxAdapter(EffectAdapter):
                 disposition="not_landed", evidence={"outbox_id": outbox_id},
             )
         expected_hash = token.get("content_hash")
-        if expected_hash and record.content_hash != expected_hash:
-            return ReconciliationResult(
-                disposition="unknown",
-                evidence={"outbox_id": outbox_id, "status": record.status},
-            )
         return ReconciliationResult(
             disposition="landed",
-            evidence={"outbox_id": outbox_id, "status": record.status},
+            evidence={
+                "outbox_id": outbox_id,
+                "status": record.status,
+                "revision": record.revision,
+                "content_hash": record.content_hash,
+                "revised": bool(
+                    expected_hash and record.content_hash != expected_hash
+                ),
+            },
         )
 
     def compensate(

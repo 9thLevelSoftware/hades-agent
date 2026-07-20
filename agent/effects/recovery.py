@@ -9,7 +9,7 @@ transaction for review, exactly once.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 from agent.effects.models import EffectContext, EffectTransaction
 
@@ -193,14 +193,39 @@ def recover_transactions(store, journal, adapters, limit: int = 100) -> dict:
     return counts
 
 
-def recover_transactions_at_startup(db, *, limit: int = 100) -> dict:
+def _startup_recovery_settings() -> tuple[bool, int]:
+    """Read ``transactions.auto_reconcile_on_start`` / ``recovery_batch_size``.
+
+    Unreadable config falls back to the safe documented defaults
+    (enabled, batch 100); values outside validation bounds are clamped.
+    """
+    enabled, batch = True, 100
+    try:
+        from hades_cli.config import load_config_readonly
+
+        section = (load_config_readonly() or {}).get("transactions") or {}
+        raw_enabled = section.get("auto_reconcile_on_start")
+        if isinstance(raw_enabled, bool):
+            enabled = raw_enabled
+        raw_batch = section.get("recovery_batch_size")
+        if isinstance(raw_batch, int) and not isinstance(raw_batch, bool):
+            batch = min(1000, max(1, raw_batch))
+    except Exception:
+        pass
+    return enabled, batch
+
+
+def recover_transactions_at_startup(db, *, limit: Optional[int] = None) -> dict:
     """Convenience seam for CLI/TUI/gateway startup over one SessionDB.
 
-    Constructs the built-in adapter families the same way the CLI service
-    does — the process-global registry starts empty in production, and an
-    empty registry must never cause in-flight effects to be frozen as
-    unknown. Effects owned by unregistered (e.g. plugin) adapters are
-    skipped untouched for a later pass.
+    Honors the user's configuration: ``auto_reconcile_on_start: false``
+    disables the startup pass entirely, and ``recovery_batch_size``
+    bounds it (an explicit *limit* argument overrides). Constructs the
+    built-in adapter families the same way the CLI service does — the
+    process-global registry starts empty in production, and an empty
+    registry must never cause in-flight effects to be frozen as unknown.
+    Effects owned by unregistered (e.g. plugin) adapters are skipped
+    untouched for a later pass.
     """
     from pathlib import Path
 
@@ -209,6 +234,13 @@ def recover_transactions_at_startup(db, *, limit: int = 100) -> dict:
     from agent.effects.registry import EffectAdapterRegistry
     from agent.effects.store import TransactionStore
     from agent.operation_journal import OperationJournal
+
+    enabled, configured_batch = _startup_recovery_settings()
+    if not enabled:
+        return {"landed": 0, "not_landed": 0, "unknown": 0, "skipped": 0,
+                "disabled": True}
+    if limit is None:
+        limit = configured_batch
 
     store = TransactionStore(db)
     journal = OperationJournal(db)

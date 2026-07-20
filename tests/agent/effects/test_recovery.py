@@ -151,3 +151,36 @@ def test_startup_seam_populates_builtin_adapters(tmp_path, monkeypatch):
         }
     finally:
         db.close()
+
+
+def test_startup_recovery_honors_configuration(tmp_path, monkeypatch):
+    import yaml
+
+    from agent.effects.recovery import recover_transactions_at_startup
+    from hades_constants import get_hades_home
+    from hades_state import SessionDB
+
+    config_path = get_hades_home() / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump({
+        "transactions": {"auto_reconcile_on_start": False},
+    }), encoding="utf-8")
+    db = SessionDB(tmp_path / "cfg-state.db")
+    try:
+        counts = recover_transactions_at_startup(db)
+        assert counts.get("disabled") is True
+        assert counts["landed"] == 0 and counts["unknown"] == 0
+    finally:
+        db.close()
+
+    # recovery_batch_size bounds the pass when enabled.
+    config_path.write_text(yaml.dump({
+        "transactions": {
+            "auto_reconcile_on_start": True, "recovery_batch_size": 1,
+        },
+    }), encoding="utf-8")
+    from agent.effects.recovery import _startup_recovery_settings
+
+    enabled, batch = _startup_recovery_settings()
+    assert enabled is True
+    assert batch == 1

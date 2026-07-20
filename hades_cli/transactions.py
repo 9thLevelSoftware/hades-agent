@@ -195,8 +195,14 @@ def _transaction_json(transaction) -> dict:
     }
 
 
-def _node_row(store, transaction_id, revision, node) -> dict:
-    effect = store.effect_for(transaction_id, revision, node.node_id)
+def _node_row(store, transaction_id, revision, node, effects=None) -> dict:
+    # Cross-revision truth: frozen nodes carried forward by a revision
+    # have no attempt at the current revision — render their latest one.
+    effects = (
+        effects if effects is not None
+        else store.latest_effects_by_node(transaction_id)
+    )
+    effect = effects.get(node.node_id)
     semantics = dict(effect.semantics or {}) if effect else {}
     return {
         "node_id": node.node_id,
@@ -297,10 +303,13 @@ def _cmd_show(services: _Services, args) -> TransactionCommandResult:
     revision = services.store.get_revision(
         transaction.transaction_id, transaction.current_revision
     )
+    effects = services.store.latest_effects_by_node(
+        transaction.transaction_id
+    )
     rows = [
         _node_row(
             services.store, transaction.transaction_id, revision.revision,
-            node,
+            node, effects=effects,
         )
         for node in revision.nodes
     ]
@@ -364,10 +373,19 @@ def _cmd_preview(services: _Services, args) -> TransactionCommandResult:
         f"{'node':<20} {'fidelity':<12} {'approval':<9} summary",
     ]
     rows = []
+    effects = services.store.latest_effects_by_node(args.transaction_id)
     for node in revision.nodes:
-        effect = services.store.effect_for(
-            args.transaction_id, revision.revision, node.node_id,
-        )
+        # Frozen nodes carried across a revision have no attempt at the
+        # current revision; their latest attempt is the truth to render.
+        effect = effects.get(node.node_id)
+        if effect is None:
+            rows.append({
+                "node_id": node.node_id, "fidelity": None,
+                "requires_approval": False, "summary": "(not prepared)",
+                "before": None, "after": None,
+            })
+            lines.append(f"{node.node_id:<20} {'?':<12} {'no':<9} (not prepared)")
+            continue
         preview = dict(effect.preview or {})
         semantics = dict(effect.semantics or {})
         summary = str(preview.get("summary", "")).splitlines()

@@ -307,3 +307,99 @@ def test_outbox_release_requires_durable_exact_approval(tmp_path, monkeypatch):
     assert released.exit_code == EXIT_OK, released.output
     confirm = run_argv(["outbox", "list", "tx-release"], output="json")
     assert (confirm.payload.get("rows") or [])[0]["status"] == "scheduled"
+
+
+def test_workflow_family_is_available_to_cli_plans(tmp_path, monkeypatch):
+    """The documented hermes-workflow.v1 family must be registered in the
+    shared CLI service without any caller-owned connection."""
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "plan.yaml"
+    plan.write_text(yaml.dump({
+        "transaction": {"title": "workflow deploy"},
+        "nodes": [{
+            "node_id": "deploy", "adapter_id": "hermes-workflow.v1",
+            "action": "deploy",
+            "args": {"spec": {
+                "id": "cli_wf_demo", "name": "CLI Demo", "version": 1,
+                "triggers": [{"type": "manual", "id": "manual"}],
+                "nodes": {"start": {"type": "pass"}},
+            }},
+        }],
+        "edges": [],
+    }), encoding="utf-8")
+    authority = tmp_path / "authority.yaml"
+    authority.write_text(yaml.dump({
+        "authority_version": 1, "irreversible_policy": "ask",
+    }), encoding="utf-8")
+    created = run_argv([
+        "create", "--plan", str(plan), "--authority", str(authority),
+        "--transaction-id", "tx-wf",
+    ])
+    assert created.exit_code == EXIT_OK, created.output
+    previewed = run_argv(["preview", "tx-wf"])
+    assert previewed.exit_code == EXIT_OK, previewed.output
+
+
+def test_preview_and_show_render_carried_frozen_nodes(tmp_path, monkeypatch):
+    """After a partial commit + revision, the carried frozen node has no
+    attempt at the current revision — rendering must not crash."""
+    config_path = get_hades_home() / "config.yaml"
+    existing = {}
+    if config_path.exists():
+        existing = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    existing["transactions"] = {"mode": "commit"}
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump(existing), encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    plan, authority = _write_plan(tmp_path, nodes=[
+        {"node_id": "first", "adapter_id": "workspace.v1",
+         "action": "write_file",
+         "args": {"path": "first.md", "content": "one\n"}},
+        {"node_id": "second", "adapter_id": "workspace.v1",
+         "action": "write_file",
+         "args": {"path": "second.md", "content": "two\n"}},
+    ], edges=[{"parent": "first", "child": "second"}])
+    run_argv([
+        "create", "--plan", str(plan), "--authority", str(authority),
+        "--transaction-id", "tx-carried",
+    ])
+    assert run_argv(["preview", "tx-carried"]).exit_code == EXIT_OK
+    committed = run_argv(["commit", "tx-carried", "--through-node", "first"])
+    assert committed.payload.get("status") == "ready", committed.output
+
+    revised_plan = tmp_path / "plan2.yaml"
+    revised_plan.write_text(yaml.dump({
+        "transaction": {"title": "cli test", "failure_policy": "stop"},
+        "nodes": [
+            {"node_id": "first", "adapter_id": "workspace.v1",
+             "action": "write_file",
+             "args": {"path": "first.md", "content": "one\n"}},
+            {"node_id": "second", "adapter_id": "workspace.v1",
+             "action": "write_file",
+             "args": {"path": "second.md", "content": "two-revised\n"}},
+        ],
+        "edges": [{"parent": "first", "child": "second"}],
+    }), encoding="utf-8")
+    revised = run_argv([
+        "revise", "tx-carried", "--plan", str(revised_plan),
+        "--expected-revision", "1", "--reason", "edit pending",
+    ])
+    assert revised.exit_code == EXIT_OK, revised.output
+
+    previewed = run_argv(["preview", "tx-carried"])
+    assert previewed.exit_code == EXIT_OK, previewed.output
+    assert "first" in previewed.output and "second" in previewed.output
+
+    shown = run_argv(["show", "tx-carried"], output="json")
+    assert shown.exit_code == EXIT_OK, shown.output
+    payload = json.loads(shown.output)
+    phases = {row["node_id"]: row["phase"] for row in payload["nodes"]}
+    assert phases["first"] in {"committed", "verified"}
+    assert phases["second"] == "previewed"
+
+    final = run_argv(["commit", "tx-carried"])
+    assert final.payload.get("status") == "committed", final.output
+    assert (tmp_path / "second.md").read_text(encoding="utf-8") == "two-revised\n"
+    # The frozen node executed exactly once: its file holds the original.
+    assert (tmp_path / "first.md").read_text(encoding="utf-8") == "one\n"
