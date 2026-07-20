@@ -7,6 +7,7 @@ identity), not to parallel copies.
 """
 
 import importlib
+import os
 import subprocess
 import sys
 
@@ -123,6 +124,121 @@ def test_python_dash_m_hermes_cli_module():
     )
     assert "ModuleNotFoundError" not in proc.stderr
     assert proc.returncode == 0, proc.stderr
+
+
+# ── Env var aliasing ─────────────────────────────────────────────────────────
+
+
+def test_env_get_reads_both_spellings(monkeypatch):
+    from hades_constants import env_get
+
+    monkeypatch.delenv("HADES_COMPAT_TEST", raising=False)
+    monkeypatch.delenv("HERMES_COMPAT_TEST", raising=False)
+    assert env_get("HADES_COMPAT_TEST") is None
+    assert env_get("HADES_COMPAT_TEST", "dflt") == "dflt"
+
+    monkeypatch.setenv("HERMES_COMPAT_TEST", "legacy")
+    assert env_get("HADES_COMPAT_TEST") == "legacy"
+    assert env_get("HERMES_COMPAT_TEST") == "legacy"
+
+    # HADES spelling wins when both are set.
+    monkeypatch.setenv("HADES_COMPAT_TEST", "fork")
+    assert env_get("HERMES_COMPAT_TEST") == "fork"
+
+
+def test_env_get_unprefixed_passthrough(monkeypatch):
+    from hades_constants import env_get
+
+    monkeypatch.setenv("COMPAT_TEST_PLAIN", "x")
+    assert env_get("COMPAT_TEST_PLAIN") == "x"
+
+
+def test_env_set_and_pop_write_both_spellings(monkeypatch):
+    from hades_constants import env_pop, env_set
+
+    monkeypatch.delenv("HADES_COMPAT_TEST", raising=False)
+    monkeypatch.delenv("HERMES_COMPAT_TEST", raising=False)
+    env_set("HADES_COMPAT_TEST", "v")
+    assert os.environ["HADES_COMPAT_TEST"] == "v"
+    assert os.environ["HERMES_COMPAT_TEST"] == "v"
+
+    assert env_pop("HERMES_COMPAT_TEST") == "v"
+    assert "HADES_COMPAT_TEST" not in os.environ
+    assert "HERMES_COMPAT_TEST" not in os.environ
+
+
+def test_env_set_into_subprocess_dict():
+    from hades_constants import env_set
+
+    child = {}
+    env_set("HERMES_KANBAN_TASK", "t-1", env=child)
+    assert child == {"HADES_KANBAN_TASK": "t-1", "HERMES_KANBAN_TASK": "t-1"}
+
+
+def test_env_var_enabled_dual_reads(monkeypatch):
+    from utils import env_var_enabled
+
+    monkeypatch.delenv("HADES_COMPAT_FLAG", raising=False)
+    monkeypatch.delenv("HERMES_COMPAT_FLAG", raising=False)
+    assert env_var_enabled("HADES_COMPAT_FLAG") is False
+    monkeypatch.setenv("HERMES_COMPAT_FLAG", "1")
+    assert env_var_enabled("HADES_COMPAT_FLAG") is True
+    assert env_var_enabled("HERMES_COMPAT_FLAG") is True
+
+
+def test_env_int_dual_reads(monkeypatch):
+    from utils import env_int
+
+    monkeypatch.delenv("HADES_COMPAT_INT", raising=False)
+    monkeypatch.setenv("HERMES_COMPAT_INT", "7")
+    assert env_int("HADES_COMPAT_INT", 0) == 7
+
+
+# ── Toolset key aliasing ─────────────────────────────────────────────────────
+
+
+def test_toolset_prefix_aliases_resolve_identically():
+    from toolsets import resolve_toolset
+
+    assert resolve_toolset("hades-cli") == resolve_toolset("hermes-cli")
+    assert resolve_toolset("hermes-acp") == resolve_toolset("hades-acp")
+    assert resolve_toolset("hades-telegram") == resolve_toolset("hermes-telegram")
+
+
+def test_get_toolset_swaps_prefix_in_static_view():
+    from toolsets import get_toolset
+
+    static_real = get_toolset("hermes-cli", include_registry=False)
+    static_alias = get_toolset("hades-cli", include_registry=False)
+    assert static_real is not None
+    assert static_alias == static_real
+
+    assert get_toolset("hermes-acp", include_registry=False) == get_toolset(
+        "hades-acp", include_registry=False
+    )
+
+
+def test_toolset_names_list_canonical_keys_only():
+    from toolsets import get_toolset_names
+
+    names = get_toolset_names()
+    # Canonical keys keep their historical spellings; no duplicate alias rows.
+    assert "hermes-cli" in names
+    assert "hades-cli" not in names
+    assert "hades-acp" in names
+    assert "hermes-acp" not in names
+
+
+def test_resolve_toolset_visited_normalizes_spellings():
+    from toolsets import resolve_toolset
+
+    visited = set()
+    first = resolve_toolset("hades-cli", visited)
+    assert first
+    # The canonical spelling was recorded, so the other spelling is treated
+    # as already-resolved (diamond), not re-resolved.
+    assert "hermes-cli" in visited
+    assert resolve_toolset("hermes-cli", visited) == []
 
 
 def test_packaging_declares_hermes_shims():
