@@ -62,7 +62,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from hades_constants import get_hades_home
+from hades_constants import env_get, get_hades_home
 # Imported at module scope so _flush_messages_to_session_db can catch
 # SessionDBClosedError explicitly (and drop _session_db on the first
 # closed-handle failure) without paying an inline import per flush.
@@ -3290,7 +3290,7 @@ class AIAgent:
         """
         self._last_activity_ts = time.time()
         self._last_activity_desc = desc
-        if os.environ.get("HADES_KANBAN_TASK"):
+        if env_get("HADES_KANBAN_TASK"):
             try:
                 from tools.kanban_tools import heartbeat_current_worker_from_env
                 heartbeat_current_worker_from_env()

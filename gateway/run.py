@@ -1856,10 +1856,12 @@ except Exception as _bootstrap_exc:
     print(f"  Warning: deprecation check failed: {_bootstrap_exc}", file=sys.stderr)
 
 # Gateway runs in quiet mode - suppress debug output and use cwd directly (no temp dirs)
-os.environ["HADES_QUIET"] = "1"
+from hades_constants import env_set as _env_set
+
+_env_set("HADES_QUIET", "1")
 
 # Enable interactive exec approval for dangerous commands on messaging platforms
-os.environ["HADES_EXEC_ASK"] = "1"
+_env_set("HADES_EXEC_ASK", "1")
 
 # Set terminal working directory for messaging platforms.
 # config.yaml terminal.cwd is the canonical source (bridged to TERMINAL_CWD

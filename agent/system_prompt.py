@@ -47,6 +47,7 @@ from agent.prompt_builder import (
     drain_truncation_warnings,
 )
 from agent.runtime_cwd import resolve_context_cwd
+from hades_constants import env_get
 from utils import is_truthy_value
 
 
@@ -236,7 +237,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(_kanban_guidance)
     elif _kanban_guidance is None and "kanban_show" in agent.valid_tool_names:
         # Fallback for code paths that bypass agent_init (rare).
-        if os.environ.get("HADES_KANBAN_TASK"):
+        if env_get("HADES_KANBAN_TASK"):
             tool_guidance.append(KANBAN_GUIDANCE)
         else:
             tool_guidance.append(KANBAN_ORCHESTRATOR_GUIDANCE)

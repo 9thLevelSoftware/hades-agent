@@ -2310,9 +2310,11 @@ def _clear_session_context(tokens: list) -> None:
 
 def _enable_gateway_prompts() -> None:
     """Route approvals through gateway callbacks instead of CLI input()."""
-    os.environ["HADES_GATEWAY_SESSION"] = "1"
-    os.environ["HADES_EXEC_ASK"] = "1"
-    os.environ["HADES_INTERACTIVE"] = "1"
+    from hades_constants import env_set
+
+    env_set("HADES_GATEWAY_SESSION", "1")
+    env_set("HADES_EXEC_ASK", "1")
+    env_set("HADES_INTERACTIVE", "1")
 
 
 # ── Blocking prompt factory ──────────────────────────────────────────

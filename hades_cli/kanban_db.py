@@ -89,6 +89,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from hades_constants import env_get, env_set
+
 from hades_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
 
@@ -243,7 +245,7 @@ def _resolve_crash_grace_seconds() -> int:
     non-integer, or negative. A value of 0 restores immediate-reclaim
     behaviour (useful for tests).
     """
-    raw = os.environ.get("HADES_KANBAN_CRASH_GRACE_SECONDS", "").strip()
+    raw = env_get("HADES_KANBAN_CRASH_GRACE_SECONDS", "").strip()
     if raw:
         try:
             parsed = int(raw)
@@ -8238,7 +8240,7 @@ def _default_spawn(
     # being invisible to kanban workers.
     from hades_cli.profiles import resolve_profile_env
     try:
-        env["HADES_HOME"] = resolve_profile_env(profile_arg)
+        env_set("HADES_HOME", resolve_profile_env(profile_arg), env=env)
     except FileNotFoundError:
         # Profile dir doesn't exist — defer resolution to the CLI's
         # _apply_profile_override() via HERMES_PROFILE (set below).
@@ -8246,9 +8248,9 @@ def _default_spawn(
         # HADES_HOME never had profiles created.
         pass
     if task.tenant:
-        env["HERMES_TENANT"] = task.tenant
-    env["HERMES_KANBAN_TASK"] = task.id
-    env["HERMES_KANBAN_WORKSPACE"] = workspace
+        env_set("HERMES_TENANT", task.tenant, env=env)
+    env_set("HERMES_KANBAN_TASK", task.id, env=env)
+    env_set("HERMES_KANBAN_WORKSPACE", workspace, env=env)
     # Pin TERMINAL_CWD to the task's workspace so the worker's file tools and
     # context-file loader anchor on the workspace, not whatever cwd the
     # dispatching gateway happened to export. The worker subprocess is already
@@ -8264,18 +8266,18 @@ def _default_spawn(
     if workspace and os.path.isabs(workspace) and os.path.isdir(workspace):
         env["TERMINAL_CWD"] = workspace
     if task.branch_name:
-        env["HERMES_KANBAN_BRANCH"] = task.branch_name
+        env_set("HERMES_KANBAN_BRANCH", task.branch_name, env=env)
     if task.current_run_id is not None:
-        env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
+        env_set("HERMES_KANBAN_RUN_ID", str(task.current_run_id), env=env)
     if task.claim_lock:
-        env["HERMES_KANBAN_CLAIM_LOCK"] = task.claim_lock
+        env_set("HERMES_KANBAN_CLAIM_LOCK", task.claim_lock, env=env)
     # Goal-loop mode: the worker reads these and wraps its run in the
     # Ralph-style /goal judge loop (see cli.py quiet-mode path). Only set
     # when enabled so non-goal tasks keep a clean env.
     if task.goal_mode:
-        env["HERMES_KANBAN_GOAL_MODE"] = "1"
+        env_set("HERMES_KANBAN_GOAL_MODE", "1", env=env)
         if task.goal_max_turns is not None:
-            env["HERMES_KANBAN_GOAL_MAX_TURNS"] = str(int(task.goal_max_turns))
+            env_set("HERMES_KANBAN_GOAL_MAX_TURNS", str(int(task.goal_max_turns)), env=env)
     terminal_timeout = _worker_terminal_timeout_env(
         task.max_runtime_seconds,
         env.get("TERMINAL_TIMEOUT"),
@@ -8294,18 +8296,18 @@ def _default_spawn(
     # dispatcher's. Belt-and-braces with the `get_default_hades_root()`
     # resolution in `kanban_home()` — symmetric resolution is the norm,
     # but unusual symlink / Docker layouts are caught here too.
-    env["HERMES_KANBAN_DB"] = str(kanban_db_path(board=board))
-    env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(workspaces_root(board=board))
+    env_set("HERMES_KANBAN_DB", str(kanban_db_path(board=board)), env=env)
+    env_set("HERMES_KANBAN_WORKSPACES_ROOT", str(workspaces_root(board=board)), env=env)
     # Board slug — the final defense-in-depth pin. If the worker ever
     # resolves kanban paths without the DB / workspaces env vars, the
     # board slug still forces it to the right directory.
     resolved_board = _normalize_board_slug(board) or get_current_board()
-    env["HERMES_KANBAN_BOARD"] = resolved_board
+    env_set("HERMES_KANBAN_BOARD", resolved_board, env=env)
     # HERMES_PROFILE is the author the kanban_comment tool defaults to.
     # `hermes -p <assignee>` activates the profile, but the env var is
     # what the tool reads — set it explicitly here so comments are
     # attributed correctly regardless of how the child loads config.
-    env["HERMES_PROFILE"] = profile_arg
+    env_set("HERMES_PROFILE", profile_arg, env=env)
 
     # A worker must NEVER boot the interactive TUI: an inherited HERMES_TUI=1
     # or a `display.interface: tui` in the profile's config would send the

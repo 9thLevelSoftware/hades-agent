@@ -12,7 +12,7 @@ from pathlib import Path
 
 from hades_cli.config import get_project_root, get_hades_home, get_env_path
 from hades_cli.env_loader import load_hermes_dotenv
-from hades_constants import display_hades_home
+from hades_constants import display_hades_home, env_get
 from hades_constants import agent_browser_runnable
 
 PROJECT_ROOT = get_project_root()
@@ -120,7 +120,7 @@ def _is_kanban_worker_env_gate(item: dict) -> bool:
     """Return True when Kanban is unavailable only because this is not a worker process."""
     if item.get("name") != "kanban":
         return False
-    if os.environ.get("HADES_KANBAN_TASK"):
+    if env_get("HADES_KANBAN_TASK"):
         return False
 
     tools = item.get("tools") or []
@@ -129,7 +129,7 @@ def _is_kanban_worker_env_gate(item: dict) -> bool:
 
 def _doctor_tool_availability_detail(toolset: str) -> str:
     """Optional explanatory suffix for toolsets whose doctor status needs context."""
-    if toolset == "kanban" and not os.environ.get("HADES_KANBAN_TASK"):
+    if toolset == "kanban" and not env_get("HADES_KANBAN_TASK"):
         return "(runtime-gated; loaded only for dispatcher-spawned workers)"
     return ""
 
@@ -564,7 +564,10 @@ def run_doctor(args):
 
     # Doctor runs from the interactive CLI, so CLI-gated tool availability
     # checks (like cronjob management) should see the same context as `hermes`.
-    os.environ.setdefault("HERMES_INTERACTIVE", "1")
+    from hades_constants import env_is_set, env_set
+
+    if not env_is_set("HERMES_INTERACTIVE"):
+        env_set("HERMES_INTERACTIVE", "1")
 
     # Handle `hermes doctor --ack <id>` as a fast path. Persist the ack and
     # return without running the rest of the diagnostics — the user has

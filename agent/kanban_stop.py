@@ -16,6 +16,8 @@ from __future__ import annotations
 import os
 from typing import Any, Iterable, Optional
 
+from hades_constants import env_get
+
 
 _TERMINAL_KANBAN_TOOLS = frozenset({"kanban_complete", "kanban_block"})
 
@@ -31,7 +33,7 @@ def kanban_stop_nudge_enabled() -> bool:
     env = os.environ.get("HADES_KANBAN_STOP_NUDGE")
     if env is not None and env.strip().lower() in {"0", "false", "no", "off"}:
         return False
-    task = (os.environ.get("HADES_KANBAN_TASK") or "").strip()
+    task = (env_get("HADES_KANBAN_TASK") or "").strip()
     return bool(task)
 
 
@@ -85,7 +87,7 @@ def build_kanban_stop_nudge(
     if session_called_kanban_terminal(messages):
         return None
 
-    tid = (task_id or os.environ.get("HADES_KANBAN_TASK") or "").strip() or "this task"
+    tid = (task_id or env_get("HADES_KANBAN_TASK") or "").strip() or "this task"
     return (
         "[System: You are a Hermes kanban worker. A plain-text reply is NOT a "
         "terminal state for the board.\n\n"

@@ -180,7 +180,7 @@ _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 
 # Load .env from ~/.hades/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
-from hades_constants import get_hades_home, display_hades_home
+from hades_constants import env_get, get_hades_home, display_hades_home
 from hades_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL,
     is_browser_debug_ready,
@@ -15295,7 +15295,7 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     """
     import os as _os
 
-    task_id = (_os.environ.get("HADES_KANBAN_TASK") or "").strip()
+    task_id = (env_get("HADES_KANBAN_TASK") or "").strip()
     if not task_id:
         return
 
@@ -15444,7 +15444,9 @@ def main(
 
     # Signal to terminal_tool that we're in interactive mode
     # This enables interactive sudo password prompts with timeout
-    os.environ["HADES_INTERACTIVE"] = "1"
+    from hades_constants import env_set
+
+    env_set("HADES_INTERACTIVE", "1")
     
     # Handle gateway mode (messaging + cron)
     if gateway:
@@ -15632,7 +15634,7 @@ def main(
         # first so the final debug trace isn't lost; SIGALRM deadman guards
         # the flush against any rare blocking-I/O case (the reporter measured
         # flush in <1ms; the alarm is a failsafe, not the common path).
-        if os.environ.get("HADES_KANBAN_TASK"):
+        if env_get("HADES_KANBAN_TASK"):
             try:
                 import signal as _sig_mod
                 if hasattr(_sig_mod, "SIGALRM"):
@@ -15677,7 +15679,7 @@ def main(
             # path or URL into a kanban task body never get it routed to the
             # model's vision input.
             single_query_image_urls: list[str] = []
-            _kanban_task_id = os.environ.get("HADES_KANBAN_TASK", "").strip()
+            _kanban_task_id = env_get("HADES_KANBAN_TASK", "").strip()
             if _kanban_task_id:
                 try:
                     from hades_cli import kanban_db as _kb
@@ -15845,7 +15847,7 @@ def main(
                         _exit_code = 0
                         if isinstance(result, dict) and result.get("failed"):
                             _exit_code = 1
-                            if os.environ.get("HADES_KANBAN_TASK") and result.get(
+                            if env_get("HADES_KANBAN_TASK") and result.get(
                                 "failure_reason"
                             ) in ("rate_limit", "billing"):
                                 try:

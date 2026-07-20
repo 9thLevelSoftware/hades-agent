@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from hades_constants import env_get
 from tools.environments.local import hermes_subprocess_env
 
 # Default minimum codex version we test against. The PR sets this from the
@@ -99,7 +100,7 @@ class CodexAppServerClient:
         # Codex sandbox on, but add the Kanban root as the only extra writable
         # root. Without this, codex-runtime workers finish their actual work
         # but crash/block when kanban_complete/kanban_block writes SQLite.
-        if spawn_env.get("HERMES_KANBAN_TASK"):
+        if env_get("HERMES_KANBAN_TASK", env=spawn_env):
             kanban_db = spawn_env.get("HERMES_KANBAN_DB")
             kanban_root = (
                 os.path.dirname(kanban_db)

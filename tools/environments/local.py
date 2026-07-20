@@ -15,6 +15,7 @@ from pathlib import Path
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
 from hades_cli._subprocess_compat import windows_hide_flags
+from hades_constants import env_get
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -628,7 +629,7 @@ def _find_bash() -> str:
 
     candidates: list[str] = []
 
-    custom = os.environ.get("HADES_GIT_BASH_PATH")
+    custom = env_get("HADES_GIT_BASH_PATH")
     if custom and os.path.isfile(custom):
         candidates.append(custom)
 

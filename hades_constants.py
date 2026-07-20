@@ -1262,6 +1262,71 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODELS_URL = f"{OPENROUTER_BASE_URL}/models"
 
 
+# ── Environment variable aliasing (HADES_* ⇄ HERMES_*) ──────────────────────
+# The hermes→hades rename left both spellings in the wild: upstream-ecosystem
+# plugins/skills/installers export HERMES_* while this fork's code sets
+# HADES_*. All prefixed env access must go through these helpers so either
+# spelling works everywhere. Contract:
+#   read  → env_get: HADES_ spelling wins when both are set
+#   write → env_set / env_pop: always both spellings (subprocesses may run
+#            upstream hermes binaries that only read HERMES_*)
+
+
+def env_alias(name: str) -> "str | None":
+    """Return the other-prefix spelling of *name*, or None if unprefixed."""
+    if name.startswith("HADES_"):
+        return "HERMES_" + name[len("HADES_"):]
+    if name.startswith("HERMES_"):
+        return "HADES_" + name[len("HERMES_"):]
+    return None
+
+
+def _env_spellings(name: str) -> "tuple[str, ...]":
+    """Both spellings of *name*, HADES_ first (the winning spelling)."""
+    alias = env_alias(name)
+    if alias is None:
+        return (name,)
+    if name.startswith("HADES_"):
+        return (name, alias)
+    return (alias, name)
+
+
+def env_get(name: str, default=None, env=None):
+    """Read an env var accepting either prefix spelling; HADES_ wins."""
+    if env is None:
+        env = os.environ
+    for spelling in _env_spellings(name):
+        value = env.get(spelling)
+        if value is not None:
+            return value
+    return default
+
+
+def env_is_set(name: str, env=None) -> bool:
+    """True when either spelling of *name* is present in the environment."""
+    return env_get(name, env=env) is not None
+
+
+def env_set(name: str, value: str, env=None) -> None:
+    """Set BOTH spellings of *name* so hermes and hades readers agree."""
+    if env is None:
+        env = os.environ
+    for spelling in _env_spellings(name):
+        env[spelling] = value
+
+
+def env_pop(name: str, env=None):
+    """Remove BOTH spellings of *name*; return the winning value if any."""
+    if env is None:
+        env = os.environ
+    found = None
+    for spelling in _env_spellings(name):
+        value = env.pop(spelling, None)
+        if found is None:
+            found = value
+    return found
+
+
 # ── Backward-compatibility aliases ───────────────────────────────────────────
 # Plugins and external code may still reference the old Hermes names.
 get_hermes_home = get_hades_home

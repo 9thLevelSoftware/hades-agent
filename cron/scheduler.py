@@ -39,7 +39,7 @@ from typing import Any, List, Optional
 # the module) fail with ModuleNotFoundError for hermes_time et al.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hades_constants import get_hades_home
+from hades_constants import env_get, get_hades_home
 from hades_cli._subprocess_compat import windows_hide_flags
 from hades_cli.config import load_config, _expand_env_vars
 from hades_cli.fallback_config import get_fallback_chain
@@ -2928,7 +2928,9 @@ def run_job(
     # Mark this as a cron session so the approval system can apply cron_mode.
     # This env var is process-wide and persists for the lifetime of the
     # scheduler process — every job this process runs is a cron job.
-    os.environ["HADES_CRON_SESSION"] = "1"
+    from hades_constants import env_set
+
+    env_set("HADES_CRON_SESSION", "1")
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
     # don't clobber each other's targets (os.environ is process-global).
@@ -3064,7 +3066,7 @@ def run_job(
         # value is intentionally re-read from storage every tick so a
         # ``cronjob action=update model=...`` after a failed run takes effect
         # on the next tick — there is no in-memory cache.
-        model = job.get("model") or os.getenv("HADES_MODEL") or ""
+        model = job.get("model") or env_get("HADES_MODEL") or ""
 
         # Load config.yaml for model, reasoning, prefill, toolsets, provider routing
         _cfg = {}
@@ -3106,7 +3108,7 @@ def run_job(
             raise RuntimeError(
                 f"Cron job '{job_name}' has no model configured "
                 f"(job.model={job.get('model')!r}, "
-                f"HERMES_MODEL={os.getenv('HADES_MODEL', '')!r}, "
+                f"HERMES_MODEL={env_get('HADES_MODEL', '')!r}, "
                 "config.yaml model.default missing or empty). "
                 f"Set a per-job model via "
                 f"`cronjob action=update job_id={job_id} model=<name>` or set a "

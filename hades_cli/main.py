@@ -280,6 +280,8 @@ from pathlib import Path
 from typing import Optional
 
 
+from hades_constants import env_set
+
 from hades_cli.subcommands._shared import add_accept_hooks_flag as _add_accept_hooks_flag
 from hades_cli.subcommands.cron import build_cron_parser
 from hades_cli.subcommands.gateway import build_gateway_parser
@@ -2018,11 +2020,11 @@ def _apply_tui_python_env(env: dict) -> None:
     """Seed/repair Python-related env vars shared by CLI and dashboard TUI launches."""
     src_root = str(env.get("HERMES_PYTHON_SRC_ROOT") or "").strip()
     if not src_root or not Path(src_root).is_dir():
-        env["HERMES_PYTHON_SRC_ROOT"] = str(PROJECT_ROOT)
+        env_set("HERMES_PYTHON_SRC_ROOT", str(PROJECT_ROOT), env=env)
 
     cwd = str(env.get("HERMES_CWD") or "").strip()
     if not cwd or not Path(cwd).is_dir():
-        env["HERMES_CWD"] = _safe_tui_cwd(env)
+        env_set("HERMES_CWD", _safe_tui_cwd(env), env=env)
 
     python = str(env.get("HERMES_PYTHON") or "").strip()
     if os.path.dirname(python):
@@ -2033,7 +2035,7 @@ def _apply_tui_python_env(env: dict) -> None:
     else:
         python_is_executable = bool(shutil.which(python, path=env.get("PATH")))
     if not python_is_executable:
-        env["HERMES_PYTHON"] = sys.executable
+        env_set("HERMES_PYTHON", sys.executable, env=env)
 
 
 def _launch_tui(
@@ -2068,7 +2070,7 @@ def _launch_tui(
         prefix="hermes-tui-active-session-", suffix=".json"
     )
     os.close(active_session_fd)
-    env["HERMES_TUI_ACTIVE_SESSION_FILE"] = active_session_file
+    env_set("HERMES_TUI_ACTIVE_SESSION_FILE", active_session_file, env=env)
     env.setdefault("NODE_ENV", "development" if tui_dev else "production")
 
     wt_info = None
@@ -2090,20 +2092,20 @@ def _launch_tui(
             wt_info = None
         if not wt_info:
             sys.exit(1)
-        env["HERMES_CWD"] = wt_info["path"]
+        env_set("HERMES_CWD", wt_info["path"], env=env)
         env["TERMINAL_CWD"] = wt_info["path"]
 
     _apply_tui_python_env(env)
 
     if model:
-        env["HERMES_MODEL"] = model
-        env["HERMES_INFERENCE_MODEL"] = model
+        env_set("HERMES_MODEL", model, env=env)
+        env_set("HERMES_INFERENCE_MODEL", model, env=env)
     if provider:
-        env["HERMES_TUI_PROVIDER"] = provider
-        env["HERMES_INFERENCE_PROVIDER"] = provider
+        env_set("HERMES_TUI_PROVIDER", provider, env=env)
+        env_set("HERMES_INFERENCE_PROVIDER", provider, env=env)
     tui_toolsets = _normalize_tui_toolsets(toolsets)
     if tui_toolsets:
-        env["HERMES_TUI_TOOLSETS"] = ",".join(tui_toolsets)
+        env_set("HERMES_TUI_TOOLSETS", ",".join(tui_toolsets), env=env)
     if skills:
         if isinstance(skills, (list, tuple)):
             flattened = []
@@ -2112,27 +2114,27 @@ def _launch_tui(
                     part.strip() for part in str(item).split(",") if part.strip()
                 )
             if flattened:
-                env["HERMES_TUI_SKILLS"] = ",".join(flattened)
+                env_set("HERMES_TUI_SKILLS", ",".join(flattened), env=env)
         else:
             value = str(skills).strip()
             if value:
-                env["HERMES_TUI_SKILLS"] = value
+                env_set("HERMES_TUI_SKILLS", value, env=env)
     if query:
-        env["HERMES_TUI_QUERY"] = query
+        env_set("HERMES_TUI_QUERY", query, env=env)
     if image:
-        env["HERMES_TUI_IMAGE"] = image
+        env_set("HERMES_TUI_IMAGE", image, env=env)
     if checkpoints:
-        env["HERMES_TUI_CHECKPOINTS"] = "1"
+        env_set("HERMES_TUI_CHECKPOINTS", "1", env=env)
     if pass_session_id:
-        env["HERMES_TUI_PASS_SESSION_ID"] = "1"
+        env_set("HERMES_TUI_PASS_SESSION_ID", "1", env=env)
     if max_turns is not None:
-        env["HERMES_TUI_MAX_TURNS"] = str(max_turns)
+        env_set("HERMES_TUI_MAX_TURNS", str(max_turns), env=env)
     if verbose:
-        env["HERMES_TUI_TOOL_PROGRESS"] = "verbose"
+        env_set("HERMES_TUI_TOOL_PROGRESS", "verbose", env=env)
     elif quiet:
-        env["HERMES_TUI_TOOL_PROGRESS"] = "off"
+        env_set("HERMES_TUI_TOOL_PROGRESS", "off", env=env)
     if accept_hooks:
-        env["HERMES_ACCEPT_HOOKS"] = "1"
+        env_set("HERMES_ACCEPT_HOOKS", "1", env=env)
     # Guarantee a generous V8 heap for the TUI. Default node cap is ~1.5–4GB
     # depending on version and can fatal-OOM on long sessions with large
     # transcripts / reasoning blobs. We target 8GB on an unconstrained host,
@@ -2160,7 +2162,7 @@ def _launch_tui(
     # still set HERMES_TUI_RESUME themselves.
     env.pop("HERMES_TUI_RESUME", None)
     if resume_session_id:
-        env["HERMES_TUI_RESUME"] = resume_session_id
+        env_set("HERMES_TUI_RESUME", resume_session_id, env=env)
 
     argv, cwd = _make_tui_argv(tui_dir, tui_dev)
     code: Optional[int] = None
@@ -5717,15 +5719,15 @@ def cmd_gui(args: argparse.Namespace):
     # with_hades_node_path() copies os.environ when called with no arg.
     env = with_hades_node_path()
     if getattr(args, "fake_boot", False):
-        env["HERMES_DESKTOP_BOOT_FAKE"] = "1"
+        env_set("HERMES_DESKTOP_BOOT_FAKE", "1", env=env)
     if getattr(args, "ignore_existing", False):
-        env["HERMES_DESKTOP_IGNORE_EXISTING"] = "1"
+        env_set("HERMES_DESKTOP_IGNORE_EXISTING", "1", env=env)
     if getattr(args, "hermes_root", None):
-        env["HERMES_DESKTOP_HERMES_ROOT"] = str(Path(args.hermes_root).expanduser().resolve())
+        env_set("HERMES_DESKTOP_HERMES_ROOT", str(Path(args.hermes_root).expanduser().resolve()), env=env)
     if getattr(args, "cwd", None):
-        env["HERMES_DESKTOP_CWD"] = str(Path(args.cwd).expanduser().resolve())
+        env_set("HERMES_DESKTOP_CWD", str(Path(args.cwd).expanduser().resolve()), env=env)
     else:
-        env["HERMES_DESKTOP_CWD"] = os.getcwd()
+        env_set("HERMES_DESKTOP_CWD", os.getcwd(), env=env)
 
     # Desktop launch options from config.yaml (`desktop.electron_flags`,
     # `desktop.disable_gpu`). The GPU policy is bridged to the env var the
@@ -5733,7 +5735,7 @@ def cmd_gui(args: argparse.Namespace):
     # `HERMES_DESKTOP_DISABLE_GPU=... hermes desktop` keeps working.
     config_electron_flags, config_disable_gpu = _desktop_launch_options()
     if config_disable_gpu != "auto" and "HERMES_DESKTOP_DISABLE_GPU" not in os.environ:
-        env["HERMES_DESKTOP_DISABLE_GPU"] = config_disable_gpu
+        env_set("HERMES_DESKTOP_DISABLE_GPU", config_disable_gpu, env=env)
 
     source_mode = getattr(args, "source", False)
     skip_build = getattr(args, "skip_build", False)
@@ -12465,7 +12467,7 @@ def cmd_dashboard(args):
         # See the support report for the double-mount workaround this avoids.
         try:
             from hades_constants import get_default_hades_root
-            env["HADES_HOME"] = str(get_default_hades_root())
+            env_set("HADES_HOME", str(get_default_hades_root()), env=env)
         except Exception:
             # Best-effort: if root resolution fails, fall back to the prior
             # behaviour (drop HADES_HOME) rather than block the reroute.
@@ -12925,9 +12927,9 @@ def _prepare_agent_startup(args) -> None:
 def _apply_safe_mode(args) -> None:
     if not getattr(args, "safe_mode", False):
         return
-    os.environ["HADES_SAFE_MODE"] = "1"
-    os.environ["HADES_IGNORE_USER_CONFIG"] = "1"
-    os.environ["HADES_IGNORE_RULES"] = "1"
+    env_set("HADES_SAFE_MODE", "1")
+    env_set("HADES_IGNORE_USER_CONFIG", "1")
+    env_set("HADES_IGNORE_RULES", "1")
 
 
 def _set_chat_arg_defaults(args) -> None:
