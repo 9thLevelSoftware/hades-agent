@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from utils import skill_vendor_metadata
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -105,9 +107,7 @@ def parse_blueprint(skill_md_text: str) -> Optional[BlueprintSpec]:
 
     name = str(fm.get("name", "")).strip()
 
-    meta = fm.get("metadata")
-    hermes = meta.get("hermes") if isinstance(meta, dict) else None
-    blueprint = hermes.get("blueprint") if isinstance(hermes, dict) else None
+    blueprint = skill_vendor_metadata(fm).get("blueprint")
     if blueprint is None:
         return None
     if not isinstance(blueprint, dict):

@@ -1450,11 +1450,11 @@ def skill_view(
                     )
 
         # Read tags/related_skills with backward compat:
-        # Check metadata.hermes.* first (agentskills.io convention), fall back to top-level
-        hermes_meta = {}
-        metadata = frontmatter.get("metadata")
-        if isinstance(metadata, dict):
-            hermes_meta = metadata.get("hermes", {}) or {}
+        # Check metadata.hermes.* / metadata.hades.* first (agentskills.io
+        # convention; hermes namespace wins), fall back to top-level.
+        from utils import skill_vendor_metadata
+
+        hermes_meta = skill_vendor_metadata(frontmatter)
 
         tags = _parse_tags(hermes_meta.get("tags") or frontmatter.get("tags", ""))
         related_skills = _parse_tags(

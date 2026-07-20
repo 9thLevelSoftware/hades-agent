@@ -257,6 +257,79 @@ def test_entry_point_scan_dedupes_dual_registered(monkeypatch):
     assert dual[0].path == "hades_variant:register"
 
 
+# ── Skills vendor-metadata namespace ─────────────────────────────────────────
+
+
+def test_skill_vendor_metadata_hermes_namespace():
+    from utils import skill_vendor_metadata
+
+    fm = {"metadata": {"hermes": {"tags": ["a"], "blueprint": {"schedule": "0 9 * * *"}}}}
+    assert skill_vendor_metadata(fm)["tags"] == ["a"]
+
+
+def test_skill_vendor_metadata_hades_fallback():
+    from utils import skill_vendor_metadata
+
+    fm = {"metadata": {"hades": {"tags": ["b"]}}}
+    assert skill_vendor_metadata(fm)["tags"] == ["b"]
+
+
+def test_skill_vendor_metadata_hermes_wins_over_hades():
+    from utils import skill_vendor_metadata
+
+    fm = {"metadata": {"hermes": {"tags": ["h"]}, "hades": {"tags": ["x"]}}}
+    assert skill_vendor_metadata(fm)["tags"] == ["h"]
+
+
+def test_skill_vendor_metadata_malformed():
+    from utils import skill_vendor_metadata
+
+    assert skill_vendor_metadata({}) == {}
+    assert skill_vendor_metadata({"metadata": "nope"}) == {}
+    assert skill_vendor_metadata({"metadata": {"hermes": "nope"}}) == {}
+
+
+def test_blueprint_parses_from_hades_namespace():
+    from tools.blueprints import parse_blueprint
+
+    skill_md = (
+        "---\n"
+        "name: test-bp\n"
+        "description: x\n"
+        "metadata:\n"
+        "  hades:\n"
+        "    blueprint:\n"
+        '      schedule: "0 9 * * *"\n'
+        "---\n"
+        "body\n"
+    )
+    spec = parse_blueprint(skill_md)
+    assert spec is not None
+    assert spec.schedule == "0 9 * * *"
+
+
+def _guard_findings(tmp_path, content):
+    from tools.skills_guard import scan_file
+
+    f = tmp_path / "SKILL.md"
+    f.write_text(content, encoding="utf-8")
+    findings = scan_file(f)
+    f.unlink()
+    return {(fi.pattern_id, fi.severity) for fi in findings}
+
+
+def test_skills_guard_flags_hades_paths_like_hermes(tmp_path):
+    hermes_env = _guard_findings(tmp_path, "cat ~/.hermes/.env\n")
+    hades_env = _guard_findings(tmp_path, "cat ~/.hades/.env\n")
+    assert ("hermes_env_access", "critical") in hermes_env
+    assert hermes_env == hades_env
+
+    hermes_cfg = _guard_findings(tmp_path, "edit .hermes/config.yaml\n")
+    hades_cfg = _guard_findings(tmp_path, "edit .hades/config.yaml\n")
+    assert ("hermes_config_mod", "critical") in hades_cfg
+    assert hermes_cfg == hades_cfg
+
+
 # ── Toolset key aliasing ─────────────────────────────────────────────────────
 
 

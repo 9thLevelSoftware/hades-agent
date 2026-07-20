@@ -29,6 +29,26 @@ def _env_lookup(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def skill_vendor_metadata(frontmatter: dict) -> dict:
+    """Return a skill's vendor metadata namespace from SKILL.md frontmatter.
+
+    The wire format is ``metadata.hermes`` (the upstream agentskills.io
+    convention — hades-authored skills keep emitting it so they stay
+    portable to stock hermes-agent). ``metadata.hades`` is accepted as a
+    read-side fallback; ``metadata.hermes`` wins when both are present.
+    """
+    metadata = frontmatter.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    hermes_meta = metadata.get("hermes")
+    if isinstance(hermes_meta, dict) and hermes_meta:
+        return hermes_meta
+    hades_meta = metadata.get("hades")
+    if isinstance(hades_meta, dict):
+        return hades_meta
+    return hermes_meta if isinstance(hermes_meta, dict) else {}
+
+
 def is_truthy_value(value: Any, default: bool = False) -> bool:
     """Coerce bool-ish values using the project's shared truthy string set."""
     if value is None:
