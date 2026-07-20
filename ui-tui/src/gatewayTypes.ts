@@ -124,6 +124,138 @@ export interface AutonomyExecResponse {
   suggestions: AutonomyRuleDoc[]
 }
 
+// ── Verified outcome & artifact receipts (native /receipt) ───────────
+
+export interface ReceiptSourceKeyDoc {
+  source_id: string
+  source_kind: string
+}
+
+export interface ReceiptRequestedOutcomeDoc {
+  constraints: string[]
+  content_hash: string
+  description: string
+  outcome_kind: string
+  producer_id: string
+}
+
+export interface ReceiptClaimDoc {
+  artifact_ids: string[]
+  claim_id: string
+  claim_kind: string
+  content_hash: string
+  evidence_ids: string[]
+  expected_json: string
+  observed_json: string
+  required: boolean
+  statement: string
+  uncertainty: string[]
+  verdict: string
+}
+
+export interface ReceiptEvidenceDoc {
+  artifact_ids: string[]
+  content_hash: string
+  evidence_id: string
+  evidence_kind: string
+  fresh_until: null | string
+  observed_at: string
+  payload_hash: string
+  producer_id: string
+  source_ref: string
+  summary: string
+}
+
+export interface ReceiptArtifactDoc {
+  artifact_id: string
+  captured_at: string
+  content_hash: string
+  display_name: string
+  media_type: null | string
+  mtime_ns: null | number
+  sha256: string
+  size_bytes: number
+  source_kind: string
+  source_ref: string
+}
+
+export interface ReceiptSummary {
+  content_hash: string
+  decided_at: string
+  receipt_id: string
+  scorer_id: string
+  scorer_version: string
+  session_id: null | string
+  source: ReceiptSourceKeyDoc
+  status: string
+  subject_id: string
+  subject_kind: string
+}
+
+export interface ReceiptDetail {
+  artifacts: ReceiptArtifactDoc[]
+  claims: ReceiptClaimDoc[]
+  content_hash: string
+  decided_at: string
+  evidence: ReceiptEvidenceDoc[]
+  mission_id: null | string
+  receipt_id: string
+  requested_outcome: ReceiptRequestedOutcomeDoc
+  scorer_id: string
+  scorer_version: string
+  session_id: null | string
+  source: ReceiptSourceKeyDoc
+  status: string
+  subject_id: string
+  subject_kind: string
+  transaction_id: null | string
+  turn_id: null | string
+  uncertainty: string[]
+}
+
+export interface ReceiptObservationDetail {
+  artifacts: ReceiptArtifactDoc[]
+  claims: ReceiptClaimDoc[]
+  content_hash: string
+  evidence: ReceiptEvidenceDoc[]
+  observation_id: string
+  observed_at: string
+  previous_observation_id: null | string
+  receipt_id: string
+  scorer_id: string
+  scorer_version: string
+  status: string
+  uncertainty: string[]
+}
+
+/** Every claim→evidence→artifact edge as one structured record. */
+export interface ReceiptClaimEdge {
+  artifact_ids: string[]
+  claim_id: string
+  claim_kind: string
+  evidence_ids: string[]
+  required: boolean
+  statement: string
+  uncertainty: string[]
+  verdict: string
+}
+
+export interface ReceiptExecResponse {
+  action: string
+  claim_edges?: ReceiptClaimEdge[]
+  exit_code: number
+  export_path?: string
+  observations?: ReceiptObservationDetail[]
+  ok: boolean
+  /** Shared truthful text rendering from hades_cli.receipts (one renderer). */
+  output: string
+  profile_home: string
+  receipt?: ReceiptDetail
+  receipts?: ReceiptSummary[]
+  retention_plan_hash?: string
+  warning?: string
+}
+
 // ── Terminal billing (Phase 2b) ──────────────────────────────────────
 
 // Wire shapes now live in @hermes/shared for reuse by TypeScript clients.

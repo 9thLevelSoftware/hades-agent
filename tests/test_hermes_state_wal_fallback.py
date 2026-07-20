@@ -367,3 +367,35 @@ class TestSessionDbUsesWalFallback:
             assert get_last_init_error() is None
         finally:
             db.close()
+
+
+class TestReceiptSchemaUnderJournalFallback:
+    """Canonical receipt tables must exist even when WAL falls back to
+    DELETE journal mode (NFS/SMB/FUSE), so receipt persistence never
+    silently disappears on network filesystems."""
+
+    def test_receipt_tables_created_under_delete_journal(self, tmp_path):
+        def _force_delete(conn, db_label="state.db"):
+            conn.execute("PRAGMA journal_mode=DELETE")
+            return "delete"
+
+        with patch.object(hades_state, "apply_wal_with_fallback", _force_delete):
+            db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            mode = db._conn.execute("PRAGMA journal_mode").fetchone()[0]
+            assert mode.lower() == "delete"
+            names = {
+                row[0]
+                for row in db._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            assert {
+                "receipts",
+                "receipt_observations",
+                "receipt_attestations",
+                "receipt_deletion_tombstones",
+            } <= names
+            assert db._receipt_schema_ready is True
+        finally:
+            db.close()

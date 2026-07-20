@@ -281,3 +281,92 @@ class TestCodeExecutionValidation:
         assert "code_execution.tools.exclude" in messages
         assert "code_execution.artifacts.max_bytes" in messages
         assert "code_execution.artifacts.max_total_bytes" in messages
+
+
+class TestReceiptsValidation:
+    """The exact safe `receipts:` section from the receipts plan."""
+
+    def test_receipts_is_a_known_root_section(self):
+        assert "receipts" in _KNOWN_ROOT_KEYS
+
+    def test_receipts_defaults_match_plan_contract(self):
+        from hades_cli.config import DEFAULT_CONFIG
+
+        assert DEFAULT_CONFIG["receipts"] == {
+            "mode": "off",
+            "retention_days": 365,
+            "artifact_locator_retention_days": 90,
+            "export_redaction": "public",
+            "signing": {"provider": "", "required": False},
+        }
+
+    def test_valid_receipts_config_has_no_issues(self):
+        assert validate_config_structure({
+            "receipts": {
+                "mode": "capture",
+                "retention_days": 365,
+                "artifact_locator_retention_days": 90,
+                "export_redaction": "public",
+                "signing": {"provider": "sigstore-local", "required": False},
+            },
+        }) == []
+
+    def test_yaml_off_boolean_mode_is_accepted(self):
+        # YAML 1.1 parses a bare `off` as boolean False; that spelling of
+        # the documented default must not be flagged.
+        assert validate_config_structure({"receipts": {"mode": False}}) == []
+
+    def test_invalid_receipts_values_are_reported(self):
+        issues = validate_config_structure({
+            "receipts": {
+                "mode": "banana",
+                "retention_days": 0,
+                "artifact_locator_retention_days": -1,
+                "export_redaction": "csv",
+                "signing": {"provider": "bad provider!", "required": "yes"},
+            },
+        })
+        messages = "\n".join(issue.message for issue in issues)
+        assert "receipts.mode" in messages
+        assert "receipts.retention_days" in messages
+        assert "receipts.artifact_locator_retention_days" in messages
+        assert "receipts.export_redaction" in messages
+        assert "receipts.signing.provider" in messages
+        assert "receipts.signing.required" in messages
+
+    def test_retention_bounds_are_enforced(self):
+        issues = validate_config_structure({
+            "receipts": {"retention_days": 4000},
+        })
+        assert any("receipts.retention_days" in i.message for i in issues)
+        issues = validate_config_structure({
+            "receipts": {
+                "retention_days": 30,
+                "artifact_locator_retention_days": 90,
+            },
+        })
+        assert any(
+            "receipts.artifact_locator_retention_days" in i.message
+            for i in issues
+        )
+
+    def test_signing_rejects_embedded_credentials(self):
+        # Config stores only a provider ID and whether signing is
+        # required; credentials never live in config.yaml.
+        issues = validate_config_structure({
+            "receipts": {
+                "signing": {
+                    "provider": "sigstore-local",
+                    "required": False,
+                    "api_key": "sk-live-secret",
+                },
+            },
+        })
+        assert any(
+            "receipts.signing" in i.message and "api_key" in i.message
+            for i in issues
+        )
+
+    def test_receipts_must_be_a_mapping(self):
+        issues = validate_config_structure({"receipts": []})
+        assert any("receipts must be a mapping" in i.message for i in issues)

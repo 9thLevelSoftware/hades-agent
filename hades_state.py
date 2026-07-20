@@ -1037,34 +1037,12 @@ CREATE TABLE IF NOT EXISTS effect_transactions (
     UNIQUE (mission_id, sequence_no)
 );
 
-CREATE TABLE IF NOT EXISTS receipts (
-    receipt_id TEXT PRIMARY KEY,
-    mission_id TEXT NOT NULL,
-    status TEXT NOT NULL,
-    objective TEXT NOT NULL,
-    constraints_json TEXT NOT NULL,
-    execution_ids_json TEXT NOT NULL,
-    transaction_ids_json TEXT NOT NULL,
-    before_after_json TEXT NOT NULL,
-    claims_json TEXT NOT NULL,
-    verifier_json TEXT NOT NULL,
-    evidence_json TEXT NOT NULL,
-    artifacts_json TEXT NOT NULL,
-    uncertainty_json TEXT NOT NULL,
-    freshness_json TEXT NOT NULL,
-    content_hash TEXT NOT NULL UNIQUE,
-    signature_json TEXT,
-    created_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS receipt_observations (
-    observation_id TEXT PRIMARY KEY,
-    receipt_id TEXT NOT NULL REFERENCES receipts(receipt_id) ON DELETE CASCADE,
-    status TEXT NOT NULL,
-    evidence_json TEXT NOT NULL,
-    content_hash TEXT NOT NULL UNIQUE,
-    created_at INTEGER NOT NULL
-);
+-- The provisional vertical-slice ``receipts``/``receipt_observations``
+-- tables are deliberately NOT declared here. The canonical receipt schema
+-- lives in RECEIPT_SCHEMA_STATEMENTS and is created by
+-- _init_receipt_schema(), which first migrates any existing v1-shaped
+-- tables atomically. Declaring the old shape here would make
+-- _reconcile_columns() fight the canonical shape on every open.
 
 CREATE TABLE IF NOT EXISTS mission_outbox (
     outbox_id TEXT PRIMARY KEY,
@@ -1242,6 +1220,192 @@ CREATE INDEX IF NOT EXISTS idx_mission_outbox_due
     ON mission_outbox(status, not_before, lease_expires_at);
 """
 
+# ── Verified Outcome & Artifact Receipts (agent/receipt_store.py) ──
+# Canonical receipt tables are deliberately NOT part of SCHEMA_SQL:
+# _init_receipt_schema() must first inspect any pre-existing provisional
+# vertical-slice `receipts` table and atomically migrate it. If the DDL
+# lived in SCHEMA_SQL, `CREATE TABLE IF NOT EXISTS receipts` would adopt
+# the old v1 shape and _reconcile_columns() would then bolt canonical
+# columns onto it — destroying the "untouched v1 or fully canonical,
+# never half-migrated" invariant. Statements are individual strings so
+# the migration can execute them inside one BEGIN IMMEDIATE transaction
+# (executescript() would auto-commit and break atomicity).
+#
+# ReceiptStatus is frozen at exactly these five values; the CHECK
+# constraints are the storage-level enforcement of that contract.
+# Receipts, observations, and attestations are immutable: triggers abort
+# every UPDATE, and DELETE is permitted only after the retention service
+# has appended a receipt_deletion_tombstones row in the same transaction.
+RECEIPT_SCHEMA_STATEMENTS: tuple = (
+    """CREATE TABLE IF NOT EXISTS receipts (
+    receipt_id TEXT PRIMARY KEY,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    session_id TEXT,
+    turn_id TEXT,
+    mission_id TEXT,
+    transaction_id TEXT,
+    requested_outcome_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+      'verified','completed_unverified','failed','blocked','unknown_effect')),
+    claims_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    artifacts_json TEXT NOT NULL,
+    uncertainty_json TEXT NOT NULL,
+    scorer_id TEXT NOT NULL,
+    scorer_version TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    inserted_at REAL NOT NULL,
+    UNIQUE(source_kind, source_id)
+)""",
+    """CREATE TABLE IF NOT EXISTS receipt_observations (
+    observation_id TEXT PRIMARY KEY,
+    receipt_id TEXT NOT NULL REFERENCES receipts(receipt_id) ON DELETE CASCADE,
+    previous_observation_id TEXT REFERENCES receipt_observations(observation_id),
+    status TEXT NOT NULL CHECK(status IN (
+      'verified','completed_unverified','failed','blocked','unknown_effect')),
+    claims_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    artifacts_json TEXT NOT NULL,
+    uncertainty_json TEXT NOT NULL,
+    scorer_id TEXT NOT NULL,
+    scorer_version TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    inserted_at REAL NOT NULL,
+    UNIQUE(receipt_id, previous_observation_id, content_hash)
+)""",
+    """CREATE TABLE IF NOT EXISTS receipt_attestations (
+    attestation_id TEXT PRIMARY KEY,
+    target_kind TEXT NOT NULL CHECK(target_kind IN ('receipt','observation')),
+    target_id TEXT NOT NULL,
+    target_content_hash TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    algorithm TEXT NOT NULL,
+    signature_b64 TEXT NOT NULL,
+    signed_at TEXT NOT NULL,
+    verification_state TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE
+)""",
+    """CREATE TABLE IF NOT EXISTS receipt_deletion_tombstones (
+    receipt_id TEXT PRIMARY KEY,
+    receipt_content_hash TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_receipts_subject
+    ON receipts(subject_kind, subject_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_receipts_status_decided
+    ON receipts(status, decided_at)""",
+    """CREATE INDEX IF NOT EXISTS idx_receipts_session_turn
+    ON receipts(session_id, turn_id)""",
+    """CREATE INDEX IF NOT EXISTS idx_receipts_mission
+    ON receipts(mission_id) WHERE mission_id IS NOT NULL""",
+    """CREATE INDEX IF NOT EXISTS idx_receipts_transaction
+    ON receipts(transaction_id) WHERE transaction_id IS NOT NULL""",
+    """CREATE INDEX IF NOT EXISTS idx_receipt_observations_order
+    ON receipt_observations(receipt_id, inserted_at)""",
+    """CREATE INDEX IF NOT EXISTS idx_receipt_attestations_target
+    ON receipt_attestations(target_kind, target_id)""",
+    """CREATE TRIGGER IF NOT EXISTS receipts_immutable_update
+    BEFORE UPDATE ON receipts
+    BEGIN
+        SELECT RAISE(ABORT, 'receipts rows are immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS receipt_observations_immutable_update
+    BEFORE UPDATE ON receipt_observations
+    BEGIN
+        SELECT RAISE(ABORT, 'receipt observations are immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS receipt_attestations_immutable_update
+    BEFORE UPDATE ON receipt_attestations
+    BEGIN
+        SELECT RAISE(ABORT, 'receipt attestations are immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS receipt_tombstones_immutable_update
+    BEFORE UPDATE ON receipt_deletion_tombstones
+    BEGIN
+        SELECT RAISE(ABORT, 'receipt deletion tombstones are immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS receipts_delete_requires_tombstone
+    BEFORE DELETE ON receipts
+    WHEN NOT EXISTS (
+        SELECT 1 FROM receipt_deletion_tombstones t
+        WHERE t.receipt_id = OLD.receipt_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT,
+            'receipt deletion requires a retention tombstone');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS receipt_observations_delete_requires_tombstone
+    BEFORE DELETE ON receipt_observations
+    WHEN NOT EXISTS (
+        SELECT 1 FROM receipt_deletion_tombstones t
+        WHERE t.receipt_id = OLD.receipt_id
+    )
+    BEGIN
+        SELECT RAISE(ABORT,
+            'receipt observation deletion requires a retention tombstone');
+    END""",
+    # ── Artifact digests and locations (agent/receipt_artifacts.py) ──
+    # One content-addressed digest row per unique byte sequence; every
+    # registration keeps its own deduplicated source link in the bounded
+    # artifact_locations table. Raw local locators live ONLY in
+    # locator_json and are excluded from public export; the public digest
+    # carries redacted source references. Digest rows are immutable;
+    # location rows allow updating only the last_checked_at bookkeeping
+    # column written by read-only rechecks.
+    """CREATE TABLE IF NOT EXISTS artifact_digests (
+    artifact_id TEXT PRIMARY KEY,
+    sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    media_type TEXT,
+    display_name TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE
+)""",
+    """CREATE TABLE IF NOT EXISTS artifact_locations (
+    location_id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL REFERENCES artifact_digests(artifact_id),
+    source_kind TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    locator_json TEXT NOT NULL,
+    locator_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_checked_at TEXT,
+    UNIQUE(source_kind, source_ref, locator_hash)
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_artifact_digests_sha256
+    ON artifact_digests(sha256, size_bytes)""",
+    """CREATE INDEX IF NOT EXISTS idx_artifact_locations_artifact
+    ON artifact_locations(artifact_id, created_at)""",
+    """CREATE TRIGGER IF NOT EXISTS artifact_digests_immutable_update
+    BEFORE UPDATE ON artifact_digests
+    BEGIN
+        SELECT RAISE(ABORT, 'artifact digests are immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS artifact_locations_limited_update
+    BEFORE UPDATE ON artifact_locations
+    WHEN NEW.location_id IS NOT OLD.location_id
+        OR NEW.artifact_id IS NOT OLD.artifact_id
+        OR NEW.source_kind IS NOT OLD.source_kind
+        OR NEW.source_ref IS NOT OLD.source_ref
+        OR NEW.locator_json IS NOT OLD.locator_json
+        OR NEW.locator_hash IS NOT OLD.locator_hash
+        OR NEW.created_at IS NOT OLD.created_at
+    BEGIN
+        SELECT RAISE(ABORT,
+            'artifact locations allow only last_checked_at updates');
+    END""",
+)
+
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content
@@ -1371,6 +1535,10 @@ class SessionDB:
         # (see the `autonomy` property; import deferred to avoid a
         # module-level hades_state <-> agent.autonomy cycle).
         self._autonomy_store = None
+        # True once the canonical receipt tables are known-present for this
+        # handle. Stays False on read-only attaches (schema init skipped)
+        # and when a v1 receipt-table migration failed and rolled back.
+        self._receipt_schema_ready = False
         self._conn = None
         try:
             if read_only:
@@ -1961,6 +2129,69 @@ class SessionDB:
                         )
 
     @staticmethod
+    def _receipt_table_shape(cursor: sqlite3.Cursor) -> str:
+        """Classify any existing ``receipts`` table.
+
+        Returns ``"absent"`` (no table — clean create), ``"canonical"``
+        (current schema), ``"v1"`` (provisional vertical-slice shape that
+        must be migrated atomically), or ``"unknown"`` (leave untouched
+        and keep receipt storage disabled rather than guess).
+        """
+        rows = cursor.execute('PRAGMA table_info("receipts")').fetchall()
+        if not rows:
+            return "absent"
+        cols = {row[1] for row in rows}
+        if {"source_kind", "source_id", "requested_outcome_json",
+                "decided_at"} <= cols:
+            return "canonical"
+        if {"objective", "before_after_json", "freshness_json",
+                "signature_json"} <= cols:
+            return "v1"
+        return "unknown"
+
+    def _init_receipt_schema(self, cursor: sqlite3.Cursor) -> None:
+        """Create canonical receipt tables, migrating any v1 tables first.
+
+        The provisional vertical-slice ``receipts``/``receipt_observations``
+        tables are migration input, not a second schema. Migration is one
+        BEGIN IMMEDIATE transaction inside
+        :func:`agent.receipt_store.migrate_v1_receipt_tables`; any failure
+        rolls back to the untouched v1 tables and receipt storage stays
+        disabled for this process (``_receipt_schema_ready`` False) so a
+        later, fixed build can retry. There is never a half-migrated state.
+        """
+        self._receipt_schema_ready = False
+        shape = self._receipt_table_shape(cursor)
+        if shape == "v1":
+            # Deferred import: hades_state must stay importable without the
+            # receipt layer, and agent.receipt_store imports hades_state's
+            # RECEIPT_SCHEMA_STATEMENTS at call time.
+            from agent.receipt_store import migrate_v1_receipt_tables
+            try:
+                report = migrate_v1_receipt_tables(self._conn)
+            except Exception:
+                logger.exception(
+                    "provisional receipt-table migration failed for %s; the "
+                    "original v1 tables are preserved untouched and receipt "
+                    "storage is disabled for this process.", self.db_path,
+                )
+                return
+            logger.info(
+                "migrated provisional receipt tables in %s: %s",
+                self.db_path, report,
+            )
+        elif shape == "unknown":
+            logger.error(
+                "existing 'receipts' table in %s has an unrecognized shape; "
+                "leaving it untouched and disabling receipt storage.",
+                self.db_path,
+            )
+            return
+        for statement in RECEIPT_SCHEMA_STATEMENTS:
+            cursor.execute(statement)
+        self._receipt_schema_ready = True
+
+    @staticmethod
     def _legacy_outbox_row_value(
         row: Any, column: str, default: Any = None
     ) -> Any:
@@ -2371,6 +2602,12 @@ class SessionDB:
         except BaseException:
             conn.rollback()
             raise
+
+        # ── Canonical receipt tables (with atomic v1 migration) ────────
+        # Runs after SCHEMA_SQL (state_meta must exist) and after the
+        # outbox repair transaction, and outside SCHEMA_SQL deliberately —
+        # see the RECEIPT_SCHEMA_STATEMENTS comment.
+        self._init_receipt_schema(cursor)
 
         # Indexes that reference reconciler-added columns must be created
         # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
@@ -9386,287 +9623,6 @@ class SessionDB:
 
         row = self._execute_read(_read)
         return self._effect_transaction_from_row(row) if row is not None else None
-
-    # ── Receipts + observations ─────────────────────────────────────────
-
-    @dataclass(frozen=True)
-    class ReceiptRecord:
-        receipt_id: str
-        mission_id: str
-        status: str
-        objective: str
-        constraints: Any
-        execution_ids: Any
-        transaction_ids: Any
-        before_after: Any
-        claims: Any
-        verifier: Any
-        evidence: Any
-        artifacts: Any
-        uncertainty: Any
-        freshness: Any
-        content_hash: str
-        signature: Any
-        created_at: int
-
-    @dataclass(frozen=True)
-    class ReceiptObservationRecord:
-        observation_id: str
-        receipt_id: str
-        status: str
-        evidence: Any
-        content_hash: str
-        created_at: int
-
-    @staticmethod
-    def _receipt_from_row(row: Any) -> "SessionDB.ReceiptRecord":
-        d = SessionDB._effect_record_dict(row)
-        return SessionDB.ReceiptRecord(
-            receipt_id=d["receipt_id"],
-            mission_id=d["mission_id"],
-            status=d["status"],
-            objective=d["objective"],
-            constraints=copy.deepcopy(
-                _redact_durable_value(SessionDB._effect_parse_json(d["constraints_json"]))
-            ),
-            execution_ids=copy.deepcopy(SessionDB._effect_parse_json(d["execution_ids_json"])),
-            transaction_ids=copy.deepcopy(SessionDB._effect_parse_json(d["transaction_ids_json"])),
-            before_after=copy.deepcopy(
-                _redact_durable_value(SessionDB._effect_parse_json(d["before_after_json"]))
-            ),
-            claims=copy.deepcopy(
-                _redact_durable_value(SessionDB._effect_parse_json(d["claims_json"]))
-            ),
-            verifier=copy.deepcopy(
-                _redact_durable_value(SessionDB._effect_parse_json(d["verifier_json"]))
-            ),
-            evidence=copy.deepcopy(
-                _redact_durable_value(SessionDB._effect_parse_json(d["evidence_json"]))
-            ),
-            artifacts=copy.deepcopy(
-                _redact_durable_value(SessionDB._effect_parse_json(d["artifacts_json"]))
-            ),
-            uncertainty=copy.deepcopy(
-                _redact_durable_value(SessionDB._effect_parse_json(d["uncertainty_json"]))
-            ),
-            freshness=copy.deepcopy(
-                _redact_durable_value(SessionDB._effect_parse_json(d["freshness_json"]))
-            ),
-            content_hash=d["content_hash"],
-            signature=copy.deepcopy(
-                _redact_durable_value(SessionDB._effect_parse_json(d.get("signature_json")))
-            ),
-            created_at=d["created_at"],
-        )
-
-    @staticmethod
-    def _receipt_observation_from_row(row: Any) -> "SessionDB.ReceiptObservationRecord":
-        d = SessionDB._effect_record_dict(row)
-        return SessionDB.ReceiptObservationRecord(
-            observation_id=d["observation_id"],
-            receipt_id=d["receipt_id"],
-            status=d["status"],
-            evidence=copy.deepcopy(
-                _redact_durable_value(SessionDB._effect_parse_json(d["evidence_json"]))
-            ),
-            content_hash=d["content_hash"],
-            created_at=d["created_at"],
-        )
-
-    @staticmethod
-    def _validate_receipt_identity(
-        receipt_id: str, content_hash: str
-    ) -> None:
-        if not isinstance(receipt_id, str) or not receipt_id:
-            raise ValueError("receipt_id must be a non-empty string")
-        if not isinstance(content_hash, str) or not content_hash:
-            raise ValueError("content_hash must be a non-empty string")
-
-    def insert_receipt(
-        self,
-        *,
-        receipt_id: str,
-        mission_id: str,
-        status: str,
-        objective: str,
-        constraints_json: str,
-        execution_ids_json: str,
-        transaction_ids_json: str,
-        before_after_json: str,
-        claims_json: str,
-        verifier_json: str,
-        evidence_json: str,
-        artifacts_json: str,
-        uncertainty_json: str,
-        freshness_json: str,
-        content_hash: str,
-        signature_json: Optional[str] = None,
-    ) -> "SessionDB.ReceiptRecord":
-        """Insert an immutable receipt row.
-
-        Receipts are write-once. A duplicate ``receipt_id`` (even with
-        different content) is a hard conflict; the storage layer never
-        updates an existing receipt in place. ``content_hash`` is also
-        unique so the same evidence payload cannot surface under two
-        receipt ids.
-        """
-        self._validate_receipt_identity(receipt_id, content_hash)
-        # Boundary validation — non-blank mission_id / status /
-        # objective, since each is part of the receipt's identity and
-        # the storage layer is the last line of defense.
-        if not isinstance(mission_id, str) or not mission_id:
-            raise ValueError("mission_id must be a non-empty string")
-        if not isinstance(status, str) or not status:
-            raise ValueError("status must be a non-empty string")
-        if not isinstance(objective, str) or not objective:
-            raise ValueError("objective must be a non-empty string")
-        # Parse + canonicalize every required JSON string before SQL.
-        # Stored bytes are always canonical (sort_keys + tight
-        # separators); malformed input raises here, never silently
-        # becomes ``None`` on read.
-        constraints_json = self._effect_canonical_redacted_from_string(constraints_json)
-        execution_ids_json = self._effect_canonical_redacted_from_string(execution_ids_json)
-        transaction_ids_json = self._effect_canonical_redacted_from_string(transaction_ids_json)
-        before_after_json = self._effect_canonical_redacted_from_string(before_after_json)
-        claims_json = self._effect_canonical_redacted_from_string(claims_json)
-        verifier_json = self._effect_canonical_redacted_from_string(verifier_json)
-        evidence_json = self._effect_canonical_redacted_from_string(evidence_json)
-        artifacts_json = self._effect_canonical_redacted_from_string(artifacts_json)
-        uncertainty_json = self._effect_canonical_redacted_from_string(uncertainty_json)
-        freshness_json = self._effect_canonical_redacted_from_string(freshness_json)
-        # Optional signature, same parsing rules when present.
-        if signature_json is not None:
-            signature_json = self._effect_canonical_redacted_from_string(signature_json)
-        # Integral seconds — see effect_transactions note.
-        now = int(time.time())
-
-        def _insert(conn: sqlite3.Connection) -> Any:
-            try:
-                conn.execute(
-                    """INSERT INTO receipts (
-                           receipt_id, mission_id, status, objective,
-                           constraints_json, execution_ids_json,
-                           transaction_ids_json, before_after_json,
-                           claims_json, verifier_json, evidence_json,
-                           artifacts_json, uncertainty_json, freshness_json,
-                           content_hash, signature_json, created_at
-                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        receipt_id,
-                        mission_id,
-                        status,
-                        objective,
-                        constraints_json,
-                        execution_ids_json,
-                        transaction_ids_json,
-                        before_after_json,
-                        claims_json,
-                        verifier_json,
-                        evidence_json,
-                        artifacts_json,
-                        uncertainty_json,
-                        freshness_json,
-                        content_hash,
-                        signature_json,
-                        now,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise ValueError(
-                    f"receipt conflict for receipt_id={receipt_id!r} "
-                    f"content_hash={content_hash!r}: {exc}"
-                ) from exc
-            return conn.execute(
-                "SELECT * FROM receipts WHERE receipt_id = ?",
-                (receipt_id,),
-            ).fetchone()
-
-        row = self._execute_write(_insert)
-        return self._receipt_from_row(row)
-
-    def get_receipt(self, receipt_id: str) -> Optional["SessionDB.ReceiptRecord"]:
-        def _read(conn: sqlite3.Connection) -> Any:
-            return conn.execute(
-                "SELECT * FROM receipts WHERE receipt_id = ?",
-                (receipt_id,),
-            ).fetchone()
-
-        row = self._execute_read(_read)
-        return self._receipt_from_row(row) if row is not None else None
-
-    def append_receipt_observation(
-        self,
-        *,
-        receipt_id: str,
-        status: str,
-        evidence: Any,
-        content_hash: str,
-        observation_id: Optional[str] = None,
-    ) -> "SessionDB.ReceiptObservationRecord":
-        """Append a new observation to an existing receipt.
-
-        Observations are append-only: the underlying ``receipts`` row is
-        never modified. ``content_hash`` is unique across observations
-        so the same evidence payload cannot be re-appended.
-        """
-        if not isinstance(receipt_id, str) or not receipt_id:
-            raise ValueError("receipt_id must be a non-empty string")
-        if not isinstance(status, str) or not status:
-            raise ValueError("status must be a non-empty string")
-        if not isinstance(content_hash, str) or not content_hash:
-            raise ValueError("content_hash must be a non-empty string")
-        obs_id = observation_id or f"obs-{int(time.time() * 1_000_000)}-{secrets.token_hex(6)}"
-        evidence_json = self._canonicalize_payload(_redact_durable_value(evidence))
-        # Integral seconds — see effect_transactions note.
-        now = int(time.time())
-
-        def _append(conn: sqlite3.Connection) -> Any:
-            try:
-                conn.execute(
-                    """INSERT INTO receipt_observations (
-                           observation_id, receipt_id, status,
-                           evidence_json, content_hash, created_at
-                       ) VALUES (?, ?, ?, ?, ?, ?)""",
-                    (
-                        obs_id,
-                        receipt_id,
-                        status,
-                        evidence_json,
-                        content_hash,
-                        now,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise ValueError(
-                    f"receipt observation conflict for "
-                    f"receipt_id={receipt_id!r} content_hash={content_hash!r}: {exc}"
-                ) from exc
-            return conn.execute(
-                "SELECT * FROM receipt_observations WHERE observation_id = ?",
-                (obs_id,),
-            ).fetchone()
-
-        row = self._execute_write(_append)
-        return self._receipt_observation_from_row(row)
-
-    def list_receipt_observations(
-        self, receipt_id: str
-    ) -> List["SessionDB.ReceiptObservationRecord"]:
-        def _read(conn: sqlite3.Connection) -> List[Any]:
-            # ``rowid`` is the SQLite-native insertion order and is the
-            # deterministic tiebreaker when multiple observations share
-            # the same integer-second ``created_at``.  Sorting by
-            # ``observation_id`` would scramble ties because the id is
-            # partly derived from ``time.time()`` and partly from a
-            # random hex token.
-            return conn.execute(
-                "SELECT * FROM receipt_observations "
-                "WHERE receipt_id = ? ORDER BY created_at, rowid",
-                (receipt_id,),
-            ).fetchall()
-
-        rows = self._execute_read(_read)
-        return [self._receipt_observation_from_row(row) for row in rows]
 
     # ── Mission outbox ──────────────────────────────────────────────────
 

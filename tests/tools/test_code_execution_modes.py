@@ -594,5 +594,40 @@ class TestSecurityInvariantsAcrossModes(unittest.TestCase):
         self.assertIn("delegate_task_available: False", result["output"])
 
 
+# ---------------------------------------------------------------------------
+# Receipt artifact correlation context (Task 3)
+# ---------------------------------------------------------------------------
+
+
+class TestExecutionContextObservability(unittest.TestCase):
+    """New receipt correlation fields never change existing behavior."""
+
+    def test_positional_construction_remains_compatible(self):
+        context = code_execution_tool.CodeExecutionContext("task", None, (), ())
+        self.assertIsNone(context.turn_id)
+        self.assertIsNone(context.tool_call_id)
+
+    def test_child_rpc_payload_never_carries_correlation_ids(self):
+        """turn/tool-call IDs are parent-side receipt provenance only."""
+        context = code_execution_tool.CodeExecutionContext(
+            task_id="task",
+            session_id="sess",
+            enabled_toolsets=(),
+            disabled_toolsets=(),
+            turn_id="turn-1",
+            tool_call_id="call-1",
+        )
+        payload = code_execution_tool._context_payload(context)
+        self.assertNotIn("turn_id", payload)
+        self.assertNotIn("tool_call_id", payload)
+
+    def test_model_visible_schema_is_unchanged_by_correlation_fields(self):
+        schema = build_execute_code_schema(set(SANDBOX_ALLOWED_TOOLS))
+        parameters = schema["parameters"]
+        self.assertNotIn("turn_id", parameters["properties"])
+        self.assertNotIn("tool_call_id", parameters["properties"])
+        self.assertNotIn("artifact_id", parameters["properties"])
+
+
 if __name__ == "__main__":
     unittest.main()

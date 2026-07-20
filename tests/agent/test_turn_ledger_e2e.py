@@ -19,7 +19,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent.receipt_store import ReceiptStore
+from agent.receipts import RECEIPT_STATUSES, ReceiptSourceKey
 from agent.turn_finalizer import finalize_turn
+from agent.verification_evidence import (
+    mark_workspace_edited,
+    record_terminal_result,
+)
 from hades_state import SessionDB
 
 
@@ -52,6 +58,9 @@ class _FakeAgent:
         self._tool_guardrail_halt_decision = None
         self._interrupt_message = None
         self._response_was_previewed = False
+        # These tests exercise capture-mode behavior explicitly; the
+        # shipped config default is receipts.mode: off (Task 7).
+        self._receipts_mode = "capture"
         self._skill_nudge_interval = 0
         self._iters_since_skill = 0
         self.valid_tool_names = []
@@ -291,3 +300,128 @@ def test_ledger_write_exception_does_not_alter_final_response(monkeypatch):
 
     # Restore for any subsequent calls.
     monkeypatch.setattr(SessionDB, "record_turn_outcome", _orig)
+
+
+# ── Task 6: turn receipt issuance through the finalizer seam ──────────────
+
+
+def test_finalize_turn_issues_receipt_capture_mode(tmp_path):
+    """The finalizer's single seam issues one turn receipt after the raw
+    ledger record. The ledger's own "verified" label is an untrusted
+    source claim, so without an independent scorer pass the receipt stays
+    completed_unverified — and capture mode exposes nothing on the
+    result."""
+    db = _open_db(tmp_path)
+    agent = _FakeAgent(db)
+
+    result = _finalize_verified(agent, turn_id="t-rcpt")
+
+    receipt = ReceiptStore(db).find_by_source(
+        ReceiptSourceKey("turn", "e2e-sess:t-rcpt")
+    )
+    assert receipt is not None
+    assert receipt.session_id == "e2e-sess"
+    assert receipt.turn_id == "t-rcpt"
+    assert receipt.status in RECEIPT_STATUSES
+    assert receipt.status == "completed_unverified"
+    # Capture mode: no verified receipt (or any projection) is exposed.
+    assert "receipt" not in result
+
+
+def test_turn_verified_label_with_stale_evidence_never_verifies(tmp_path):
+    """A ledger row labeled verified whose verification evidence went
+    stale after a later edit yields completed_unverified, never
+    verified."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+    event = record_terminal_result(
+        command="python -m pytest -q",
+        cwd=ws,
+        session_id="e2e-sess",
+        exit_code=0,
+        output="all green",
+    )
+    assert event is not None
+    marked = mark_workspace_edited(
+        session_id="e2e-sess", cwd=ws, paths=[str(ws / "calc.py")]
+    )
+    assert marked is not None
+
+    db = _open_db(tmp_path)
+    agent = _FakeAgent(db)
+    _finalize_verified(agent, turn_id="t-stale")
+
+    receipt = ReceiptStore(db).find_by_source(
+        ReceiptSourceKey("turn", "e2e-sess:t-stale")
+    )
+    assert receipt is not None
+    assert receipt.status == "completed_unverified"
+    assert receipt.status != "verified"
+    assert any("stale" in u for u in receipt.uncertainty)
+
+
+def test_receipt_store_failure_capture_mode_preserves_response(
+    tmp_path, monkeypatch
+):
+    """Capture mode: a receipt-store failure is logged and swallowed; the
+    ledger row and user-facing response are untouched."""
+    db = _open_db(tmp_path)
+    agent = _FakeAgent(db)
+
+    def _boom(self, receipt, *, decision=None):
+        raise RuntimeError("simulated receipt store outage")
+
+    monkeypatch.setattr(ReceiptStore, "insert", _boom)
+
+    result = _finalize_verified(agent, turn_id="t-cap-fail")
+
+    assert result["final_response"] == "Done."
+    assert result["outcome"] == "verified"
+    assert "receipt" not in result
+    # The raw ledger row still landed (ledger persistence is independent).
+    rows = db.get_outcome_trends(session_id="e2e-sess", days=30)
+    assert rows and rows[0]["outcome"] == "verified"
+
+
+def test_receipt_store_failure_require_mode_downgrades_projection_only(
+    tmp_path, monkeypatch
+):
+    """Require mode, receipt-required turn: a receipt-store failure
+    changes only the receipt projection to completed_unverified and never
+    fabricates a user/system message."""
+    db = _open_db(tmp_path)
+    agent = _FakeAgent(db)
+    agent._receipts_mode = "require"
+    agent._turn_receipt_required = True
+
+    def _boom(self, receipt, *, decision=None):
+        raise RuntimeError("simulated receipt store outage")
+
+    monkeypatch.setattr(ReceiptStore, "insert", _boom)
+
+    result = _finalize_verified(agent, turn_id="t-req-fail")
+
+    assert result["final_response"] == "Done."
+    projection = result["receipt"]
+    assert projection["receipt_id"] is None
+    assert projection["receipt_status"] == "completed_unverified"
+    # No fabricated message: the transcript is exactly the turn's own.
+    assert [m["role"] for m in result["messages"]] == ["user", "assistant"]
+
+
+def test_require_mode_success_exposes_receipt_projection(tmp_path):
+    db = _open_db(tmp_path)
+    agent = _FakeAgent(db)
+    agent._receipts_mode = "require"
+    agent._turn_receipt_required = True
+
+    result = _finalize_verified(agent, turn_id="t-req-ok")
+
+    projection = result["receipt"]
+    assert projection["receipt_id"]
+    assert projection["receipt_id"].startswith("rct_")
+    assert projection["receipt_status"] == "completed_unverified"
+    receipt = ReceiptStore(db).get(projection["receipt_id"])
+    assert receipt is not None
+    assert receipt.turn_id == "t-req-ok"

@@ -27,6 +27,7 @@ import pytest
 
 from agent.turn_ledger import (
     TurnOutcomeRecord,
+    fetch_turn_outcome,
     record_turn_outcome_safely,
 )
 from agent.turn_outcome import TURN_OUTCOMES, classify_turn_outcome
@@ -1747,3 +1748,45 @@ def test_codex_runtime_invokes_sidecar_bump_with_recorded_skills(monkeypatch):
     assert any(skill == "web" for skill, _outcome, _cost in bumps), (
         f"expected bump for 'web' from projected messages, got {bumps}"
     )
+
+# ---------------------------------------------------------------------------
+# Read-back seam for receipt ingestion (Task 4) — fetch_turn_outcome.
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_turn_outcome_roundtrips_persisted_record(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        original = TurnOutcomeRecord(
+            session_id="s1",
+            turn_id="t1",
+            created_at=1752660000.0,
+            outcome="verified",
+            outcome_reason="verification passed",
+            turn_exit_reason="text_response(finish_reason=stop)",
+            api_calls=2,
+            tool_iterations=3,
+            retry_count=1,
+            guardrail_halt=None,
+            cost_usd_delta=0.25,
+            input_tokens_delta=100,
+            output_tokens_delta=50,
+            cache_read_tokens_delta=10,
+            skills_loaded=("plan", "web"),
+            model="test-model",
+        )
+        db.record_turn_outcome(original)
+        loaded = fetch_turn_outcome(db, "s1", "t1")
+        assert loaded == original
+        assert isinstance(loaded.skills_loaded, tuple)
+    finally:
+        db.close()
+
+
+def test_fetch_turn_outcome_missing_row_returns_none(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        assert fetch_turn_outcome(db, "s1", "no-such-turn") is None
+        assert fetch_turn_outcome(None, "s1", "t1") is None
+    finally:
+        db.close()

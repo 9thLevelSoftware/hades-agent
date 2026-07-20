@@ -2240,5 +2240,129 @@ def test_execute_code_keeps_ordinary_string_output_shape():
     assert "artifact_path" not in result
 
 
+# ---------------------------------------------------------------------------
+# Receipt artifact digest metadata (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def test_attach_execute_artifacts_registers_receipt_digest(tmp_path, monkeypatch):
+    """A durable spill artifact gains canonical receipt digest metadata."""
+    import hashlib
+
+    home = tmp_path / "home"
+    home.mkdir()
+    artifact_dir = home / "artifacts"
+    artifact_dir.mkdir()
+    artifact_path = artifact_dir / "execute_code_spill.txt"
+    payload = b"spilled output bytes"
+    artifact_path.write_bytes(payload)
+    context = CodeExecutionContext(
+        task_id="task-1",
+        session_id="sess-1",
+        enabled_toolsets=(),
+        disabled_toolsets=(),
+        turn_id="turn-9",
+        tool_call_id="call-3",
+    )
+    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setattr(
+        code_execution_tool, "_artifact_storage_dir", lambda: str(artifact_dir),
+    )
+    result = code_execution_tool._attach_execute_artifacts(
+        {"output": "truncated"}, (), str(artifact_path), context=context,
+    )
+
+    assert result["artifact_path"] == str(artifact_path)
+    assert result["artifact_id"].startswith("art_")
+    assert result["artifact_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert result["artifact_content_hash"].startswith("sha256:")
+    assert "artifact_digest_error" not in result
+
+    # The digest landed in the profile-local catalog with a source link
+    # correlating session, turn, and tool call — without leaking the raw
+    # local path into the public source ref.
+    from hades_state import SessionDB
+    from agent.receipt_artifacts import ArtifactCatalog
+
+    session_db = SessionDB(db_path=home / "state.db")
+    try:
+        catalog = ArtifactCatalog(session_db)
+        digest = catalog.get(result["artifact_id"])
+        assert digest is not None
+        assert digest.source_kind == "execute_code"
+        assert digest.source_ref == "sess-1:turn-9:call-3"
+        assert catalog.location_count(result["artifact_id"]) == 1
+    finally:
+        session_db.close()
+
+
+def test_attach_execute_artifacts_records_digest_error_without_breaking_result(
+    tmp_path, monkeypatch,
+):
+    """Registration failure keeps the artifact usable and marks the error."""
+    home = tmp_path / "home"
+    home.mkdir()
+    artifact_dir = home / "artifacts"
+    artifact_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    artifact_path = outside_dir / "escaped.txt"
+    artifact_path.write_bytes(b"outside the durable artifact root")
+    context = CodeExecutionContext(
+        task_id="task-1",
+        session_id="sess-1",
+        enabled_toolsets=(),
+        disabled_toolsets=(),
+        turn_id="turn-9",
+        tool_call_id="call-4",
+    )
+    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setattr(
+        code_execution_tool, "_artifact_storage_dir", lambda: str(artifact_dir),
+    )
+    result = code_execution_tool._attach_execute_artifacts(
+        {"output": "truncated"}, (), str(artifact_path), context=context,
+    )
+
+    # The existing artifact path/result stay usable...
+    assert result["artifact_path"] == str(artifact_path)
+    assert result["truncated"] is True
+    # ...but no digest fields exist for later verified claims to cite.
+    assert "artifact_id" not in result
+    assert "artifact_sha256" not in result
+    assert "artifact_content_hash" not in result
+    assert "ArtifactBoundaryError" in result["artifact_digest_error"]
+
+
+def test_attach_execute_artifacts_without_context_adds_no_digest(tmp_path):
+    artifact_path = tmp_path / "plain.txt"
+    artifact_path.write_bytes(b"plain artifact")
+    result = code_execution_tool._attach_execute_artifacts(
+        {"output": "truncated"}, (), str(artifact_path),
+    )
+    assert result["artifact_path"] == str(artifact_path)
+    assert "artifact_id" not in result
+    assert "artifact_digest_error" not in result
+
+
+def test_execute_code_context_carries_dispatch_observability_ids():
+    """The handler propagates turn/tool-call IDs without any schema change."""
+    from tools.approval import (
+        reset_current_observability_context,
+        set_current_observability_context,
+    )
+
+    tokens = set_current_observability_context(
+        turn_id="turn-obs", tool_call_id="call-obs",
+    )
+    try:
+        assert code_execution_tool._current_observability_ids() == (
+            "turn-obs", "call-obs",
+        )
+    finally:
+        reset_current_observability_context(tokens)
+    assert code_execution_tool._current_observability_ids() == (None, None)
+
+
 if __name__ == "__main__":
     unittest.main()

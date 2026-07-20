@@ -264,6 +264,25 @@ class OperationJournal:
         row = self._db._execute_read(_read)
         return self._record(row) if row is not None else None
 
+    def list_for_turn(self, session_id: str, turn_id: str) -> list[OperationRecord]:
+        """List every operation recorded for one session turn, read-only.
+
+        Receipt-ingest seam: the turn evidence source projects these rows
+        into immutable operation evidence. Ordering is stable
+        ``(created_at, operation_id)`` so re-reads are deterministic.
+        """
+
+        def _read(conn):
+            return conn.execute(
+                """SELECT * FROM agent_operations
+                    WHERE session_id = ? AND turn_id = ?
+                    ORDER BY created_at, operation_id""",
+                (str(session_id), str(turn_id)),
+            ).fetchall()
+
+        rows = self._db._execute_read(_read)
+        return [self._record(row) for row in rows]
+
     def get_by_operation_id(self, operation_id: str) -> Optional[OperationRecord]:
         """Alias for :meth:`get` — coordinator-side naming preferred by
         the effect-transactions contract (Task 3). Behavior is identical:

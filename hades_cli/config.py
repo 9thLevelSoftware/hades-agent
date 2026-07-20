@@ -2941,6 +2941,41 @@ DEFAULT_CONFIG = {
         "artifact_dir": "/tmp/hermes-results",
     },
 
+    # Verified outcome & artifact receipts (agent.receipts).
+    # Stable behavioral settings only — signing credentials never live in
+    # config.yaml.  They stay in a secret store or .env and are resolved
+    # by the named provider itself; config stores only the provider ID
+    # and whether signing is required.  There is no environment-variable
+    # bridge for this section.
+    "receipts": {
+        # off (default) — no receipt issuance.
+        # capture — receipts are issued best-effort and never surface on
+        #   the turn result.
+        # require — the receipt projection is exposed on turn results; a
+        #   store failure for an explicitly receipt-required turn
+        #   downgrades only that projection to completed_unverified.
+        "mode": "off",
+        # Days a receipt (and its observations/attestations) is kept
+        # before the explicit retention service may plan its deletion.
+        # Range 1..3650.  Prune never runs implicitly during a live turn.
+        "retention_days": 365,
+        # Days a raw local artifact locator row is kept.  Range
+        # 1..retention_days — locators expire no later than receipts.
+        "artifact_locator_retention_days": 90,
+        # Default export mode: public (no local locators at all) or
+        # local (profile-relative locators after boundary checks).
+        "export_redaction": "public",
+        "signing": {
+            # Registered signer provider ID ('' disables signing; no
+            # provider is loaded until config names it and its check_fn
+            # accepts the config).
+            "provider": "",
+            # When true, a signing failure prevents signed export and
+            # consumer projection.  It can never change a receipt status.
+            "required": False,
+        },
+    },
+
     # Tool Search (progressive disclosure for large tool surfaces).
     # When the model is connected to many MCP servers or non-core plugin
     # tools, their JSON schemas can consume a substantial fraction of the
@@ -5563,7 +5598,7 @@ def check_config_version() -> Tuple[int, int]:
 _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
     "fallback_providers", "credential_pool_strategies", "toolsets",
-    "agent", "terminal", "code_execution", "display", "compression", "delegation",
+    "agent", "terminal", "code_execution", "receipts", "display", "compression", "delegation",
     "auxiliary", "moa", "custom_providers", "context", "memory", "gateway",
     "sessions", "streaming", "updates", "mcp_servers",
 }
@@ -5734,6 +5769,112 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                                 f"code_execution.artifacts.{field} must be an integer greater than 0",
                                 f"Set artifacts.{field} to a positive byte limit",
                             ))
+
+    # ── receipts settings (verified outcome & artifact receipts) ─────────
+    receipts = config.get("receipts")
+    if receipts is not None:
+        if not isinstance(receipts, dict):
+            issues.append(ConfigIssue(
+                "error",
+                f"receipts must be a mapping, got {type(receipts).__name__}",
+                "Use receipts: with mode, retention, export, and signing underneath it",
+            ))
+        else:
+            mode = receipts.get("mode")
+            # YAML 1.1 parses a bare `off` as boolean False — accept that
+            # spelling of the documented default.
+            if "mode" in receipts and mode is not False and (
+                not isinstance(mode, str)
+                or mode.strip().lower() not in {"off", "capture", "require"}
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "receipts.mode must be 'off', 'capture', or 'require'",
+                    "Set mode: off (default), capture, or require",
+                ))
+
+            def _valid_days(value: Any, upper: int) -> bool:
+                return (
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and 1 <= value <= upper
+                )
+
+            retention_days = receipts.get("retention_days")
+            if "retention_days" in receipts and not _valid_days(retention_days, 3650):
+                issues.append(ConfigIssue(
+                    "error",
+                    "receipts.retention_days must be an integer in 1..3650",
+                    "Set retention_days: 365 (default) or another bounded value",
+                ))
+            if "retention_days" not in receipts:
+                locator_upper = int(DEFAULT_CONFIG["receipts"]["retention_days"])
+            elif _valid_days(retention_days, 3650):
+                locator_upper = retention_days
+            else:
+                # retention_days itself is invalid (already reported); any
+                # locator value beyond the absolute bound is still flagged.
+                locator_upper = 3650
+            locator_days = receipts.get("artifact_locator_retention_days")
+            if "artifact_locator_retention_days" in receipts and not _valid_days(
+                locator_days, max(locator_upper, 1)
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "receipts.artifact_locator_retention_days must be an integer in "
+                    "1..retention_days",
+                    "Raw artifact locators expire no later than their receipts",
+                ))
+
+            export_redaction = receipts.get("export_redaction")
+            if "export_redaction" in receipts and (
+                not isinstance(export_redaction, str)
+                or export_redaction.strip().lower() not in {"public", "local"}
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "receipts.export_redaction must be 'public' or 'local'",
+                    "Set export_redaction: public (default) or local",
+                ))
+
+            signing = receipts.get("signing")
+            if signing is not None:
+                if not isinstance(signing, dict):
+                    issues.append(ConfigIssue(
+                        "error",
+                        "receipts.signing must be a mapping",
+                        "Use signing: with provider and required underneath it",
+                    ))
+                else:
+                    provider = signing.get("provider")
+                    if "provider" in signing and (
+                        not isinstance(provider, str)
+                        or (provider != "" and not re.fullmatch(
+                            r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", provider
+                        ))
+                    ):
+                        issues.append(ConfigIssue(
+                            "error",
+                            "receipts.signing.provider must be '' or a bounded "
+                            "identifier (letters, digits, . _ -, max 64 chars)",
+                            "Name a registered signer provider, or '' to disable signing",
+                        ))
+                    required = signing.get("required")
+                    if "required" in signing and not isinstance(required, bool):
+                        issues.append(ConfigIssue(
+                            "error",
+                            "receipts.signing.required must be a boolean",
+                            "Set required: false (default) or true",
+                        ))
+                    extra_keys = sorted(set(signing) - {"provider", "required"})
+                    if extra_keys:
+                        issues.append(ConfigIssue(
+                            "error",
+                            "receipts.signing only stores provider and required — "
+                            f"unexpected keys: {extra_keys}",
+                            "Signing credentials stay in a secret store or .env, "
+                            "never in config.yaml",
+                        ))
 
     cp = config.get("custom_providers")
     if cp is not None:

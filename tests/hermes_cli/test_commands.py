@@ -130,6 +130,39 @@ class TestResolveCommand:
 
 
 # ---------------------------------------------------------------------------
+# Receipt viewer registration (verified outcome & artifact receipts)
+# ---------------------------------------------------------------------------
+
+class TestReceiptCommandRegistration:
+    """Top-level/classic receipt routes derive from the one registry."""
+
+    def test_receipt_registered_with_receipts_alias(self):
+        cmd = resolve_command("receipt")
+        assert cmd is not None
+        assert cmd.name == "receipt"
+        assert "receipts" in cmd.aliases
+        assert resolve_command("receipts") is cmd
+        assert resolve_command("/receipts") is cmd
+
+    def test_receipt_is_cli_only_no_gateway_messaging_command(self):
+        cmd = resolve_command("receipt")
+        assert cmd.cli_only is True
+        assert cmd.gateway_only is False
+        assert "receipt" not in GATEWAY_KNOWN_COMMANDS
+
+    def test_receipt_subcommands_drive_autocomplete(self):
+        assert "/receipt" in SUBCOMMANDS
+        assert set(SUBCOMMANDS["/receipt"]) == {
+            "list", "show", "claims", "recheck", "export",
+            "verify-signature", "retention-plan", "prune",
+        }
+
+    def test_receipt_and_alias_in_commands_dict(self):
+        assert "/receipt" in COMMANDS
+        assert "/receipts" in COMMANDS
+
+
+# ---------------------------------------------------------------------------
 # Derived dicts (backwards compat)
 # ---------------------------------------------------------------------------
 

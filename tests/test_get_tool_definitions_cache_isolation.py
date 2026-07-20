@@ -113,3 +113,73 @@ class TestQuietModeCacheIsolation:
         explains why the bug only hit Gateway."""
         model_tools.get_tool_definitions(quiet_mode=False)
         assert len(model_tools._tool_defs_cache) == 0
+
+
+class TestReceiptToolSchemaIsolation:
+    """Task 11: receipts add no model-visible tool and never disturb the
+    effective tool-definition cache or schema hashes."""
+
+    def test_receipt_issue_and_recheck_keep_tool_schema_byte_identical(
+        self, tmp_path
+    ):
+        import hashlib
+        import json
+
+        from agent.receipt_ingest import build_receipt_issuer
+        from agent.receipt_store import ReceiptStore
+        from agent.receipts import ReceiptSourceKey
+        from agent.turn_ledger import TurnOutcomeRecord
+        from hades_state import SessionDB
+
+        def _schema_hash() -> str:
+            defs = model_tools.get_tool_definitions(quiet_mode=True)
+            return hashlib.sha256(
+                json.dumps(defs, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+
+        before_hash = _schema_hash()
+        cache_size_before = len(model_tools._tool_defs_cache)
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            db.record_turn_outcome(
+                TurnOutcomeRecord(
+                    session_id="s1",
+                    turn_id="t1",
+                    created_at=1752660000.0,
+                    outcome="completed_unverified",
+                    outcome_reason="response completed without verification",
+                    turn_exit_reason="text_response(finish_reason=stop)",
+                    api_calls=1,
+                    tool_iterations=0,
+                    retry_count=0,
+                    guardrail_halt=None,
+                    cost_usd_delta=0.0,
+                    input_tokens_delta=1,
+                    output_tokens_delta=1,
+                    cache_read_tokens_delta=0,
+                    skills_loaded=(),
+                    model="cache-test-model",
+                )
+            )
+            issuer = build_receipt_issuer(db)
+            receipt = issuer.issue(ReceiptSourceKey("turn", "s1:t1"))
+            issuer.recheck(receipt.receipt_id)
+            assert ReceiptStore(db).get(receipt.receipt_id) == receipt
+        finally:
+            db.close()
+
+        # The effective tool schema hash is unchanged and receipt code
+        # touched neither the cache nor the definitions themselves.
+        assert _schema_hash() == before_hash
+        assert len(model_tools._tool_defs_cache) >= cache_size_before
+
+    def test_no_receipt_named_tool_is_model_visible(self):
+        definitions = model_tools.get_tool_definitions(quiet_mode=True)
+        names = [
+            tool.get("function", {}).get("name", "") for tool in definitions
+        ]
+        assert all("receipt" not in name.lower() for name in names), (
+            "receipts are Footprint Ladder rung 1: no model-visible core "
+            f"tool may be added \u2014 found {names}"
+        )

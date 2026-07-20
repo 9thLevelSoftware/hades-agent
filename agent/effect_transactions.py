@@ -50,6 +50,63 @@ EFFECT_SEMANTIC_KINDS = frozenset({
     "irreversible",
 })
 
+# Terminal phases of SessionDB._EFFECT_PHASE_TRANSITIONS as this
+# coordinator drives them. The storage graph has no "compensated" phase in
+# v1; ``unknown_effect`` still admits a later ``committed``/``failed``
+# settlement, but it is a terminal *presentation* state for receipt
+# purposes — a later settlement becomes a recheck observation on the same
+# receipt, never a second receipt.
+_TERMINAL_EFFECT_TX_PHASES = frozenset({
+    "committed",
+    "failed",
+    "cancelled",
+    "unknown_effect",
+})
+
+
+def _issue_transaction_receipt_safely(session_db: Any, transaction_id: str) -> None:
+    """Best-effort canonical receipt after a terminal phase transition.
+
+    Gated on the profile's configured ``receipts.mode`` — ``off`` (the
+    shipped default) performs zero receipt/artifact writes. Any failure is
+    logged and swallowed: the receipt path can never break, retry, or block
+    the transaction flow, and it never mutates transaction state beyond the
+    existing ``receipt_id`` projection column.
+    """
+    try:
+        from agent.receipt_ingest import resolve_configured_receipts_mode
+
+        if resolve_configured_receipts_mode() not in {"capture", "require"}:
+            return
+
+        from agent.receipt_ingest import (
+            SnapshotConflictError,
+            build_receipt_issuer,
+        )
+        from agent.receipt_models import ReceiptSourceKey
+
+        issuer = build_receipt_issuer(session_db)
+        source = ReceiptSourceKey("transaction", transaction_id)
+        try:
+            issuer.issue(source)
+        except SnapshotConflictError:
+            # The transaction's durable content changed after issuance
+            # (e.g. ``unknown_effect`` later settled ``committed``): a
+            # changed terminal source becomes a recheck observation, never
+            # a replacement receipt.
+            existing = issuer.store.find_by_source(source)
+            if existing is None:
+                raise
+            issuer.recheck(existing.receipt_id)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "transaction receipt issuance failed for transaction=%s",
+            transaction_id,
+            exc_info=True,
+        )
+
 
 # ── Frozen contracts ────────────────────────────────────────────────────
 
@@ -600,7 +657,7 @@ def _execute(self: _Coordinator, *, tool_name, args, handler, operation_key, mis
     ):
         # Authority expired/revoked between prepare and commit. Settle
         # the tx to ``cancelled`` and block the handler.
-        self.session_db.transition_effect_transaction(
+        self._transition_tx(
             transaction_id,
             expected_phase="previewed",
             next_phase="cancelled",
@@ -639,7 +696,7 @@ def _execute(self: _Coordinator, *, tool_name, args, handler, operation_key, mis
         # exception propagates unchanged without re-invocation.
         approval_result = self.approval_request(approval_payload)
         if not approval_result:
-            self.session_db.transition_effect_transaction(
+            self._transition_tx(
                 transaction_id,
                 expected_phase="previewed",
                 next_phase="cancelled",
@@ -656,7 +713,7 @@ def _execute(self: _Coordinator, *, tool_name, args, handler, operation_key, mis
             )
 
     # ── 9. Transition tx to committing; invoke through adapter.commit
-    self.session_db.transition_effect_transaction(
+    self._transition_tx(
         transaction_id,
         expected_phase="previewed",
         next_phase="committing",
@@ -693,7 +750,7 @@ def _execute(self: _Coordinator, *, tool_name, args, handler, operation_key, mis
     except Exception as exc:
         # Other commit failures: settle to ``failed`` so retries can
         # reason about the prior state.
-        self.session_db.transition_effect_transaction(
+        self._transition_tx(
             transaction_id,
             expected_phase="committing",
             next_phase="failed",
@@ -716,7 +773,7 @@ def _execute(self: _Coordinator, *, tool_name, args, handler, operation_key, mis
     try:
         verified = adapter.verify(prepared, handler_result)
     except (KeyboardInterrupt, TimeoutError) as exc:
-        self.session_db.transition_effect_transaction(
+        self._transition_tx(
             transaction_id,
             expected_phase="committing",
             next_phase="unknown_effect",
@@ -745,7 +802,7 @@ def _execute(self: _Coordinator, *, tool_name, args, handler, operation_key, mis
     # on the tx row alongside the raw handler result. The phase graph
     # still moves ``committing → committed`` — verify simply enriches
     # the row, it does not introduce a new transition.
-    self.session_db.transition_effect_transaction(
+    self._transition_tx(
         transaction_id,
         expected_phase="committing",
         next_phase="committed",
@@ -766,7 +823,7 @@ def _execute(self: _Coordinator, *, tool_name, args, handler, operation_key, mis
 
 
 def _settle_unknown_effect(self, *, transaction_id, operation_id, error):
-    self.session_db.transition_effect_transaction(
+    self._transition_tx(
         transaction_id,
         expected_phase="committing",
         next_phase="unknown_effect",
@@ -781,9 +838,30 @@ def _settle_unknown_effect(self, *, transaction_id, operation_id, error):
     )
 
 
+def _transition_tx(self, transaction_id, *, expected_phase, next_phase, **payload):
+    """The one seam every coordinator phase transition flows through.
+
+    Delegates the CAS to ``session_db.transition_effect_transaction``
+    unchanged, then — only when the row actually reached a terminal phase
+    right now — issues the canonical receipt best-effort. Hooking here
+    (not per call site, not in hades_state) keeps issuance single-sourced
+    for every terminal path: committed, failed, cancelled, unknown_effect.
+    """
+    result = self.session_db.transition_effect_transaction(
+        transaction_id,
+        expected_phase=expected_phase,
+        next_phase=next_phase,
+        **payload,
+    )
+    if result and next_phase in _TERMINAL_EFFECT_TX_PHASES:
+        _issue_transaction_receipt_safely(self.session_db, transaction_id)
+    return result
+
+
 # Bind the unbound methods so the frozen dataclass can carry them.
 _Coordinator.execute = _execute  # type: ignore[attr-defined]
 _Coordinator._settle_unknown_effect = _settle_unknown_effect  # type: ignore[attr-defined]
+_Coordinator._transition_tx = _transition_tx  # type: ignore[attr-defined]
 
 
 # ponytail: a single re-export point keeps the import surface tidy.

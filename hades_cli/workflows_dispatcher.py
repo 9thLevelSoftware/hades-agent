@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import sqlite3
@@ -25,6 +26,8 @@ from hades_cli import workflows_db as wfdb
 from hades_cli.workflows_engine import EngineResult, render_template, run_in_memory_until_waiting
 from hades_cli.workflows_prompts import render_agent_prompt, render_prompt_text
 from hades_cli.workflows_spec import RESULT_CONTRACT_PRIMITIVES, WorkflowSpec
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -406,6 +409,82 @@ def _record_reconciliation_review(
         return
 
 
+def _issue_mission_terminal_receipt(
+    mission_id: str,
+    *,
+    state_db_path: Path | None,
+    workflow_db_path: Path | None,
+) -> tuple[str, str] | None:
+    """Best-effort canonical receipt for a mission being terminalized.
+
+    Gated on the profile's configured ``receipts.mode``: ``off`` (the
+    shipped default) performs zero receipt/artifact writes and leaves the
+    dispatcher byte-identical to its pre-receipt behavior. Under
+    ``capture``/``require`` the one canonical receipt is inserted into the
+    profile-local state.db BEFORE the caller projects the terminal verdict;
+    the caller then links it via ``mdb.project_receipt_verdict`` on its own
+    workflows.db connection. Returns ``(receipt_id, status)`` on success and
+    ``None`` on any failure — issuance never raises into outbox
+    reconciliation, never fabricates messages, and never blocks the
+    dispatcher.
+    """
+    try:
+        from agent.receipt_ingest import resolve_configured_receipts_mode
+
+        if resolve_configured_receipts_mode() not in {"capture", "require"}:
+            return None
+
+        from agent.receipt_ingest import (
+            SnapshotConflictError,
+            build_receipt_issuer,
+        )
+        from agent.receipt_models import ReceiptSourceKey
+
+        wf_path = (
+            Path(workflow_db_path)
+            if workflow_db_path is not None
+            else wfdb.workflows_db_path()
+        )
+        state_db = SessionDB(db_path=state_db_path)
+        try:
+            issuer = build_receipt_issuer(
+                state_db,
+                workflows_db_path=wf_path,
+                profile=_active_profile_name(),
+            )
+            # The dispatcher already holds the workflows.db write
+            # transaction and performs the authoritative projection itself
+            # (mdb.project_receipt_verdict on its own connection, inside the
+            # same transaction). The issuer's built-in cross-connection
+            # mission CAS link would contend with that held transaction, so
+            # it is disabled here; a crash between receipt insertion and the
+            # projection is repaired by ReceiptIssuer.recover_projection.
+            issuer._project = lambda source: None  # type: ignore[method-assign]
+            source = ReceiptSourceKey("mission", mission_id)
+            try:
+                receipt = issuer.issue(source)
+                return receipt.receipt_id, receipt.status
+            except SnapshotConflictError:
+                # The mission's durable content changed after issuance: a
+                # changed terminal source becomes a recheck observation,
+                # never a replacement receipt.
+                existing = issuer.store.find_by_source(source)
+                if existing is None:
+                    raise
+                observation = issuer.recheck(existing.receipt_id)
+                return existing.receipt_id, observation.status
+        finally:
+            state_db.close()
+    except Exception:
+        logger.warning(
+            "mission receipt issuance failed for mission=%s; falling back "
+            "to the plain verdict projection",
+            mission_id,
+            exc_info=True,
+        )
+        return None
+
+
 def _reconcile_unknown_mission(
     conn: sqlite3.Connection,
     mission: mdb.MissionRecord | None,
@@ -413,6 +492,8 @@ def _reconcile_unknown_mission(
     outbox: SessionDB.OutboxRecord,
     error: dict[str, Any],
     now: int,
+    state_db_path: Path | None = None,
+    workflow_db_path: Path | None = None,
 ) -> None:
     if mission is None or mission.profile != _active_profile_name():
         return
@@ -420,14 +501,35 @@ def _reconcile_unknown_mission(
     # already-verdicted mission must not be rewritten merely because delivery
     # became uncertain later.
     if mission.status not in {"succeeded", "failed", "cancelled"} and mission.verdict is None:
+        # The receipt (when receipts.mode enables it) is inserted BEFORE the
+        # terminal verdict projection so a crash in between is repaired by
+        # source-key recovery instead of losing evidence.
+        projection = _issue_mission_terminal_receipt(
+            mission.mission_id,
+            state_db_path=state_db_path,
+            workflow_db_path=workflow_db_path,
+        )
         try:
             mdb.set_mission_status(conn, mission.mission_id, "blocked", now=now)
         except mdb.MissionStateError:
             pass
-        try:
-            mdb.set_mission_verdict(conn, mission.mission_id, "unknown_effect", now=now)
-        except mdb.MissionStateError:
-            pass
+        if projection is not None:
+            receipt_id, receipt_status = projection
+            try:
+                mdb.project_receipt_verdict(
+                    conn,
+                    mission.mission_id,
+                    receipt_id=receipt_id,
+                    verdict=receipt_status,
+                    now=now,
+                )
+            except mdb.MissionStateError:
+                pass
+        else:
+            try:
+                mdb.set_mission_verdict(conn, mission.mission_id, "unknown_effect", now=now)
+            except mdb.MissionStateError:
+                pass
     _record_reconciliation_review(
         conn,
         mission,
@@ -629,6 +731,8 @@ def _resume_terminal_outbox_nodes(
                     outbox=outbox,
                     error=error,
                     now=now,
+                    state_db_path=state_db_path,
+                    workflow_db_path=workflow_db_path,
                 )
                 _block_terminal_projection(conn, row, error=error, now=now)
                 continue

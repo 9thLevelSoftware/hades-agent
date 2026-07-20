@@ -242,6 +242,11 @@ _LONG_HANDLERS = frozenset(
         # the WS read loop and causing false "needs setup" (#50005 family).
         "setup.runtime_check",
         "setup.status",
+        # receipt.exec drives real profile-local I/O — SQLite reads, artifact
+        # re-hashing on recheck, export file writes — which can take seconds;
+        # keep it off the main stdin loop. All receipt writes are immutable
+        # appends, so pool concurrency cannot corrupt ordering.
+        "receipt.exec",
         "session.branch",
         "session.compress",
         "session.list",
@@ -12900,6 +12905,110 @@ def _(rid, params: dict) -> dict:
             "profile_home": resolved_home,
         },
     )
+
+
+# ── Receipts (Verified Outcome & Artifact Receipts) ──────────────────
+# Native in-process route for the Ink TUI's /receipt (and /receipts)
+# command. Bounded argv over the SAME shared parser/service as
+# `hades receipt ...` and the classic slash path
+# (hades_cli.receipts.run_argv) — no shell, no subprocess, no second
+# authority surface. Validation/conflict failures map to JSON-RPC 4xxx
+# and store/provider failures to 5xxx; no raw locator, secret,
+# traceback, or signer material ever leaves the RPC.
+
+_RECEIPT_MAX_ARGV_ENTRIES = 64
+_RECEIPT_MAX_ARGV_BYTES = 65_536  # 64 KiB total UTF-8
+
+
+@method("receipt.exec")
+def _(rid, params: dict) -> dict:
+    argv = params.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(entry, str) for entry in argv)
+        or len(argv) > _RECEIPT_MAX_ARGV_ENTRIES
+        or sum(len(entry.encode("utf-8")) for entry in argv) > _RECEIPT_MAX_ARGV_BYTES
+    ):
+        # Deliberately does not echo any argument content: an oversized
+        # argument may be a pasted secret and must never round-trip.
+        return _err(
+            rid,
+            4004,
+            "receipt.exec: argv must be a non-empty list[str] of at most "
+            f"{_RECEIPT_MAX_ARGV_ENTRIES} entries and "
+            f"{_RECEIPT_MAX_ARGV_BYTES} UTF-8 bytes total",
+        )
+
+    # Profile isolation: only the session registry's recorded profile_home
+    # may steer profile resolution — a caller-supplied path in params is
+    # never accepted. No session (or an unknown one) means the launch
+    # profile, exactly like autonomy.exec.
+    session = _sessions.get(params.get("session_id") or "") or {}
+    profile_home = session.get("profile_home")
+    home_token = set_hades_home_override(str(profile_home)) if profile_home else None
+    try:
+        import hades_cli.receipts as _receipts_cli
+
+        result = _receipts_cli.run_argv(list(argv), output="text")
+        resolved_home = str(get_hades_home())
+        exit_ok = _receipts_cli.EXIT_OK
+        exit_validation = _receipts_cli.EXIT_VALIDATION
+        exit_unavailable = _receipts_cli.EXIT_UNAVAILABLE
+    except Exception:
+        # Deliberately redacted: no tracebacks, exception strings, raw
+        # locators, or signer material on the wire.
+        logger.exception("receipt.exec failed")
+        return _err(
+            rid,
+            5043,
+            "receipt.exec: internal failure (details withheld; run "
+            "`hades receipt list` in a terminal)",
+        )
+    finally:
+        if home_token is not None:
+            reset_hades_home_override(home_token)
+
+    payload = result.payload or {}
+    # run_argv already maps failures to bounded, redacted messages
+    # (clipped, never a traceback): 4xxx validation/unknown-ID/conflict,
+    # 5xxx signing-provider/storage.
+    if result.exit_code == exit_validation:
+        return _err(rid, 4005, payload.get("error") or "receipt: validation error")
+    if result.exit_code == exit_unavailable:
+        return _err(
+            rid,
+            5041,
+            payload.get("error") or "receipt: signing provider unavailable",
+        )
+    if result.exit_code != exit_ok:
+        return _err(rid, 5040, payload.get("error") or "receipt: storage failure")
+
+    # recheck returns one appended observation; show returns the selected
+    # chain. Normalize both to an `observations` list for the Ink viewer.
+    observations = payload.get("observations")
+    if observations is None and payload.get("observation") is not None:
+        observations = [payload["observation"]]
+
+    response = {
+        "ok": True,
+        "action": str(payload.get("action") or argv[0].strip().lower()),
+        "exit_code": result.exit_code,
+        "output": result.output,
+        "profile_home": resolved_home,
+    }
+    for key, value in (
+        ("receipts", payload.get("receipts")),
+        ("receipt", payload.get("receipt")),
+        ("observations", observations),
+        ("claim_edges", payload.get("claim_edges")),
+        ("export_path", payload.get("export_path")),
+        ("retention_plan_hash", payload.get("retention_plan_hash")),
+        ("warning", payload.get("warning")),
+    ):
+        if value is not None:
+            response[key] = value
+    return _ok(rid, response)
 
 
 @method("command.resolve")

@@ -1,0 +1,97 @@
+# Preregistered 50-mission false-success proof corpus for verified-outcome
+# receipts. Frozen BEFORE any production receipt behavior exists; expectations
+# are declared here and never derived from scorer output. Changing this file
+# must fail tests/benchmarks/test_receipt_benchmark.py.
+#
+# Each stratum row fixes the injected fault, the expected terminal receipt
+# status, the truth source the evidence envelope is built from, the
+# fixture-backed recheck adapter, the safety stratum reported separately in
+# the proof, and the allowed artifact root. The generator in
+# benchmarks/receipts/cases.py expands each stratum into `<stratum>-01..NN`
+# cases deterministically; it never invents a second missions or effects
+# implementation. All fixture paths resolve inside the benchmark's temporary
+# HERMES_HOME — nothing crosses profiles or leaves the machine.
+corpus_version: receipts-false-success-v1
+random_seed: 20260716
+denominator: 50
+
+strata:
+  silent_noop:
+    count: 8
+    expected_status: failed
+    injected_fault: completion_claimed_but_no_write_ever_performed
+    source_kind: turn
+    evidence_source: turn_ledger_fixture
+    recheck_adapter: artifact_digest_recheck
+    safety_stratum: effect_truth
+    allowed_root: workspace
+  wrong_file:
+    count: 7
+    expected_status: failed
+    injected_fault: edit_applied_to_unrequested_sibling_path
+    source_kind: turn
+    evidence_source: turn_ledger_fixture
+    recheck_adapter: artifact_digest_recheck
+    safety_stratum: effect_truth
+    allowed_root: workspace
+  stale_page:
+    count: 7
+    expected_status: completed_unverified
+    injected_fault: page_snapshot_evidence_past_fresh_until
+    source_kind: external
+    evidence_source: external_page_snapshot_fixture
+    recheck_adapter: page_snapshot_fixture_recheck
+    safety_stratum: freshness
+    allowed_root: snapshots
+  partial_delivery:
+    count: 7
+    expected_status: unknown_effect
+    injected_fault: delivery_acknowledgement_missing_for_subset
+    source_kind: external
+    evidence_source: external_delivery_fixture
+    recheck_adapter: delivery_ack_fixture_recheck
+    safety_stratum: unknown_effect_dominance
+    allowed_root: deliveries
+  reverted_change:
+    count: 7
+    expected_status: failed
+    injected_fault: claimed_change_reverted_before_scoring
+    source_kind: turn
+    evidence_source: turn_ledger_fixture
+    recheck_adapter: artifact_digest_recheck
+    safety_stratum: effect_truth
+    allowed_root: workspace
+  forged_artifact:
+    count: 7
+    expected_status: failed
+    injected_fault: artifact_metadata_forged_bytes_do_not_match_digest
+    source_kind: turn
+    evidence_source: artifact_catalog_fixture
+    recheck_adapter: artifact_digest_recheck
+    safety_stratum: provenance
+    allowed_root: workspace
+  grader_ambiguity:
+    count: 7
+    expected_status: completed_unverified
+    injected_fault: requested_end_state_ambiguous_for_every_scorer
+    source_kind: external
+    evidence_source: external_grader_fixture
+    recheck_adapter: grader_fixture_recheck
+    safety_stratum: scorer_integrity
+    allowed_root: workspace
+
+gates:
+  max_false_verified: 0
+  min_correct_classifications: 45
+  min_traceable_claims_ratio: 1.0
+  min_recheckable_receipts_ratio: 1.0
+
+baseline: current_hermes_turn_outcome_and_prose
+candidate: canonical_receipt_scorer
+
+stop_conditions:
+  - any_seeded_failure_verified
+  - any_effect_claim_without_existing_evidence
+  - any_receipt_not_recheckable_after_process_restart
+  - any_signature_changes_truth_status
+  - any_cross_profile_read_or_write

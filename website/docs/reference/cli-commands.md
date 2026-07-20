@@ -85,6 +85,7 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes pets` | Browse, install, and select [petdex](../user-guide/features/pets.md) animated pets shown across the CLI, TUI, and desktop app. Subcommands: `list`, `install`, `select`, `show`, `off`, `scale`, `remove`, `doctor`. |
 | `hermes sessions` | Browse, export, prune, rename, and delete sessions. |
 | `hermes insights` | Show token/cost/activity analytics. |
+| `hermes receipt` (alias `receipts`) | Inspect verified outcome & artifact receipts — immutable, independently scored records of what a turn/mission/transaction really changed. See [Outcome Receipts](../user-guide/features/outcome-receipts.md). |
 | `hermes claw` | OpenClaw migration helpers. |
 | `hermes dashboard` | Launch the web dashboard for managing config, API keys, and sessions. |
 | `hermes desktop` (alias `gui`) | Build and launch the native Electron desktop app. |
@@ -1474,6 +1475,34 @@ hermes insights [--days N] [--source platform]
 |--------|-------------|
 | `--days <n>` | Analyze the last `n` days (default: 30). |
 | `--source <platform>` | Filter by source such as `cli`, `telegram`, or `discord`. |
+
+## `hermes receipt`
+
+```bash
+hermes receipt <subcommand> [options]
+```
+
+Inspect verified outcome & artifact receipts: immutable, independently scored
+records of the requested end state, claimed effects, evidence, artifact
+hashes, and remaining uncertainty. `hermes receipts` is an alias; the same
+grammar is available as the `/receipt` slash command in the classic CLI and
+the native TUI. See [Outcome Receipts](../user-guide/features/outcome-receipts.md)
+for statuses, rechecks, export redaction, retention, signing, and the
+staged-rollout gates.
+
+| Subcommand | Description |
+|------------|-------------|
+| `list [--status S] [--subject K] [--limit N]` | List stored receipts, optionally filtered by canonical status or subject kind. |
+| `show RECEIPT_ID [--observation latest\|all\|OBS_ID]` | Show one receipt — the immutable original decision plus its recheck observations. |
+| `claims RECEIPT_ID` | Every claim with its evidence and artifact edges (claim → evidence → artifact traceability). |
+| `recheck RECEIPT_ID` | Re-score current facts and append one linked observation. Read-only against the subject; never rewrites the receipt. |
+| `export RECEIPT_ID --output PATH [--redaction public\|local] [--bundle-artifacts] [--sign]` | Write a redacted, hash-verifiable export. `public` (default) contains no raw locators or secrets. |
+| `verify-signature RECEIPT_ID` | Verify recorded provenance attestations. Provenance only — a valid signature never changes truth status. |
+| `retention-plan [--at RFC3339]` | Exact deletion candidates and blockers under the configured retention windows. |
+| `prune --confirm-plan PLAN_HASH` | Delete exactly one confirmed retention plan (tombstoned). Refuses stale plan hashes and active holds. |
+
+All subcommands accept `--json` for machine-readable output. Receipts are
+profile-local: commands only ever see the active profile's `state.db`.
 
 ## `hermes claw`
 

@@ -42,15 +42,22 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # (HERMES_PYTHON is exported by the devShell hook and ships [dev] extras:
 # pytest, pytest-asyncio, pytest-timeout, ruff, ty).
 VENV=""
+PYTHON=""
 for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
   if [ -f "$candidate/bin/activate" ]; then
     VENV="$candidate"
+    PYTHON="$candidate/bin/python"
+    break
+  elif [ -f "$candidate/Scripts/activate" ]; then
+    # Windows venv layout (uv/python -m venv under Git Bash/MSYS).
+    VENV="$candidate"
+    PYTHON="$candidate/Scripts/python.exe"
     break
   fi
 done
 
 if [ -n "$VENV" ]; then
-  PYTHON="$VENV/bin/python"
+  :
 elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
     && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
   # Guard with an import check: HERMES_PYTHON may point at the RELEASE
@@ -94,6 +101,10 @@ echo "▶ launching test runner"
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \
+  ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+  ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+  ${SYSTEMDRIVE:+SYSTEMDRIVE="$SYSTEMDRIVE"} \
+  ${COMSPEC:+COMSPEC="$COMSPEC"} \
   TZ=UTC \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \

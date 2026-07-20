@@ -142,7 +142,7 @@ def _validate_inputs(
     # V1 has a closed evidence vocabulary. Reject an unknown check before
     # opening the mission/execution transaction so no mission can start with
     # a condition the receipt scorer cannot independently evaluate.
-    from agent.receipts import validate_evidence_manifest
+    from agent.mission_evidence import validate_evidence_manifest
 
     validate_evidence_manifest(evidence)
     if not isinstance(input_data, dict):

@@ -8763,6 +8763,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 print(_auto_out)
         elif canonical == "workflow":
             self._handle_workflow_command(cmd_original)
+        elif canonical == "receipt":
+            self._handle_receipt_command(cmd_original)
         elif canonical == "skills":
             with self._busy_command(self._slow_command_status(cmd_original)):
                 self._handle_skills_command(cmd_original)

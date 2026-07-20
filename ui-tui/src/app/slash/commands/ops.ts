@@ -4,6 +4,7 @@ import type {
   CommandsCatalogResponse,
   DelegationPauseResponse,
   ProcessStopResponse,
+  ReceiptExecResponse,
   ReloadEnvResponse,
   ReloadMcpResponse,
   RollbackDiffResponse,
@@ -127,7 +128,126 @@ const renderAutonomyResult = (action: string, r: AutonomyExecResponse, ctx: Slas
   return isLongText(text) ? page(text, title) : sys(text)
 }
 
+// unknown_effect is neither a failure nor retry-safe: the effect may or may
+// not have happened, so retrying could double-apply it. This warning is
+// persistent — it prints on EVERY response that carries an unknown_effect
+// receipt or observation.
+const UNKNOWN_EFFECT_WARNING = 'unknown_effect — Do not retry the effect; recheck/reconcile evidence.'
+
+const receiptStatuses = (r: ReceiptExecResponse): string[] => [
+  ...(r.receipt ? [r.receipt.status] : []),
+  ...(r.receipts?.map(summary => summary.status) ?? []),
+  ...(r.observations?.map(observation => observation.status) ?? [])
+]
+
+/**
+ * Render one structured `receipt.exec` result.
+ *
+ * `output` carries the SAME truthful text rendering as `hades receipt ...`
+ * and the classic slash path (one renderer, no second authority surface):
+ * `completed_unverified` is never success, `unknown_effect` is never
+ * failure/retry-safe, and attestations stay labeled "provenance only".
+ * list/claims become panels, show becomes a page, and the mutating verbs
+ * (recheck/export/prune) become concise system results.
+ */
+const renderReceiptResult = (action: string, r: ReceiptExecResponse, ctx: SlashRunCtx): void => {
+  const { page, panel, sys } = ctx.transcript
+
+  if (r.warning) {
+    sys(`warning: ${r.warning}`)
+  }
+
+  if (receiptStatuses(r).includes('unknown_effect')) {
+    sys(`warning: ${UNKNOWN_EFFECT_WARNING}`)
+  }
+
+  if (r.action === 'list' && r.receipts) {
+    if (!r.receipts.length) {
+      return sys('no receipts match — capture is controlled by receipts.mode in config.yaml')
+    }
+
+    return panel('Receipts', [
+      {
+        rows: r.receipts.map(summary => [
+          summary.receipt_id,
+          `${summary.subject_kind}:${summary.subject_id} · ${summary.status} · decided ${summary.decided_at}`
+        ])
+      }
+    ])
+  }
+
+  if (r.action === 'show') {
+    const title = r.receipt?.receipt_id ? `Receipt ${r.receipt.receipt_id}` : 'Receipt'
+
+    return page(r.output || '(no output)', title)
+  }
+
+  if (r.action === 'claims' && r.claim_edges) {
+    if (!r.claim_edges.length) {
+      return sys('no claims recorded on this receipt')
+    }
+
+    return panel('Receipt claims (claim → evidence → artifacts)', [
+      {
+        rows: r.claim_edges.map(edge => [
+          `${edge.claim_id} [${edge.verdict}]`,
+          [
+            edge.statement,
+            `  evidence: ${edge.evidence_ids.join(', ') || '(none)'}`,
+            `  artifacts: ${edge.artifact_ids.join(', ') || '(none)'}`,
+            ...edge.uncertainty.map(note => `  uncertainty: ${note}`)
+          ].join('\n')
+        ])
+      }
+    ])
+  }
+
+  if (r.action === 'recheck') {
+    const observation = r.observations?.[r.observations.length - 1]
+
+    return sys(
+      `recheck appended observation ${observation?.observation_id ?? '(unknown)'} · status ${
+        observation?.status ?? '(unknown)'
+      } · the original receipt is immutable`
+    )
+  }
+
+  if (r.action === 'export') {
+    return sys(`exported receipt to ${r.export_path ?? '(unknown path)'}`)
+  }
+
+  if (r.action === 'prune') {
+    return sys(r.output.split('\n')[0] || 'retention plan pruned')
+  }
+
+  // verify-signature / retention-plan / help and anything else: the shared
+  // text rendering, paged when long.
+  const title = `Receipt ${(r.action || action).replace(/^-+/, '') || 'help'}`
+  const text = r.output || '(no output)'
+
+  return isLongText(text) ? page(text, title) : sys(text)
+}
+
 export const opsCommands: SlashCommand[] = [
+  {
+    aliases: ['receipts'],
+    help: 'inspect verified outcome receipts (evidence, artifacts, rechecks)',
+    name: 'receipt',
+    run: (arg, ctx) => {
+      // Existing slash tokenizer semantics (whitespace split) — never a shell.
+      const tokens = arg.trim().split(/\s+/).filter(Boolean)
+      const argv = tokens.length ? tokens : ['--help']
+
+      // Native route only: recheck/prune write observations/tombstones, so
+      // receipt commands must never reach the slash-worker fallback
+      // (slash.exec) — see slashParity.test.ts.
+      ctx.gateway
+        .rpc<ReceiptExecResponse>('receipt.exec', { argv, session_id: ctx.sid })
+        .then(ctx.guarded<ReceiptExecResponse>(r => renderReceiptResult(argv[0]!, r, ctx)))
+        .catch(ctx.guardedErr)
+    }
+  },
+
   {
     aliases: ['authority'],
     help: 'explain and edit what Hades may do (allow/ask/deny authority)',

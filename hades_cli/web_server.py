@@ -14322,6 +14322,295 @@ async def get_autonomy_audit(
     return await _autonomy_call(profile, _audit)
 
 
+# ---------------------------------------------------------------------------
+# Verified outcome & artifact receipts — secondary READ-ONLY Dashboard
+# inspection surface.  Every route resolves/validates the requested profile
+# synchronously, then opens ONLY that profile's ``SessionDB`` in a worker
+# thread and reads through the same ``agent.receipts`` store contract the
+# CLI and native Ink TUI use.  Responses pass through the Task 7 redaction
+# layer (``ReceiptRedactor``) so no profile-home prefix, secret, message
+# body, or raw ``artifact_locations`` locator reaches the wire, and
+# attestations are always labeled "provenance only".  The Dashboard never
+# rechecks, exports, signs, prunes, or otherwise mutates receipt state —
+# primary control stays with ``hades receipt ...`` / ``/receipt ...``.
+#
+# A token-authenticated caller whose principal carries a ``profile:<name>``
+# scope (see ``dashboard_auth.token_auth``) is bound to that profile: reads
+# always resolve that profile's store and a mismatching explicit
+# ``?profile=`` gets the same 404 a missing receipt gets, so a scoped
+# caller can never confirm another profile's receipts exist.
+# ---------------------------------------------------------------------------
+
+_RECEIPT_STATUSES = (
+    "blocked",
+    "completed_unverified",
+    "failed",
+    "unknown_effect",
+    "verified",
+)
+_RECEIPT_SUBJECT_KINDS = ("turn", "mission", "transaction", "external")
+_RECEIPT_MAX_LIST_LIMIT = 200
+_RECEIPT_MAX_CURSOR = 1_000_000_000
+# Canonical IDs are ``rct_<64 hex>``; migrated legacy IDs are the explicit
+# compatibility exception, so accept a bounded conservative charset.
+_RECEIPT_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
+
+
+def _receipt_not_found() -> HTTPException:
+    """The one refusal for missing, foreign-profile, or malformed IDs."""
+    return HTTPException(status_code=404, detail="receipt not found")
+
+
+def _receipt_scope_profile(request: Request, profile: Optional[str]) -> Optional[str]:
+    """Resolve the effective profile for one receipts read.
+
+    Precedence: a ``profile:<name>`` principal scope from the token-auth
+    seam binds the caller to that profile (an explicit mismatching
+    ``?profile=`` is refused as 404); otherwise the ordinary ``?profile=``
+    query parameter applies, `None`/"current" meaning the dashboard's own
+    profile.
+    """
+    principal = getattr(request.state, "token_principal", None)
+    scoped: Optional[str] = None
+    for scope in getattr(principal, "scopes", None) or ():
+        if isinstance(scope, str) and scope.startswith("profile:"):
+            scoped = scope.split(":", 1)[1].strip()
+            break
+    requested = (profile or "").strip()
+    if scoped:
+        if requested and requested.lower() != "current" and requested != scoped:
+            raise _receipt_not_found()
+        return scoped
+    return requested or None
+
+
+async def _receipt_read(request: Request, profile: Optional[str], fn):
+    """Run ``fn(store, redactor)`` against the resolved profile's store.
+
+    The profile is validated synchronously (same 400/404 as every other
+    profile-scoped endpoint); the profile's ``state.db`` is then opened
+    read-through in a worker thread and closed before returning.  Only
+    the read-only store and the redactor are wired — never the signing,
+    retention, export, or issuance services.
+    """
+    effective = _receipt_scope_profile(request, profile)
+    if effective and effective.lower() != "current":
+        profile_dir = _resolve_profile_dir(effective)
+    else:
+        from hades_constants import get_hades_home
+
+        profile_dir = Path(get_hades_home())
+
+    def _run():
+        from agent.receipt_security import ReceiptRedactor
+        from agent.receipt_store import ReceiptStore
+        from hades_state import SessionDB
+
+        db = SessionDB(db_path=profile_dir / "state.db")
+        try:
+            return fn(ReceiptStore(db), ReceiptRedactor(sensitive_roots=(profile_dir,)))
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    try:
+        return await asyncio.to_thread(_run)
+    except HTTPException:
+        raise
+    except Exception:
+        # Bounded refusal: no traceback, store detail, or path reaches
+        # the wire.
+        _log.exception("receipts endpoint failed")
+        raise HTTPException(status_code=500, detail="receipts: internal failure")
+
+
+def _receipt_claim_edges(claims) -> List[dict]:
+    """Every claim→evidence→artifact edge as one structured record
+    (same shape as the CLI/TUI renderers)."""
+    return [
+        {
+            "claim_id": claim.claim_id,
+            "claim_kind": claim.claim_kind,
+            "statement": claim.statement,
+            "verdict": claim.verdict,
+            "required": claim.required,
+            "evidence_ids": list(claim.evidence_ids),
+            "artifact_ids": list(claim.artifact_ids),
+            "uncertainty": list(claim.uncertainty),
+        }
+        for claim in claims
+    ]
+
+
+def _receipt_attestation_docs(store, receipt, observations) -> List[dict]:
+    """Attestation projections, each explicitly labeled provenance-only."""
+    from dataclasses import asdict as dc_asdict
+
+    attestations = list(store.list_attestations(receipt.receipt_id))
+    for observation in observations:
+        attestations.extend(store.list_attestations(observation.observation_id))
+    return [
+        dict(dc_asdict(attestation), role="provenance only")
+        for attestation in attestations
+    ]
+
+
+def _receipt_validate_id(receipt_id: str) -> str:
+    rid = (receipt_id or "").strip()
+    if not _RECEIPT_ID_RE.match(rid):
+        # A malformed ID cannot exist; refusing it identically to a
+        # missing one keeps the surface a non-oracle.
+        raise _receipt_not_found()
+    return rid
+
+
+@app.get("/api/receipts")
+async def list_receipts_api(
+    request: Request,
+    profile: Optional[str] = None,
+    status: Optional[str] = None,
+    subject: Optional[str] = None,
+    cursor: Optional[str] = None,
+    limit: int = 50,
+):
+    """Redacted receipt summaries for one profile (canonical filters only)."""
+    if status is not None and status not in _RECEIPT_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of {', '.join(_RECEIPT_STATUSES)}",
+        )
+    if subject is not None and subject not in _RECEIPT_SUBJECT_KINDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"subject must be one of {', '.join(_RECEIPT_SUBJECT_KINDS)}",
+        )
+    if not 1 <= limit <= _RECEIPT_MAX_LIST_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"limit must be between 1 and {_RECEIPT_MAX_LIST_LIMIT}",
+        )
+    offset = 0
+    if cursor is not None and cursor != "":
+        if not cursor.isdigit() or int(cursor) > _RECEIPT_MAX_CURSOR:
+            raise HTTPException(
+                status_code=400,
+                detail="cursor must be an opaque value from a previous page",
+            )
+        offset = int(cursor)
+
+    def _list(store, redactor):
+        from dataclasses import asdict as dc_asdict
+
+        from agent.receipt_models import ReceiptQuery
+
+        summaries = store.list(
+            ReceiptQuery(
+                status=status,
+                subject_kind=subject,
+                limit=limit,
+                offset=offset,
+            )
+        )
+        payload = {
+            "ok": True,
+            "receipts": [dc_asdict(summary) for summary in summaries],
+            "count": len(summaries),
+            "next_cursor": (
+                str(offset + limit) if len(summaries) == limit else None
+            ),
+        }
+        return redactor.redact(payload)
+
+    return await _receipt_read(request, profile, _list)
+
+
+@app.get("/api/receipts/{receipt_id}")
+async def get_receipt_api(
+    receipt_id: str,
+    request: Request,
+    profile: Optional[str] = None,
+):
+    """One redacted receipt: original decision, claim→evidence→artifact
+    edges, latest recheck observation, and provenance-only attestations."""
+    rid = _receipt_validate_id(receipt_id)
+
+    def _detail(store, redactor):
+        from dataclasses import asdict as dc_asdict
+
+        receipt = store.get(rid)
+        if receipt is None:
+            raise _receipt_not_found()
+        observations = store.observations(rid)
+        latest = observations[-1] if observations else None
+        payload = {
+            "ok": True,
+            "receipt_id": receipt.receipt_id,
+            "receipt": dc_asdict(receipt),
+            "claim_edges": _receipt_claim_edges(receipt.claims),
+            "original_status": receipt.status,
+            "latest_observation": dc_asdict(latest) if latest else None,
+            "observation_count": len(observations),
+            "attestations": _receipt_attestation_docs(
+                store, receipt, observations
+            ),
+            "status_note": _RECEIPT_STATUS_NOTES.get(receipt.status, ""),
+            # Inspection-only surface: primary control is the CLI/TUI.
+            "recheck_hint": (
+                f"hades receipt recheck {receipt.receipt_id} "
+                f"(or /receipt recheck {receipt.receipt_id})"
+            ),
+        }
+        return redactor.redact(payload)
+
+    return await _receipt_read(request, profile, _detail)
+
+
+@app.get("/api/receipts/{receipt_id}/observations")
+async def get_receipt_observations_api(
+    receipt_id: str,
+    request: Request,
+    profile: Optional[str] = None,
+):
+    """The append-only recheck history for one receipt, oldest first."""
+    rid = _receipt_validate_id(receipt_id)
+
+    def _observations(store, redactor):
+        from dataclasses import asdict as dc_asdict
+
+        receipt = store.get(rid)
+        if receipt is None:
+            raise _receipt_not_found()
+        observations = store.observations(rid)
+        payload = {
+            "ok": True,
+            "receipt_id": receipt.receipt_id,
+            "observations": [dc_asdict(o) for o in observations],
+            "count": len(observations),
+        }
+        return redactor.redact(payload)
+
+    return await _receipt_read(request, profile, _observations)
+
+
+# Plain-language status notes shared with the CLI renderer's posture:
+# never "success" for completed_unverified; never failure/retry-safe for
+# unknown_effect.
+_RECEIPT_STATUS_NOTES = {
+    "verified": "independently scored end state",
+    "completed_unverified": (
+        "completion claimed by the producer — not independently verified"
+    ),
+    "failed": "the requested end state does not hold",
+    "blocked": "execution was blocked before the end state could hold",
+    "unknown_effect": (
+        "the effect may or may not have happened. Do not retry the "
+        "effect; recheck and reconcile evidence"
+    ),
+}
+
+
 class SkillToggle(BaseModel):
     name: str
     enabled: bool
