@@ -902,12 +902,15 @@ class LSPClient:
             except asyncio.TimeoutError:
                 continue
 
-    def diagnostics_for(self, path: str) -> List[Dict[str, Any]]:
+    def diagnostics_for(self, path: str, *, fresh_only: bool = False) -> List[Dict[str, Any]]:
         """Return current merged + deduped diagnostics for one file.
 
         Diagnostics from push and pull stores are concatenated and
         deduplicated by ``(severity, code, message, range)`` content
         key.  Empty list if the server hasn't published anything.
+
+        With ``fresh_only=True``, stale leftovers from the previous
+        edit cycle are excluded when version tracking permits it.
         """
         abs_path = os.path.abspath(path)
         push = self._push_diagnostics.get(abs_path) or []
