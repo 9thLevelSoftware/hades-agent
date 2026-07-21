@@ -162,7 +162,8 @@ export function deriveBillingView(
 
 export function buildManageSubscriptionUrl(
   subscription?: null | Pick<SubscriptionStateResponse, 'org_id' | 'portal_url'>,
-  fallbackPortalUrl?: null | string
+  fallbackPortalUrl?: null | string,
+  tierId?: string
 ): string {
   const portalUrls = [subscription?.portal_url, fallbackPortalUrl].filter(
     (url): url is string => typeof url === 'string' && url.length > 0
@@ -174,6 +175,10 @@ export function buildManageSubscriptionUrl(
 
       if (subscription?.org_id) {
         url.searchParams.set('org_id', subscription.org_id)
+      }
+
+      if (tierId) {
+        url.searchParams.set('plan', tierId)
       }
 
       return url.toString()
@@ -276,11 +281,12 @@ function paymentMethodRow(billing: BillingStateResponse): BillingAccountRowView 
 
 /**
  * Tier catalog as chips for accounts that can change plans; the current plan is
- * inert, every other opens the portal where the change/start happens.
+ * inert, every other opens the portal where the change/start happens, deep-linked
+ * to that tier via `?plan=`.
  */
 function subscriptionTierChips(
   subscription: null | SubscriptionStateResponse,
-  manageUrl: string
+  fallbackPortalUrl?: null | string
 ): BillingChipView[] | undefined {
   // Teams have no personal subscription to sell into.
   if (!subscription?.can_change_plan || subscription.context === 'team') {
@@ -301,7 +307,9 @@ function subscriptionTierChips(
     const suffix = Number.isFinite(credits) && credits > 0 ? ` · $${credits.toLocaleString('en-US')} credits/mo` : ''
     const label = `${tier.name} · ${tier.dollars_per_month_display}/mo${suffix}`
 
-    return tier.is_current ? { disabled: true, label: `✓ ${label}` } : { disabled: false, label, url: manageUrl }
+    return tier.is_current
+      ? { disabled: true, label: `✓ ${label}` }
+      : { disabled: false, label, url: buildManageSubscriptionUrl(subscription, fallbackPortalUrl, tier.tier_id) }
   })
 }
 
@@ -310,13 +318,14 @@ function subscriptionRow(
   subscription: null | SubscriptionStateResponse,
   subscriptionResult?: BillingResult<SubscriptionStateResponse>
 ): BillingAccountRowView {
-  const manageUrl = buildManageSubscriptionUrl(subscription, subscription?.portal_url ?? billing.portal_url)
+  const fallbackPortalUrl = subscription?.portal_url ?? billing.portal_url
+  const manageUrl = buildManageSubscriptionUrl(subscription, fallbackPortalUrl)
   const current = subscription?.current
   const fallbackPlan = billing.usage?.plan_name ?? EMPTY_BILLING_VALUE
   const value = current?.tier_name ?? fallbackPlan
   const renewal = formatBillingDate(current?.cycle_ends_at ?? billing.usage?.renews_at)
   const unavailable = subscriptionResult && !subscriptionResult.ok
-  const chips = subscriptionTierChips(subscription, manageUrl)
+  const chips = subscriptionTierChips(subscription, fallbackPortalUrl)
 
   return {
     action: { label: 'Adjust plan ↗', url: manageUrl },
@@ -459,18 +468,10 @@ function deriveUsageRows(
   })
 
   const topupValue = topupCreditsValue(billing, usage)
-  const topupRemaining = topupCreditsAmount(billing, usage)
 
+  // No bar: top-ups have no denominator (the wire carries only the current
+  // balance, and the pool is open-ended), so a fill fraction would be fiction.
   rows.push({
-    bar:
-      topupRemaining != null
-        ? {
-            label: 'Top-up credits remaining',
-            state: topupRemaining > 0 ? 'ok' : 'neutral',
-            tone: 'topup',
-            value: topupRemaining > 0 ? 1 : 0
-          }
-        : undefined,
     caption: 'Does not expire',
     id: 'topup_credits',
     title: 'Top-up credits',
@@ -530,15 +531,6 @@ function topupCreditsValue(billing: BillingStateResponse, usage?: UsageModelData
     usage?.topup_bar?.remaining_display ??
     nonEmpty(billing.balance_display) ??
     formatMoney(billing.balance_usd)
-  )
-}
-
-function topupCreditsAmount(billing: BillingStateResponse, usage?: UsageModelData): null | number {
-  return (
-    parseAmount(usage?.topup_bar?.remaining_display) ??
-    parseAmount(usage?.topup_remaining_display) ??
-    parseAmount(billing.balance_usd) ??
-    parseAmount(billing.balance_display)
   )
 }
 
