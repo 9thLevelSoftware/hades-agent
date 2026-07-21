@@ -2292,6 +2292,8 @@ class BasePlatformAdapter(ABC):
     - Handling media
     """
 
+    gateway_runner: "Optional[Any]" = None
+
     # Whether this platform renders triple-backtick fenced code blocks (i.e.
     # ``format_message`` translates/preserves markdown fences into a real code
     # block).  Capability flag for markdown-aware presentation choices.
@@ -5661,7 +5663,7 @@ class BasePlatformAdapter(ABC):
         # Normalize empty topic to None
         if chat_topic is not None and not chat_topic.strip():
             chat_topic = None
-        return SessionSource(
+        source = SessionSource(
             platform=self.platform,
             chat_id=str(chat_id),
             chat_name=chat_name,
@@ -5681,6 +5683,15 @@ class BasePlatformAdapter(ABC):
             auto_thread_created=auto_thread_created,
             auto_thread_initial_name=auto_thread_initial_name,
         )
+        runner = self.gateway_runner
+        if runner is not None:
+            try:
+                profile = runner._profile_name_for_source(source)
+                if profile:
+                    source.profile = profile
+            except Exception:
+                pass
+        return source
     
     @abstractmethod
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:

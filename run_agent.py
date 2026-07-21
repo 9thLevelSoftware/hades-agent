@@ -4904,6 +4904,9 @@ class AIAgent:
 
     def _record_streamed_assistant_text(self, text: str) -> None:
         """Accumulate visible assistant text emitted through stream callbacks."""
+        if self._stream_writer_superseded():
+            self._stream_writer_dropped += 1
+            return
         if isinstance(text, str) and text:
             self._current_streamed_assistant_text = (
                 getattr(self, "_current_streamed_assistant_text", "") + text
@@ -5086,8 +5089,32 @@ class AIAgent:
         if not hasattr(self, "_stream_writer_dropped"):
             self._stream_writer_dropped = 0
 
+    def _claim_stream_writer(self) -> int:
+        self._ensure_stream_writer_state()
+        with self._stream_writer_lock:
+            self._stream_writer_token += 1
+            token = self._stream_writer_token
+        self._stream_writer_tls.token = token
+        return token
+
+    def _stream_writer_is_current(self, token: int) -> bool:
+        self._ensure_stream_writer_state()
+        with self._stream_writer_lock:
+            return token == self._stream_writer_token
+
+    def _stream_writer_superseded(self) -> bool:
+        self._ensure_stream_writer_state()
+        my_token = getattr(self._stream_writer_tls, "token", None)
+        if my_token is None:
+            return False
+        with self._stream_writer_lock:
+            return my_token < self._stream_writer_token
+
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
+        if self._stream_writer_superseded():
+            self._stream_writer_dropped += 1
+            return
         # If a tool iteration set the break flag, prepend a single paragraph
         # break before the first real text delta.  This prevents the original
         # problem (text concatenation across tool boundaries) without stacking
@@ -5141,6 +5168,9 @@ class AIAgent:
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""
+        if self._stream_writer_superseded():
+            self._stream_writer_dropped += 1
+            return
         cb = self.reasoning_callback
         if cb is not None:
             try:

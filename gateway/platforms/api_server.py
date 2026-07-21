@@ -667,6 +667,12 @@ def _openai_error(message: str, err_type: str = "invalid_request_error", param: 
     }
 
 
+_PROFILE_REJECTED = object()
+
+_api_request_profile: ContextVar[Optional[str]] = ContextVar(
+    "_api_request_profile", default=None
+)
+
 _api_agent_request_reservation: ContextVar[Optional[dict[str, bool]]] = ContextVar(
     "api_agent_request_reservation", default=None
 )

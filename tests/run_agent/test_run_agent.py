@@ -2018,7 +2018,7 @@ class TestBuildApiKwargs:
         )
         assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
 
-    def test_reasoning_xhigh_normalized_for_copilot(self, agent):
+    def test_reasoning_xhigh_normalized_for_copilot(self, agent, monkeypatch):
         """xhigh effort should normalize to high for Copilot GitHub Models."""
         from agent.transports import get_transport
         from providers import get_provider_profile
@@ -3493,6 +3493,7 @@ class TestConcurrentToolExecution:
             "effect_adapter": None,
             "effect_semantic_kind": None,
             "effect_overrides": {},
+            "effect_action": None,
         }
         from model_tools import registry
         assert seen["operation_key"] == registry.operation_key(
@@ -4206,7 +4207,7 @@ class TestHandleMaxIterations:
         kwargs = agent.client.chat.completions.create.call_args.kwargs
         from agent.portal_tags import nous_portal_tags
 
-        assert kwargs["extra_body"]["tags"] == nous_portal_tags()
+        assert kwargs["extra_body"]["tags"] == nous_portal_tags(session_id=agent.session_id)
         assert kwargs["extra_body"]["provider"] == {
             "only": ["deepseek"],
             "ignore": ["deepinfra"],
@@ -4228,7 +4229,7 @@ class TestHandleMaxIterations:
         kwargs = agent.client.chat.completions.create.call_args.kwargs
         from agent.portal_tags import nous_portal_tags
 
-        assert kwargs["extra_body"] == {"tags": nous_portal_tags()}
+        assert kwargs["extra_body"] == {"tags": nous_portal_tags(session_id=agent.session_id)}
 
     def test_summary_drops_invalid_provider_sort(self, agent):
         agent.base_url = "https://openrouter.ai/api/v1"
