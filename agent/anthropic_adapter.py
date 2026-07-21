@@ -1414,7 +1414,7 @@ _OAUTH_TOKEN_URL = _OAUTH_TOKEN_URLS[0]
 _OAUTH_TOKEN_USER_AGENT = "axios/1.7.9"
 _OAUTH_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
 _OAUTH_SCOPES = "org:create_api_key user:profile user:inference"
-def _get_hermes_oauth_file() -> Path:
+def _get_hades_oauth_file() -> Path:
     return get_hades_home() / ".anthropic_oauth.json"
 
 
@@ -1431,7 +1431,7 @@ def _generate_pkce() -> tuple:
     return verifier, challenge
 
 
-def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
+def run_hades_oauth_login_pure() -> Optional[Dict[str, Any]]:
     """Run Hades-native OAuth PKCE flow and return credential state."""
     import secrets
     import time
@@ -1561,9 +1561,9 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
     }
 
 
-def read_hermes_oauth_credentials() -> Optional[Dict[str, Any]]:
+def read_hades_oauth_credentials() -> Optional[Dict[str, Any]]:
     """Read Hades-managed OAuth credentials from ~/.hades/.anthropic_oauth.json."""
-    oauth_file = _get_hermes_oauth_file()
+    oauth_file = _get_hades_oauth_file()
     if oauth_file.exists():
         try:
             data = json.loads(oauth_file.read_text(encoding="utf-8"))
