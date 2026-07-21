@@ -45,6 +45,7 @@ def finalize_turn(
     _should_review_memory,
     _turn_exit_reason,
     _pending_verification_response=None,
+    _pending_verification_response_previewed=False,
 ):
     """Run the post-loop finalization and return the turn ``result`` dict.
 
@@ -78,6 +79,11 @@ def finalize_turn(
         # fallible model call. The explicit pending value is the provenance
         # guard: unrelated error/recovery exits can never enter this branch.
         final_response = _pending_verification_response
+        # Mark the turn as previewed only when the reused candidate was
+        # actually streamed to the user as interim content. (#65919 review:
+        # response-loss blocker)
+        if _pending_verification_response_previewed:
+            agent._response_was_previewed = True
         _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
         iteration_limit_fallback = True
         preserved_verification_fallback = True
