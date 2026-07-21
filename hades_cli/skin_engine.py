@@ -861,14 +861,40 @@ def list_skins() -> List[Dict[str, str]]:
 
 
 def load_skin(name: str) -> SkinConfig:
-    """Load a skin by name. Checks user skins first, then built-in."""
+    """Load a skin by name. Checks user skins first, then built-in.
+
+    User YAML at ``$HADES_HOME/skins/<name>.yaml`` **overrides** a built-in of
+    the same name. Missing keys inherit from that built-in (or from
+    ``default``), so a file that only sets ``banner_hero`` still keeps the
+    built-in logo/colors/branding. This is the supported way to replace the
+    left-hand welcome-banner icon without forking the whole skin.
+    """
     # Check user skins directory
     skins_path = _skins_dir()
     user_file = skins_path / f"{name}.yaml"
     if user_file.is_file():
         data = _load_skin_from_yaml(user_file)
         if data:
-            return _build_skin_config(data)
+            # Merge onto the matching built-in (or default) so partial user
+            # skins only need the fields they change.
+            base_name = name if name in _BUILTIN_SKINS else "default"
+            if data.get("name") in _BUILTIN_SKINS:
+                base_name = str(data["name"])
+            base = dict(_BUILTIN_SKINS[base_name])
+            merged = dict(base)
+            for key, value in data.items():
+                if key in {"colors", "spinner", "branding", "tool_emojis"} and isinstance(value, dict):
+                    section = dict(base.get(key) or {})
+                    section.update(value)
+                    merged[key] = section
+                elif key in {"banner_logo", "banner_hero"}:
+                    # Empty/whitespace means "keep base" so a half-written YAML
+                    # cannot silently wipe the wordmark/hero back to Hermes.
+                    if isinstance(value, str) and value.strip():
+                        merged[key] = value
+                else:
+                    merged[key] = value
+            return _build_skin_config(merged)
 
     # Check built-in skins
     if name in _BUILTIN_SKINS:
