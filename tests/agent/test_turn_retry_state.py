@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import fields
 
-from agent.turn_retry_state import TurnRetryState
+from agent.turn_retry_state import TurnRetryState, compute_turn_api_attempt_ceiling
 
 
 EXPECTED_FIELDS = {
@@ -65,3 +65,14 @@ def test_guards_are_independently_mutable():
     # untouched guards stay False
     assert s.has_retried_429 is False
     assert s.anthropic_auth_retry_attempted is False
+
+
+def test_turn_api_attempt_ceiling_default_scales_with_fallbacks():
+    # api_max_retries=1, 3 fallbacks → 1 * 4 providers + 3 headroom = 7
+    assert compute_turn_api_attempt_ceiling(1, 3) == 7
+    assert compute_turn_api_attempt_ceiling(3, 0) == 6
+
+
+def test_turn_api_attempt_ceiling_configured_wins():
+    assert compute_turn_api_attempt_ceiling(1, 10, configured=5) == 5
+    assert compute_turn_api_attempt_ceiling(1, 10, configured=0) == 14  # 0 falls through

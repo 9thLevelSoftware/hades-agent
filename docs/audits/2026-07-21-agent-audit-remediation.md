@@ -25,10 +25,10 @@ Each phase is completed fully before its PR is opened.
 | L3-02 | Sandbox mirror only matches `.hades`, not `.hermes` | 1 | done (phase-1) |
 | L2-01 | Codex kanban writable_roots string injection | 1 | done (phase-1) |
 | L2-05 | ACP file attach skips read denylist | 1 | done (phase-1) |
-| L1-02 | Turn retry budget resets on failover | 2 | pending |
-| L4-01 | Background review `in_flight` + aggressive prompts | 2 | pending |
-| L4-02 | Full skill inject without token budget | 2 | pending |
-| L4-06 | Skill config values may inject secrets | 2 | pending |
+| L1-02 | Turn retry budget resets on failover | 2 | done (phase-2) |
+| L4-01 | Background review `in_flight` + aggressive prompts | 2 | done (phase-2) |
+| L4-02 | Full skill inject without token budget | 2 | done (phase-2) |
+| L4-06 | Skill config values may inject secrets | 2 | done (phase-2) |
 | L2-03 | Unbounded codex notification queues | 3 | pending |
 | L2-04 / L4-05 | hermes-tools MCP over-advertises tools | 3 | pending |
 | L2-02 (soft) | hermes-tools elicitation auto-accept | 3 | pending |

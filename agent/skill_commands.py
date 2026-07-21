@@ -175,6 +175,20 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
     return loaded_skill, skill_dir, skill_name
 
 
+_SECRETISH_CONFIG_KEY = re.compile(
+    r"(api[_-]?key|token|password|passwd|secret|credential|authorization|auth)$",
+    re.IGNORECASE,
+)
+
+
+def _is_secretish_config_key(key: str) -> bool:
+    """True when a skill config key looks like it holds a secret value."""
+    normalized = str(key or "").strip().lower().replace("-", "_").replace(".", "_")
+    if not normalized:
+        return False
+    return bool(_SECRETISH_CONFIG_KEY.search(normalized))
+
+
 def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None:
     """Resolve and inject skill-declared config values into the message parts.
 
@@ -182,6 +196,9 @@ def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None
     entries, their current values (from config.yaml or defaults) are appended
     as a ``[Skill config: ...]`` block so the agent knows the configured values
     without needing to read config.yaml itself.
+
+    Secret-like keys (token, password, api_key, …) show only ``(set)`` /
+    ``(not set)`` so values never enter the transcript (audit L4-06).
     """
     try:
         from agent.skill_utils import (
@@ -206,7 +223,10 @@ def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None
 
         lines = ["", f"[Skill config (from {display_hades_home()}/config.yaml):"]
         for key, value in resolved.items():
-            display_val = str(value) if value else "(not set)"
+            if _is_secretish_config_key(str(key)):
+                display_val = "(set)" if value else "(not set)"
+            else:
+                display_val = str(value) if value else "(not set)"
             lines.append(f"  {key} = {display_val}")
         lines.append("]")
         parts.extend(lines)
@@ -314,7 +334,33 @@ def _build_skill_message(
         parts.append("")
         parts.append(f"[Runtime note: {runtime_note}]")
 
-    return "\n".join(parts)
+    message = "\n".join(parts)
+    return _apply_skill_inject_budget(message, skills_cfg)
+
+
+def _apply_skill_inject_budget(message: str, skills_cfg: dict) -> str:
+    """Truncate oversize skill injects while preserving scaffolding markers.
+
+    Default budget is high (48k tokens rough) so normal skills are unchanged.
+    Override via ``skills.max_inject_tokens`` in config.yaml.
+    """
+    try:
+        max_tokens = int(skills_cfg.get("max_inject_tokens", 48000) or 48000)
+    except (TypeError, ValueError):
+        max_tokens = 48000
+    if max_tokens <= 0:
+        return message
+    # Rough chars/token; intentionally conservative (over-estimate tokens).
+    max_chars = max_tokens * 4
+    if len(message) <= max_chars:
+        return message
+    keep = max(max_chars - 400, 2000)
+    truncated = message[:keep].rstrip()
+    return (
+        truncated
+        + "\n\n[Skill content truncated to stay within skills.max_inject_tokens. "
+        "Load remaining sections with skill_view as needed.]"
+    )
 
 
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
