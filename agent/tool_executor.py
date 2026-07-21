@@ -1233,12 +1233,12 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # Checkpoint: snapshot working dir before file-mutating tools
         if not _execution_blocked and function_name in {"write_file", "patch"} and agent._checkpoint_mgr.enabled:
             try:
-                file_path = function_args.get("path", "")
-                if file_path:
-                    work_dir = agent._checkpoint_mgr.get_working_dir_for_path(file_path)
-                    agent._checkpoint_mgr.ensure_checkpoint(
-                        work_dir, f"before {function_name}"
-                    )
+                _ensure_file_checkpoint(
+                    agent,
+                    function_name,
+                    function_args,
+                    effective_task_id,
+                )
             except Exception:
                 pass  # never block tool execution
 
