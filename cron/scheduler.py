@@ -2221,7 +2221,7 @@ def _run_job_script_with_claim_heartbeat(
         from cron.script_claim import issue_script_launch_claim
 
         claim = issue_script_launch_claim(
-            home=_get_hermes_home(),
+            home=_get_hades_home(),
             job_id=str(job.get("id") or ""),
             dispatched_job=job,
         )

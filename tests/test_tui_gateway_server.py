@@ -11,7 +11,12 @@ from unittest.mock import patch
 
 import pytest
 
-from hades_constants import reset_hades_home_override, set_hades_home_override
+from hades_constants import (
+    reset_hades_home_override,
+    set_hades_home_override,
+    set_hermes_home_override,
+    reset_hermes_home_override,
+)
 from hades_cli.active_sessions import active_session_registry_snapshot
 from hades_cli.browser_connect import ChromeDebugLaunch
 from tui_gateway import server
@@ -5439,7 +5444,7 @@ def test_config_set_model_does_not_leak_inference_provider_env(monkeypatch):
 
     session = _session(agent=_Agent())
     server._sessions["sid"] = session
-    monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openrouter")
+    monkeypatch.setenv("HADES_INFERENCE_PROVIDER", "openrouter")
     monkeypatch.setattr(
         "hades_cli.model_switch.switch_model", lambda **_kwargs: result
     )
@@ -5583,7 +5588,7 @@ def test_config_set_model_switches_agent_without_touching_env(monkeypatch):
     agent._session_db = db
     session = _session(agent=agent)
     server._sessions["sid"] = session
-    monkeypatch.setenv("HERMES_TUI_PROVIDER", "openai-codex")
+    monkeypatch.setenv("HADES_TUI_PROVIDER", "openai-codex")
     monkeypatch.delenv("HERMES_MODEL", raising=False)
     monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
     monkeypatch.setattr(server, "_restart_slash_worker", lambda sid, session: None)
@@ -5958,7 +5963,7 @@ def test_file_attach_uploads_remote_file_into_session_workspace(monkeypatch, tmp
         assert resp["result"]["attached"] is True
         assert resp["result"]["uploaded"] is True
         assert resp["result"]["path"] == str(stored)
-        assert resp["result"]["ref_text"] == "@file:.hermes/desktop-attachments/report.txt"
+        assert resp["result"]["ref_text"] == "@file:.hades/desktop-attachments/report.txt"
         assert stored.read_text(encoding="utf-8") == "hello world"
     finally:
         server._sessions.pop("sid", None)
@@ -5990,7 +5995,7 @@ def test_file_attach_copies_gateway_visible_file_outside_workspace(monkeypatch, 
         stored = workspace / ".hades" / "desktop-attachments" / "outside.txt"
         assert resp["result"]["attached"] is True
         assert resp["result"]["uploaded"] is True
-        assert resp["result"]["ref_text"] == "@file:.hermes/desktop-attachments/outside.txt"
+        assert resp["result"]["ref_text"] == "@file:.hades/desktop-attachments/outside.txt"
         assert stored.read_text(encoding="utf-8") == "outside workspace"
     finally:
         server._sessions.pop("sid", None)
@@ -6081,7 +6086,7 @@ def test_file_attach_quotes_ref_with_spaces(monkeypatch, tmp_path):
         )
 
         assert resp["result"]["attached"] is True
-        assert resp["result"]["ref_text"] == "@file:`.hermes/desktop-attachments/my exam schedule.csv`"
+        assert resp["result"]["ref_text"] == "@file:`.hades/desktop-attachments/my exam schedule.csv`"
     finally:
         server._sessions.pop("sid", None)
 
@@ -7463,14 +7468,14 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
 
 
 def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):
-    fake_mod = types.ModuleType("hermes_state")
+    fake_mod = types.ModuleType("hades_state")
 
     class _BrokenSessionDB:
         def __init__(self):
             raise RuntimeError("locking protocol")
 
     fake_mod.SessionDB = _BrokenSessionDB
-    monkeypatch.setitem(sys.modules, "hermes_state", fake_mod)
+    monkeypatch.setitem(sys.modules, "hades_state", fake_mod)
     monkeypatch.setattr(server, "_db", None)
     monkeypatch.setattr(server, "_db_error", None)
 
@@ -8553,7 +8558,7 @@ def test_browser_manage_connect_sets_env_and_cleans_twice(monkeypatch):
 
     assert resp["result"]["connected"] is True
     assert resp["result"]["url"] == "http://127.0.0.1:9222"
-    assert resp["result"]["messages"] == ["Chromium-family browser is already listening on port 9222"]
+    assert resp["result"]["messages"] == ["Chromium-family browser is already listening at http://127.0.0.1:9222"]
     assert os.environ.get("BROWSER_CDP_URL") == "http://127.0.0.1:9222"
     # First cleanup runs against the OLD env (none here), second against the NEW.
     assert cleanup_calls == ["", "http://127.0.0.1:9222"]
@@ -8573,7 +8578,7 @@ def test_browser_manage_connect_defaults_to_loopback(monkeypatch):
 
     assert resp["result"]["connected"] is True
     assert resp["result"]["url"] == "http://127.0.0.1:9222"
-    assert resp["result"]["messages"] == ["Chromium-family browser is already listening on port 9222"]
+    assert resp["result"]["messages"] == ["Chromium-family browser is already listening at http://127.0.0.1:9222"]
     assert urls[0] == "http://127.0.0.1:9222/json/version"
 
 
@@ -8733,13 +8738,14 @@ def test_browser_manage_connect_default_local_retries_after_launch(monkeypatch):
 
     def _opener(_url, timeout=2.0):  # noqa: ARG001 — match urllib signature
         attempts["n"] += 1
-        if attempts["n"] < 3:
+        if attempts["n"] < 5:
             raise OSError("not ready")
         return _Resp()
 
     import urllib.request
 
     monkeypatch.setattr(urllib.request, "urlopen", _opener)
+    launched = ChromeDebugLaunch(launched=True)
     with patch.dict(sys.modules, {"tools.browser_tool": fake}):
         with (
             patch(
@@ -10761,9 +10767,9 @@ class TestResolveRuntimeWithFallback:
         result = server._resolve_runtime_with_fallback(
             {"requested": "openai-codex"},
         )
-        assert resolution.runtime == fallback_runtime
-        assert resolution.selected_model == "deepseek-v4-pro"
-        assert resolution.used_fallback is True
+        assert result.runtime == fallback_runtime
+        assert result.selected_model == "deepseek-v4-pro"
+        assert result.used_fallback is True
 
     def test_auth_error_skips_provider_only_fallback(self, monkeypatch):
         """Auth fallback requires one complete provider/model pair."""
@@ -10885,7 +10891,8 @@ class TestResolveRuntimeWithFallback:
         result = server._resolve_runtime_with_fallback(
             {"requested": "openai-codex"},
         )
-        assert result == fallback_runtime
+        assert result.runtime == fallback_runtime
+        assert result.used_fallback is True
 
     def test_make_agent_uses_fallback_on_auth_error(self, monkeypatch):
         """Integration: _make_agent falls back to configured fallback

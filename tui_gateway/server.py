@@ -20,8 +20,11 @@ from typing import Any, NamedTuple, Optional
 from hades_constants import (
     get_hades_home,
     get_hades_home_override,
+    get_hermes_home,
     reset_hades_home_override,
+    reset_hermes_home_override,
     set_hades_home_override,
+    set_hermes_home_override,
     env_get,
     env_pop,
     env_set,
@@ -266,6 +269,9 @@ _LONG_HANDLERS = frozenset(
         "session.list",
         "session.resume",
         "shell.exec",
+        "billing.state",
+        "subscription.state",
+        "usage.bars",
         "skills.manage",
         "slash.exec",
     }
@@ -4136,6 +4142,16 @@ def _get_usage(agent) -> dict:
     return usage
 
 
+def _session_usage_snapshot(session: dict | None) -> dict:
+    agent = (session or {}).get("agent")
+    mirror_usage = _metadata_mirror(session).get("usage")
+    if (session or {}).get("_compute_host_active") and isinstance(mirror_usage, dict):
+        return dict(mirror_usage)
+    if agent is not None:
+        return _get_usage(agent)
+    return dict(mirror_usage) if isinstance(mirror_usage, dict) else {}
+
+
 def _probe_credentials(agent) -> str:
     """Light credential check at session creation — returns warning or ''."""
     try:
@@ -5516,15 +5532,27 @@ def _schedule_mcp_late_refresh(sid: str, agent) -> None:
     ).start()
 
 
+class _FallbackResolution:
+    __slots__ = ("runtime", "selected_model", "used_fallback")
+
+    def __init__(self, runtime, selected_model, used_fallback):
+        self.runtime = runtime
+        self.selected_model = selected_model
+        self.used_fallback = used_fallback
+
+
 def _resolve_runtime_with_fallback(
     resolve_kwargs: dict | None = None,
-) -> dict:
+):
     """Resolve runtime provider with init-time fallback on auth failure.
 
     Mirrors the fallback pattern in ``cron/scheduler.py`` and
     ``hermes_cli/cli_agent_setup_mixin.py``: when the primary provider
     raises ``AuthError``, walk the configured ``fallback_providers`` /
     ``fallback_model`` chain before giving up.
+
+    Returns the provider dict directly on primary success, or a
+    ``_FallbackResolution`` when a fallback was used.
     """
     from hades_cli.auth import AuthError
     from hades_cli.runtime_provider import resolve_runtime_provider
@@ -5541,16 +5569,22 @@ def _resolve_runtime_with_fallback(
             if not fb_provider:
                 continue
             try:
-                from hades_cli.fallback_config import resolve_entry_api_key
-
-                fb_kwargs: dict = {
-                    "requested": fb_provider,
-                    "target_model": fb_model,
-                }
+                fb_model = (entry.get("model") or "").strip() or None
+                if not fb_model:
+                    continue
+                fb_kwargs: dict = {"requested": fb_provider}
+                if fb_model:
+                    fb_kwargs["target_model"] = fb_model
                 if entry.get("base_url"):
                     fb_kwargs["explicit_base_url"] = entry["base_url"]
                 if entry.get("api_key"):
                     fb_kwargs["explicit_api_key"] = entry["api_key"]
+                elif entry.get("key_env") or entry.get("api_key_env"):
+                    key_env = (entry.get("key_env") or entry.get("api_key_env") or "").strip()
+                    if key_env:
+                        env_val = os.getenv(key_env, "").strip()
+                        if env_val:
+                            fb_kwargs["explicit_api_key"] = env_val
                 runtime = resolve_runtime_provider(**fb_kwargs)
                 import logging
 
@@ -5559,7 +5593,11 @@ def _resolve_runtime_with_fallback(
                     primary_exc,
                     fb_provider,
                 )
-                return runtime
+                return _FallbackResolution(
+                    runtime=runtime,
+                    selected_model=fb_model,
+                    used_fallback=True,
+                )
             except Exception:
                 continue
         raise
@@ -5797,10 +5835,11 @@ def _make_agent(
             dict(entry) for entry in effective_runtime.fallback_model
         ]
     else:
-        runtime = _resolve_runtime_with_fallback(resolve_kwargs)
-        # The switch already resolved concrete credentials/endpoint; honor them
-        # so a custom/named endpoint survives the rebuild even if global
-        # resolution would pick a different one.
+        _resolved = _resolve_runtime_with_fallback(resolve_kwargs)
+        if isinstance(_resolved, _FallbackResolution):
+            runtime = _resolved.runtime
+        else:
+            runtime = _resolved
         if override_base_url:
             runtime["base_url"] = override_base_url
         if override_api_key:
@@ -8911,12 +8950,20 @@ def _serialize_billing_state(state) -> dict:
     auto_reload = None
     if state.auto_reload is not None:
         ar = state.auto_reload
+        ar_card = None
+        if ar.card is not None:
+            ar_card = {"kind": ar.card.kind}
+            if ar.card.kind == "distinct":
+                ar_card["payment_method_id"] = ar.card.payment_method_id
+                ar_card["brand"] = ar.card.brand
+                ar_card["last4"] = ar.card.last4
         auto_reload = {
             "enabled": ar.enabled,
             "threshold_usd": _s(ar.threshold_usd),
             "threshold_display": format_money(ar.threshold_usd),
             "reload_to_usd": _s(ar.reload_to_usd),
             "reload_to_display": format_money(ar.reload_to_usd),
+            "card": ar_card,
         }
     return {
         "ok": True,
@@ -8925,6 +8972,7 @@ def _serialize_billing_state(state) -> dict:
         "org_slug": state.org_slug,
         "role": state.role,
         "is_admin": state.is_admin,
+        "can_change_plan": state.can_change_plan,
         "can_charge": state.can_charge,
         "balance_usd": _s(state.balance_usd),
         "balance_display": format_money(state.balance_usd),
@@ -8971,6 +9019,17 @@ def _serialize_usage_bar(bar) -> Optional[dict]:
         "pct_used": bar.pct_used,
         "fill_fraction": bar.fill_fraction,
     }
+
+
+def _usage_payload(state) -> dict:
+    """Lazy dollar-usage payload for the subscription.state response."""
+    if not getattr(state, "logged_in", False):
+        return {"available": False}
+    try:
+        from agent.billing_usage import build_usage_model
+        return _serialize_usage_model(build_usage_model())
+    except Exception:
+        return {"available": False}
 
 
 def _serialize_usage_model(model) -> dict:

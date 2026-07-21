@@ -1418,6 +1418,13 @@ from contextlib import contextmanager as _contextmanager
 # port already held by the default's listener. We hard-error on it rather than
 # silently dropping the adapter (see _start_one_profile_adapters).
 # Stored as platform .value strings since the Platform enum is imported below.
+_RECONNECT_BACKOFF_CAP = 300  # 5 minutes max between retries
+
+
+def _reconnect_backoff(attempt: int) -> float:
+    return min(30 * (2 ** (attempt - 1)), _RECONNECT_BACKOFF_CAP)
+
+
 _PORT_BINDING_PLATFORM_VALUES = frozenset({
     "webhook",
     "api_server",
@@ -1431,6 +1438,11 @@ _PORT_BINDING_PLATFORM_VALUES = frozenset({
 })
 
 
+def _platform_binds_port(platform_value: str, extra: Optional[dict] = None) -> bool:
+    from gateway.config import platform_binds_port
+    return platform_binds_port(platform_value, extra)
+
+
 class MultiplexConfigError(RuntimeError):
     """A profile multiplexer config is invalid (fail-fast at startup).
 
@@ -1438,6 +1450,10 @@ class MultiplexConfigError(RuntimeError):
     logged and the gateway stays alive to retry, but a config error means the
     operator must fix config.yaml, so it aborts startup cleanly.
     """
+
+
+class SecondaryPortBindingConfigError(MultiplexConfigError):
+    pass
 
 
 @_contextmanager
@@ -2928,6 +2944,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     _busy_text_mode: str = "interrupt"
     _restart_drain_timeout: float = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
     _exit_code: Optional[int] = None
+    _systemd_watchdog: Optional[Any] = None
     _draining: bool = False
     _external_drain_active: bool = False
     _restart_requested: bool = False
@@ -2943,6 +2960,52 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     _startup_restore_in_progress: bool = False
     _adapter_state_lock = threading.Lock()
     _fatal_adapter_claims: _weakref.WeakSet[BasePlatformAdapter] = _weakref.WeakSet()
+
+    _MAX_SUPERVISED_RESTARTS: int = 5
+    _SUPERVISED_HEALTHY_SECS: float = 60.0
+
+    def _spawn_supervised(
+        self,
+        coro_factory: "Callable[[], Coroutine]",
+        label: str,
+    ) -> None:
+        state = {"attempt": 0}
+        healthy_secs = self._SUPERVISED_HEALTHY_SECS
+
+        def _schedule() -> None:
+            async def _run():
+                started = asyncio.get_event_loop().time()
+                try:
+                    await coro_factory()
+                except Exception:
+                    elapsed = asyncio.get_event_loop().time() - started
+                    if elapsed >= healthy_secs:
+                        state["attempt"] = 0
+                    raise
+
+            t = asyncio.ensure_future(_run())
+            t.add_done_callback(_on_done)
+
+        def _on_done(task: asyncio.Task) -> None:
+            exc = task.exception() if not task.cancelled() else None
+            if exc is None:
+                return
+            state["attempt"] += 1
+            if state["attempt"] > self._MAX_SUPERVISED_RESTARTS:
+                logger.error(
+                    "supervised %s: exhausted %d restarts, giving up",
+                    label, self._MAX_SUPERVISED_RESTARTS,
+                )
+                return
+            delay = min(2 ** state["attempt"], _RECONNECT_BACKOFF_CAP)
+
+            async def _restart():
+                await asyncio.sleep(delay)
+                _schedule()
+
+            asyncio.ensure_future(_restart())
+
+        _schedule()
 
     async def _workflow_dispatcher_watcher(
         self,
@@ -3073,7 +3136,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     def __init__(self, config: Optional[GatewayConfig] = None):
         global _gateway_runner_ref
-        self.config = config or load_gateway_config()
+        self.config = config or load_gateway_config_for_runner()
         # Mark the process as a profile multiplexer when configured. This flips
         # agent.secret_scope.get_secret() to fail-closed on any unscoped
         # credential read, so a missed migration crashes loudly instead of
@@ -8932,6 +8995,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return
                 await asyncio.sleep(1)
 
+    def _start_systemd_watchdog(self) -> bool:
+        """Start sd_notify only after a configured gateway is truly running."""
+        if not self._running or self.config.systemd_watchdog_seconds <= 0:
+            return False
+        if self._systemd_watchdog is not None:
+            return True
+
+        from gateway.systemd_notify import SystemdWatchdog
+
+        watchdog = SystemdWatchdog(config_enabled=True)
+        if not watchdog.start():
+            return False
+        self._systemd_watchdog = watchdog
+        watchdog.ready("Hades Gateway running")
+        return True
+
+    async def _stop_systemd_watchdog(self) -> None:
+        """Stop heartbeats before any potentially long shutdown drain."""
+        watchdog = self._systemd_watchdog
+        if watchdog is None:
+            return
+        self._systemd_watchdog = None
+        await watchdog.stop()
+
     async def stop(
         self,
         *,
@@ -9025,6 +9112,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             self._running = False
             self._draining = True
+
+            stop_watchdog = getattr(self, "_stop_systemd_watchdog", None)
+            if callable(stop_watchdog):
+                await stop_watchdog()
 
             # Notify all chats with active agents BEFORE draining.
             # Adapters are still connected here, so messages can be sent.
@@ -9429,10 +9520,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 connected += await self._start_one_profile_adapters(
                     profile_name, profile_home, claimed
                 )
+            except SecondaryPortBindingConfigError as e:
+                logger.warning(
+                    "Skipping secondary profile '%s': %s",
+                    profile_name, e,
+                )
             except MultiplexConfigError:
-                # Config error (e.g. a secondary profile binding a port) is not
-                # transient — propagate so startup aborts cleanly instead of
-                # limping along with a half-configured multiplexer.
                 raise
             except Exception as e:
                 logger.error(
@@ -9474,26 +9567,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "'open'."
             )
 
+        port_binding_violations = [
+            platform.value
+            for platform, platform_config in profile_cfg.platforms.items()
+            if platform_config.enabled
+            and platform.value != "relay"
+            and _platform_binds_port(platform.value, getattr(platform_config, "extra", None))
+        ]
+        if port_binding_violations:
+            names = ", ".join(sorted(port_binding_violations))
+            raise SecondaryPortBindingConfigError(
+                f"Profile '{profile_name}' enables port-binding platform(s) "
+                f"{names}, but gateway.multiplex_profiles is on. The default "
+                f"profile owns the single shared HTTP listener — a secondary "
+                f"profile cannot bind its own port."
+            )
+
         profile_map = self._profile_adapters.setdefault(profile_name, {})
         connected = 0
         for platform, platform_config in profile_cfg.platforms.items():
             if not platform_config.enabled:
                 continue
-            # A secondary profile must NOT enable a port-binding platform: the
-            # default profile's listener already serves every profile via the
-            # /p/<profile>/ prefix, so a second bind can only collide. This is a
-            # config error, not a transient failure — fail fast and loud.
-            if platform.value in _PORT_BINDING_PLATFORM_VALUES:
-                raise MultiplexConfigError(
-                    f"Profile '{profile_name}' enables the port-binding platform "
-                    f"'{platform.value}', but gateway.multiplex_profiles is on. The "
-                    f"default profile owns the single shared HTTP listener and "
-                    f"serves every profile through the /p/{profile_name}/ URL "
-                    f"prefix — a secondary profile cannot bind its own port. "
-                    f"Remove platforms.{platform.value} from profile "
-                    f"'{profile_name}'s config.yaml (configure it only on the "
-                    f"default profile)."
-                )
+            if platform.value == "relay" and getattr(profile_cfg, "multiplex_profiles", False):
+                continue
             with _profile_runtime_scope(profile_home):
                 adapter = self._create_adapter(platform, platform_config)
             if not adapter:
@@ -9517,15 +9613,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Stamp every inbound event from this adapter with its profile so
             # the agent turn (and session key) resolve to the right home.
-            adapter.set_message_handler(
-                self._make_profile_message_handler(profile_name)
-            )
-            adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
-            adapter.set_session_store(self.session_store)
-            adapter.set_busy_session_handler(self._handle_active_session_busy_message)
-            adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
-            adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
-            adapter._busy_text_mode = self._busy_text_mode
+            self._configure_profile_adapter(adapter, profile_name, platform)
 
             try:
                 with _profile_runtime_scope(profile_home):
@@ -9684,6 +9772,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
 
+    async def _cancel_secondary_profile_reconnect_tasks(self) -> None:
+        pending = getattr(self, "_profile_failed_platforms", None)
+        if not isinstance(pending, dict) or not pending:
+            return
+        tasks = []
+        for profile_pending in pending.values():
+            if isinstance(profile_pending, dict):
+                tasks.extend(t for t in profile_pending.values() if isinstance(t, asyncio.Task))
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        pending.clear()
+
     def _make_profile_fatal_error_handler(
         self, profile_name: str, platform: Platform
     ) -> Callable[[BasePlatformAdapter], Awaitable[None]]:
@@ -9749,6 +9851,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     event.source.profile = profile_name
             except Exception:
                 pass
+            if profile_home:
+                with _profile_runtime_scope(profile_home):
+                    return await self._handle_message(event)
             return await self._handle_message(event)
         return _handler
 
@@ -14585,7 +14690,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _thread_metadata = self._thread_metadata_for_source(source, event_message_id)
 
         try:
-            user_config = _load_gateway_config()
+            _bg_profile = getattr(source, "profile", None)
+            if _bg_profile:
+                from hades_cli.profiles import get_profile_dir
+                with _profile_runtime_scope(get_profile_dir(_bg_profile)):
+                    user_config = _load_gateway_config()
+            else:
+                user_config = _load_gateway_config()
             platform_key = _platform_config_key(source.platform)
             session_key = self._session_key_for_source(source)
 
@@ -18488,6 +18599,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
             )
+
+    def _profile_name_for_source(self, source: SessionSource) -> "Optional[str]":
+        from gateway.profile_routing import match_profile_route
+        if not getattr(self.config, "multiplex_profiles", False):
+            return None
+        routes = getattr(self.config, "profile_routes", None)
+        if not routes:
+            return None
+        matched = match_profile_route(
+            routes,
+            source.platform.value,
+            guild_id=getattr(source, "guild_id", None),
+            chat_id=source.chat_id,
+            thread_id=getattr(source, "thread_id", None),
+            parent_chat_id=getattr(source, "parent_chat_id", None),
+        )
+        return matched.profile if matched else None
 
     def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":
         """Resolve which profile's HADES_HOME should serve this inbound source.
@@ -22609,7 +22737,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         name="gateway-housekeeping",
     )
     housekeeping_thread.start()
-    
+
+    start_watchdog = getattr(runner, "_start_systemd_watchdog", None)
+    if callable(start_watchdog):
+        start_watchdog()
+
     # Wait for shutdown
     await runner.wait_for_shutdown()
 

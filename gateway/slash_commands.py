@@ -3159,8 +3159,9 @@ class GatewaySlashCommandsMixin:
 
     async def _handle_fast_command(self, event: MessageEvent) -> str:
         """Handle /fast — mirror the CLI Priority Processing toggle in gateway chats."""
-        from gateway.run import _load_gateway_config, _resolve_gateway_model
+        from gateway.run import _hermes_home, _load_gateway_config, _resolve_gateway_model
         from hades_cli.models import model_supports_fast_mode
+        import yaml
 
         args = event.get_command_args().strip().lower()
         config_path = _hermes_home / "config.yaml"
