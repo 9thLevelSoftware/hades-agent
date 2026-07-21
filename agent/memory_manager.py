@@ -552,7 +552,14 @@ class MemoryManager:
 
         def _run() -> None:
             try:
-                result_box["value"] = provider.prefetch(query, session_id=session_id) or ""
+                value = provider.prefetch(query, session_id=session_id) or ""
+                result_box["value"] = value
+                # Cache inside the worker so a late success after the caller
+                # timed out still populates last-good for the next turn
+                # (Codex review P2).
+                if value and value.strip():
+                    with self._external_prefetch_lock:
+                        self._last_external_prefetch[provider.name] = value
             except Exception as exc:  # pragma: no cover - re-raised by caller
                 error_box["value"] = exc
 
@@ -590,10 +597,9 @@ class MemoryManager:
                 self._external_prefetch_threads.pop(provider.name, None)
         if error_box:
             raise error_box["value"]
-        value = result_box.get("value", "")
-        if value and value.strip():
-            self._last_external_prefetch[provider.name] = value
-        return value
+        return result_box.get("value", "") or self._last_external_prefetch.get(
+            provider.name, ""
+        )
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn.
@@ -721,9 +727,11 @@ class MemoryManager:
                 logger.debug("Inline memory background task failed: %s", e)
             return
         try:
-            # Make submit+tracking atomic with the shutdown snapshot. The
-            # callback is attached after releasing the lock because an already
-            # completed future invokes callbacks synchronously.
+            # Make submit+tracking atomic with the shutdown snapshot. Attach
+            # done callbacks *after* releasing the lock — completed futures
+            # invoke callbacks synchronously and would re-enter the non-reentrant
+            # lock via _forget_background_future (Codex review P2).
+            pending_callbacks: list = []
             with self._sync_executor_lock:
                 if self._shutting_down:
                     logger.warning("Memory manager is shutting down; rejecting late %s task", kind)
@@ -734,10 +742,12 @@ class MemoryManager:
                 for deferred_fn, deferred_kind in deferred:
                     fut = executor.submit(deferred_fn)
                     self._background_futures[fut] = deferred_kind
-                    fut.add_done_callback(self._forget_background_future)
+                    pending_callbacks.append(fut)
                 future = executor.submit(fn)
                 self._background_futures[future] = kind
-            future.add_done_callback(self._forget_background_future)
+                pending_callbacks.append(future)
+            for fut in pending_callbacks:
+                fut.add_done_callback(self._forget_background_future)
         except RuntimeError:
             if self._shutting_down:
                 logger.warning("Memory manager shut down during %s submission; task rejected", kind)

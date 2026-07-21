@@ -718,9 +718,9 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
-    # Turn-global API attempt ceiling (audit L1-02). Survives per-provider
-    # retry_count resets on fallback so a long chain cannot multiply forever.
-    _turn_api_attempts = 0
+    # Per-API-call attempt ceiling (audit L1-02). Resets for each outer tool
+    # iteration so successful multi-step tool loops are not starved, but
+    # survives per-provider retry_count resets on failover within one call.
     _fallback_len = len(getattr(agent, "_fallback_chain", None) or [])
     _configured_ceiling = getattr(agent, "_api_max_attempts_per_turn", None)
     if _configured_ceiling is None:
@@ -1235,6 +1235,9 @@ def run_conversation(
         max_retries = agent._api_max_retries
         _retry = TurnRetryState()
         max_compression_attempts = 3
+        # Reset per outer API call so successful tool-loop iterations don't
+        # accumulate against the failover ceiling (Codex review P1).
+        _turn_api_attempts = 0
 
         finish_reason = "stop"
         response = None  # Guard against UnboundLocalError if all retries fail

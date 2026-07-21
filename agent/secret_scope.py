@@ -113,10 +113,30 @@ _GLOBAL_ENV_PREFIXES = (
 )
 
 
+_SECRET_GLOBAL_SUFFIXES = (
+    "_TOKEN",
+    "_KEY",
+    "_SECRET",
+    "_PASSWORD",
+    "_PASSWD",
+    "_CREDENTIAL",
+    "_API_KEY",
+    "_AUTH",
+)
+
+
 def _is_global_env(name: str) -> bool:
-    """Return True for genuinely process-global (non-profile-secret) env vars."""
+    """Return True for genuinely process-global (non-profile-secret) env vars.
+
+    Prefix allowlists never treat credential-like suffixes as global — a
+    future ``HERMES_TELEGRAM_BOT_TOKEN`` style name must stay fail-closed
+    under multiplex (audit L3-08).
+    """
     if name in _GLOBAL_ENV_EXACT:
         return True
+    upper = name.upper()
+    if any(upper.endswith(sfx) for sfx in _SECRET_GLOBAL_SUFFIXES):
+        return False
     return any(name.startswith(p) for p in _GLOBAL_ENV_PREFIXES)
 
 

@@ -380,20 +380,42 @@ class CodexAppServerClient:
                 self._stderr_lines.append(f"<stdout reader error> {exc}")
 
     def _put_bounded(self, q: queue.Queue, msg: dict, *, kind: str) -> None:
-        """Enqueue with backpressure: drop oldest on overflow rather than OOM."""
+        """Enqueue with backpressure: drop oldest on overflow rather than OOM.
+
+        Server-initiated requests (approvals/elicitation) get an error reply
+        before eviction so codex does not hang waiting forever (Codex review P1).
+        """
         try:
             q.put_nowait(msg)
             return
         except queue.Full:
             pass
+        dropped = None
         try:
-            q.get_nowait()
+            dropped = q.get_nowait()
         except queue.Empty:
             pass
+        if kind == "server_request" and isinstance(dropped, dict) and "id" in dropped:
+            try:
+                self.respond_error(
+                    dropped["id"],
+                    -32000,
+                    "server request queue full; dropped oldest request",
+                )
+            except Exception:  # pragma: no cover - best-effort nack
+                logger.debug("failed to nack dropped codex server request", exc_info=True)
         try:
             q.put_nowait(msg)
         except queue.Full:  # pragma: no cover - extreme race
-            pass
+            if kind == "server_request" and "id" in msg:
+                try:
+                    self.respond_error(
+                        msg["id"],
+                        -32000,
+                        "server request queue full; could not enqueue",
+                    )
+                except Exception:
+                    pass
         if kind == "notification":
             self._dropped_notifications += 1
             if self._dropped_notifications in (1, 10, 100) or self._dropped_notifications % 500 == 0:

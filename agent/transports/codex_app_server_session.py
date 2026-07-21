@@ -228,6 +228,9 @@ class CodexAppServerSession:
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
         self._interrupt_event = threading.Event()
+        # Lifecycle lock: ensure_started / close / run_turn entry must not race
+        # when interrupt/close arrives from another thread (audit L2-07).
+        self._lifecycle_lock = threading.RLock()
         # Pending file-change items, keyed by item id. Populated on
         # item/started for fileChange items; consumed by the approval
         # bridge when codex sends item/fileChange/requestApproval. The
@@ -242,73 +245,77 @@ class CodexAppServerSession:
         """Spawn the subprocess, do the initialize handshake, and start a
         thread. Returns the codex thread id. Idempotent — repeated calls
         return the same thread id."""
-        if self._thread_id is not None:
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("codex app-server session is closed")
+            if self._thread_id is not None:
+                return self._thread_id
+            if self._client is None:
+                self._client = self._client_factory(
+                    codex_bin=self._codex_bin, codex_home=self._codex_home
+                )
+            self._client.initialize(
+                client_name="hermes",
+                client_title="Hades Agent",
+                client_version=_get_hermes_version(),
+            )
+            # Permission selection is intentionally NOT sent on thread/start.
+            # Two reasons (live-tested against codex 0.130.0):
+            #   1. `thread/start.permissions` is gated behind the experimentalApi
+            #      capability on this codex version — we'd have to opt in during
+            #      initialize and accept the unstable surface.
+            #   2. Even with experimentalApi declared and the correct shape
+            #      (`{"type": "profile", "id": "..."}`, not `{"profileId": ...}`),
+            #      codex requires a matching `[permissions]` table in
+            #      ~/.codex/config.toml or it fails the request with
+            #      'default_permissions requires a [permissions] table'.
+            # Letting codex pick its default (`:read-only` unless the user has
+            # configured otherwise in their codex config.toml) is the standard
+            # codex CLI workflow and avoids fighting codex's own validation.
+            # Users who want a write-capable profile configure it in their
+            # ~/.codex/config.toml the same way they would for any codex usage.
+            params: dict[str, Any] = {"cwd": self._cwd}
+            result = self._client.request("thread/start", params, timeout=15)
+            # Cross-fill thread.id/sessionId — different codex versions have
+            # serialized this under either key. Mirrors openclaw beta.8's
+            # tolerance fix so future codex drops/renames don't KeyError us
+            # at handshake time.
+            thread_obj = result.get("thread") or {}
+            thread_id = (
+                thread_obj.get("id")
+                or thread_obj.get("sessionId")
+                or result.get("sessionId")
+                or result.get("threadId")
+            )
+            if not thread_id:
+                raise CodexAppServerError(
+                    code=-32603,
+                    message=(
+                        "codex thread/start returned no thread id "
+                        f"(payload keys: {sorted(result.keys())})"
+                    ),
+                )
+            self._thread_id = thread_id
+            logger.info(
+                "codex app-server thread started: id=%s profile=%s cwd=%s",
+                self._thread_id[:8],
+                self._permission_profile,
+                self._cwd,
+            )
             return self._thread_id
-        if self._client is None:
-            self._client = self._client_factory(
-                codex_bin=self._codex_bin, codex_home=self._codex_home
-            )
-        self._client.initialize(
-            client_name="hermes",
-            client_title="Hades Agent",
-            client_version=_get_hermes_version(),
-        )
-        # Permission selection is intentionally NOT sent on thread/start.
-        # Two reasons (live-tested against codex 0.130.0):
-        #   1. `thread/start.permissions` is gated behind the experimentalApi
-        #      capability on this codex version — we'd have to opt in during
-        #      initialize and accept the unstable surface.
-        #   2. Even with experimentalApi declared and the correct shape
-        #      (`{"type": "profile", "id": "..."}`, not `{"profileId": ...}`),
-        #      codex requires a matching `[permissions]` table in
-        #      ~/.codex/config.toml or it fails the request with
-        #      'default_permissions requires a [permissions] table'.
-        # Letting codex pick its default (`:read-only` unless the user has
-        # configured otherwise in their codex config.toml) is the standard
-        # codex CLI workflow and avoids fighting codex's own validation.
-        # Users who want a write-capable profile configure it in their
-        # ~/.codex/config.toml the same way they would for any codex usage.
-        params: dict[str, Any] = {"cwd": self._cwd}
-        result = self._client.request("thread/start", params, timeout=15)
-        # Cross-fill thread.id/sessionId — different codex versions have
-        # serialized this under either key. Mirrors openclaw beta.8's
-        # tolerance fix so future codex drops/renames don't KeyError us
-        # at handshake time.
-        thread_obj = result.get("thread") or {}
-        thread_id = (
-            thread_obj.get("id")
-            or thread_obj.get("sessionId")
-            or result.get("sessionId")
-            or result.get("threadId")
-        )
-        if not thread_id:
-            raise CodexAppServerError(
-                code=-32603,
-                message=(
-                    "codex thread/start returned no thread id "
-                    f"(payload keys: {sorted(result.keys())})"
-                ),
-            )
-        self._thread_id = thread_id
-        logger.info(
-            "codex app-server thread started: id=%s profile=%s cwd=%s",
-            self._thread_id[:8],
-            self._permission_profile,
-            self._cwd,
-        )
-        return self._thread_id
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self._client is not None:
-            try:
-                self._client.close()
-            except Exception:  # pragma: no cover - best-effort cleanup
-                pass
-            self._client = None
-        self._thread_id = None
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:  # pragma: no cover - best-effort cleanup
+                    pass
+                self._client = None
+            self._thread_id = None
 
     def __enter__(self) -> "CodexAppServerSession":
         return self

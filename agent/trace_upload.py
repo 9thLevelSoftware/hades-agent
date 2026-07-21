@@ -47,6 +47,15 @@ class TraceRedactionError(RuntimeError):
     """Raised when a trace cannot be safely redacted before upload."""
 
 
+def _safe_error_text(exc: BaseException) -> str:
+    """Format an exception for user/log output with secret redaction."""
+    try:
+        from agent.redact import redact_sensitive_text
+        return redact_sensitive_text(str(exc), force=True)
+    except Exception:
+        return type(exc).__name__
+
+
 # ---------------------------------------------------------------------------
 # Conversion: Hermes OpenAI-format messages -> Claude Code JSONL
 # ---------------------------------------------------------------------------
@@ -294,7 +303,8 @@ def _do_upload(
         who = api.whoami()
         user = who.get("name") if isinstance(who, dict) else None
     except Exception as e:
-        logger.warning("HF whoami failed: %s", e)
+        safe = _safe_error_text(e)
+        logger.warning("HF whoami failed: %s", safe)
         return ("Your Hugging Face token was rejected (whoami failed). "
                 "Make sure it has WRITE access and isn't expired.")
     if not user:
@@ -306,8 +316,9 @@ def _do_upload(
             repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True,
         )
     except Exception as e:
-        logger.warning("HF create_repo failed for %s: %s", repo_id, e)
-        return f"Could not create/access dataset {repo_id}: {e}"
+        safe = _safe_error_text(e)
+        logger.warning("HF create_repo failed for %s: %s", repo_id, safe)
+        return f"Could not create/access dataset {repo_id}: {safe}"
 
     path_in_repo = f"sessions/{session_id}.jsonl"
     try:
@@ -319,8 +330,9 @@ def _do_upload(
             commit_message=f"add session trace {session_id}",
         )
     except Exception as e:
-        logger.warning("HF upload_file failed for %s: %s", repo_id, e)
-        return f"Upload to Hugging Face failed: {e}"
+        safe = _safe_error_text(e)
+        logger.warning("HF upload_file failed for %s: %s", repo_id, safe)
+        return f"Upload to Hugging Face failed: {safe}"
 
     return (f"Uploaded -> https://huggingface.co/datasets/{repo_id}/blob/main/{path_in_repo}\n"
             f"View in the trace viewer: https://huggingface.co/datasets/{repo_id}")

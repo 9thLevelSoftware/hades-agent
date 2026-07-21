@@ -250,7 +250,15 @@ def build_token_provider(scope: Optional[str] = None,
             exclude_interactive_browser=exclude_interactive_browser,
         )
     credential = build_credential(config)
-    return ai.get_bearer_token_provider(credential, config.scope)
+    provider = ai.get_bearer_token_provider(credential, config.scope)
+    # Mark Hades-minted providers so consumers can distinguish them from
+    # arbitrary callables (audit L2-06). Legacy bare callables still work
+    # via is_token_provider's fallback.
+    try:
+        setattr(provider, "_hades_token_provider", True)
+    except Exception:
+        pass
+    return provider
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +434,13 @@ def is_token_provider(value: Any) -> bool:
 
     Used at the seams where a consumer must decide between
     string-API-key semantics and bearer-callable semantics.
+
+    Prefer providers minted by :func:`build_token_provider` (marked with
+    ``_hades_token_provider``). Bare callables remain accepted for one
+    release of back-compat.
     """
+    if getattr(value, "_hades_token_provider", False):
+        return True
     return callable(value) and not isinstance(value, str)
 
 

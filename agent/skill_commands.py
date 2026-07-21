@@ -254,10 +254,29 @@ def _build_skill_message(
     if skills_cfg.get("template_vars", True):
         content = _substitute_template_vars(content, skill_dir, session_id)
     if skills_cfg.get("inline_shell", False):
-        timeout = int(skills_cfg.get("inline_shell_timeout", 10) or 10)
-        content = _expand_inline_shell(content, skill_dir, timeout)
+        # Hub-installed skills must never gain inline-shell RCE (audit L3-05).
+        # Default config keeps inline_shell off; this is a second line of defense.
+        skill_name = str(loaded_skill.get("name") or (skill_dir.name if skill_dir else "") or "")
+        hub_blocked = False
+        if skill_name:
+            try:
+                from tools.skill_usage import is_hub_installed
+                hub_blocked = bool(is_hub_installed(skill_name))
+            except Exception:
+                hub_blocked = False
+        if hub_blocked:
+            logger.warning(
+                "Skipping inline-shell expansion for hub-installed skill %r",
+                skill_name,
+            )
+        else:
+            timeout = int(skills_cfg.get("inline_shell_timeout", 10) or 10)
+            content = _expand_inline_shell(content, skill_dir, timeout)
 
-    parts = [activation_note, "", content.strip()]
+    # Budget the skill BODY only so activation markers, user_instruction,
+    # and runtime notes always survive (Codex review P1).
+    body = _apply_skill_body_budget(content.strip(), skills_cfg)
+    parts = [activation_note, "", body]
 
     # ── Inject the absolute skill directory so the agent can reference
     #    bundled scripts without an extra skill_view() round-trip. ──
@@ -334,12 +353,11 @@ def _build_skill_message(
         parts.append("")
         parts.append(f"[Runtime note: {runtime_note}]")
 
-    message = "\n".join(parts)
-    return _apply_skill_inject_budget(message, skills_cfg)
+    return "\n".join(parts)
 
 
-def _apply_skill_inject_budget(message: str, skills_cfg: dict) -> str:
-    """Truncate oversize skill injects while preserving scaffolding markers.
+def _apply_skill_body_budget(body: str, skills_cfg: dict) -> str:
+    """Truncate oversize skill *body* while leaving head/tail scaffolding intact.
 
     Default budget is high (48k tokens rough) so normal skills are unchanged.
     Override via ``skills.max_inject_tokens`` in config.yaml.
@@ -349,18 +367,22 @@ def _apply_skill_inject_budget(message: str, skills_cfg: dict) -> str:
     except (TypeError, ValueError):
         max_tokens = 48000
     if max_tokens <= 0:
-        return message
+        return body
     # Rough chars/token; intentionally conservative (over-estimate tokens).
     max_chars = max_tokens * 4
-    if len(message) <= max_chars:
-        return message
+    if len(body) <= max_chars:
+        return body
     keep = max(max_chars - 400, 2000)
-    truncated = message[:keep].rstrip()
+    truncated = body[:keep].rstrip()
     return (
         truncated
         + "\n\n[Skill content truncated to stay within skills.max_inject_tokens. "
         "Load remaining sections with skill_view as needed.]"
     )
+
+
+# Back-compat alias used by unit tests / callers of the old name.
+_apply_skill_inject_budget = _apply_skill_body_budget
 
 
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:

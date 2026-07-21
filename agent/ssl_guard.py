@@ -68,7 +68,9 @@ def verify_ca_bundle() -> None:
             missing/corrupt.
     """
     if _skip_ssl_guard_enabled():
-        logger.debug("SSL CA bundle guard skipped via HERMES_SKIP_SSL_GUARD")
+        logger.debug(
+            "SSL CA bundle guard skipped via HADES_SKIP_SSL_GUARD / HERMES_SKIP_SSL_GUARD"
+        )
         return
 
     for env_var in _CA_BUNDLE_ENV_VARS:
