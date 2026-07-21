@@ -688,7 +688,7 @@ class TestMatrixReplyFallbackStripping:
 # ---------------------------------------------------------------------------
 
 class TestMatrixBangCommandAlias:
-    """Matrix clients may reserve /commands, so Hermes supports !commands."""
+    """Matrix clients may reserve /commands, so Hades supports !commands."""
 
     def setup_method(self):
         self.adapter = _make_adapter()
@@ -1033,7 +1033,10 @@ class TestMatrixRenderingPayloads:
 
     @pytest.mark.asyncio
     async def test_long_response_split_preserves_thread_context(self):
-        long_text = "Intro\n```python\n" + ("print('hello')\n" * 500) + "```\nDone"
+        # Build a payload guaranteed to exceed the adapter's outbound chunk
+        # size (configurable since #53026) so send() must split it.
+        repeats = (self.adapter.max_message_length // 15) + 200
+        long_text = "Intro\n```python\n" + ("print('hello')\n" * repeats) + "```\nDone"
 
         result = await self.adapter.send(
             "!room:example.org",
@@ -1678,11 +1681,11 @@ class TestMatrixDeviceId:
             token="syt_test",
             extra={
                 "homeserver": "https://matrix.example.org",
-                "device_id": "HERMES_BOT_STABLE",
+                "device_id": "HADES_BOT_STABLE",
             },
         )
         adapter = MatrixAdapter(config)
-        assert adapter._device_id == "HERMES_BOT_STABLE"
+        assert adapter._device_id == "HADES_BOT_STABLE"
 
     def test_device_id_from_env(self, monkeypatch):
         monkeypatch.setenv("MATRIX_DEVICE_ID", "FROM_ENV")
@@ -1832,14 +1835,14 @@ class TestMatrixDeviceIdConfig:
     def test_device_id_in_config_extra(self, monkeypatch):
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_abc123")
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
-        monkeypatch.setenv("MATRIX_DEVICE_ID", "HERMES_BOT")
+        monkeypatch.setenv("MATRIX_DEVICE_ID", "HADES_BOT")
 
         from gateway.config import GatewayConfig, _apply_env_overrides
         config = GatewayConfig()
         _apply_env_overrides(config)
 
         mc = config.platforms[Platform.MATRIX]
-        assert mc.extra.get("device_id") == "HERMES_BOT"
+        assert mc.extra.get("device_id") == "HADES_BOT"
 
     def test_device_id_not_set_when_env_empty(self, monkeypatch):
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_abc123")
@@ -4028,7 +4031,7 @@ class TestMatrixSystemBridgeFilter:
         ) is False
 
     def test_bot_account_is_not_bridge(self):
-        # The Hermes bot itself (no leading underscore) must not be
+        # The Hades bot itself (no leading underscore) must not be
         # classified as a bridge — that filter is a pairing guard, not
         # a self-filter.
         assert self.adapter._is_system_or_bridge_sender(

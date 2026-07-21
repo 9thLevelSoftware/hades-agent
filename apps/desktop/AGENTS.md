@@ -89,7 +89,7 @@ There are three distinct switch shapes, and conflating them is the classic bug:
 - A **connection/mode apply** (local ↔ remote ↔ cloud) is the soft re-home:
   shell mounted, gateway-bound stores explicitly wiped, then reconnect. Query
   invalidation alone cannot evict live session stores — wipe them.
-- A **runtime home change** (switching the underlying `HADES_HOME` profile) is
+- A **runtime home change** (switching the underlying `HERMES_HOME` profile) is
   a hard re-home: the window legitimately reloads and state resets by remount.
 - A **live profile swap** in the same window activates another profile's socket
   while background profiles keep streaming; lists merge rather than wipe, and
@@ -125,9 +125,11 @@ normalization alike. Learn the shape, not a snapshot of the current rungs.
 Two auth-flavored corollaries worth naming because they are easy to get wrong:
 
 - **One-time credentials are never reused.** An OAuth gateway connection mints a
-  fresh WebSocket ticket on every dial; a mint failure means reauthentication,
-  not "fall back to the cached URL." Only long-lived token/local auth may reuse
-  a cached URL as a lower rung.
+  fresh WebSocket ticket on every dial and never falls back to the cached URL.
+  Only a confirmed 401/403 (or an explicitly tagged auth rejection) means
+  reauthentication; timeout, network, malformed-response, and server failures
+  remain connectivity errors. Only long-lived token/local auth may reuse a
+  cached URL as a lower rung.
 - **A connection test must exercise the leg you'll actually use.** An HTTP
   status probe passing while the WebSocket/auth leg fails is a false positive
   that ships as "it said connected but nothing works."

@@ -1,4 +1,4 @@
-# nix/hermes-agent.nix — Overridable Hades Agent package
+# nix/hermes-agent.nix — Overridable Hermes Agent package
 #
 # callPackage auto-wires nixpkgs args; flake inputs are passed explicitly.
 # Users override via:
@@ -21,6 +21,9 @@
   # linux-only deps
   wl-clipboard,
   xclip,
+
+  # linux-only dev deps
+  cage,
 
   # Flake inputs — passed explicitly by packages.nix and overlays.nix
   uv2nix,
@@ -61,22 +64,20 @@ let
 
   bundledSkills = lib.cleanSourceWith {
     src = ../skills;
-    filter =
-      path: _type: !(lib.hasInfix "/index-cache/" path) && !(lib.hasInfix "/__pycache__/" path);
+    filter = path: _type: !(lib.hasInfix "/index-cache/" path) && !(lib.hasInfix "/__pycache__/" path);
   };
 
   # Optional skills are NOT in the wheel (pythonSrc excludes them, see
-  # lib.nix) — the wrapper exposes them via HADES_OPTIONAL_SKILLS, the
+  # lib.nix) — the wrapper exposes them via HERMES_OPTIONAL_SKILLS, the
   # same mechanism Homebrew packaging uses.
   bundledOptionalSkills = lib.cleanSourceWith {
     src = ../optional-skills;
-    filter =
-      path: _type: !(lib.hasInfix "/index-cache/" path) && !(lib.hasInfix "/__pycache__/" path);
+    filter = path: _type: !(lib.hasInfix "/index-cache/" path) && !(lib.hasInfix "/__pycache__/" path);
   };
 
   # Import bundled plugins (memory, context_engine, platforms/*).  Keeping
   # them out of the Python site-packages keeps import semantics identical
-  # to a dev checkout — the loader reads them from HADES_BUNDLED_PLUGINS.
+  # to a dev checkout — the loader reads them from HERMES_BUNDLED_PLUGINS.
   bundledPlugins = lib.cleanSourceWith {
     src = ../plugins;
     filter = path: _type: !(lib.hasInfix "/__pycache__/" path);
@@ -162,7 +163,7 @@ let
   '';
 in
 stdenv.mkDerivation (finalAttrs: {
-  pname = "hades-agent";
+  pname = "hermes-agent";
   version = (fromTOML (builtins.readFile ../pyproject.toml)).project.version;
 
   dontUnpack = true;
@@ -187,9 +188,9 @@ stdenv.mkDerivation (finalAttrs: {
       (name: ''
         makeWrapper ${hermesVenv}/bin/${name} $out/bin/${name} \
           --suffix PATH : "${runtimePath}" \
-          --set HADES_BUNDLED_SKILLS $out/share/hermes-agent/skills \
-          --set HADES_OPTIONAL_SKILLS $out/share/hermes-agent/optional-skills \
-          --set HADES_BUNDLED_PLUGINS $out/share/hermes-agent/plugins \
+          --set HERMES_BUNDLED_SKILLS $out/share/hermes-agent/skills \
+          --set HERMES_OPTIONAL_SKILLS $out/share/hermes-agent/optional-skills \
+          --set HERMES_BUNDLED_PLUGINS $out/share/hermes-agent/plugins \
           --set HERMES_BUNDLED_LOCALES $out/share/hermes-agent/locales \
           --set HERMES_WEB_DIST $out/share/hermes-agent/web_dist \
           --set HERMES_TUI_DIR $out/ui-tui \
@@ -209,8 +210,8 @@ stdenv.mkDerivation (finalAttrs: {
       '')
       [
         "hermes"
-        "hades-agent"
-        "hades-acp"
+        "hermes-agent"
+        "hermes-acp"
       ]
     }
 
@@ -251,12 +252,19 @@ stdenv.mkDerivation (finalAttrs: {
         export HERMES_PYTHON=${devPython}/bin/python3
       '';
 
-      devDeps = runtimeDeps ++ [ devPython ];
+      devDeps =
+        runtimeDeps
+        ++ [
+          devPython
+        ]
+        ++ lib.optionals stdenv.isLinux [
+          cage # for running e2e tests without popping windows
+        ];
     };
 
   meta = with lib; {
     description = "AI agent with advanced tool-calling capabilities";
-    homepage = "https://github.com/9thLevelSoftware/hades-agent";
+    homepage = "https://github.com/NousResearch/hermes-agent";
     mainProgram = "hermes";
     license = licenses.mit;
     platforms = platforms.unix;

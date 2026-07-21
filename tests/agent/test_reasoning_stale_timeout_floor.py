@@ -4,8 +4,8 @@ Reasoning models (Nemotron 3 Ultra, OpenAI o1/o3, Anthropic Opus 4.x
 thinking, DeepSeek R1, Qwen QwQ, xAI Grok reasoning) routinely exceed
 the 180s / 90s chat-model stale-timeout defaults during their
 thinking phase.  Hades's default cloud-stream stale detector
-(``HERMES_STREAM_STALE_TIMEOUT`` = 180s) and non-stream detector
-(``HERMES_API_CALL_STALE_TIMEOUT`` = 90s) both fire before the
+(``HADES_STREAM_STALE_TIMEOUT`` = 180s) and non-stream detector
+(``HADES_API_CALL_STALE_TIMEOUT`` = 90s) both fire before the
 upstream proxy's idle timeout on a healthy reasoning stream.  Result:
 the user sees ``API call failed after 3 retries: [Errno 32] Broken
 pipe`` for every Nemotron 3 Ultra turn.
@@ -77,6 +77,7 @@ import pytest
     # xAI Grok reasoning variants — explicit, not bare `grok`.
     ("x-ai/grok-4-fast-reasoning", 300.0),
     ("x-ai/grok-4.20-reasoning", 300.0),
+    ("x-ai/grok-4.5", 300.0),
     ("x-ai/grok-4-fast-non-reasoning", 180.0),
 ])
 def test_reasoning_stale_timeout_floor_positive_cases(model, expected):
@@ -167,7 +168,7 @@ def test_reasoning_floor_applies_to_nemotron_3_ultra(monkeypatch, tmp_path):
     """Nemotron 3 Ultra without explicit config gets the 600s floor."""
     monkeypatch.setenv("HADES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")
-    monkeypatch.delenv("HERMES_API_CALL_STALE_TIMEOUT", raising=False)
+    monkeypatch.delenv("HADES_API_CALL_STALE_TIMEOUT", raising=False)
     _write_config(tmp_path, "")
 
     # Isolate the floor path from leaked provider config: with no per-model /
@@ -198,7 +199,7 @@ def test_reasoning_floor_applies_to_opus_4_thinking(monkeypatch, tmp_path):
     """Anthropic Opus 4.x thinking gets the 240s floor without explicit config."""
     monkeypatch.setenv("HADES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")
-    monkeypatch.delenv("HERMES_API_CALL_STALE_TIMEOUT", raising=False)
+    monkeypatch.delenv("HADES_API_CALL_STALE_TIMEOUT", raising=False)
     _write_config(tmp_path, "")
 
     # Deterministic floor path — see test_reasoning_floor_applies_to_nemotron_3_ultra.
@@ -226,7 +227,7 @@ def test_reasoning_floor_never_overrides_explicit_user_config(monkeypatch, tmp_p
     """
     monkeypatch.setenv("HADES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")
-    monkeypatch.delenv("HERMES_API_CALL_STALE_TIMEOUT", raising=False)
+    monkeypatch.delenv("HADES_API_CALL_STALE_TIMEOUT", raising=False)
 
     # Explicit per-model config resolves to 60s (priority 1). The resolver
     # must short-circuit on this and never consult the reasoning floor.
@@ -251,7 +252,7 @@ def test_reasoning_floor_loses_to_env_var_when_no_floor_match(monkeypatch, tmp_p
     """For a non-reasoning model, env var still wins over the 90s default."""
     monkeypatch.setenv("HADES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")
-    monkeypatch.setenv("HERMES_API_CALL_STALE_TIMEOUT", "300")
+    monkeypatch.setenv("HADES_API_CALL_STALE_TIMEOUT", "300")
     _write_config(tmp_path, "")
 
     # No provider config -> resolver consults the env var (priority 3).
@@ -273,7 +274,7 @@ def test_non_reasoning_model_keeps_default(monkeypatch, tmp_path):
     """GPT-5 (non-reasoning) without env var / config -> 90s default, implicit."""
     monkeypatch.setenv("HADES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text("", encoding="utf-8")
-    monkeypatch.delenv("HERMES_API_CALL_STALE_TIMEOUT", raising=False)
+    monkeypatch.delenv("HADES_API_CALL_STALE_TIMEOUT", raising=False)
     _write_config(tmp_path, "")
 
     # No provider config, no env var, no floor match -> 90s implicit default.

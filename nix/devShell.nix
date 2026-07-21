@@ -43,9 +43,12 @@
           ${combinedNonNpm}
           ${hermesNpmLib.mkNpmDevShellHook npmPackageJsonPaths}
 
+          # Force Node to use Nix's playwright-test binary instead of node_modules/.bin
+          export PATH="${pkgs.playwright-test}/bin:$PATH"
+
           # for the devshell to pick up the src
           export HERMES_PYTHON_SRC_ROOT=$(git rev-parse --show-toplevel)
-          echo "Hades Agent dev shell in $HERMES_PYTHON_SRC_ROOT"
+          echo "Hermes Agent dev shell in $HERMES_PYTHON_SRC_ROOT"
           echo "Ready. Run 'hermes' or 'sandbox hermes' to start."
         '';
       };

@@ -4,9 +4,9 @@ Reasoning models (those that emit extended thinking blocks before their
 first content token) routinely exceed Hades's default chat-model
 stale detectors:
 
-* Stream stale detector:   ``HERMES_STREAM_STALE_TIMEOUT``     default 180s
+* Stream stale detector:   ``HADES_STREAM_STALE_TIMEOUT``     default 180s
                            ``agent/chat_completion_helpers.py:2544``
-* Non-stream stale detector: ``HERMES_API_CALL_STALE_TIMEOUT``  default 90s
+* Non-stream stale detector: ``HADES_API_CALL_STALE_TIMEOUT``  default 90s
                            ``run_agent.py:1140``
 
 For NVIDIA Nemotron 3 Ultra on the hosted NIM gateway the empirical
@@ -102,6 +102,7 @@ _REASONING_STALE_TIMEOUT_FLOORS: tuple[tuple[str, int], ...] = (
     # ``claude-opus-4`` so non-thinking Claude 3.x or future
     # non-reasoning Claude variants don't match.
     ("claude-opus-4", 240),
+    ("claude-sonnet-5", 180),
     ("claude-sonnet-4.5", 180),
     ("claude-sonnet-4.6", 180),
     # xAI Grok reasoning variants.  Explicit reasoning-only keys
@@ -111,6 +112,7 @@ _REASONING_STALE_TIMEOUT_FLOORS: tuple[tuple[str, int], ...] = (
     # non-reasoning pairs.
     ("grok-4-fast-reasoning", 300),
     ("grok-4.20-reasoning", 300),
+    ("grok-4.5", 300),
     ("grok-4-fast-non-reasoning", 180),
 )
 
