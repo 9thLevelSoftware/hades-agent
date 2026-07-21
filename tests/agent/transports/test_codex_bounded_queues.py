@@ -17,6 +17,9 @@ def _client_without_spawn():
     client._dropped_server_requests = 0
     client._pending = {}
     client._pending_lock = __import__("threading").Lock()
+    client._closed = False
+    client._proc = type("P", (), {"stdin": None})()
+    client.respond_error = lambda *a, **k: None  # type: ignore[method-assign]
     return client
 
 
@@ -40,3 +43,14 @@ def test_dispatch_routes_notification_and_server_request():
     client._dispatch({"id": 7, "method": "item/commandExecution/requestApproval", "params": {}})
     assert client._notifications.qsize() == 1
     assert client._server_requests.qsize() == 1
+
+
+def test_server_request_overflow_nacks_oldest():
+    client = _client_without_spawn()
+    nacked: list = []
+    client.respond_error = lambda rid, code, msg, data=None: nacked.append(rid)  # type: ignore[method-assign]
+    client._put_bounded(client._server_requests, {"id": 1, "method": "a"}, kind="server_request")
+    client._put_bounded(client._server_requests, {"id": 2, "method": "b"}, kind="server_request")
+    client._put_bounded(client._server_requests, {"id": 3, "method": "c"}, kind="server_request")
+    assert 1 in nacked  # oldest dropped with error reply
+    assert client._server_requests.qsize() == 2
