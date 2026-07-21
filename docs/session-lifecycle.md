@@ -399,7 +399,7 @@ unexpected exit). For each session updated within the last 120 seconds:
 
 ### Stuck-Loop Detection (`_suspend_stuck_loop_sessions`)
 
-Counts consecutive restarts via a JSON file (`{HADES_HOME}/restart_counts.json`). If a
+Counts consecutive restarts via a JSON file (`{HERMES_HOME}/restart_counts.json`). If a
 session has been active across 3+ consecutive restarts, it's auto-suspended so the user
 gets a clean slate.
 
@@ -628,7 +628,7 @@ When a session expires:
 
 ```yaml
 session_reset:
-  mode: both            # none | idle | daily | both
+  mode: none            # none (default) | idle | daily | both
   at_hour: 4            # daily reset hour (local time)
   idle_minutes: 1440    # idle timeout (24h)
   notify: true          # notify user on auto-reset

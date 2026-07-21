@@ -1,6 +1,6 @@
 # Desktop Engineering Guide
 
-How to build Hermes Desktop well. This is a judgment guide, not an inventory —
+How to build Hades Desktop well. This is a judgment guide, not an inventory —
 it teaches the invariants and the reasoning behind them so a change fits the app
 even as files move. Read it with the repository `AGENTS.md` (root rules still
 apply) and [`DESIGN.md`](./DESIGN.md) for the visual and interaction contract.
@@ -125,9 +125,11 @@ normalization alike. Learn the shape, not a snapshot of the current rungs.
 Two auth-flavored corollaries worth naming because they are easy to get wrong:
 
 - **One-time credentials are never reused.** An OAuth gateway connection mints a
-  fresh WebSocket ticket on every dial; a mint failure means reauthentication,
-  not "fall back to the cached URL." Only long-lived token/local auth may reuse
-  a cached URL as a lower rung.
+  fresh WebSocket ticket on every dial and never falls back to the cached URL.
+  Only a confirmed 401/403 (or an explicitly tagged auth rejection) means
+  reauthentication; timeout, network, malformed-response, and server failures
+  remain connectivity errors. Only long-lived token/local auth may reuse a
+  cached URL as a lower rung.
 - **A connection test must exercise the leg you'll actually use.** An HTTP
   status probe passing while the WebSocket/auth leg fails is a false positive
   that ships as "it said connected but nothing works."

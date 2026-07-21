@@ -82,7 +82,7 @@ test('resolveRemovableAppPath: dev-run .app resolves (safety is shouldRemoveAppB
 test('resolveRemovableAppPath finds the install dir on Windows', () => {
   assert.equal(
     resolveRemovableAppPath('C:\\Users\\x\\AppData\\Local\\Programs\\Hermes\\Hermes.exe', 'win32'),
-    'C:\\Users\\x\\AppData\\Local\\Programs\\Hermes'
+    'C:\\Users\\x\\AppData\\Local\\Programs\\Hades'
   )
   assert.equal(
     resolveRemovableAppPath('C:\\Users\\x\\AppData\\Local\\hermes-desktop\\Hermes.exe', 'win32'),
@@ -102,7 +102,7 @@ test('resolveRemovableAppPath uses APPIMAGE on Linux when set', () => {
 })
 
 test('resolveRemovableAppPath finds the unpacked dir on Linux', () => {
-  assert.equal(resolveRemovableAppPath('/opt/hades/linux-unpacked/hermes', 'linux', {}), '/opt/hades/linux-unpacked')
+  assert.equal(resolveRemovableAppPath('/opt/hermes/linux-unpacked/hermes', 'linux', {}), '/opt/hermes/linux-unpacked')
   // A system-package install (/usr/bin) → null, left to apt/dnf.
   assert.equal(resolveRemovableAppPath('/usr/bin/hermes', 'linux', {}), null)
 })
@@ -126,12 +126,12 @@ test('shouldRemoveAppBundle requires packaged AND a resolved path', () => {
 test('buildPosixCleanupScript waits for the PID, runs the uninstall module, removes bundle', () => {
   const script = buildPosixCleanupScript({
     desktopPid: 4321,
-    pythonExe: '/home/x/.hermes/hermes-agent/venv/bin/python',
+    pythonExe: '/home/x/.hades/hermes-agent/venv/bin/python',
     pythonPath: null,
-    agentRoot: '/home/x/.hermes/hermes-agent',
+    agentRoot: '/home/x/.hades/hermes-agent',
     uninstallArgs: ['-m', 'hades_cli.uninstall', '--mode', 'gui'],
-    appPath: '/opt/hades/linux-unpacked',
-    hermesHome: '/home/x/.hermes'
+    appPath: '/opt/hermes/linux-unpacked',
+    hermesHome: '/home/x/.hades'
   })
 
   assert.match(script, /^#!\/bin\/bash/)
@@ -140,7 +140,7 @@ test('buildPosixCleanupScript waits for the PID, runs the uninstall module, remo
   // bounded wait (~30s), not unbounded
   assert.match(script, /seq 1 60/)
   assert.match(script, /'-m' 'hades_cli\.uninstall' '--mode' 'gui'/)
-  assert.match(script, /rm -rf '\/opt\/hades\/linux-unpacked'/)
+  assert.match(script, /rm -rf '\/opt\/hermes\/linux-unpacked'/)
   assert.match(script, /export HADES_HOME='\/home\/x\/\.hermes'/)
 })
 
@@ -148,11 +148,11 @@ test('buildPosixCleanupScript exports PYTHONPATH when pythonPath is set (lite/fu
   const script = buildPosixCleanupScript({
     desktopPid: 1,
     pythonExe: '/usr/bin/python3',
-    pythonPath: '/home/x/.hermes/hermes-agent',
-    agentRoot: '/home/x/.hermes/hermes-agent',
+    pythonPath: '/home/x/.hades/hermes-agent',
+    agentRoot: '/home/x/.hades/hermes-agent',
     uninstallArgs: ['-m', 'hades_cli.uninstall', '--mode', 'full'],
     appPath: null,
-    hermesHome: '/home/x/.hermes'
+    hermesHome: '/home/x/.hades'
   })
 
   // System python + source on PYTHONPATH so import hades_cli works while the
@@ -230,7 +230,7 @@ test('buildWindowsCleanupScript waits (bounded) for PID, runs uninstall, rmdir b
   assert.doesNotMatch(script, /find "%PID%"/) // the old substring-prone form is gone
   // Removal is a retry loop (Windows releases dir handles lazily).
   assert.match(script, /:rmloop/)
-  assert.match(script, /rmdir \/s \/q "C:\\Users\\x\\AppData\\Local\\Programs\\Hades" >nul 2>&1/)
+  assert.match(script, /rmdir \/s \/q "C:\\Users\\x\\AppData\\Local\\Programs\\Hermes" >nul 2>&1/)
   assert.match(script, /if %tries% geq 10 goto rmdone/)
   assert.match(script, /del "%~f0"/)
 })

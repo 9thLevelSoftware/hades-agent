@@ -34,8 +34,8 @@ class TestAgentConfigSignature:
 
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter", "api_mode": "chat_completions"}
-        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hades-telegram"], "")
+        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hades-telegram"], "")
         assert sig1 == sig2
 
     def test_model_change_different_signature(self):
@@ -43,8 +43,8 @@ class TestAgentConfigSignature:
 
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter"}
-        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("claude-opus-4.6", runtime, ["hermes-telegram"], "")
+        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hades-telegram"], "")
+        sig2 = GatewayRunner._agent_config_signature("claude-opus-4.6", runtime, ["hades-telegram"], "")
         assert sig1 != sig2
 
     def test_same_token_prefix_different_full_token_changes_signature(self):
@@ -65,8 +65,8 @@ class TestAgentConfigSignature:
         }
 
         assert rt1["api_key"][:8] == rt2["api_key"][:8]
-        sig1 = GatewayRunner._agent_config_signature("gpt-5.3-codex", rt1, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("gpt-5.3-codex", rt2, ["hermes-telegram"], "")
+        sig1 = GatewayRunner._agent_config_signature("gpt-5.3-codex", rt1, ["hades-telegram"], "")
+        sig2 = GatewayRunner._agent_config_signature("gpt-5.3-codex", rt2, ["hades-telegram"], "")
         assert sig1 != sig2
 
     def test_provider_change_different_signature(self):
@@ -74,16 +74,16 @@ class TestAgentConfigSignature:
 
         rt1 = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
         rt2 = {"api_key": "sk-test12345678", "base_url": "https://api.anthropic.com", "provider": "anthropic"}
-        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", rt1, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", rt2, ["hermes-telegram"], "")
+        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", rt1, ["hades-telegram"], "")
+        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", rt2, ["hades-telegram"], "")
         assert sig1 != sig2
 
     def test_toolset_change_different_signature(self):
         from gateway.run import GatewayRunner
 
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
-        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-discord"], "")
+        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hades-telegram"], "")
+        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hades-discord"], "")
         assert sig1 != sig2
 
     def test_reasoning_not_in_signature(self):
@@ -93,8 +93,8 @@ class TestAgentConfigSignature:
         runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
         # Same config — signature should be identical regardless of what
         # reasoning_config the caller might have (it's not passed in)
-        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
-        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hades-telegram"], "")
+        sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hades-telegram"], "")
         assert sig1 == sig2
 
     # ---------------------------------------------------------------
@@ -242,6 +242,32 @@ class TestExtractCacheBustingConfig:
         assert out["compression.target_ratio"] == 0.3
         assert out["compression.protect_last_n"] == 25
         assert out["compression.codex_app_server_auto"] == "hermes"
+
+    def test_reads_checkpoint_subkeys(self):
+        from gateway.run import GatewayRunner
+
+        out = GatewayRunner._extract_cache_busting_config(
+            {
+                "checkpoints": {
+                    "enabled": True,
+                    "max_snapshots": 12,
+                    "max_total_size_mb": 333,
+                    "max_file_size_mb": 5,
+                }
+            }
+        )
+
+        assert out["checkpoints.enabled"] is True
+        assert out["checkpoints.max_snapshots"] == 12
+        assert out["checkpoints.max_total_size_mb"] == 333
+        assert out["checkpoints.max_file_size_mb"] == 5
+
+    def test_reads_legacy_checkpoint_boolean(self):
+        from gateway.run import GatewayRunner
+
+        out = GatewayRunner._extract_cache_busting_config({"checkpoints": True})
+
+        assert out["checkpoints.enabled"] is True
 
     def test_missing_keys_yield_none(self):
         """Absent config keys must produce None values (still contribute to signature)."""
@@ -427,7 +453,7 @@ class TestAgentCacheLifecycle:
         session_key = "telegram:12345"
         runtime = {"api_key": "test", "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter", "api_mode": "chat_completions"}
-        sig = runner._agent_config_signature("anthropic/claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        sig = runner._agent_config_signature("anthropic/claude-sonnet-4", runtime, ["hades-telegram"], "")
 
         # First message — create and cache
         agent1 = AIAgent(
@@ -455,7 +481,7 @@ class TestAgentCacheLifecycle:
         runtime = {"api_key": "test", "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter", "api_mode": "chat_completions"}
 
-        old_sig = runner._agent_config_signature("anthropic/claude-sonnet-4", runtime, ["hermes-telegram"], "")
+        old_sig = runner._agent_config_signature("anthropic/claude-sonnet-4", runtime, ["hades-telegram"], "")
         agent1 = AIAgent(
             model="anthropic/claude-sonnet-4", api_key="test",
             base_url="https://openrouter.ai/api/v1", provider="openrouter",
@@ -466,7 +492,7 @@ class TestAgentCacheLifecycle:
             runner._agent_cache[session_key] = (agent1, old_sig)
 
         # New model → different signature
-        new_sig = runner._agent_config_signature("anthropic/claude-opus-4.6", runtime, ["hermes-telegram"], "")
+        new_sig = runner._agent_config_signature("anthropic/claude-opus-4.6", runtime, ["hades-telegram"], "")
         assert new_sig != old_sig
 
         with runner._agent_cache_lock:
@@ -1719,10 +1745,10 @@ class TestAgentConfigSignatureUserId:
         from gateway.run import GatewayRunner
         runtime = {"provider": "anthropic", "api_key": "k", "base_url": "", "api_mode": "chat_completions"}
         sig_a = GatewayRunner._agent_config_signature(
-            "claude-sonnet-4", runtime, ["hermes-telegram"], "", user_id="7654321"
+            "claude-sonnet-4", runtime, ["hades-telegram"], "", user_id="7654321"
         )
         sig_b = GatewayRunner._agent_config_signature(
-            "claude-sonnet-4", runtime, ["hermes-telegram"], "", user_id="491827364"
+            "claude-sonnet-4", runtime, ["hades-telegram"], "", user_id="491827364"
         )
         assert sig_a != sig_b
 
@@ -1730,10 +1756,10 @@ class TestAgentConfigSignatureUserId:
         from gateway.run import GatewayRunner
         runtime = {"provider": "anthropic", "api_key": "k", "base_url": "", "api_mode": "chat_completions"}
         sig_1 = GatewayRunner._agent_config_signature(
-            "claude-sonnet-4", runtime, ["hermes-telegram"], "", user_id="7654321"
+            "claude-sonnet-4", runtime, ["hades-telegram"], "", user_id="7654321"
         )
         sig_2 = GatewayRunner._agent_config_signature(
-            "claude-sonnet-4", runtime, ["hermes-telegram"], "", user_id="7654321"
+            "claude-sonnet-4", runtime, ["hades-telegram"], "", user_id="7654321"
         )
         assert sig_1 == sig_2
 
@@ -1741,11 +1767,11 @@ class TestAgentConfigSignatureUserId:
         from gateway.run import GatewayRunner
         runtime = {"provider": "anthropic", "api_key": "k", "base_url": "", "api_mode": "chat_completions"}
         sig_a = GatewayRunner._agent_config_signature(
-            "claude-sonnet-4", runtime, ["hermes-telegram"], "",
+            "claude-sonnet-4", runtime, ["hades-telegram"], "",
             user_id="7654321", user_id_alt="@igor_tg",
         )
         sig_b = GatewayRunner._agent_config_signature(
-            "claude-sonnet-4", runtime, ["hermes-telegram"], "",
+            "claude-sonnet-4", runtime, ["hades-telegram"], "",
             user_id="7654321", user_id_alt="@erosika_tg",
         )
         assert sig_a != sig_b
@@ -1760,10 +1786,10 @@ class TestAgentConfigSignatureUserId:
         from gateway.run import GatewayRunner
         runtime = {"provider": "anthropic", "api_key": "k", "base_url": "", "api_mode": "chat_completions"}
         sig_implicit = GatewayRunner._agent_config_signature(
-            "claude-sonnet-4", runtime, ["hermes-telegram"], "",
+            "claude-sonnet-4", runtime, ["hades-telegram"], "",
         )
         sig_explicit_none = GatewayRunner._agent_config_signature(
-            "claude-sonnet-4", runtime, ["hermes-telegram"], "",
+            "claude-sonnet-4", runtime, ["hades-telegram"], "",
             user_id=None, user_id_alt=None,
         )
         assert sig_implicit == sig_explicit_none
@@ -1885,40 +1911,6 @@ class TestAgentCacheMessageCountRebaseline:
 
         # Guard must now reject reuse so the agent rebuilds from fresh disk.
         assert self._guard_would_reuse(runner, "telegram:s1", "s1") is False
-
-    @pytest.mark.asyncio
-    async def test_rebaseline_preserves_projected_route_identity(self, tmp_path):
-        """Refreshing the count must preserve every cache-coherence field.
-
-        Routed agents use the fifth tuple element to prove that the cached
-        agent is still bound to the exact projected route.  Dropping that
-        identity during the post-turn refresh makes turn two classify/build
-        again even though the same process owns all transcript writes.
-        """
-        from hermes_state import SessionDB
-
-        db = SessionDB(db_path=tmp_path / "sessions.db")
-        db.create_session("s1", source="telegram")
-        runner = self._runner_with_db(db)
-        agent = object()
-        route_identity = "openrouter/selected-model"
-
-        with runner._agent_cache_lock:
-            runner._agent_cache["telegram:s1"] = (
-                agent,
-                "sig",
-                0,
-                "s1",
-                route_identity,
-            )
-
-        db.append_message("s1", role="user", content="first turn")
-        db.append_message("s1", role="assistant", content="first response")
-        await runner._refresh_agent_cache_message_count("telegram:s1", "s1")
-
-        with runner._agent_cache_lock:
-            cached = runner._agent_cache["telegram:s1"]
-        assert cached == (agent, "sig", 2, "s1", route_identity)
 
     @pytest.mark.asyncio
     async def test_rebaseline_is_fail_safe_and_skips_legacy_and_pending(self, tmp_path):

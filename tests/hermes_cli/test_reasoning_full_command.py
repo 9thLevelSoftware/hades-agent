@@ -34,14 +34,14 @@ def test_default_config_clamps_reasoning():
 
 
 def _seed_config(tmp_path, monkeypatch):
-    hh = tmp_path / ".hades"
+    hh = tmp_path / ".hermes"
     hh.mkdir()
     (hh / "config.yaml").write_text("display:\n  show_reasoning: true\n")
     monkeypatch.setenv("HADES_HOME", str(hh))
-    # cli captures _hermes_home at import; force it to the temp home.
+    # cli captures _hades_home at import; force it to the temp home.
     import cli
 
-    monkeypatch.setattr(cli, "_hermes_home", hh, raising=False)
+    monkeypatch.setattr(cli, "_hades_home", hh, raising=False)
     return hh
 
 
@@ -55,7 +55,7 @@ def test_reasoning_full_sets_and_persists(tmp_path, monkeypatch):
     assert saved["display"]["reasoning_full"] is True
 
 
-def test_reasoning_clamp_resets_and_persists(tmp_path, monkeypatch):
+def test_reasoning_clamp_resets_and_persists(tmp_path, monkeypatch, capsys):
     hh = _seed_config(tmp_path, monkeypatch)
     s = _Stub()
     s.reasoning_full = True
@@ -64,6 +64,7 @@ def test_reasoning_clamp_resets_and_persists(tmp_path, monkeypatch):
     assert s.reasoning_full is False
     saved = yaml.safe_load((hh / "config.yaml").read_text())
     assert saved["display"]["reasoning_full"] is False
+    assert "Unknown argument" not in capsys.readouterr().out
 
 
 def test_reasoning_all_is_alias_for_full(tmp_path, monkeypatch):

@@ -1226,6 +1226,10 @@ class HermesConsoleEngine:
         return f"{output[:self.output_limit]}\n... output truncated ({omitted} bytes omitted)"
 
 
+# Backward-compat alias: Phase 1 test rename used HadesConsoleEngine
+HadesConsoleEngine = HermesConsoleEngine
+
+
 def _expect_no_args(args: Sequence[str], usage: str) -> None:
     if args:
         raise ConsoleCommandError(f"Usage: {usage}")

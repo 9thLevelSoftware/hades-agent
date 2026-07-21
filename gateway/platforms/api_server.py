@@ -118,6 +118,14 @@ def _coerce_port(value: Any, default: int = DEFAULT_PORT) -> int:
 _TRUE_REQUEST_BOOL_STRINGS = frozenset({"1", "true", "yes", "on"})
 _FALSE_REQUEST_BOOL_STRINGS = frozenset({"0", "false", "no", "off"})
 
+# Sentinel returned by _resolve_request_profile when a /p/<profile>/ prefix
+# is present but the profile is not served by this gateway instance.
+_PROFILE_REJECTED = object()
+
+_api_request_profile: ContextVar[Optional[str]] = ContextVar(
+    "api_server_request_profile", default=None
+)
+
 
 def _coerce_request_bool(value: Any, default: bool = False) -> bool:
     """Normalize boolean-like API payload values.

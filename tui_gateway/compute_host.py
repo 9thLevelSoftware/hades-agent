@@ -11,7 +11,6 @@ import argparse
 import concurrent.futures
 import json
 import os
-from hades_constants import env_get, env_set
 import signal
 import subprocess
 import sys
@@ -147,7 +146,7 @@ class ComputeHost:
         self._heartbeat_secs = (
             float(heartbeat_secs)
             if heartbeat_secs is not None
-            else float(env_get("HADES_COMPUTE_HOST_HEARTBEAT_SECS") or "15")
+            else float(os.environ.get("HADES_COMPUTE_HOST_HEARTBEAT_SECS") or "15")
         )
         if self._heartbeat_secs > 0:
             threading.Thread(target=self._heartbeat_loop, name="compute-host-heartbeat", daemon=True).start()
@@ -367,9 +366,9 @@ class ComputeHost:
             except Exception:
                 pass
             try:
-                import hermes_undo
+                import hades_undo
 
-                hermes_undo.on_user_message_appended(session["session_key"])
+                hades_undo.on_user_message_appended(session["session_key"])
             except Exception:
                 pass
             try:
@@ -600,7 +599,7 @@ class ComputeHost:
 
 def _rss_mb(pid: int) -> float:
     try:
-        out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)], text=True, stderr=subprocess.DEVNULL, timeout=2).strip()
+        out = subprocess.check_output(["ps", "-o", "rss=", "-p", str(pid)], text=True, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2).strip()
         return int(out.splitlines()[-1].strip()) / 1024.0 if out else 0.0
     except Exception:
         return 0.0
@@ -608,13 +607,13 @@ def _rss_mb(pid: int) -> float:
 
 def _default_workers() -> int:
     try:
-        return max(2, int(env_get("HADES_TUI_RPC_POOL_WORKERS") or "8"))
+        return max(2, int(os.environ.get("HADES_TUI_RPC_POOL_WORKERS") or "8"))
     except (TypeError, ValueError):
         return 8
 
 
 def run_host(stdin: Any = None, stdout: Any = None) -> None:
-    env_set("HADES_COMPUTE_HOST_CHILD", "1")
+    os.environ["HADES_COMPUTE_HOST_CHILD"] = "1"
     stdin = stdin or sys.stdin
     host = ComputeHost(stdout=stdout or sys.stdout)
     shutting_down = threading.Event()
@@ -639,7 +638,7 @@ def run_host(stdin: Any = None, stdout: Any = None) -> None:
             "boot_id": host._boot_id,
             "build_sha": _build_sha(),
             "cwd": os.getcwd(),
-            "hermes_home": env_get("HADES_HOME", ""),
+            "hades_home": os.environ.get("HADES_HOME", ""),
         }
     )
 

@@ -963,7 +963,7 @@ describe('usePromptActions file attachment sync', () => {
       if (method === 'file.attach') {
         return {
           attached: true,
-          path: '/remote/work/.hermes/desktop-attachments/report.txt',
+          path: '/remote/work/.hades/desktop-attachments/report.txt',
           ref_text: '@file:.hermes/desktop-attachments/report.txt',
           uploaded: true
         } as never

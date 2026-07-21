@@ -18,7 +18,7 @@ sidebar_position: 7
 | 凭据 | 来源 | 配置方式 |
 |------|------|---------|
 | **SuperGrok / X Premium+ OAuth**（推荐） | 在 `accounts.x.ai` 浏览器登录，自动刷新 | `hermes auth add xai-oauth` — 参见 [xAI Grok OAuth (SuperGrok / X Premium+)](../../guides/xai-grok-oauth.md) |
-| **`XAI_API_KEY`** | 付费 xAI API 密钥 | 在 `~/.hades/.env` 中设置 |
+| **`XAI_API_KEY`** | 付费 xAI API 密钥 | 在 `~/.hermes/.env` 中设置 |
 
 两者使用相同的 endpoint 和相同的请求体，区别仅在于 bearer token。**当两者同时配置时，SuperGrok OAuth 优先**，x_search 将消耗你的订阅配额而非付费 API 用量。
 
@@ -43,12 +43,16 @@ hermes tools
 ## 配置
 
 ```yaml
-# ~/.hades/config.yaml
+# ~/.hermes/config.yaml
 x_search:
   # 用于 Responses 调用的 xAI 模型。
-  # grok-4.20-reasoning 是推荐的默认值；任何支持
+  # grok-4.5 是推荐的默认值；任何支持
   # x_search 工具访问权限的 Grok 模型均可使用。
-  model: grok-4.20-reasoning
+  model: grok-4.5
+
+  # 可选推理强度：low、medium、high 或 xhigh。省略时使用所选模型的默认值。
+  # xhigh 仅适用于明确支持它的模型，例如 grok-4.20-multi-agent。
+  # reasoning_effort: low
 
   # 请求超时时间（秒）。复杂查询的 x_search 可能需要 60–120 秒，
   # 默认值较为宽松。最小值：30。
@@ -58,6 +62,9 @@ x_search:
   # 每次重试按指数退避（1.5 倍尝试秒数，上限 5 秒）。
   retries: 2
 ```
+
+`reasoning_effort` 会以 `reasoning: {effort: ...}` 的形式发送到 xAI
+Responses API。不支持可配置推理的模型应留空。无效值会在发起 API 请求前失败。
 
 ## 工具参数
 
@@ -110,11 +117,11 @@ agent 将：
 
 ### "No xAI credentials available"
 
-当两种认证路径均失败时，工具会显示此错误。请在 `~/.hades/.env` 中设置 `XAI_API_KEY`，或运行 `hermes auth add xai-oauth` 并完成浏览器登录。然后重启会话，让 agent 重新加载工具注册表。
+当两种认证路径均失败时，工具会显示此错误。请在 `~/.hermes/.env` 中设置 `XAI_API_KEY`，或运行 `hermes auth add xai-oauth` 并完成浏览器登录。然后重启会话，让 agent 重新加载工具注册表。
 
 ### "`x_search` is not enabled for this model"
 
-配置的 `x_search.model` 没有访问服务端 `x_search` 工具的权限。请切换至 `grok-4.20-reasoning`（默认值）或其他支持该工具的 Grok 模型。当前支持列表请查阅 [xAI 文档](https://docs.x.ai/)。
+配置的 `x_search.model` 没有访问服务端 `x_search` 工具的权限。请切换至 `grok-4.5`（默认值）或其他支持该工具的 Grok 模型。当前支持列表请查阅 [xAI 文档](https://docs.x.ai/)。
 
 ### 工具未出现在 schema 中
 

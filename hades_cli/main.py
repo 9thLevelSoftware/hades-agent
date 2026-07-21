@@ -623,6 +623,7 @@ from hades_cli import __version__, __release_date__
 # existing test monkeypatches (hades_cli.main._model_flow_*) keep resolving unchanged.
 from hades_cli.model_setup_flows import (
     _prompt_auth_credentials_choice,
+    _model_flow_auto,
     _model_flow_openrouter,
     _model_flow_nous,
     _model_flow_openai_codex,
@@ -3167,7 +3168,9 @@ def select_provider_and_model(args=None):
         return
 
     # Step 2: Provider-specific setup + model selection
-    if selected_provider == "openrouter":
+    if selected_provider == "auto":
+        _model_flow_auto(config)
+    elif selected_provider == "openrouter":
         _model_flow_openrouter(config, current_model)
     elif selected_provider == "moa":
         _model_flow_moa(config, current_model)

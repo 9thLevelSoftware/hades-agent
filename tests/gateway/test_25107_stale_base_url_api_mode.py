@@ -79,15 +79,15 @@ def _fake_switch_result(*, base_url="", api_mode=""):
 def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value, *, base_url="", api_mode=""):
     import gateway.run as gateway_run
 
-    hermes_home = tmp_path / ".hades"
-    hermes_home.mkdir()
-    cfg_path = hermes_home / "config.yaml"
+    hades_home = tmp_path / ".hermes"
+    hades_home.mkdir()
+    cfg_path = hades_home / "config.yaml"
     cfg_path.write_text(
         yaml.safe_dump({"model": model_yaml_value, "providers": {}}),
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+    monkeypatch.setattr(gateway_run, "_hades_home", hades_home)
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr(
         "hades_cli.model_switch.list_picker_providers",
@@ -101,8 +101,8 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value, *, base_url=""
         "hades_cli.model_switch.resolve_display_context_length",
         lambda *a, **k: 8192,
     )
-    monkeypatch.setattr("hades_constants.get_hades_home", lambda: hermes_home)
-    monkeypatch.setattr("hades_cli.config.get_hades_home", lambda: hermes_home)
+    monkeypatch.setattr("hades_constants.get_hades_home", lambda: hades_home)
+    monkeypatch.setattr("hades_cli.config.get_hades_home", lambda: hades_home)
     return cfg_path
 
 
@@ -186,7 +186,7 @@ async def test_picker_tap_to_custom_clears_stale_base_url_and_api_mode(tmp_path,
     adapter = _FakePickerAdapter()
     cfg_path = _setup_isolated_home(tmp_path, monkeypatch, dict(_STALE_MODEL_CFG))
 
-    confirmation = await _drive_picker(_make_runner(adapter), _make_event("/model"))
+    confirmation = await _drive_picker(_make_runner(adapter), _make_event("/model --global"))
 
     assert confirmation is not None
     written = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))

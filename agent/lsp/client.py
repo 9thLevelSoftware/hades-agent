@@ -804,22 +804,36 @@ class LSPClient:
         version: int,
         *,
         mode: str = "document",
-    ) -> None:
+        timeout: Optional[float] = None,
+    ) -> bool:
         """Wait for the server to publish diagnostics for ``path`` at ``version``.
 
         ``mode`` is ``"document"`` (5s budget, document pulls) or
-        ``"full"`` (10s budget, also workspace pulls).  Best-effort —
-        returns silently on timeout.  Does NOT throw if the server
-        doesn't support pull diagnostics; we still get the push side.
+        ``"full"`` (10s budget, also workspace pulls).  ``timeout``
+        overrides the mode's default budget when provided — this is
+        how the user's ``lsp.wait_timeout`` config reaches the wait
+        loop (slow servers like tsserver on big projects need more
+        than the 5s default).
+
+        Returns ``True`` when *fresh* diagnostics arrived (a push at
+        or after our didChange, or a pull answered after it) and
+        ``False`` on timeout.  Callers must treat ``False`` as "no
+        data", NOT as "no errors" — the diagnostic stores may still
+        hold stale entries from the previous edit at that point.
+        Best-effort — never throws if the server doesn't support pull
+        diagnostics; we still get the push side.
         """
-        budget = DIAGNOSTICS_FULL_WAIT if mode == "full" else DIAGNOSTICS_DOCUMENT_WAIT
+        if timeout is not None and timeout > 0:
+            budget = timeout
+        else:
+            budget = DIAGNOSTICS_FULL_WAIT if mode == "full" else DIAGNOSTICS_DOCUMENT_WAIT
         deadline = asyncio.get_event_loop().time() + budget
         abs_path = os.path.abspath(path)
 
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
-                return
+                return False
 
             # Concurrent: document pull + push wait.
             pull_task = asyncio.create_task(self._pull_document_diagnostics(abs_path))
@@ -842,12 +856,12 @@ class LSPClient:
             if abs_path in self._published and (
                 current_v is None or current_v >= version
             ):
-                return
+                return True
 
             # Pull may have populated _pull_diagnostics — that's also
             # success.
             if abs_path in self._pull_diagnostics:
-                return
+                return True
 
             # Loop until budget runs out.
 
@@ -888,16 +902,28 @@ class LSPClient:
             except asyncio.TimeoutError:
                 continue
 
-    def diagnostics_for(self, path: str) -> List[Dict[str, Any]]:
+    def diagnostics_for(self, path: str, *, fresh_only: bool = False) -> List[Dict[str, Any]]:
         """Return current merged + deduped diagnostics for one file.
 
         Diagnostics from push and pull stores are concatenated and
         deduplicated by ``(severity, code, message, range)`` content
         key.  Empty list if the server hasn't published anything.
+
+        With ``fresh_only=True``, stale leftovers from the previous
+        edit cycle are excluded — push diagnostics are only included
+        when the server's version has caught up to the document's
+        current version.
         """
         abs_path = os.path.abspath(path)
         push = self._push_diagnostics.get(abs_path) or []
         pull = self._pull_diagnostics.get(abs_path) or []
+        if fresh_only:
+            # Exclude push diagnostics if the server hasn't caught up
+            # to the current document version (stale leftovers).
+            doc_version = (self._files.get(abs_path) or {}).get("version")
+            push_v = self._published_version.get(abs_path)
+            if doc_version is not None and (push_v is None or push_v < doc_version):
+                push = []
         return _dedupe(push, pull)
 
 

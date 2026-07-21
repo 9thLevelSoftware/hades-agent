@@ -1,6 +1,6 @@
 """GMI Cloud provider profile."""
 
-from hades_cli import __version__ as _HERMES_VERSION
+from hades_cli import __version__ as _HADES_VERSION
 from providers import register_provider
 from providers.base import ProviderProfile
 
@@ -16,13 +16,14 @@ gmi = ProviderProfile(
     # Attribution so GMI can identify traffic from Hades Agent.
     # The generic profile.default_headers fallback in run_agent.py and
     # agent/auxiliary_client.py picks this up at client construction time.
-    default_headers={"User-Agent": f"HermesAgent/{_HERMES_VERSION}"},
+    default_headers={"User-Agent": f"HadesAgent/{_HADES_VERSION}"},
     default_aux_model="google/gemini-3.1-flash-lite-preview",
     fallback_models=(
         "zai-org/GLM-5.1-FP8",
         "deepseek-ai/DeepSeek-V3.2",
         "moonshotai/Kimi-K2.5",
         "google/gemini-3.1-flash-lite-preview",
+        "anthropic/claude-sonnet-5",
         "anthropic/claude-sonnet-4.6",
         "openai/gpt-5.4",
     ),

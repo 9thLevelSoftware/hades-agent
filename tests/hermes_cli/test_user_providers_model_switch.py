@@ -20,7 +20,7 @@ def test_list_authenticated_providers_includes_full_models_list_from_user_provid
     Regression test: previously only default_model was shown in /model picker.
     """
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
     
     user_providers = {
         "local-ollama": {
@@ -60,7 +60,7 @@ def test_list_authenticated_providers_includes_full_models_list_from_user_provid
 def test_list_authenticated_providers_dedupes_models_when_default_in_list(monkeypatch):
     """When default_model is also in models list, don't duplicate."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
     
     user_providers = {
         "my-provider": {
@@ -88,14 +88,14 @@ def test_list_authenticated_providers_dedupes_models_when_default_in_list(monkey
 
 def test_list_authenticated_providers_enumerates_dict_format_models(monkeypatch):
     """providers: dict entries with ``models:`` as a dict keyed by model id
-    (canonical Hermes write format) should surface every key in the picker.
+    (canonical Hades write format) should surface every key in the picker.
 
     Regression: the ``providers:`` dict path previously only accepted
     list-format ``models:`` and silently dropped dict-format entries,
     even though Hades's own writer and downstream readers use dict format.
     """
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     user_providers = {
         "local-ollama": {
@@ -139,7 +139,7 @@ def test_list_authenticated_providers_uses_live_models_for_user_provider(monkeyp
     /v1/models endpoint exposed newly added models.
     """
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
     monkeypatch.setenv("CRS_TEST_KEY", "sk-test")
 
     calls = []
@@ -183,7 +183,7 @@ def test_list_authenticated_providers_uses_live_models_for_user_provider(monkeyp
 def test_user_provider_live_model_probe_uses_extra_headers(monkeypatch):
     """providers.<name>.extra_headers must also apply to live /models probes."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     calls = []
 
@@ -235,7 +235,7 @@ def test_list_authenticated_providers_dict_models_without_default_model(monkeypa
     """Dict-format ``models:`` without a ``default_model`` must still expose
     every dict key, not collapse to an empty list."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     user_providers = {
         "multimodel": {
@@ -267,7 +267,7 @@ def test_list_authenticated_providers_dict_models_dedupe_with_default(monkeypatc
     """When ``default_model`` is also a key in the ``models:`` dict, it must
     appear exactly once (list already had this for list-format models)."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     user_providers = {
         "my-provider": {
@@ -317,7 +317,7 @@ def test_list_authenticated_providers_openai_alias_not_emitted_as_phantom(monkey
         "agent.models_dev.fetch_models_dev",
         lambda: {"openai": {"env": ["OPENAI_API_KEY"]}},
     )
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     providers = list_authenticated_providers(
         current_provider="",
@@ -389,7 +389,7 @@ def test_switch_model_user_config_openai_does_not_hop_to_openrouter(monkeypatch)
 def test_list_authenticated_providers_user_openai_official_url_fallback(monkeypatch):
     """User providers: api.openai.com with no models list uses native curated fallback."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     user_providers = {
         "openai-direct": {
@@ -412,7 +412,7 @@ def test_list_authenticated_providers_user_openai_official_url_fallback(monkeypa
 def test_list_authenticated_providers_fallback_to_default_only(monkeypatch):
     """When no models array is provided, should fall back to default_model."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
     
     user_providers = {
         "simple-provider": {
@@ -440,7 +440,7 @@ def test_list_authenticated_providers_fallback_to_default_only(monkeypatch):
 
 
 def test_list_authenticated_providers_accepts_base_url_and_singular_model(monkeypatch):
-    """providers: dict entries written in canonical Hermes shape
+    """providers: dict entries written in canonical Hades shape
     (``base_url`` + singular ``model``) should resolve the same as the
     legacy ``api`` + ``default_model`` shape.
 
@@ -449,7 +449,7 @@ def test_list_authenticated_providers_accepts_base_url_and_singular_model(monkey
     surfaced with empty ``api_url`` and no default.
     """
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     user_providers = {
         "custom": {
@@ -477,6 +477,33 @@ def test_list_authenticated_providers_accepts_base_url_and_singular_model(monkey
     assert custom["total_models"] == 3
 
 
+def test_list_authenticated_providers_exposes_bare_direct_custom_config(monkeypatch):
+    """A direct ``model.provider=custom`` + ``model.base_url`` config has no
+    providers:/custom_providers entry, but it is still a valid runtime target
+    and must remain visible in Desktop's model picker.
+    """
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
+
+    providers = list_authenticated_providers(
+        current_provider="custom",
+        current_base_url="http://172.29.176.1:8081/v1",
+        current_model="gpt-5.4",
+        user_providers={},
+        custom_providers=[],
+        max_models=50,
+    )
+
+    custom = next((p for p in providers if p["slug"] == "custom"), None)
+    assert custom is not None
+    assert custom["is_current"] is True
+    # main surfaces the bare direct-config row via the "model-config" source
+    # (with live model discovery); the desktop CRUD view builds on that same row.
+    assert custom["source"] == "model-config"
+    assert custom["api_url"] == "http://172.29.176.1:8081/v1"
+    assert "gpt-5.4" in custom["models"]
+
+
 def test_list_authenticated_providers_dedupes_when_user_and_custom_overlap(monkeypatch):
     """When the same slug appears in both ``providers:`` dict and
     ``custom_providers:`` list, emit exactly one row (providers: dict wins
@@ -486,7 +513,7 @@ def test_list_authenticated_providers_dedupes_when_user_and_custom_overlap(monke
     overlapping entries produced two picker rows for the same provider.
     """
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     providers = list_authenticated_providers(
         current_provider="custom",
@@ -526,7 +553,7 @@ def test_list_authenticated_providers_no_duplicate_labels_across_schemas(monkeyp
     identically, bypassing ``seen_slugs`` dedup because the slug shapes differ.
     """
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     shared_entries = [
         ("endpoint-a", "http://a.local/v1"),
@@ -584,7 +611,7 @@ def test_list_authenticated_providers_hides_custom_shadowing_builtin_endpoint(mo
             }
         },
     )
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     custom_providers = [
         {
@@ -630,7 +657,7 @@ def test_list_authenticated_providers_keeps_custom_with_distinct_endpoint(monkey
             }
         },
     )
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     custom_providers = [
         {
@@ -674,7 +701,7 @@ def test_list_authenticated_providers_dedup_honors_base_url_env_override(monkeyp
             }
         },
     )
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     custom_providers = [
         {
@@ -1110,7 +1137,7 @@ def test_section3_probes_no_key_endpoint_without_explicit_models(monkeypatch):
     list because section 3 gated probing on ``api_url and api_key``.
     """
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     probed = {}
 
@@ -1150,7 +1177,7 @@ def test_section3_skips_probe_when_no_key_but_explicit_models(monkeypatch):
     """A no-key endpoint WITH an explicit models: list is the user narrowing a
     public endpoint to a subset — skip live discovery and keep the list."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
 
     def _fail_fetch(api_key, api_url, **kwargs):
         raise AssertionError("should not probe when explicit models are set")
@@ -1188,7 +1215,7 @@ def test_current_custom_model_is_surfaced_in_builtin_provider_row(monkeypatch):
     current provider's list.
     """
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     # Pin a small curated catalog so the assertion is deterministic.
     monkeypatch.setattr(
@@ -1216,7 +1243,7 @@ def test_current_custom_model_not_leaked_into_other_provider_rows(monkeypatch):
     """The current model is only injected into the CURRENT provider's row,
     never into other providers (which can't serve it)."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
-    monkeypatch.setattr("hades_cli.providers.HERMES_OVERLAYS", {})
+    monkeypatch.setattr("hades_cli.providers.HADES_OVERLAYS", {})
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.setenv("NOUS_API_KEY", "sk-test")
     monkeypatch.setattr(

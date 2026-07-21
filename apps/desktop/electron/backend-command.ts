@@ -38,7 +38,7 @@ export function dashboardFallbackArgs(args) {
 }
 
 /**
- * True when a runtime's `hermes_cli/subcommands/dashboard.py` source registers
+ * True when a runtime's `hades_cli/subcommands/dashboard.py` source registers
  * the `serve` subcommand. Matches `add_parser("serve"` / `add_parser('serve'`
  * specifically so the substring "server" (e.g. "start_server", "web server")
  * never produces a false positive.

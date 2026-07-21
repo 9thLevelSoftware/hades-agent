@@ -203,7 +203,7 @@ def test_build_models_payload_does_not_call_provider_model_ids():
     caching). ``build_models_payload`` itself must not call the live fetcher
     directly; the test pins that boundary.
     """
-    rows = [{"slug": "nous", "name": "Nous", "models": ["hermes-4-405b"],
+    rows = [{"slug": "nous", "name": "Nous", "models": ["hades-4-405b"],
              "total_models": 1, "is_current": False, "is_user_defined": False,
              "source": "built-in"}]
     ctx = _empty_ctx()
@@ -274,6 +274,43 @@ def test_build_models_payload_can_probe_only_current_custom_provider():
     mock_list.assert_called_once()
     assert mock_list.call_args.kwargs["probe_custom_providers"] is False
     assert mock_list.call_args.kwargs["probe_current_custom_provider"] is True
+
+
+def test_cli_model_picker_forwards_force_refresh_to_probe_flags():
+    """CLI /model picker must pass force_refresh to probe flags (#65652, #65650).
+
+    Normal open (/model bare) skips non-current probes; /model --refresh probes
+    all custom providers to freshen their model lists.
+    """
+    ctx = _empty_ctx()
+
+    # Normal open — skip non-current probes
+    force_refresh = False
+    with patch(
+        "hades_cli.model_switch.list_authenticated_providers",
+        return_value=[],
+    ) as mock_list:
+        build_models_payload(
+            ctx,
+            probe_custom_providers=force_refresh,
+            probe_current_custom_provider=not force_refresh,
+        )
+    assert mock_list.call_args.kwargs["probe_custom_providers"] is False
+    assert mock_list.call_args.kwargs["probe_current_custom_provider"] is True
+
+    # Refresh open — probe everything
+    force_refresh = True
+    with patch(
+        "hades_cli.model_switch.list_authenticated_providers",
+        return_value=[],
+    ) as mock_list:
+        build_models_payload(
+            ctx,
+            probe_custom_providers=force_refresh,
+            probe_current_custom_provider=not force_refresh,
+        )
+    assert mock_list.call_args.kwargs["probe_custom_providers"] is True
+    assert mock_list.call_args.kwargs["probe_current_custom_provider"] is False
 
 
 def test_list_authenticated_providers_force_fresh_is_keyword_only():
@@ -911,7 +948,7 @@ def test_build_models_payload_keeps_static_provider_models_from_providers_dict()
     with (
         patch("hades_cli.config.load_config", return_value=cfg),
         patch("agent.models_dev.fetch_models_dev", return_value={}),
-        patch("hades_cli.providers.HERMES_OVERLAYS", {}),
+        patch("hades_cli.providers.HADES_OVERLAYS", {}),
         patch(
             "hades_cli.models.fetch_api_models",
             side_effect=AssertionError("fetch_api_models must not be called"),

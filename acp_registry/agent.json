@@ -1,16 +1,16 @@
 {
-  "id": "hades-agent",
-  "name": "Hades Agent",
-  "version": "0.18.2",
+  "id": "hermes-agent",
+  "name": "Hermes Agent",
+  "version": "0.19.0",
   "description": "Self-improving open-source AI agent by Nous Research with ACP editor integration, persistent memory, skills, and rich tool support.",
-  "repository": "https://github.com/9thLevelSoftware/hades-agent",
+  "repository": "https://github.com/NousResearch/hermes-agent",
   "website": "https://hermes-agent.nousresearch.com/docs/user-guide/features/acp",
   "authors": ["Nous Research"],
   "license": "MIT",
   "distribution": {
     "uvx": {
-      "package": "hades-agent[acp]==0.18.2",
-      "args": ["hades-acp"]
+      "package": "hermes-agent[acp]==0.19.0",
+      "args": ["hermes-acp"]
     }
   }
 }

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hades_cli.console_engine import HermesConsoleEngine, run_console_repl
+from hades_cli.console_engine import HadesConsoleEngine, run_console_repl
 
 
 EXPECTED_CONSOLE_COMMANDS = {
@@ -214,8 +214,8 @@ MUTATING_CONFIRMATION_SMOKE_COMMANDS = [
     "mcp add demo --url https://example.com/sse",
     "mcp configure github",
     "mcp picker",
-    "backup --quick -o /tmp/hermes-console-test.zip",
-    "import /tmp/hermes-console-test.zip",
+    "backup --quick -o /tmp/hades-console-test.zip",
+    "import /tmp/hades-console-test.zip",
     "send --to telegram hello",
     "memory reset --target memory",
     "auth remove openrouter 1",
@@ -231,8 +231,8 @@ MUTATING_CONFIRMATION_SMOKE_COMMANDS = [
 ]
 
 
-def test_console_parses_bare_and_hermes_prefixed_commands(_isolate_hermes_home):
-    engine = HermesConsoleEngine()
+def test_console_parses_bare_and_hades_prefixed_commands(_isolate_hades_home):
+    engine = HadesConsoleEngine()
 
     bare = engine.execute("config path")
     prefixed = engine.execute("hermes config path")
@@ -245,7 +245,7 @@ def test_console_parses_bare_and_hermes_prefixed_commands(_isolate_hermes_home):
 
 def test_console_status_hides_cli_next_step_footer(
     monkeypatch: pytest.MonkeyPatch,
-    _isolate_hermes_home,
+    _isolate_hades_home,
 ):
     import hades_cli.status as status_mod
 
@@ -261,7 +261,7 @@ def test_console_status_hides_cli_next_step_footer(
 
     monkeypatch.setattr(status_mod, "show_status", fake_show_status)
 
-    result = HermesConsoleEngine().execute("status")
+    result = HadesConsoleEngine().execute("status")
 
     assert result.status == "ok"
     assert "Sessions" in result.output
@@ -273,7 +273,7 @@ def test_console_status_hides_cli_next_step_footer(
 
 def test_console_status_hides_osc_linked_cli_next_step_footer(
     monkeypatch: pytest.MonkeyPatch,
-    _isolate_hermes_home,
+    _isolate_hades_home,
 ):
     import hades_cli.status as status_mod
 
@@ -291,7 +291,7 @@ def test_console_status_hides_osc_linked_cli_next_step_footer(
 
     monkeypatch.setattr(status_mod, "show_status", fake_show_status)
 
-    result = HermesConsoleEngine().execute("status")
+    result = HadesConsoleEngine().execute("status")
 
     assert result.status == "ok"
     assert "Sessions" in result.output
@@ -303,7 +303,7 @@ def test_console_status_hides_osc_linked_cli_next_step_footer(
 
 
 def test_console_help_uses_cli_subcommand_summaries():
-    help_text = HermesConsoleEngine().help_text()
+    help_text = HadesConsoleEngine().help_text()
 
     assert "skills list" in help_text
     assert "List installed skills" in help_text
@@ -315,7 +315,7 @@ def test_console_help_uses_cli_subcommand_summaries():
 
 
 def test_console_help_table_keeps_long_summaries_compact():
-    help_text = HermesConsoleEngine().help_text()
+    help_text = HadesConsoleEngine().help_text()
 
     slack_line = next(
         line for line in help_text.splitlines() if line.strip().startswith("slack manifest")
@@ -326,13 +326,13 @@ def test_console_help_table_keeps_long_summaries_compact():
 
 
 def test_console_help_for_command_uses_cli_summary():
-    help_text = HermesConsoleEngine().help_text("skills list")
+    help_text = HadesConsoleEngine().help_text("skills list")
 
     assert help_text == "skills list\nList installed skills"
 
 
 def test_console_registry_covers_non_admin_cli_surface():
-    registered = set(HermesConsoleEngine().commands)
+    registered = set(HadesConsoleEngine().commands)
 
     missing = EXPECTED_CONSOLE_COMMANDS - registered
 
@@ -377,7 +377,7 @@ def test_console_registry_covers_non_admin_cli_surface():
     ],
 )
 def test_console_rejects_destructive_and_shell_like_commands(line):
-    result = HermesConsoleEngine().execute(line)
+    result = HadesConsoleEngine().execute(line)
 
     assert result.status == "error"
     assert result.output
@@ -385,14 +385,14 @@ def test_console_rejects_destructive_and_shell_like_commands(line):
 
 @pytest.mark.parametrize("line", MUTATING_CONFIRMATION_SMOKE_COMMANDS)
 def test_mutating_console_commands_require_confirmation(line):
-    result = HermesConsoleEngine().execute(line)
+    result = HadesConsoleEngine().execute(line)
 
     assert result.status == "confirm_required"
     assert result.confirmation_message
 
 
 def test_help_lists_supported_commands_and_not_full_cli():
-    result = HermesConsoleEngine().execute("help")
+    result = HadesConsoleEngine().execute("help")
 
     assert result.status == "ok"
     assert "sessions list" in result.output
@@ -401,24 +401,27 @@ def test_help_lists_supported_commands_and_not_full_cli():
     assert "gateway restart" not in result.output
 
 
-def test_config_set_requires_confirmation_then_writes(_isolate_hermes_home):
-    engine = HermesConsoleEngine()
+def test_config_set_requires_confirmation_then_writes(_isolate_hades_home):
+    engine = HadesConsoleEngine()
 
-    pending = engine.execute("config set console.test true")
+    # Use a schema-known key path. Since #34067, `config set` refuses unknown
+    # top-level keys, so this flow test must target a valid path (telegram is a
+    # PlatformConfig-shaped dict that accepts arbitrary child keys).
+    pending = engine.execute("config set telegram.test true")
     assert pending.status == "confirm_required"
 
     from hades_cli.config import read_raw_config
 
     assert read_raw_config() == {}
 
-    result = engine.execute("config set console.test true", confirmed=True)
+    result = engine.execute("config set telegram.test true", confirmed=True)
 
     assert result.status == "ok"
-    assert "console.test" in result.output
-    assert read_raw_config()["console"]["test"] is True
+    assert "telegram.test" in result.output
+    assert read_raw_config()["telegram"]["test"] is True
 
 
-def test_sessions_list_and_stats_use_isolated_session_store(_isolate_hermes_home):
+def test_sessions_list_and_stats_use_isolated_session_store(_isolate_hades_home):
     from hades_state import SessionDB
 
     db = SessionDB()
@@ -428,7 +431,7 @@ def test_sessions_list_and_stats_use_isolated_session_store(_isolate_hermes_home
     finally:
         db.close()
 
-    engine = HermesConsoleEngine()
+    engine = HadesConsoleEngine()
     listed = engine.execute("sessions list --limit 10")
     stats = engine.execute("sessions stats")
 
@@ -439,11 +442,11 @@ def test_sessions_list_and_stats_use_isolated_session_store(_isolate_hermes_home
     assert "Listable sessions: 1" in stats.output
 
 
-def test_cron_pause_resume_and_run_require_confirmation(_isolate_hermes_home):
+def test_cron_pause_resume_and_run_require_confirmation(_isolate_hades_home):
     from cron.jobs import create_job, get_job
 
     job = create_job(prompt="say hello", schedule="every 1h", name="alpha")
-    engine = HermesConsoleEngine()
+    engine = HadesConsoleEngine()
 
     pending = engine.execute(f"cron pause {job['id']}")
     assert pending.status == "confirm_required"
@@ -468,7 +471,7 @@ def test_cron_pause_resume_and_run_require_confirmation(_isolate_hermes_home):
     assert "Triggered job" in triggered.output
 
 
-def test_repl_runs_non_interactive_lines_without_prompts(_isolate_hermes_home):
+def test_repl_runs_non_interactive_lines_without_prompts(_isolate_hades_home):
     stdin = io.StringIO("help\nexit\n")
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -481,12 +484,12 @@ def test_repl_runs_non_interactive_lines_without_prompts(_isolate_hermes_home):
     )
 
     assert code == 0
-    assert "Hermes Console" in stdout.getvalue()
+    assert "Hades Console" in stdout.getvalue()
     assert "hermes>" not in stdout.getvalue()
     assert stderr.getvalue() == ""
 
 
-def test_repl_refuses_non_interactive_confirmation(_isolate_hermes_home):
+def test_repl_refuses_non_interactive_confirmation(_isolate_hades_home):
     stdin = io.StringIO("config set console.test true\n")
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -502,7 +505,7 @@ def test_repl_refuses_non_interactive_confirmation(_isolate_hermes_home):
     assert "Confirmation required" in stderr.getvalue()
 
 
-def test_main_console_subcommand_smoke(_isolate_hermes_home):
+def test_main_console_subcommand_smoke(_isolate_hades_home):
     import subprocess
 
     result = subprocess.run(
@@ -516,4 +519,4 @@ def test_main_console_subcommand_smoke(_isolate_hermes_home):
     )
 
     assert result.returncode == 0
-    assert "Hermes Console" in result.stdout
+    assert "Hades Console" in result.stdout

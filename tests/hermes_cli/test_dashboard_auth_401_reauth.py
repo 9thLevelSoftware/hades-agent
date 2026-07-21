@@ -41,7 +41,7 @@ from hades_cli.dashboard_auth.cookies import (
     clear_session_cookies,
     set_session_cookies,
 )
-from tests.hades_cli.conftest_dashboard_auth import StubAuthProvider
+from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +221,7 @@ class TestTransparentRefreshOnAccessTokenEviction:
         signature + exp), then send ONLY that RT cookie.
         """
         import time as _t
-        from tests.hades_cli.conftest_dashboard_auth import _sign
+        from tests.hermes_cli.conftest_dashboard_auth import _sign
 
         clear_providers()
         provider = StubAuthProvider(default_ttl=900)
@@ -290,7 +290,7 @@ class TestTransparentRefreshOnAccessTokenEviction:
     def test_unknown_provider_hint_retains_verify_fallback(self, gated_app):
         """A hint for a removed provider must not suppress the normal scan."""
         import time as _t
-        from tests.hades_cli.conftest_dashboard_auth import _sign
+        from tests.hermes_cli.conftest_dashboard_auth import _sign
 
         valid_at = _sign({
             "sub": "stub-user-1",
@@ -384,7 +384,7 @@ class TestTransparentRefreshOnAccessTokenEviction:
 
     def test_valid_legacy_session_is_migrated_with_provider_hint(self, gated_app):
         import time as _t
-        from tests.hades_cli.conftest_dashboard_auth import _sign
+        from tests.hermes_cli.conftest_dashboard_auth import _sign
 
         valid_at = _sign({
             "sub": "stub-user-1",
@@ -424,7 +424,7 @@ class TestTransparentRefreshOnAccessTokenEviction:
         gated_app.cookies.clear()
         # A syntactically-real but expired RT (signed with exp<=now).
         import time as _t
-        from tests.hades_cli.conftest_dashboard_auth import _sign
+        from tests.hermes_cli.conftest_dashboard_auth import _sign
         dead_rt = _sign({"sub": "u", "kind": "refresh", "exp": int(_t.time()) - 1})
         gated_app.cookies.set(SESSION_RT_COOKIE, dead_rt)
         r = gated_app.get("/api/sessions")
@@ -545,7 +545,7 @@ class TestAutoSsoRedirect:
     def test_multiple_providers_render_chooser_not_auto_sso(self, gated_app):
         """With two interactive providers we can't pick for the user, so the
         /login chooser must render rather than auto-redirecting to one."""
-        from tests.hades_cli.conftest_dashboard_auth import StubAuthProvider
+        from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
         from hades_cli.dashboard_auth import register_provider
 
         class _SecondStub(StubAuthProvider):
