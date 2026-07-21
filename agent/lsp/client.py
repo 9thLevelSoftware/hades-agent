@@ -804,22 +804,36 @@ class LSPClient:
         version: int,
         *,
         mode: str = "document",
-    ) -> None:
+        timeout: Optional[float] = None,
+    ) -> bool:
         """Wait for the server to publish diagnostics for ``path`` at ``version``.
 
         ``mode`` is ``"document"`` (5s budget, document pulls) or
-        ``"full"`` (10s budget, also workspace pulls).  Best-effort —
-        returns silently on timeout.  Does NOT throw if the server
-        doesn't support pull diagnostics; we still get the push side.
+        ``"full"`` (10s budget, also workspace pulls).  ``timeout``
+        overrides the mode's default budget when provided — this is
+        how the user's ``lsp.wait_timeout`` config reaches the wait
+        loop (slow servers like tsserver on big projects need more
+        than the 5s default).
+
+        Returns ``True`` when *fresh* diagnostics arrived (a push at
+        or after our didChange, or a pull answered after it) and
+        ``False`` on timeout.  Callers must treat ``False`` as "no
+        data", NOT as "no errors" — the diagnostic stores may still
+        hold stale entries from the previous edit at that point.
+        Best-effort — never throws if the server doesn't support pull
+        diagnostics; we still get the push side.
         """
-        budget = DIAGNOSTICS_FULL_WAIT if mode == "full" else DIAGNOSTICS_DOCUMENT_WAIT
+        if timeout is not None and timeout > 0:
+            budget = timeout
+        else:
+            budget = DIAGNOSTICS_FULL_WAIT if mode == "full" else DIAGNOSTICS_DOCUMENT_WAIT
         deadline = asyncio.get_event_loop().time() + budget
         abs_path = os.path.abspath(path)
 
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
-                return
+                return False
 
             # Concurrent: document pull + push wait.
             pull_task = asyncio.create_task(self._pull_document_diagnostics(abs_path))
@@ -842,12 +856,12 @@ class LSPClient:
             if abs_path in self._published and (
                 current_v is None or current_v >= version
             ):
-                return
+                return True
 
             # Pull may have populated _pull_diagnostics — that's also
             # success.
             if abs_path in self._pull_diagnostics:
-                return
+                return True
 
             # Loop until budget runs out.
 
