@@ -1623,8 +1623,9 @@ def skill_view(
         # Surface agentskills.io optional fields when present
         if frontmatter.get("compatibility"):
             result["compatibility"] = frontmatter["compatibility"]
-        if isinstance(metadata, dict):
-            result["metadata"] = metadata
+        _raw_metadata = frontmatter.get("metadata")
+        if isinstance(_raw_metadata, dict):
+            result["metadata"] = _raw_metadata
 
         return json.dumps(result, ensure_ascii=False)
 
