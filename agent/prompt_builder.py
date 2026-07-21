@@ -58,6 +58,14 @@ def _scan_context_content(content: str, filename: str) -> str:
     BLOCKED at this layer because the file would otherwise enter the
     system prompt verbatim and the user has no chance to intervene.
     """
+    # Editors (Windows Notepad, PowerShell Out-File without -Encoding
+    # utf8NoBOM, some VS Code profiles) prefix a UTF-8 BOM as an encoding
+    # artifact, not a prompt injection. Strip a leading U+FEFF silently so a
+    # context file (SOUL.md, AGENTS.md, ...) is not blocked wholesale; BOMs
+    # elsewhere in the content remain subject to the threat scan below.
+    if content.startswith("\ufeff"):
+        content = content[1:]
+
     findings = _scan_for_threats(content, scope="context")
     if findings:
         logger.warning("Context file %s blocked: %s", filename, ", ".join(findings))
@@ -81,10 +89,10 @@ def _find_git_root(start: Path) -> Optional[Path]:
 
 # Hades spellings first: on a hades install a project carrying both files
 # almost certainly wrote the .hades one deliberately for this fork.
-_HERMES_MD_NAMES = (".hades.md", "HADES.md", ".hermes.md", "HERMES.md")
+_HADES_MD_NAMES = (".hades.md", "HADES.md", ".hermes.md", "HERMES.md")
 
 
-def _find_hermes_md(cwd: Path) -> Optional[Path]:
+def _find_hades_md(cwd: Path) -> Optional[Path]:
     """Discover the nearest ``.hades.md``/``HADES.md``/``.hermes.md``/``HERMES.md``.
 
     Search order: *cwd* first, then each parent directory up to (and
@@ -99,7 +107,7 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
     search_dirs = [current, *current.parents] if stop_at else [current]
 
     for directory in search_dirs:
-        for name in _HERMES_MD_NAMES:
+        for name in _HADES_MD_NAMES:
             candidate = directory / name
             if candidate.is_file():
                 return candidate
@@ -116,6 +124,7 @@ def _strip_yaml_frontmatter(content: str) -> str:
     strip it so only the human-readable markdown body is injected into the
     system prompt.
     """
+    content = content.lstrip("\ufeff")  # tolerate UTF-8 BOM (Windows editors)
     if content.startswith("---"):
         end = content.find("\n---", 3)
         if end != -1:
@@ -139,11 +148,11 @@ DEFAULT_AGENT_IDENTITY = (
     "Be targeted and efficient in your exploration and investigations."
 )
 
-HERMES_AGENT_HELP_GUIDANCE = (
+HADES_AGENT_HELP_GUIDANCE = (
     "You run on Hades Agent (by Nous Research). When the user needs help with "
     "Hermes itself — configuring, setting up, using, extending, or troubleshooting "
     "it — or when you need to understand your own features, tools, or capabilities, "
-    "the documentation at https://hermes-agent.nousresearch.com/docs is your "
+    "the documentation at https://hades-agent.nousresearch.com/docs is your "
     "authoritative reference and always holds the latest, most up-to-date "
     "information. Load the `hermes-agent` skill with skill_view(name='hades-agent') "
     "for additional guidance and proven workflows, but treat the docs as the source "
@@ -192,7 +201,7 @@ KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
     "You have been assigned ONE task from "
     "the shared board at `~/.hades/kanban.db`. Your task id is in "
-    "`$HERMES_KANBAN_TASK`; your workspace is `$HERMES_KANBAN_WORKSPACE`. "
+    "`$HADES_KANBAN_TASK`; your workspace is `$HADES_KANBAN_WORKSPACE`. "
     "The `kanban_*` tools in your schema are your primary coordination surface — "
     "they write directly to the shared SQLite DB and work regardless of terminal "
     "backend (local/docker/modal/ssh).\n"
@@ -204,7 +213,7 @@ KANBAN_GUIDANCE = (
     "metadata), any prior attempts on this task if you're a retry, the full "
     "comment thread, and a pre-formatted `worker_context` you can treat as "
     "ground truth.\n"
-    "2. **Work inside the workspace.** `cd $HERMES_KANBAN_WORKSPACE` before "
+    "2. **Work inside the workspace.** `cd $HADES_KANBAN_WORKSPACE` before "
     "any file operations. The workspace is yours for this run. Don't modify "
     "files outside it unless the task explicitly asks.\n"
     "3. **Heartbeat on long operations.** Call `kanban_heartbeat(note=...)` "
@@ -249,27 +258,31 @@ KANBAN_GUIDANCE = (
     "\n"
     "## Reference details that change outcomes\n"
     "\n"
-    "- **Workspace.** `cd $HERMES_KANBAN_WORKSPACE` first. For a `worktree` kind "
+    "- **Workspace.** `cd $HADES_KANBAN_WORKSPACE` first. For a `worktree` kind "
     "with no `.git`, `git worktree add <path> "
-    "${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_TASK}` from the main repo, then "
+    "${HADES_KANBAN_BRANCH:-wt/$HADES_KANBAN_TASK}` from the main repo, then "
     "cd there. For a project-linked task the workspace is a fresh "
-    "`<repo>/.worktrees/<task-id>` and `$HERMES_KANBAN_BRANCH` a deterministic "
+    "`<repo>/.worktrees/<task-id>` and `$HADES_KANBAN_BRANCH` a deterministic "
     "`<project-slug>/<task-id>` — the main repo is two levels up, so run "
     "`git worktree add` from there.\n"
     "- **Deliverables.** Files a human wants go in "
     "`kanban_complete(artifacts=[<absolute paths>])` (top-level param; paths in "
     "`metadata` are NOT uploaded). Files must exist at completion.\n"
+    "- **Attachments.** Attach real downloadable artifacts instead of pasting "
+    "links in comments: `kanban_attach` (base64) or `kanban_attach_url` "
+    "(server-side public http(s) fetch); 25 MB cap, `kanban_attachments` "
+    "lists them. Workers may only attach to their own task.\n"
     "- **Created cards.** List ids in `kanban_complete(created_cards=[...])` "
     "ONLY when captured from a successful `kanban_create` return — never invent "
     "or paste ids; the kernel rejects the completion on any phantom id.\n"
     "- **Orchestrating: discover profiles first.** The dispatcher SILENTLY "
     "drops a card with an unknown assignee (it sits in `ready` forever). Ground "
-    "every assignee in a real profile (`hermes profile list`, or ask the user), "
+    "every assignee in a real profile (`hades profile list`, or ask the user), "
     "and express dependencies via `parents=[...]` on `kanban_create`, not prose.\n"
     "\n"
     "## Do NOT\n"
     "\n"
-    "- Do not shell out to `hermes kanban <verb>` for board operations. Use "
+    "- Do not shell out to `hades kanban <verb>` for board operations. Use "
     "the `kanban_*` tools — they work across all terminal backends.\n"
     "- Do not complete a task you didn't actually finish. Block it.\n"
     "- Do not call `clarify` to ask questions. You are running headless — "
@@ -287,12 +300,12 @@ KANBAN_GUIDANCE = (
 KANBAN_ORCHESTRATOR_GUIDANCE = (
     "# Kanban orchestrator mode\n"
     "You have access to Kanban board tools but are NOT assigned a specific "
-    "task (no `HERMES_KANBAN_TASK`). Use `kanban_list(board=<board-slug>)` "
+    "task (no `HADES_KANBAN_TASK`). Use `kanban_list(board=<board-slug>)` "
     "with an explicit board to review the board state. To decompose work, "
     "use `kanban_create(title=..., assignee=<profile>, parents=[...])` to "
     "spawn child tasks and `kanban_link(parent_id=..., child_id=...)` to "
     "express dependencies. Do NOT call `kanban_show()` with no arguments — "
-    "it defaults to `HERMES_KANBAN_TASK`, which is not set in orchestrator "
+    "it defaults to `HADES_KANBAN_TASK`, which is not set in orchestrator "
     "mode; always pass an explicit `task_id` if you need to inspect a "
     "specific task."
 )
@@ -587,7 +600,7 @@ def computer_use_guidance(platform_name: Optional[str] = None) -> str:
         "## When something is broken\n"
         "If `computer_use` consistently fails (empty captures, missing "
         "elements, clicks not landing, type going nowhere), ask the user to "
-        "run `hermes computer-use doctor` and share the output. That command "
+        "run `hades computer-use doctor` and share the output. That command "
         "runs cua-driver's structured health-report — per-platform checks "
         "for permissions, display server, accessibility tree reachability "
         "— and the failure message tells you exactly what to fix.\n"
@@ -1461,7 +1474,7 @@ def _current_session_platform_hint() -> str:
     if get_session_env is None:
         return ""
     try:
-        return get_session_env("HERMES_SESSION_PLATFORM") or ""
+        return get_session_env("HADES_SESSION_PLATFORM") or ""
     except Exception:
         return ""
 
@@ -1795,8 +1808,8 @@ def build_skills_system_prompt(
             "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
             "or troubleshoot Hades Agent itself — its CLI, config, models, providers, tools, "
             "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
-            "`hermes setup`) so you don't have to guess or invent workarounds.\n"
+            "first. It has the actual commands (e.g. `hades config set …`, `hades tools`, "
+            "`hades setup`) so you don't have to guess or invent workarounds.\n"
             "If a skill has issues, fix it with skill_manage(action='patch').\n"
             "After difficult/iterative tasks, offer to save as a skill. "
             "If a skill you loaded was missing steps, had wrong commands, or needed "
@@ -1880,7 +1893,7 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
             "When a Nous-managed feature is active, do not ask the user for Firecrawl, FAL, OpenAI TTS, OpenAI Whisper, or Browser-Use API keys.",
             "If the user is not subscribed and asks for a capability that Nous subscription would unlock or simplify, suggest Nous subscription as one option alongside direct setup or local alternatives.",
             "Do not mention subscription unless the user asks about it or it directly solves the current missing capability.",
-            "Useful commands: hermes setup, hermes setup tools, hermes setup terminal, hermes status.",
+            "Useful commands: hades setup, hades setup tools, hades setup terminal, hades status.",
         ]
     )
     return "\n".join(lines)
@@ -1938,8 +1951,8 @@ def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
     ``skip_soul=True`` so SOUL.md isn't injected twice.
     """
     try:
-        from hades_cli.config import ensure_hermes_home
-        ensure_hermes_home()
+        from hades_cli.config import ensure_hades_home
+        ensure_hades_home()
     except Exception as e:
         logger.debug("Could not ensure HADES_HOME before loading SOUL.md: %s", e)
 
@@ -1961,29 +1974,29 @@ def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
         return None
 
 
-def _load_hermes_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
-    """.hermes.md / HERMES.md — walk to git root."""
-    hermes_md_path = _find_hermes_md(cwd_path)
-    if not hermes_md_path:
+def _load_hades_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
+    """.hades.md / HADES.md — walk to git root."""
+    hades_md_path = _find_hades_md(cwd_path)
+    if not hades_md_path:
         return ""
     try:
-        content = hermes_md_path.read_text(encoding="utf-8").strip()
+        content = hades_md_path.read_text(encoding="utf-8").strip()
         if not content:
             return ""
         content = _strip_yaml_frontmatter(content)
-        rel = hermes_md_path.name
+        rel = hades_md_path.name
         try:
-            rel = str(hermes_md_path.relative_to(cwd_path))
+            rel = str(hades_md_path.relative_to(cwd_path))
         except ValueError:
             pass
         content = _scan_context_content(content, rel)
         result = f"## {rel}\n\n{content}"
         return _truncate_content(
             result, ".hermes.md", context_length=context_length,
-            read_path=str(hermes_md_path),
+            read_path=str(hades_md_path),
         )
     except Exception as e:
-        logger.debug("Could not read %s: %s", hermes_md_path, e)
+        logger.debug("Could not read %s: %s", hades_md_path, e)
         return ""
 
 
@@ -2116,7 +2129,7 @@ def build_context_files_prompt(
     else:
         # Priority-based project context: first match wins
         project_context = (
-            _load_hermes_md(cwd_path, context_length)
+            _load_hades_md(cwd_path, context_length)
             or _load_agents_md(cwd_path, context_length)
             or _load_claude_md(cwd_path, context_length)
             or _load_cursorrules(cwd_path, context_length)
