@@ -3059,3 +3059,30 @@ def _model_flow_anthropic(config, current_model=""):
         print(f"Default model set to: {selected} (via Anthropic)")
     else:
         print("No change.")
+
+
+def _model_flow_auto(config):
+    """Auto provider/model flow — picks best available automatically."""
+    from hades_cli.config import load_config, save_config
+
+    cfg = load_config()
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+
+    # Set provider to auto — resolves at runtime to best available
+    model_cfg["provider"] = "auto"
+    # Clear model so runtime picks the best default
+    model_cfg["default"] = ""
+    cfg["model"] = model_cfg
+
+    save_config(cfg)
+    print()
+    print("  ✓ Provider set to Auto")
+    print("  ✓ Model set to Auto (best available)")
+    print()
+    print("  At runtime, the system will:")
+    print("    1. Detect the best provider from your credentials")
+    print("    2. Pick the best model for that provider")
+    print()
+    print("  To customize: hermes model → select a specific provider")
