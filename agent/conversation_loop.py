@@ -37,7 +37,7 @@ from agent.turn_context import (
     compose_user_api_content,
     reanchor_current_turn_user_idx,
 )
-from agent.turn_retry_state import TurnRetryState
+from agent.turn_retry_state import TurnRetryState, compute_turn_api_attempt_ceiling
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
@@ -718,6 +718,24 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
+    # Per-API-call attempt ceiling (audit L1-02). Resets for each outer tool
+    # iteration so successful multi-step tool loops are not starved, but
+    # survives per-provider retry_count resets on failover within one call.
+    _fallback_len = len(getattr(agent, "_fallback_chain", None) or [])
+    _configured_ceiling = getattr(agent, "_api_max_attempts_per_turn", None)
+    if _configured_ceiling is None:
+        try:
+            from hades_cli.config import load_config
+            _agent_cfg = (load_config() or {}).get("agent") or {}
+            _configured_ceiling = _agent_cfg.get("api_max_attempts_per_turn")
+        except Exception:
+            _configured_ceiling = None
+    _turn_api_attempt_ceiling = compute_turn_api_attempt_ceiling(
+        getattr(agent, "_api_max_retries", 3),
+        _fallback_len,
+        configured=_configured_ceiling,
+    )
+
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
@@ -1217,6 +1235,9 @@ def run_conversation(
         max_retries = agent._api_max_retries
         _retry = TurnRetryState()
         max_compression_attempts = 3
+        # Reset per outer API call so successful tool-loop iterations don't
+        # accumulate against the failover ceiling (Codex review P1).
+        _turn_api_attempts = 0
 
         finish_reason = "stop"
         response = None  # Guard against UnboundLocalError if all retries fail
@@ -1225,6 +1246,32 @@ def run_conversation(
         agent._current_api_request_id = api_request_id
 
         while retry_count < max_retries:
+            _turn_api_attempts += 1
+            if _turn_api_attempts > _turn_api_attempt_ceiling:
+                agent._flush_status_buffer()
+                agent._emit_status(
+                    f"❌ Turn API attempt ceiling ({_turn_api_attempt_ceiling}) "
+                    f"exceeded after {_turn_api_attempts - 1} attempts. Giving up."
+                )
+                logger.error(
+                    "%sTurn API attempt ceiling exceeded (%s > %s) %s",
+                    agent.log_prefix,
+                    _turn_api_attempts,
+                    _turn_api_attempt_ceiling,
+                    agent._client_log_context(),
+                )
+                agent._persist_session(messages, conversation_history)
+                _final_response = (
+                    f"Turn API attempt ceiling ({_turn_api_attempt_ceiling}) exceeded."
+                )
+                return {
+                    "final_response": _final_response,
+                    "messages": messages,
+                    "completed": False,
+                    "api_calls": api_call_count,
+                    "error": _final_response,
+                    "failed": True,
+                }
             # ── Nous Portal rate limit guard ──────────────────────
             # If another session already recorded that Nous is rate-
             # limited, skip the API call entirely.  Each attempt

@@ -175,6 +175,20 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
     return loaded_skill, skill_dir, skill_name
 
 
+_SECRETISH_CONFIG_KEY = re.compile(
+    r"(api[_-]?key|token|password|passwd|secret|credential|authorization|auth)$",
+    re.IGNORECASE,
+)
+
+
+def _is_secretish_config_key(key: str) -> bool:
+    """True when a skill config key looks like it holds a secret value."""
+    normalized = str(key or "").strip().lower().replace("-", "_").replace(".", "_")
+    if not normalized:
+        return False
+    return bool(_SECRETISH_CONFIG_KEY.search(normalized))
+
+
 def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None:
     """Resolve and inject skill-declared config values into the message parts.
 
@@ -182,6 +196,9 @@ def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None
     entries, their current values (from config.yaml or defaults) are appended
     as a ``[Skill config: ...]`` block so the agent knows the configured values
     without needing to read config.yaml itself.
+
+    Secret-like keys (token, password, api_key, …) show only ``(set)`` /
+    ``(not set)`` so values never enter the transcript (audit L4-06).
     """
     try:
         from agent.skill_utils import (
@@ -206,7 +223,10 @@ def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None
 
         lines = ["", f"[Skill config (from {display_hades_home()}/config.yaml):"]
         for key, value in resolved.items():
-            display_val = str(value) if value else "(not set)"
+            if _is_secretish_config_key(str(key)):
+                display_val = "(set)" if value else "(not set)"
+            else:
+                display_val = str(value) if value else "(not set)"
             lines.append(f"  {key} = {display_val}")
         lines.append("]")
         parts.extend(lines)
@@ -234,10 +254,29 @@ def _build_skill_message(
     if skills_cfg.get("template_vars", True):
         content = _substitute_template_vars(content, skill_dir, session_id)
     if skills_cfg.get("inline_shell", False):
-        timeout = int(skills_cfg.get("inline_shell_timeout", 10) or 10)
-        content = _expand_inline_shell(content, skill_dir, timeout)
+        # Hub-installed skills must never gain inline-shell RCE (audit L3-05).
+        # Default config keeps inline_shell off; this is a second line of defense.
+        skill_name = str(loaded_skill.get("name") or (skill_dir.name if skill_dir else "") or "")
+        hub_blocked = False
+        if skill_name:
+            try:
+                from tools.skill_usage import is_hub_installed
+                hub_blocked = bool(is_hub_installed(skill_name))
+            except Exception:
+                hub_blocked = False
+        if hub_blocked:
+            logger.warning(
+                "Skipping inline-shell expansion for hub-installed skill %r",
+                skill_name,
+            )
+        else:
+            timeout = int(skills_cfg.get("inline_shell_timeout", 10) or 10)
+            content = _expand_inline_shell(content, skill_dir, timeout)
 
-    parts = [activation_note, "", content.strip()]
+    # Budget the skill BODY only so activation markers, user_instruction,
+    # and runtime notes always survive (Codex review P1).
+    body = _apply_skill_body_budget(content.strip(), skills_cfg)
+    parts = [activation_note, "", body]
 
     # ── Inject the absolute skill directory so the agent can reference
     #    bundled scripts without an extra skill_view() round-trip. ──
@@ -315,6 +354,35 @@ def _build_skill_message(
         parts.append(f"[Runtime note: {runtime_note}]")
 
     return "\n".join(parts)
+
+
+def _apply_skill_body_budget(body: str, skills_cfg: dict) -> str:
+    """Truncate oversize skill *body* while leaving head/tail scaffolding intact.
+
+    Default budget is high (48k tokens rough) so normal skills are unchanged.
+    Override via ``skills.max_inject_tokens`` in config.yaml.
+    """
+    try:
+        max_tokens = int(skills_cfg.get("max_inject_tokens", 48000) or 48000)
+    except (TypeError, ValueError):
+        max_tokens = 48000
+    if max_tokens <= 0:
+        return body
+    # Rough chars/token; intentionally conservative (over-estimate tokens).
+    max_chars = max_tokens * 4
+    if len(body) <= max_chars:
+        return body
+    keep = max(max_chars - 400, 2000)
+    truncated = body[:keep].rstrip()
+    return (
+        truncated
+        + "\n\n[Skill content truncated to stay within skills.max_inject_tokens. "
+        "Load remaining sections with skill_view as needed.]"
+    )
+
+
+# Back-compat alias used by unit tests / callers of the old name.
+_apply_skill_inject_budget = _apply_skill_body_budget
 
 
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:

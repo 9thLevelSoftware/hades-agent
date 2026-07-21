@@ -27,6 +27,34 @@ imported by the turn loop without an import cycle.
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+from typing import Optional
+
+
+def compute_turn_api_attempt_ceiling(
+    api_max_retries: int,
+    fallback_chain_len: int = 0,
+    *,
+    configured: Optional[int] = None,
+    compression_headroom: int = 3,
+) -> int:
+    """Return a turn-global API attempt ceiling that never resets on failover.
+
+    Default is generous enough to preserve today's multi-provider recovery
+    behavior: each provider in the primary+fallback set may use the full
+    per-provider ``api_max_retries`` budget, plus a small headroom for
+    compression restarts. An explicit positive ``configured`` value wins.
+    """
+    if configured is not None:
+        try:
+            configured_int = int(configured)
+        except (TypeError, ValueError):
+            configured_int = 0
+        if configured_int > 0:
+            return configured_int
+    retries = max(1, int(api_max_retries or 1))
+    providers = 1 + max(0, int(fallback_chain_len or 0))
+    headroom = max(0, int(compression_headroom or 0))
+    return retries * providers + headroom
 
 
 @dataclass
@@ -37,6 +65,10 @@ class TurnRetryState:
     (once per ``api_call_count``). Each guard fires its recovery branch at most
     once; the ``restart_with_*`` signals are read by the loop after the attempt
     to decide whether to rebuild the request and retry.
+
+    Turn-global attempt ceilings live outside this object (see
+    :func:`compute_turn_api_attempt_ceiling`) so they survive per-attempt
+    recreation and provider failover ``retry_count`` resets.
     """
 
     # ── Per-provider OAuth / credential refresh guards ───────────────────

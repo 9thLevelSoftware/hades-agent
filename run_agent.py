@@ -1657,6 +1657,7 @@ class AIAgent:
         keep working.
         """
         from agent.background_review import spawn_background_review_thread
+        from agent.reflection_triggers import release_review_flight
         from tools.thread_context import propagate_context_to_thread
         target, _prompt = spawn_background_review_thread(
             self,
@@ -1666,10 +1667,20 @@ class AIAgent:
         )
         # Carry the active profile into the review thread so MEMORY.md / skill
         # review writes land in the right profile (#54937).
-        t = threading.Thread(
-            target=propagate_context_to_thread(target), daemon=True, name="bg-review"
-        )
-        t.start()
+        # If Thread construction/start fails after should_trigger_review set
+        # in_flight, clear the flag so future reviews are not permanently blocked
+        # (audit L4-01).
+        try:
+            t = threading.Thread(
+                target=propagate_context_to_thread(target), daemon=True, name="bg-review"
+            )
+            t.start()
+        except Exception:
+            try:
+                release_review_flight(self)
+            except Exception:
+                self._background_review_in_flight = False
+            raise
 
     def _build_memory_write_metadata(
         self,
