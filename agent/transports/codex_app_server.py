@@ -17,8 +17,10 @@ runtime is not selected.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -28,9 +30,35 @@ from typing import Any, Optional
 from hades_constants import env_get
 from tools.environments.local import hermes_subprocess_env
 
+logger = logging.getLogger(__name__)
+
+# Reject path values that would break out of a TOML/JSON string when passed via
+# ``codex -c 'sandbox_workspace_write.writable_roots=[...]'``.
+_UNSAFE_KANBAN_ROOT_CHARS = re.compile(r'["\'\n\r\t`\[\]]')
+
 # Default minimum codex version we test against. The PR sets this from the
 # `codex --version` parsed at install time; bumping is a one-line change here.
 MIN_CODEX_VERSION = (0, 125, 0)
+
+
+def _safe_kanban_writable_root(path: Optional[str]) -> Optional[str]:
+    """Return an absolute kanban root safe to embed in a codex -c config, or None.
+
+    Rejects empty values, relative paths, and characters that enable config-string
+    injection when interpolated into ``writable_roots=[...]``.
+    """
+    if not path or not isinstance(path, str):
+        return None
+    cleaned = path.strip()
+    if not cleaned or not os.path.isabs(cleaned):
+        return None
+    if _UNSAFE_KANBAN_ROOT_CHARS.search(cleaned):
+        return None
+    # Normalize without requiring the path to exist (board root may be created later).
+    try:
+        return os.path.abspath(os.path.expanduser(cleaned))
+    except (OSError, ValueError):
+        return None
 
 
 @dataclass
@@ -114,16 +142,27 @@ class CodexAppServerClient:
                     env=spawn_env,
                 )
             )
-            app_server_args.extend(
-                [
-                    "-c",
-                    'sandbox_mode="workspace-write"',
-                    "-c",
-                    f'sandbox_workspace_write.writable_roots=["{kanban_root}"]',
-                    "-c",
-                    "sandbox_workspace_write.network_access=false",
-                ]
-            )
+            safe_root = _safe_kanban_writable_root(kanban_root)
+            if safe_root is None:
+                logger.error(
+                    "codex app-server: refusing kanban writable_roots for unsafe path %r; "
+                    "worker handoff may fail without board DB write access",
+                    kanban_root,
+                )
+            else:
+                # JSON-escape the path so quotes/backslashes cannot break out of
+                # the codex -c config string (audit L2-01).
+                encoded_root = json.dumps(safe_root)
+                app_server_args.extend(
+                    [
+                        "-c",
+                        'sandbox_mode="workspace-write"',
+                        "-c",
+                        f"sandbox_workspace_write.writable_roots=[{encoded_root}]",
+                        "-c",
+                        "sandbox_workspace_write.network_access=false",
+                    ]
+                )
 
         cmd = [codex_bin, "app-server"] + app_server_args
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.

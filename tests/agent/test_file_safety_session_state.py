@@ -35,7 +35,7 @@ def fake_homes(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("relative", ["state.db", "sessions/session_abc.json"])
 def test_session_state_paths_are_write_denied(fake_homes, relative):
-    from agent.file_safety import is_write_denied
+    from agent.file_safety import get_write_denied_error, is_write_denied
 
     _root, profile = fake_homes
     target = profile / relative
@@ -43,6 +43,9 @@ def test_session_state_paths_are_write_denied(fake_homes, relative):
     target.write_text("existing transcript", encoding="utf-8")
 
     assert is_write_denied(str(target)) is True
+    err = get_write_denied_error(str(target))
+    assert err is not None
+    assert "session transcript" in err.lower() or "sessions/" in err
 
 
 def test_default_profile_state_db_is_write_denied_from_profile(fake_homes):
