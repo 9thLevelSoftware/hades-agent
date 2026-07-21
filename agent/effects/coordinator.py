@@ -662,6 +662,11 @@ class TransactionCoordinator:
             reconciliation = adapter.reconcile(current, context)
             disposition = reconciliation.disposition
             evidence = dict(reconciliation.evidence)
+        except NotImplementedError:
+            # Adapters without reconcile capability must not crash the loop
+            # (audit L4-03). Treat as unclassifiable.
+            disposition = "unknown"
+            evidence = {"error": "reconcile_unsupported"}
         except Exception:
             disposition = "unknown"
             evidence = {}
@@ -937,6 +942,9 @@ class TransactionCoordinator:
             )
             try:
                 result = adapter.compensate(request, context)
+            except NotImplementedError:
+                result = None
+                error = "compensate_unsupported"
             except Exception as exc:
                 result = None
                 error = f"{type(exc).__name__}: {exc}"

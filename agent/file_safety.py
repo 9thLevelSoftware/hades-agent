@@ -358,7 +358,26 @@ def raise_if_read_blocked(path: str) -> None:
     """
     try:
         blocked = get_read_block_error(path)
-    except Exception:  # noqa: BLE001 - guard must never break local-file loading
+    except Exception:  # noqa: BLE001
+        # Fail closed for known credential-like basenames so a denylist bug
+        # cannot open auth/.env paths; other paths stay fail-open so image
+        # loads are not broken (audit L3-04 partial).
+        try:
+            base = Path(path).expanduser().name.lower()
+        except Exception:
+            base = ""
+        if base in _BLOCKED_PROJECT_ENV_BASENAMES or base in {
+            "auth.json",
+            "auth.lock",
+            ".anthropic_oauth.json",
+            "webhook_subscriptions.json",
+            "bws_cache.json",
+            "google_oauth.json",
+        }:
+            raise ValueError(
+                f"Access denied: read safety check failed for credential-like "
+                f"path '{path}' (internal error)."
+            )
         return
     if blocked:
         raise ValueError(blocked)

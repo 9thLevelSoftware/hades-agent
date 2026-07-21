@@ -34,14 +34,14 @@ Each phase is completed fully before its PR is opened.
 | L2-02 (soft) | hermes-tools elicitation auto-accept | 3 | done (phase-3) |
 | L1-03 | External memory prefetch blocks hot path | 4 | done (phase-4) |
 | L1-04 | Sync executor falls back to inline I/O | 4 | done (phase-4) |
-| L3-06 (partial) | Trace upload exception scrubbing | 5 | pending |
-| L3-08 (partial) | Global env prefix secret drift | 5 | pending |
-| L3-04 (partial) | `raise_if_read_blocked` fail-open | 5 | pending |
-| L3-07 / L3-05 | SSL skip log naming; hub inline-shell refuse | 5 | pending |
-| L2-06 | Azure token provider marker | 5 | pending |
-| L4-03 | Effects `NotImplemented` surface | 5 | pending |
-| L2-07 | Codex session lifecycle race | 5 | pending |
-| L1-05 (partial) | Nudge/review bookkeeping | 2/5 | pending |
+| L3-06 (partial) | Trace upload exception scrubbing | 5 | done (phase-5) |
+| L3-08 (partial) | Global env prefix secret drift | 5 | done (phase-5) |
+| L3-04 (partial) | `raise_if_read_blocked` fail-open | 5 | done (phase-5) |
+| L3-07 / L3-05 | SSL skip log naming; hub inline-shell refuse | 5 | done (phase-5) |
+| L2-06 | Azure token provider marker | 5 | done (phase-5) |
+| L4-03 | Effects `NotImplemented` surface | 5 | done (phase-5) |
+| L2-07 | Codex session lifecycle race | 5 | done (phase-5) |
+| L1-05 (partial) | Nudge/review bookkeeping | 2 | done (phase-2 flight release) |
 
 ## Explicitly deferred (not in this track)
 
@@ -76,6 +76,8 @@ Each phase is completed fully before its PR is opened.
 - `tests/run_agent/test_background_review*.py`
 - `tests/test_background_review_*.py`
 - `tests/tools/test_skill_*.py` / `tests/tools/test_skills_*.py`
+- `tests/agent/test_skill_commands.py` / `tests/agent/test_skill_utils.py` (when present)
+- `tests/agent/test_skill_inject_safety.py`
 - `tests/agent/test_memory_skill_scaffolding.py`
 - `tests/run_agent/test_memory_nudge_counter_hydration.py`
 
@@ -83,6 +85,8 @@ Each phase is completed fully before its PR is opened.
 
 - `tests/agent/test_codex_app_server_*.py`
 - `tests/agent/transports/test_codex_app_server_*.py`
+- `tests/agent/transports/test_hermes_tools_mcp_server.py` (EXPOSED_TOOLS contract)
+- `tests/agent/transports/test_codex_bounded_queues.py`
 - `tests/run_agent/test_codex_app_server_*.py`
 
 ### Phase 4 — memory manager
