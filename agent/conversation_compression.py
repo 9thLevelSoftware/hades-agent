@@ -1519,9 +1519,9 @@ def _compress_context_via_codex_app_server(
     auto_mode = str(
         getattr(agent, "codex_app_server_auto_compaction", "native") or "native"
     ).lower()
-    if auto_mode not in {"native", "hades", "off"}:
+    if auto_mode not in {"native", "hades", "hermes", "off"}:
         auto_mode = "native"
-    if not force and auto_mode != "hades":
+    if not force and auto_mode not in {"hades", "hermes"}:
         logger.info(
             "codex app-server compaction skipped: mode=%s force=false "
             "(session=%s messages=%d tokens=~%s)",

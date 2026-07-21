@@ -454,8 +454,8 @@ function resolveHermesHome() {
   }
 
   if (IS_WINDOWS && process.env.LOCALAPPDATA) {
-    const localappdata = path.join(process.env.LOCALAPPDATA, 'hermes')
-    const legacy = path.join(app.getPath('home'), '.hermes')
+    const localappdata = path.join(process.env.LOCALAPPDATA, 'hades')
+    const legacy = path.join(app.getPath('home'), '.hades')
 
     // Migrate transparently to LOCALAPPDATA, but honour an existing legacy
     // ~/.hades setup (no LOCALAPPDATA install yet) so users don't lose state.
@@ -466,7 +466,7 @@ function resolveHermesHome() {
     return localappdata
   }
 
-  return path.join(app.getPath('home'), '.hermes')
+  return path.join(app.getPath('home'), '.hades')
 }
 
 const HADES_HOME = resolveHermesHome()

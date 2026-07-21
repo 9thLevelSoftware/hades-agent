@@ -16127,3 +16127,31 @@ if __name__ == "__main__":
     import fire
 
     fire.Fire(main)
+
+
+def _retire_cli_agent(agent, memory_messages=None):
+    """Retire a CLI agent: finalize memory, close client/resources.
+    
+    Called during /resume and /new to cleanly shut down the old agent
+    so the new session can start immediately.
+    """
+    if agent is None:
+        return
+    
+    # Finalize memory if messages provided
+    if memory_messages:
+        try:
+            # Try to save conversation to memory
+            if hasattr(agent, 'memory') and agent.memory:
+                agent.memory.save_conversation(memory_messages)
+        except Exception:
+            pass  # Memory save is best-effort
+    
+    # Close the agent's client and resources
+    try:
+        if hasattr(agent, 'close'):
+            agent.close()
+        elif hasattr(agent, 'cleanup'):
+            agent.cleanup()
+    except Exception:
+        pass  # Cleanup is best-effort
