@@ -82,6 +82,7 @@ def test_billing_killswitch_off_blocks(cli, monkeypatch, capsys):
     cli._show_billing("/billing")
     out = capsys.readouterr().out
     assert "turned off for this org" in out
+    assert "Enable it on the portal to add funds here." in out
 
 
 def test_billing_limit_screen_readonly(cli, monkeypatch, capsys):
