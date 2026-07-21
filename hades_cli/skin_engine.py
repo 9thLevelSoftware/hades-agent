@@ -166,10 +166,10 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
         "name": "default",
         "description": "Hades default — obsidian and violet",
         "colors": {
-            "banner_border": "#6B21A8",
+            "banner_border": "#9333EA",
             "banner_title": "#C084FC",
             "banner_accent": "#A855F7",
-            "banner_dim": "#4C1D95",
+            "banner_dim": "#7C3AED",
             "banner_text": "#EDE9FE",
             "ui_accent": "#A855F7",
             "ui_label": "#C084FC",
@@ -177,18 +177,18 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "ui_error": "#f87171",
             "ui_warn": "#fb923c",
             "prompt": "#EDE9FE",
-            "input_rule": "#6B21A8",
+            "input_rule": "#9333EA",
             "response_border": "#A855F7",
-            "status_bar_bg": "#0F0A1A",
+            "status_bar_bg": "#1A0F2E",
             "status_bar_text": "#EDE9FE",
             "status_bar_strong": "#C084FC",
-            "status_bar_dim": "#5B4A6E",
+            "status_bar_dim": "#9F7AC4",
             "status_bar_good": "#4ade80",
             "status_bar_warn": "#C084FC",
             "status_bar_bad": "#FB923C",
             "status_bar_critical": "#F87171",
             "session_label": "#C084FC",
-            "session_border": "#5B4A6E",
+            "session_border": "#9F7AC4",
         },
         "spinner": {
             "waiting_faces": ["(Ω)", "(⛧)", "(◆)", "(⬥)", "(/)"],
@@ -218,20 +218,20 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
 [bold #C084FC]██║  ██║██╔══██╗██╔══██╗██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
 [#A855F7]███████║███████║██║  ██║█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
 [#7C3AED]██╔══██║██╔══██║██║  ██║██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
-[#6B21A8]██║  ██║██║  ██║██████╔╝███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
-[#4C1D95]╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]""",
-        "banner_hero": """[#4C1D95]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣤⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#6B21A8]⠀⠀⠀⠀⠀⠀⠀⠀⣠⣾⡿⠛⠛⢿⣷⣄⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#7C3AED]⠀⠀⠀⠀⠀⠀⢀⣾⡿⠋⠀⠀⠀⠀⠙⢿⣷⡀⠀⠀⠀⠀⠀⠀[/]
-[#A855F7]⠀⠀⠀⠀⠀⠀⣿⡿⠀⠀⠀⠀Ω⠀⠀⠀⢿⣿⠀⠀⠀⠀⠀⠀[/]
-[#C084FC]⠀⠀⠀⠀⠀⢸⣿⠇⠀⠀⣠⣤⣤⣄⠀⠀⠸⣿⡇⠀⠀⠀⠀⠀[/]
-[#A855F7]⠀⠀⠀⠀⠀⢸⣿⠀⠀⣴⣿⣿⣿⣿⣦⠀⠀⣿⡇⠀⠀⠀⠀⠀[/]
-[#7C3AED]⠀⠀⠀⠀⠀⠘⣿⣆⠀⠙⠿⣿⣿⠿⠋⠀⣰⣿⠃⠀⠀⠀⠀⠀[/]
-[#6B21A8]⠀⠀⠀⠀⠀⠀⠘⢿⣷⣤⣀⣀⣀⣤⣾⡿⠃⠀⠀⠀⠀⠀⠀[/]
-[#4C1D95]⠀⠀⠀⠀⠀⠀⠀⠀⠈⠛⠿⠿⠿⠛⠁⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#6B21A8]⠀⠀⠀⠀⠀⠀⠀⠀⠀⣰⡿⢿⣆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[#A855F7]⠀⠀⠀⠀⠀⠀⠀⠀⣼⡟⠀⠀⢻⣧⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
-[dim #4C1D95]⠀⠀⠀⠀⠀⠀sovereign below⠀⠀⠀⠀⠀⠀⠀[/]""",
+[#9333EA]██║  ██║██║  ██║██████╔╝███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
+[#7C3AED]╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]""",
+        "banner_hero": """[#7C3AED]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣤⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#9333EA]⠀⠀⠀⠀⠀⠀⠀⠀⣠⣾⡿⠛⠛⢿⣷⣄⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#7C3AED]⠀⠀⠀⠀⠀⠀⢀⣾⡿⠋⠀⠀⠀⠀⠙⢿⣷ᡀ⠀⠀⠀⠀⠀⠀[/]
+[#A855F7]⠀⠀⠀⠀⠀⠀᣿᡿⠀⠀⠀⠀Ω⠀⠀⠀⢿᣿⠀⠀⠀⠀⠀⠀[/]
+[#C084FC]⠀⠀⠀⠀⠀⢸᣿⠇⠀⠀ᣠᣤᣤᣄ⠀⠀⠸᣿ᡇ⠀⠀⠀⠀⠀[/]
+[#A855F7]⠀⠀⠀⠀⠀⢸᣿⠀⠀ᣴ᣿᣿᣿᣿ᣦ⠀⠀᣿ᡇ⠀⠀⠀⠀⠀[/]
+[#7C3AED]⠀⠀⠀⠀⠀⠘᣿ᣆ⠀⠙⠿᣿᣿⠿⠋⠀ᣰ᣿⠃⠀⠀⠀⠀⠀[/]
+[#9333EA]⠀⠀⠀⠀⠀⠀⠘⢿᣷ᣤᣀᣀᣀᣤ᣾᡿⠃⠀⠀⠀⠀⠀⠀[/]
+[#7C3AED]⠀⠀⠀⠀⠀⠀⠀⠀⠈⠛⠿ᠿᠿ᠛᠁⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#9333EA]⠀⠀⠀⠀⠀⠀⠀⠀⠀ᣰ᡿⢿ᣆ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[#A855F7]⠀⠀⠀⠀⠀⠀⠀⠀⣼ᡟ⠀⠀⢻ᣧ⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+[dim #7C3AED]⠀⠀⠀⠀⠀⠀sovereign below⠀⠀⠀⠀⠀⠀⠀[/]""",
     },
     "ares": {
         "name": "ares",
@@ -619,20 +619,20 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "prompt": "#EDE9FE",
             "input_rule": "#9333EA",
             "response_border": "#A855F7",
-            "status_bar_bg": "#0F0A1A",
+            "status_bar_bg": "#1A0F2E",
             "status_bar_text": "#EDE9FE",
             "status_bar_strong": "#C084FC",
-            "status_bar_dim": "#5B4A6E",
+            "status_bar_dim": "#9F7AC4",
             "status_bar_good": "#4ade80",
             "status_bar_warn": "#C084FC",
             "status_bar_bad": "#FB923C",
             "status_bar_critical": "#F87171",
             "session_label": "#C084FC",
-            "session_border": "#5B4A6E",
+            "session_border": "#9F7AC4",
             "selection_bg": "#2E1065",
-            "completion_menu_bg": "#0F0A1A",
+            "completion_menu_bg": "#1A0F2E",
             "completion_menu_current_bg": "#2E1065",
-            "completion_menu_meta_bg": "#140E22",
+            "completion_menu_meta_bg": "#1F1535",
             "completion_menu_meta_current_bg": "#3B1F7A",
         },
         "spinner": {
