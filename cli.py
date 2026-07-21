@@ -222,12 +222,12 @@ from hades_cli.browser_connect import (
     manual_chrome_debug_command,
     try_launch_chrome_debug,
 )
-from hades_cli.env_loader import load_hades_dotenv
+from hades_cli.env_loader import load_hermes_dotenv
 from utils import base_url_host_matches, fast_safe_load
 
 _hades_home = get_hades_home()
 _project_env = Path(__file__).parent / '.env'
-load_hades_dotenv(hades_home=_hades_home, project_env=_project_env)
+load_hermes_dotenv(hermes_home=_hades_home, project_env=_project_env)
 
 
 _REASONING_TAGS = (

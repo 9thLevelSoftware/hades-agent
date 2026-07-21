@@ -116,7 +116,7 @@ from agent.process_bootstrap import (
 from agent.iteration_budget import IterationBudget
 
 
-from hades_cli.env_loader import load_hades_dotenv
+from hades_cli.env_loader import load_hermes_dotenv
 from hades_cli.timeouts import (
     get_provider_request_timeout,
     get_provider_stale_timeout,
@@ -124,7 +124,7 @@ from hades_cli.timeouts import (
 
 _hades_home = get_hades_home()
 _project_env = Path(__file__).parent / '.env'
-_loaded_env_paths = load_hades_dotenv(hades_home=_hades_home, project_env=_project_env)
+_loaded_env_paths = load_hermes_dotenv(hermes_home=_hades_home, project_env=_project_env)
 if _loaded_env_paths:
     for _env_path in _loaded_env_paths:
         logger.info("Loaded environment variables from %s", _env_path)
