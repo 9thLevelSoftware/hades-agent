@@ -848,18 +848,45 @@ class CodexAppServerSession:
         elif method == "mcpServer/elicitation/request":
             # Codex's MCP layer asks the user for structured input on
             # behalf of an MCP server (e.g. tool-call confirmation,
-            # OAuth, form data). For our own hermes-tools callback we
-            # auto-accept — the user already approved Hades' tools
-            # by enabling the runtime, and we never expose anything
-            # codex's built-in shell can't already do. For other MCP
-            # servers we decline so the user explicitly opts in via
-            # codex's own auth flow.
+            # OAuth, form data). Prefer the interactive approval_callback
+            # when present (audit L2-02 soft). For hermes-tools with no
+            # callback (cron / non-interactive), keep auto-accept so
+            # workers still complete, but log a warning. Other MCP
+            # servers always decline.
             server_name = params.get("serverName") or ""
             if server_name == "hermes-tools":
-                self._client.respond(
-                    rid,
-                    {"action": "accept", "content": None, "_meta": None},
-                )
+                if self._approval_callback is not None:
+                    description = (
+                        params.get("message")
+                        or params.get("reason")
+                        or "Codex hermes-tools elicitation request"
+                    )
+                    try:
+                        choice = self._approval_callback(
+                            f"mcp-elicitation:{server_name}",
+                            str(description),
+                            allow_permanent=False,
+                        )
+                        decision = _approval_choice_to_codex_decision(choice)
+                        action = "accept" if decision == "accept" else "decline"
+                    except Exception:
+                        logger.exception(
+                            "approval_callback raised on hermes-tools elicitation"
+                        )
+                        action = "decline"
+                    self._client.respond(
+                        rid,
+                        {"action": action, "content": None, "_meta": None},
+                    )
+                else:
+                    logger.warning(
+                        "hermes-tools MCP elicitation auto-accepted "
+                        "(no interactive approval_callback; non-interactive path)"
+                    )
+                    self._client.respond(
+                        rid,
+                        {"action": "accept", "content": None, "_meta": None},
+                    )
             else:
                 self._client.respond(
                     rid,
