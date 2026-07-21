@@ -910,11 +910,20 @@ class LSPClient:
         key.  Empty list if the server hasn't published anything.
 
         With ``fresh_only=True``, stale leftovers from the previous
-        edit cycle are excluded when version tracking permits it.
+        edit cycle are excluded — push diagnostics are only included
+        when the server's version has caught up to the document's
+        current version.
         """
         abs_path = os.path.abspath(path)
         push = self._push_diagnostics.get(abs_path) or []
         pull = self._pull_diagnostics.get(abs_path) or []
+        if fresh_only:
+            # Exclude push diagnostics if the server hasn't caught up
+            # to the current document version (stale leftovers).
+            doc_version = (self._files.get(abs_path) or {}).get("version")
+            push_v = self._published_version.get(abs_path)
+            if doc_version is not None and (push_v is None or push_v < doc_version):
+                push = []
         return _dedupe(push, pull)
 
 
