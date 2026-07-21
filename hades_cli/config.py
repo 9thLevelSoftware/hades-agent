@@ -958,6 +958,11 @@ def ensure_hermes_home():
     _HERMES_HOME_ENSURED.add(key)
 
 
+def ensure_hades_home():
+    """Hades-named alias for :func:`ensure_hermes_home` (dual-home ensure)."""
+    return ensure_hermes_home()
+
+
 def _ensure_hermes_home_managed(home: Path):
     """Managed-mode variant: verify dirs exist (activation creates them), seed SOUL.md."""
     if not home.is_dir():
