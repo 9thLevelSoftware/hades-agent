@@ -77,6 +77,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/features/plugins',
             'user-guide/features/built-in-plugins',
             'user-guide/features/outcome-receipts',
+            'user-guide/features/action-transactions',
           ],
         },
         {
@@ -817,6 +818,14 @@ const sidebars: SidebarsConfig = {
           ],
         },
         'reference/faq',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Development',
+      collapsed: true,
+      items: [
+        'development/effect-adapters',
       ],
     },
   ],

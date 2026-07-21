@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+from hades_constants import env_get
 import tempfile
 import time
 from dataclasses import dataclass
@@ -82,7 +83,7 @@ def resolve_cache_home(home_path: Optional[Path] = None) -> Path:
     (and tests that don't thread a home through) working.
     """
     if home_path is None:
-        home_path = Path(os.getenv("HADES_HOME", Path.home() / ".hades"))
+        home_path = Path(env_get("HADES_HOME", Path.home() / ".hades"))
     return home_path
 
 

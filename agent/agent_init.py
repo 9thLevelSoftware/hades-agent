@@ -49,7 +49,7 @@ from agent.tool_guardrails import (
 )
 from hades_cli.config import cfg_get
 from hades_cli.timeouts import get_provider_request_timeout
-from hades_constants import get_hades_home
+from hades_constants import env_get, get_hades_home
 from utils import base_url_host_matches, is_truthy_value
 
 # Use the same logger name as run_agent so tests patching ``run_agent.logger``
@@ -1387,7 +1387,7 @@ def init_agent(
     # worker-only instructions like "call kanban_show() with no args",
     # which error out when no task is assigned.
     from agent.prompt_builder import KANBAN_GUIDANCE, KANBAN_ORCHESTRATOR_GUIDANCE
-    if os.environ.get("HADES_KANBAN_TASK"):
+    if env_get("HADES_KANBAN_TASK"):
         agent._kanban_worker_guidance = KANBAN_GUIDANCE
     elif "kanban_show" in agent.valid_tool_names:
         agent._kanban_worker_guidance = KANBAN_ORCHESTRATOR_GUIDANCE
@@ -1440,7 +1440,9 @@ def init_agent(
 
         set_current_session_id(agent.session_id)
     except Exception:
-        os.environ["HADES_SESSION_ID"] = agent.session_id
+        from hades_constants import env_set
+
+        env_set("HADES_SESSION_ID", agent.session_id)
 
     # Session logs go into ~/.hades/sessions/ alongside gateway sessions
     hermes_home = get_hades_home()

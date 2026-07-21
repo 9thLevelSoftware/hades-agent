@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hades_constants import env_get
 import shutil
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -710,7 +711,7 @@ def _find_pses_bundle(ctx: ServerContext) -> Optional[str]:
     env_path = os.environ.get("PSES_BUNDLE_PATH")
     if env_path:
         candidates.append(env_path)
-    home = os.environ.get("HADES_HOME") or os.path.join(
+    home = env_get("HADES_HOME") or os.path.join(
         os.path.expanduser("~"), ".hades"
     )
     candidates.append(os.path.join(home, "lsp", "PowerShellEditorServices"))
@@ -796,7 +797,7 @@ def _spawn_powershell_es(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 def hermes_lsp_session_dir() -> str:
     """Return (and create) the dir for PSES session/log scratch files."""
-    home = os.environ.get("HADES_HOME") or os.path.join(
+    home = env_get("HADES_HOME") or os.path.join(
         os.path.expanduser("~"), ".hades"
     )
     d = os.path.join(home, "lsp", "pses")

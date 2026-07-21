@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - non-Windows
     msvcrt = None
 from datetime import datetime, timedelta
 from pathlib import Path
-from hades_constants import get_hades_home
+from hades_constants import get_hades_home, env_get
 from typing import Optional, Dict, List, Any, Mapping, Set, Tuple, Union
 
 logger = logging.getLogger(__name__)
@@ -214,7 +214,7 @@ def _oneshot_run_claim_ttl_seconds() -> float:
     - positive N → ``max(N * headroom, ONESHOT_RUN_CLAIM_TTL_SECONDS)`` so a
       tiny configured timeout can never expire a claim mid-run.
     """
-    raw = os.getenv("HADES_CRON_TIMEOUT", "").strip()
+    raw = env_get("HADES_CRON_TIMEOUT", "").strip()
     timeout = _DEFAULT_CRON_INACTIVITY_TIMEOUT
     if raw:
         try:
@@ -2070,7 +2070,7 @@ def _machine_id() -> str:
     Uses ``HERMES_MACHINE_ID`` if set, else hostname + pid. The CAS correctness
     comes from the file lock + the fresh-claim check, not from this value.
     """
-    explicit = os.getenv("HADES_MACHINE_ID", "").strip()
+    explicit = env_get("HADES_MACHINE_ID", "").strip()
     if explicit:
         return explicit
     try:
@@ -2851,7 +2851,11 @@ def apply_mutation(mutation: CronStateMutation) -> None:
                     f"Optimistic revision mismatch: job {mutation.resource!r} "
                     f"not found"
                 )
-            current_rev = canonical_revision(current)
+            # Hash the NORMALIZED record: prepare_update/prepare_disable
+            # compute their expected revision from get_job(), which
+            # normalizes. Hashing the raw stored dict here would make
+            # every update/disable fail its own optimistic check.
+            current_rev = canonical_revision(_normalize_job_record(current))
             if current_rev != mutation.expected_revision:
                 raise RuntimeError(
                     f"Optimistic revision mismatch on {mutation.resource!r}: "
@@ -2873,7 +2877,12 @@ def verify_mutation(mutation: CronStateMutation) -> bool:
         return current is not None
     if current is None:
         return False
-    return canonical_snapshot(current) == mutation.after
+    # Compare normalized-and-filtered state on BOTH sides: the stored job
+    # may predate normalization (raw create payload) and mutation.after
+    # may carry keys (e.g. paused_at) the canonical filter drops.
+    return canonical_snapshot(_normalize_job_record(current)) == canonical_snapshot(
+        _normalize_job_record(dict(mutation.after or {}))
+    )
 
 
 def restore_mutation(mutation: CronStateMutation) -> None:
@@ -2889,8 +2898,10 @@ def restore_mutation(mutation: CronStateMutation) -> None:
                 f"Optimistic revision mismatch: job {mutation.resource!r} not found during restore"
             )
         current = jobs[index]
-        expected_after = canonical_snapshot(mutation.after or {})
-        if canonical_snapshot(current) != expected_after:
+        expected_after = canonical_snapshot(
+            _normalize_job_record(dict(mutation.after or {}))
+        )
+        if canonical_snapshot(_normalize_job_record(current)) != expected_after:
             raise RuntimeError(
                 f"Optimistic revision mismatch on {mutation.resource!r} during restore"
             )

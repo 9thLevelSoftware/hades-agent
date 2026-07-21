@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from hades_constants import env_get
 import shutil
 import subprocess
 import sys
@@ -260,7 +261,7 @@ def run_doctor(
             from hades_cli.tools_config import _cua_driver_cmd
             driver_cmd = _cua_driver_cmd()
         except Exception:
-            driver_cmd = os.environ.get("HADES_CUA_DRIVER_CMD") or "cua-driver"
+            driver_cmd = env_get("HADES_CUA_DRIVER_CMD") or "cua-driver"
 
     binary = shutil.which(driver_cmd)
     if not binary:

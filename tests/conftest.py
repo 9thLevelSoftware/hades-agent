@@ -340,8 +340,15 @@ def _hermetic_environment(tmp_path, monkeypatch):
             monkeypatch.delenv(name, raising=False)
 
     # 2. Blank behavioral HERMES_* vars that could change test semantics.
+    # Scrub BOTH prefix spellings of each — the runtime dual-reads
+    # HADES_*/HERMES_* (hades_constants.env_get), so a leaked var under
+    # either spelling changes behavior.
     for name in _HERMES_BEHAVIORAL_VARS:
         monkeypatch.delenv(name, raising=False)
+        if name.startswith("HERMES_"):
+            monkeypatch.delenv("HADES_" + name[len("HERMES_"):], raising=False)
+        elif name.startswith("HADES_"):
+            monkeypatch.delenv("HERMES_" + name[len("HADES_"):], raising=False)
 
     # Honcho's fallback host/config resolution legitimately reads the user's
     # global ~/.honcho/config.json. Keep HOME stable (subprocess tests depend

@@ -30,6 +30,7 @@ from __future__ import annotations
 import ctypes
 import locale
 import os
+from hades_constants import env_get, env_set
 import re
 import shlex
 import shutil
@@ -244,15 +245,15 @@ def _launch_elevated_install(
     start_on_login: bool | None = None,
 ) -> bool:
     """Launch an elevated gateway install via UAC and return True on handoff."""
-    old_start_now = os.environ.get("HADES_GATEWAY_INSTALL_START_NOW")
-    old_start_on_login = os.environ.get("HADES_GATEWAY_INSTALL_START_ON_LOGIN")
-    old_handoff = os.environ.get("HADES_GATEWAY_ELEVATED_HANDOFF")
+    old_start_now = env_get("HADES_GATEWAY_INSTALL_START_NOW")
+    old_start_on_login = env_get("HADES_GATEWAY_INSTALL_START_ON_LOGIN")
+    old_handoff = env_get("HADES_GATEWAY_ELEVATED_HANDOFF")
     try:
         if start_now is not None:
-            os.environ["HADES_GATEWAY_INSTALL_START_NOW"] = "1" if start_now else "0"
+            env_set("HADES_GATEWAY_INSTALL_START_NOW", "1" if start_now else "0")
         if start_on_login is not None:
-            os.environ["HADES_GATEWAY_INSTALL_START_ON_LOGIN"] = "1" if start_on_login else "0"
-        os.environ["HADES_GATEWAY_ELEVATED_HANDOFF"] = "1"
+            env_set("HADES_GATEWAY_INSTALL_START_ON_LOGIN", "1" if start_on_login else "0")
+        env_set("HADES_GATEWAY_ELEVATED_HANDOFF", "1")
         extra_args = ["--elevated-handoff"]
         if force:
             extra_args.append("--force")
@@ -872,7 +873,7 @@ def windowless_gateway_restart_spec(
         "VIRTUAL_ENV": str(venv_dir),
     }
     if hermes_home:
-        env_overlay["HADES_HOME"] = hermes_home
+        env_set("HADES_HOME", hermes_home, env=env_overlay)
     _prepend_pythonpath(
         env_overlay,
         [project_root, *extra_pythonpath] if extra_pythonpath else [project_root],

@@ -22,12 +22,13 @@ Uses stdlib ``urllib`` only, matching ``debug.py`` style — no third-party deps
 
 import json
 import os
+from hades_constants import env_get
 import urllib.request
 
 # Base URL of the Nous account service that mints the signed upload URL.
 # Overridable via env so the feature can be pointed at staging / a local dev
 # NAS instance during testing.
-NAS_BASE = os.environ.get(
+NAS_BASE = env_get(
     "HERMES_DIAGNOSTICS_BASE_URL", "https://portal.nousresearch.com"
 )
 

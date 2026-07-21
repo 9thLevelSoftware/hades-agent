@@ -148,9 +148,9 @@ def set_current_session_id(session_id: str) -> None:
     ``get_session_env("HERMES_SESSION_ID")`` with an ``os.environ`` fallback,
     so both storage paths must move together when the active session changes.
     """
-    import os
+    from hades_constants import env_set
 
-    os.environ["HADES_SESSION_ID"] = session_id
+    env_set("HADES_SESSION_ID", session_id)
     _SESSION_ID.set(session_id)
 
 
@@ -316,7 +316,7 @@ def get_session_env(name: str, default: str = "") -> str:
        don't use ``set_session_vars`` at all).
     3. *default*
     """
-    import os
+    from hades_constants import env_get
 
     var = _VAR_MAP.get(name)
     if var is not None:
@@ -324,7 +324,8 @@ def get_session_env(name: str, default: str = "") -> str:
         if value is not _UNSET:
             return value
     # Fall back to os.environ for CLI, cron, and test compatibility
-    return os.getenv(name, default)
+    # (dual-read: writers may set either the HADES_ or HERMES_ spelling).
+    return env_get(name, default)
 
 
 def declare_stateless_channel() -> None:

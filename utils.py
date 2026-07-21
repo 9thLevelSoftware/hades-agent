@@ -13,10 +13,40 @@ from urllib.parse import urlparse
 
 import yaml
 
+from hades_constants import env_get as _env_get_aliased
+
 logger = logging.getLogger(__name__)
 
 
 TRUTHY_STRINGS = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_lookup(name: str, default: str = "") -> str:
+    """os.getenv that dual-reads HADES_*/HERMES_* prefixed names."""
+    if name.startswith(("HADES_", "HERMES_")):
+        value = _env_get_aliased(name)
+        return default if value is None else value
+    return os.getenv(name, default)
+
+
+def skill_vendor_metadata(frontmatter: dict) -> dict:
+    """Return a skill's vendor metadata namespace from SKILL.md frontmatter.
+
+    The wire format is ``metadata.hermes`` (the upstream agentskills.io
+    convention — hades-authored skills keep emitting it so they stay
+    portable to stock hermes-agent). ``metadata.hades`` is accepted as a
+    read-side fallback; ``metadata.hermes`` wins when both are present.
+    """
+    metadata = frontmatter.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    hermes_meta = metadata.get("hermes")
+    if isinstance(hermes_meta, dict):
+        return hermes_meta
+    hades_meta = metadata.get("hades")
+    if isinstance(hades_meta, dict):
+        return hades_meta
+    return {}
 
 
 def is_truthy_value(value: Any, default: bool = False) -> bool:
@@ -32,7 +62,7 @@ def is_truthy_value(value: Any, default: bool = False) -> bool:
 
 def env_var_enabled(name: str, default: str = "") -> bool:
     """Return True when an environment variable is set to a truthy value."""
-    return is_truthy_value(os.getenv(name, default), default=False)
+    return is_truthy_value(_env_lookup(name, default), default=False)
 
 
 def _preserve_file_mode(path: Path) -> "int | None":
@@ -409,7 +439,7 @@ def fast_safe_load(stream: Any) -> Any:
 
 def env_int(key: str, default: int = 0) -> int:
     """Read an environment variable as an integer, with fallback."""
-    raw = os.getenv(key, "").strip()
+    raw = _env_lookup(key, "").strip()
     if not raw:
         return default
     try:
@@ -420,7 +450,7 @@ def env_int(key: str, default: int = 0) -> int:
 
 def env_float(key: str, default: float = 0.0) -> float:
     """Read an environment variable as a float, with fallback."""
-    raw = os.getenv(key, "").strip()
+    raw = _env_lookup(key, "").strip()
     if not raw:
         return default
     try:
@@ -431,7 +461,7 @@ def env_float(key: str, default: float = 0.0) -> float:
 
 def env_bool(key: str, default: bool = False) -> bool:
     """Read an environment variable as a boolean."""
-    return is_truthy_value(os.getenv(key, ""), default=default)
+    return is_truthy_value(_env_lookup(key, ""), default=default)
 
 
 # ─── Proxy Helpers ────────────────────────────────────────────────────────────

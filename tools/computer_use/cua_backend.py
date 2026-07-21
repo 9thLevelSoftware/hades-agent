@@ -41,6 +41,7 @@ import concurrent.futures
 import json
 import logging
 import os
+from hades_constants import env_get
 import re
 import shutil
 import subprocess
@@ -73,7 +74,7 @@ logger = logging.getLogger(__name__)
 # only have *looked* like it pinned. For a reproducible version, point
 # `HERMES_CUA_DRIVER_CMD` at a specific binary instead.
 
-_CUA_DRIVER_CMD = os.environ.get("HADES_CUA_DRIVER_CMD", "cua-driver")
+_CUA_DRIVER_CMD = env_get("HADES_CUA_DRIVER_CMD", "cua-driver")
 _CUA_DRIVER_ARGS = ["mcp"]  # stdio MCP transport (fallback when the
                             # driver doesn't expose `manifest` — see
                             # `_resolve_mcp_invocation` below)

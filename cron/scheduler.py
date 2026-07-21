@@ -40,7 +40,7 @@ from typing import Any, List, Mapping, Optional
 # the module) fail with ModuleNotFoundError for hermes_time et al.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from hades_constants import get_hades_home
+from hades_constants import env_get, get_hades_home, env_set
 from hades_cli._subprocess_compat import windows_hide_flags
 from hades_cli.config import load_config, _expand_env_vars
 from hades_cli.fallback_config import get_fallback_chain
@@ -2026,7 +2026,7 @@ def _get_script_timeout() -> int:
         except Exception:
             logger.warning("Invalid patched _SCRIPT_TIMEOUT=%r; using env/config/default", _SCRIPT_TIMEOUT)
 
-    env_value = os.getenv("HADES_CRON_SCRIPT_TIMEOUT", "").strip()
+    env_value = env_get("HADES_CRON_SCRIPT_TIMEOUT", "").strip()
     if env_value:
         try:
             timeout = int(float(env_value))
@@ -2867,7 +2867,7 @@ def run_job(
         # Resolve timeout: env override → config.yaml → default 10s.
         # Mirrors the script_timeout_seconds resolution pattern.
         _session_db_timeout: float | None = None
-        _raw_env_timeout = os.getenv("HADES_CRON_SESSION_DB_TIMEOUT", "").strip()
+        _raw_env_timeout = env_get("HADES_CRON_SESSION_DB_TIMEOUT", "").strip()
         if _raw_env_timeout:
             try:
                 _session_db_timeout = float(_raw_env_timeout)
@@ -2975,7 +2975,9 @@ def run_job(
     # Mark this as a cron session so the approval system can apply cron_mode.
     # This env var is process-wide and persists for the lifetime of the
     # scheduler process — every job this process runs is a cron job.
-    os.environ["HADES_CRON_SESSION"] = "1"
+    from hades_constants import env_set
+
+    env_set("HADES_CRON_SESSION", "1")
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
     # don't clobber each other's targets (os.environ is process-global).
@@ -3097,7 +3099,7 @@ def run_job(
         # value is intentionally re-read from storage every tick so a
         # ``cronjob action=update model=...`` after a failed run takes effect
         # on the next tick — there is no in-memory cache.
-        model = job.get("model") or os.getenv("HADES_MODEL") or ""
+        model = job.get("model") or env_get("HADES_MODEL") or ""
 
         # Load config.yaml for model, reasoning, prefill, toolsets, provider routing
         _cfg = {}
@@ -3138,7 +3140,7 @@ def run_job(
             raise RuntimeError(
                 f"Cron job '{job_name}' has no model configured "
                 f"(job.model={job.get('model')!r}, "
-                f"HERMES_MODEL={os.getenv('HADES_MODEL', '')!r}, "
+                f"HERMES_MODEL={env_get('HADES_MODEL', '')!r}, "
                 "config.yaml model.default missing or empty). "
                 f"Set a per-job model via "
                 f"`cronjob action=update job_id={job_id} model=<name>` or set a "
@@ -3164,7 +3166,7 @@ def run_job(
         prefill_messages = None
         agent_cfg = _cfg.get("agent", {}) if isinstance(_cfg.get("agent", {}), dict) else {}
         prefill_file = (
-            os.getenv("HADES_PREFILL_MESSAGES_FILE", "")
+            env_get("HADES_PREFILL_MESSAGES_FILE", "")
             or _cfg.get("prefill_messages_file", "")
             or agent_cfg.get("prefill_messages_file", "")
         )
@@ -3184,6 +3186,11 @@ def run_job(
 
         # Max iterations
         max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
+
+        reasoning_config = resolve_reasoning_config(
+            model or "",
+            _cfg,
+        )
 
         # Route before the ordinary baseline credential resolver can abort. An
         # active projection is already an exact, verified execution binding;
@@ -3508,7 +3515,7 @@ def run_job(
         #
         # Uses the agent's built-in activity tracker (updated by
         # _touch_activity() on every tool call, API call, and stream delta).
-        _raw_cron_timeout = os.getenv("HADES_CRON_TIMEOUT", "").strip()
+        _raw_cron_timeout = env_get("HADES_CRON_TIMEOUT", "").strip()
         if _raw_cron_timeout:
             try:
                 _cron_timeout = float(_raw_cron_timeout)
@@ -4097,7 +4104,7 @@ def tick(
         # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
         _max_workers: Optional[int] = None
         try:
-            _env_par = os.getenv("HADES_CRON_MAX_PARALLEL", "").strip()
+            _env_par = env_get("HADES_CRON_MAX_PARALLEL", "").strip()
             if _env_par:
                 _max_workers = int(_env_par) or None
         except (ValueError, TypeError):

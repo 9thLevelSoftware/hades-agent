@@ -104,7 +104,11 @@ conservative at the waist.
   thresholds, feature flags, display prefs — go in `config.yaml`. Bridge to an
   internal env var if the mechanism needs one, but user-facing docs point to
   `config.yaml`. Reject PRs that tell users to "set X in your .env" unless X
-  is a credential.
+  is a credential. Any `HADES_*`/`HERMES_*`-prefixed knob is read via
+  `hades_constants.env_get` and written via `env_set` (both accept either
+  spelling and keep the two prefixes in sync); never single-spelling
+  `os.getenv`/`os.environ` access for these names —
+  `tests/test_env_alias_guard.py` enforces this.
 - **A new core tool when terminal + file already do the job, or when a skill
   would.** If the only barrier is file visibility on a remote backend, fix the
   mount, not the toolset.
@@ -621,6 +625,15 @@ Non-secret settings (timeouts, thresholds, feature flags, paths, display
 preferences) belong in `config.yaml`, not `.env`. If internal code needs an
 env var mirror for backward compatibility, bridge it from `config.yaml` to
 the env var in code (see `gateway_timeout`, `terminal.cwd` → `TERMINAL_CWD`).
+
+`HADES_*`/`HERMES_*`-prefixed env vars are dual-spelled: read them with
+`hades_constants.env_get` (either spelling works; `HADES_` wins) and set them
+with `hades_constants.env_set` (writes BOTH spellings; pass `env=` for
+subprocess env dicts). `env_pop`/`env_is_set` cover removal and presence
+checks. Never use single-spelling `os.getenv`/`os.environ` reads or writes
+for these names — the ratchet guard `tests/test_env_alias_guard.py` fails on
+any new direct access. (`utils.py`'s `env_var_enabled`/`env_int`/`env_float`/
+`env_bool` already dual-read internally.)
 
 ### Config loaders (three paths — know which one you're in):
 

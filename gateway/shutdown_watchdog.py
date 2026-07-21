@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from hades_constants import get_hades_home
+from hades_constants import get_hades_home, env_get
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ _WATCHDOG_DUMP_RELATIVE = ("logs", "gateway-shutdown-watchdog.log")
 
 def _process_hermes_home() -> Path:
     """HADES_HOME for process-level identity files (ignore profile overrides)."""
-    val = os.environ.get("HADES_HOME", "").strip()
+    val = env_get("HADES_HOME", "").strip()
     if val:
         return Path(val)
     return get_hades_home()

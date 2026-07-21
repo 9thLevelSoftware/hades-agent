@@ -29,6 +29,7 @@ Usage::
 
 import logging
 import os
+from hades_constants import env_get
 import shlex
 import shutil
 import subprocess
@@ -1491,7 +1492,7 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
     ).strip().rstrip("/")
     language = str(
         xai_config.get("language")
-        or os.getenv("HADES_LOCAL_STT_LANGUAGE")
+        or env_get("HADES_LOCAL_STT_LANGUAGE")
         or DEFAULT_LOCAL_STT_LANGUAGE
     ).strip()
     # .get("format", True) already defaults to True when the key is absent;

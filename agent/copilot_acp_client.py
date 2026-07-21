@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from hades_constants import env_get
 import queue
 import re
 import shlex
@@ -61,14 +62,14 @@ def _is_gh_copilot_deprecation_message(stderr_text: str) -> bool:
 
 def _resolve_command() -> str:
     return (
-        os.getenv("HADES_COPILOT_ACP_COMMAND", "").strip()
+        env_get("HADES_COPILOT_ACP_COMMAND", "").strip()
         or os.getenv("COPILOT_CLI_PATH", "").strip()
         or "copilot"
     )
 
 
 def _resolve_args() -> list[str]:
-    raw = os.getenv("HADES_COPILOT_ACP_ARGS", "").strip()
+    raw = env_get("HADES_COPILOT_ACP_ARGS", "").strip()
     if not raw:
         return ["--acp", "--stdio"]
     return shlex.split(raw)

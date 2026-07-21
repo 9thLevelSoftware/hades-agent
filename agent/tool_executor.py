@@ -16,6 +16,7 @@ import concurrent.futures
 import json
 import logging
 import os
+from hades_constants import env_get
 import random
 import threading
 import time
@@ -95,7 +96,7 @@ def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict, Optional[str]]:
 
 
 def _resolve_concurrent_tool_timeout() -> float | None:
-    raw = os.getenv("HADES_CONCURRENT_TOOL_TIMEOUT_S", "").strip()
+    raw = env_get("HADES_CONCURRENT_TOOL_TIMEOUT_S", "").strip()
     if not raw:
         return _DEFAULT_CONCURRENT_TOOL_TIMEOUT_S
     try:
@@ -317,9 +318,9 @@ def _run_agent_tool_execution_middleware(
         _execute,
         original_args=function_args,
         operation_metadata=operation_metadata,
-        operation_key_factory=lambda: registry.operation_key(
+        operation_key_factory=lambda effective=None: registry.operation_key(
             function_name,
-            function_args,
+            effective if effective is not None else function_args,
             task_id=effective_task_id or "",
             tool_call_id=tool_call_id or "",
         ),

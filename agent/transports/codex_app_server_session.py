@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hades_constants import env_get
 import threading
 import time
 from dataclasses import dataclass, field
@@ -215,7 +216,7 @@ class CodexAppServerSession:
         self._codex_home = codex_home
         self._permission_profile = (
             permission_profile or _HERMES_TO_CODEX_PERMISSION_PROFILE.get(
-                os.environ.get("HADES_TERMINAL_SECURITY_MODE", "auto"),
+                env_get("HADES_TERMINAL_SECURITY_MODE", "auto"),
                 "workspace-write",
             )
         )

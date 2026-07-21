@@ -245,7 +245,35 @@ def run_tool_execution_middleware(
                 operation_key=context.get("operation_key", ""),
                 mission_id=mission_id,
             )
-        return next_call(payload)
+        # Action transactions (agent/effects): when a transaction execution
+        # context is active — ContextVar in-process, or the trusted
+        # HERMES_TRANSACTION_* subprocess triple — the terminal handler is
+        # committed through the transaction coordinator. The operation key
+        # is computed from the FINAL effective arguments at this boundary:
+        # a plugin rewrite is the persisted identity. With no context, the
+        # call passes through byte-identical and writes no row.
+        from agent.effects.context import transaction_context_from_runtime
+
+        tx_context = transaction_context_from_runtime()
+        if tx_context is None or tx_context.coordinator is None:
+            return next_call(payload)
+        effective = payload if isinstance(payload, dict) else args
+        if callable(operation_key_factory):
+            try:
+                terminal_key = operation_key_factory(effective)
+            except TypeError:
+                # Legacy zero-arg factory: fall back without the effective
+                # arguments rather than failing the tool call.
+                terminal_key = operation_key_factory()
+        else:
+            terminal_key = context.get("operation_key", "")
+        return tx_context.coordinator.commit_tool_effect(
+            tool_name=tool_name,
+            effective_args=effective,
+            operation_key=terminal_key,
+            invoke=next_call,
+            execution=tx_context,
+        )
 
     def _gated_terminal(final_args: Any) -> Any:
         from agent.autonomy.runtime import authority_gate

@@ -1,0 +1,81 @@
+# Preregistered 100-case action-transaction benchmark contract.
+#
+# Frozen BEFORE any production transaction coordinator exists. The runner
+# (added by a later task) consumes this manifest verbatim; gates may never
+# be relaxed after results are observed.
+schema: hermes.action-transactions-benchmark.v1
+baseline: current_hermes_without_transaction_coordinator
+
+# Exact preregistered strata. The sum is the frozen denominator of 100.
+strata:
+  revision: 20
+  stale_authority: 15
+  crash: 25
+  duplicate_delivery: 10
+  partial_failure: 15
+  compensation_boundary: 15
+
+# Crash cases cycle through these five fault boundaries, five cases each.
+fault_points:
+  - after_prepare
+  - after_preview
+  - after_commit_intent
+  - after_handler_return
+  - after_delivery_dispatch
+
+# Expected outcome contract per stratum. Expectations are read from this
+# manifest only — never derived from coordinator or scorer output.
+expected_by_stratum:
+  revision:
+    committed_nodes_frozen: true
+    revised_pending_args_are_committed_args: true
+    stale_cas_loses_cleanly: true
+  stale_authority:
+    handler_calls: 0
+    network_calls: 0
+    terminal_status: blocked
+    approval_cannot_override_changed_authority: true
+  crash:
+    max_effect_commits: 1
+    recovered_disposition_matches_adapter_evidence: true
+    blind_retry_forbidden: true
+  duplicate_delivery:
+    max_hermes_boundary_dispatches: 1
+    provider_ambiguity_is_unknown: true
+    exactly_once_claim_forbidden: true
+  partial_failure:
+    descendants_do_not_commit: true
+    default_policy: stop
+    prefix_compensation_follows_eligibility_order: true
+  compensation_boundary:
+    fidelity_labels_match_adapter: true
+    cascade_order: reverse_topological
+    irreversible_or_unknown_boundary_never_crossed: true
+
+# Hard safety floors and the single latency threshold. Zero means zero.
+gates:
+  unauthorized_irreversible_commits: 0
+  duplicate_instrumented_effects: 0
+  incorrect_compensation_order: 0
+  unclassified_non_reversible_effects: 0
+  false_success_receipts: 0
+  median_eligible_overhead_ratio_max: 0.15
+
+reporting:
+  rate_interval: wilson_95
+  latency_percentiles: [p50, p95]
+  report_exclusions_separately: true
+  composite_score_forbidden: true
+  output: local_json_and_markdown_only
+
+fixtures:
+  plan: fixtures/plan.yaml
+  authority: fixtures/authority.yaml
+
+# Staged rollout gates: mode `commit` is recommended only after ALL of
+# these hold. Preregistered; never relaxed after results are observed.
+rollout:
+  require_100_case_pass: true
+  require_zero_safety_regressions: true
+  require_median_eligible_overhead_below: 0.15
+  commit_mode_default_requires: 30_real_transactions_across_three_families

@@ -43,13 +43,46 @@ def get_hades_home_override() -> str | None:
     return str(override)
 
 
-def _get_platform_default_hades_home() -> Path:
-    """Return the platform-native default Hades home path."""
+# Adopt-in-place decisions, keyed by (hades_default, legacy) path pair so
+# monkeypatched homes in tests get fresh evaluation while a real process
+# makes the decision once (two stat() calls) and keeps it stable.
+_home_adoption_cache: dict = {}
+
+
+def _default_home_candidates() -> "tuple[Path, Path]":
+    """Return (hades_default, legacy_hermes) platform home candidates."""
     if sys.platform == "win32":
         local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
         base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
-        return base / "hades"
-    return Path.home() / ".hades"
+        return base / "hades", base / "hermes"
+    return Path.home() / ".hades", Path.home() / ".hermes"
+
+
+def _get_platform_default_hades_home() -> Path:
+    """Return the platform-native default Hades home path.
+
+    Adopt-in-place compatibility: installer-provisioned machines (and any
+    machine that ran upstream hermes-agent) keep state under the legacy
+    hermes-named dir. When no HADES_HOME/HERMES_HOME env override is in
+    play and the hades-named default does not exist but the legacy dir
+    does, use the legacy dir directly — no data is copied or moved, and a
+    co-installed upstream hermes pointed at the same dir keeps sharing
+    state. If BOTH exist, the hades dir wins (``hades doctor`` surfaces
+    the split).
+    """
+    hades_default, legacy = _default_home_candidates()
+    key = (str(hades_default), str(legacy))
+    cached = _home_adoption_cache.get(key)
+    if cached is not None:
+        return cached
+    result = hades_default
+    try:
+        if not hades_default.exists() and legacy.exists():
+            result = legacy
+    except OSError:
+        pass
+    _home_adoption_cache[key] = result
+    return result
 
 
 def _hades_home_from_env() -> Path:
@@ -1294,6 +1327,71 @@ FINISH_REASON_LENGTH = "length"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODELS_URL = f"{OPENROUTER_BASE_URL}/models"
+
+
+# ── Environment variable aliasing (HADES_* ⇄ HERMES_*) ──────────────────────
+# The hermes→hades rename left both spellings in the wild: upstream-ecosystem
+# plugins/skills/installers export HERMES_* while this fork's code sets
+# HADES_*. All prefixed env access must go through these helpers so either
+# spelling works everywhere. Contract:
+#   read  → env_get: HADES_ spelling wins when both are set
+#   write → env_set / env_pop: always both spellings (subprocesses may run
+#            upstream hermes binaries that only read HERMES_*)
+
+
+def env_alias(name: str) -> "str | None":
+    """Return the other-prefix spelling of *name*, or None if unprefixed."""
+    if name.startswith("HADES_"):
+        return "HERMES_" + name[len("HADES_"):]
+    if name.startswith("HERMES_"):
+        return "HADES_" + name[len("HERMES_"):]
+    return None
+
+
+def _env_spellings(name: str) -> "tuple[str, ...]":
+    """Both spellings of *name*, HADES_ first (the winning spelling)."""
+    alias = env_alias(name)
+    if alias is None:
+        return (name,)
+    if name.startswith("HADES_"):
+        return (name, alias)
+    return (alias, name)
+
+
+def env_get(name: str, default=None, env=None):
+    """Read an env var accepting either prefix spelling; HADES_ wins."""
+    if env is None:
+        env = os.environ
+    for spelling in _env_spellings(name):
+        value = env.get(spelling)
+        if value is not None:
+            return value
+    return default
+
+
+def env_is_set(name: str, env=None) -> bool:
+    """True when either spelling of *name* is present in the environment."""
+    return env_get(name, env=env) is not None
+
+
+def env_set(name: str, value: str, env=None) -> None:
+    """Set BOTH spellings of *name* so hermes and hades readers agree."""
+    if env is None:
+        env = os.environ
+    for spelling in _env_spellings(name):
+        env[spelling] = value
+
+
+def env_pop(name: str, env=None):
+    """Remove BOTH spellings of *name*; return the winning value if any."""
+    if env is None:
+        env = os.environ
+    found = None
+    for spelling in _env_spellings(name):
+        value = env.pop(spelling, None)
+        if found is None:
+            found = value
+    return found
 
 
 # ── Backward-compatibility aliases ───────────────────────────────────────────

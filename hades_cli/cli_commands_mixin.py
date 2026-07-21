@@ -27,7 +27,7 @@ from rich import box as rich_box
 from rich.markup import escape as _escape
 from rich.panel import Panel
 
-from hades_constants import display_hades_home, is_termux as _is_termux_environment
+from hades_constants import display_hades_home, is_termux as _is_termux_environment, env_get
 from hades_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL,
     is_browser_debug_ready,
@@ -936,7 +936,7 @@ class CLICommandsMixin:
         try:
             self._session_db.create_session(
                 session_id=new_session_id,
-                source=os.environ.get("HADES_SESSION_SOURCE", "cli"),
+                source=env_get("HADES_SESSION_SOURCE", "cli"),
                 model=self.model,
                 model_config={
                     "max_iterations": self.max_turns,
@@ -1576,6 +1576,30 @@ class CLICommandsMixin:
             output = run_slash(rest)
         except Exception as exc:  # pragma: no cover - defensive
             output = f"(._.) workflow error: {exc}"
+        if output:
+            print(output)
+
+    def _handle_transaction_command(self, cmd: str):
+        """Handle the /transaction command — delegate to the shared CLI.
+
+        Mirrors ``_handle_workflow_command``: strip the leading
+        ``/transaction`` (or ``/tx``) and hand the remainder to
+        ``transactions.run_slash``, the same parser/service behind
+        ``hermes transaction ...``.
+        """
+        from hades_cli.transactions import run_slash
+
+        rest = cmd.strip()
+        if rest.startswith("/"):
+            rest = rest.lstrip("/")
+        for prefix in ("transaction", "tx"):
+            if rest.startswith(prefix):
+                rest = rest[len(prefix):].lstrip()
+                break
+        try:
+            output = run_slash(rest)
+        except Exception as exc:  # pragma: no cover - defensive
+            output = f"(._.) transaction error: {exc}"
         if output:
             print(output)
 

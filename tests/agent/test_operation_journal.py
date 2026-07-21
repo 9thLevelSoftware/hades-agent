@@ -751,3 +751,76 @@ class TestCoordinatorHelpers:
             effect_disposition="unknown",
         )
         assert journal.terminal_result("op-1") is None
+
+
+# ── Task 5 (action transactions): exact query/CAS helpers ────────────────
+
+
+class TestCoordinatorJournalHelpers:
+    """Exact helpers the transaction coordinator relies on. They add
+    query/CAS convenience WITHOUT weakening transitions: there is still
+    no ``unknown -> running`` path and no blind retry primitive."""
+
+    def test_get_by_identity_returns_exact_match_only(self, db):
+        journal = _journal(db)
+        journal.create(
+            operation_id="op-1", kind="effect_commit",
+            destination="workspace.v1", payload_hash="hash-a",
+        )
+        journal.create(
+            operation_id="op-2", kind="effect_commit",
+            destination="workspace.v1", payload_hash="hash-b",
+        )
+        found = journal.get_by_identity("effect_commit", "workspace.v1", "hash-a")
+        assert found is not None and found.operation_id == "op-1"
+        assert journal.get_by_identity("effect_commit", "workspace.v1", "hash-c") is None
+        assert journal.get_by_identity("other_kind", "workspace.v1", "hash-a") is None
+
+    def test_list_inflight_filters_running_and_dispatched(self, db):
+        journal = _journal(db)
+        journal.create(operation_id="op-run", kind="effect_commit")
+        journal.transition(
+            "op-run", from_states={"pending"}, to_state="running",
+            effect_disposition="none",
+        )
+        journal.create(operation_id="op-dispatch", kind="delivery")
+        journal.transition(
+            "op-dispatch", from_states={"pending"}, to_state="running",
+            effect_disposition="none",
+        )
+        journal.transition(
+            "op-dispatch", from_states={"running"}, to_state="dispatched",
+            effect_disposition="unknown",
+        )
+        journal.create(operation_id="op-idle", kind="effect_commit")
+        inflight = {record.operation_id for record in journal.list_inflight()}
+        assert inflight == {"op-run", "op-dispatch"}
+        only_commits = {
+            record.operation_id
+            for record in journal.list_inflight(kind="effect_commit")
+        }
+        assert only_commits == {"op-run"}
+
+    def test_transition_if_current_returns_none_on_cas_miss(self, db):
+        journal = _journal(db)
+        journal.create(operation_id="op-1", kind="effect_commit")
+        record = journal.transition_if_current(
+            "op-1", from_states={"pending"}, to_state="running",
+            effect_disposition="none",
+        )
+        assert record is not None and record.state == "running"
+        missed = journal.transition_if_current(
+            "op-1", from_states={"pending"}, to_state="running",
+            effect_disposition="none",
+        )
+        assert missed is None
+        assert journal.get("op-1").state == "running"
+
+    def test_transition_if_current_still_validates_legality(self, db):
+        journal = _journal(db)
+        journal.create(operation_id="op-1", kind="effect_commit")
+        with pytest.raises(ValueError):
+            journal.transition_if_current(
+                "op-1", from_states={"unknown"}, to_state="running",
+                effect_disposition="none",
+            )

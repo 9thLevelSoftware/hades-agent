@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from hades_constants import env_get
 import re
 import sys
 import threading
@@ -66,7 +67,7 @@ def _get_sessions_dir() -> Path:
         from hades_constants import get_hades_home
         return get_hades_home() / "sessions"
     except ImportError:
-        return Path(os.environ.get("HADES_HOME", Path.home() / ".hades")) / "sessions"
+        return Path(env_get("HADES_HOME", Path.home() / ".hades")) / "sessions"
 
 
 def _get_session_db():
@@ -199,7 +200,7 @@ def _load_channel_directory() -> dict:
         directory_file = get_hades_home() / "channel_directory.json"
     except ImportError:
         directory_file = Path(
-            os.environ.get("HADES_HOME", Path.home() / ".hades")
+            env_get("HADES_HOME", Path.home() / ".hades")
         ) / "channel_directory.json"
 
     if not directory_file.exists():
@@ -454,7 +455,7 @@ class EventBridge:
             from hades_constants import get_hades_home
             db_file = get_hades_home() / "state.db"
         except ImportError:
-            db_file = Path(os.environ.get("HADES_HOME", Path.home() / ".hades")) / "state.db"
+            db_file = Path(env_get("HADES_HOME", Path.home() / ".hades")) / "state.db"
 
         try:
             db_mtime = db_file.stat().st_mtime if db_file.exists() else 0.0

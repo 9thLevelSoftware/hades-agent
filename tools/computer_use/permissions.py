@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+from hades_constants import env_get
 import shutil
 import subprocess
 import sys
@@ -43,7 +44,7 @@ def _driver_cmd(override: Optional[str]) -> str:
 
         return _cua_driver_cmd()
     except Exception:
-        return os.environ.get("HADES_CUA_DRIVER_CMD", "").strip() or "cua-driver"
+        return env_get("HADES_CUA_DRIVER_CMD", "").strip() or "cua-driver"
 
 
 def _child_env() -> Dict[str, str]:

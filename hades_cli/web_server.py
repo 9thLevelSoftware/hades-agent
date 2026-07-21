@@ -27,6 +27,7 @@ import json
 import logging
 import mimetypes
 import os
+from hades_constants import env_get, env_is_set, env_set
 import re
 import secrets
 import shlex
@@ -124,7 +125,7 @@ except ImportError:
             f"Install with: {sys.executable} -m pip install 'fastapi' 'uvicorn[standard]'"
         )
 
-WEB_DIST = Path(os.environ["HADES_WEB_DIST"]) if "HERMES_WEB_DIST" in os.environ else Path(__file__).parent / "web_dist"
+WEB_DIST = Path(env_get("HADES_WEB_DIST")) if env_is_set("HERMES_WEB_DIST") else Path(__file__).parent / "web_dist"
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -200,7 +201,7 @@ async def _lifespan(app: "FastAPI"):
     # dashboard` is unaffected — it relies on its own gateway.
     cron_stop: "threading.Event | None" = None
     cron_thread: "threading.Thread | None" = None
-    if os.getenv("HADES_DESKTOP") == "1":
+    if env_get("HADES_DESKTOP") == "1":
         cron_stop = threading.Event()
         cron_thread = threading.Thread(
             target=_start_desktop_cron_ticker,
@@ -277,7 +278,7 @@ app.include_router(_memory_oauth_router)
 # on every server start. Either way it dies when the process exits and is
 # injected into the SPA HTML so only the legitimate web UI can use it.
 # ---------------------------------------------------------------------------
-_SESSION_TOKEN = os.environ.get("HADES_DASHBOARD_SESSION_TOKEN") or secrets.token_urlsafe(32)
+_SESSION_TOKEN = env_get("HADES_DASHBOARD_SESSION_TOKEN") or secrets.token_urlsafe(32)
 _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 
 # In-browser Chat tab (/chat, /api/pty, /api/ws, …).  Always enabled: the
@@ -1681,7 +1682,7 @@ def _local_dashboard_request(request: Request) -> bool:
 
 
 def _default_hermes_root_is_opt_data() -> bool:
-    raw = os.environ.get("HADES_HOME", "").strip()
+    raw = env_get("HADES_HOME", "").strip()
     if not raw:
         return False
     try:
@@ -3294,7 +3295,8 @@ def _spawn_hermes_action(subcommand: List[str], name: str) -> subprocess.Popen:
     # trip the in-process restart-loop guard and exit 1 — silently failing the
     # dashboard's auto-restart paths. The gateway's own restart watcher already
     # drops it (gateway/run.py); mirror that here (#52470).
-    action_env = {**os.environ, "HERMES_NONINTERACTIVE": "1"}
+    action_env = {**os.environ}
+    env_set("HERMES_NONINTERACTIVE", "1", env=action_env)
     action_env.pop("_HADES_GATEWAY", None)
 
     popen_kwargs: Dict[str, Any] = {
@@ -9106,7 +9108,7 @@ async def _start_device_code_flow(
         import httpx
         pconfig = PROVIDER_REGISTRY["nous"]
         portal_base_url = (
-            os.getenv("HADES_PORTAL_BASE_URL")
+            env_get("HADES_PORTAL_BASE_URL")
             or os.getenv("NOUS_PORTAL_BASE_URL")
             or pconfig.portal_base_url
         ).rstrip("/")
@@ -16148,8 +16150,10 @@ def _resolve_chat_argv(
     # makes browser-side transcript scrolling feel broken. Keep the terminal
     # build unchanged for native CLI usage; only disable mouse tracking for
     # the dashboard PTY path.
-    env.setdefault("HERMES_TUI_DISABLE_MOUSE", "1")
-    env.setdefault("HERMES_TUI_INLINE", "1")
+    if not env_is_set("HERMES_TUI_DISABLE_MOUSE", env=env):
+        env_set("HERMES_TUI_DISABLE_MOUSE", "1", env=env)
+    if not env_is_set("HERMES_TUI_INLINE", env=env):
+        env_set("HERMES_TUI_INLINE", "1", env=env)
     # The dashboard terminal is xterm.js, which always renders 24-bit RGB.
     # But chalk inside the TUI child decides its color depth from the
     # SERVER process env — and hosted/cloud deploys run the dashboard under
@@ -16161,10 +16165,10 @@ def _resolve_chat_argv(
     # COLORTERM=truecolor into os.environ. Backfill it for the PTY child;
     # setdefault so an explicit operator value still wins.
     env.setdefault("COLORTERM", "truecolor")
-    env["HERMES_TUI_DASHBOARD"] = "1"
+    env_set("HERMES_TUI_DASHBOARD", "1", env=env)
 
     if profile_dir is not None:
-        env["HADES_HOME"] = str(profile_dir)
+        env_set("HADES_HOME", str(profile_dir), env=env)
 
     if resume:
         _resume_db = _open_session_db_for_profile(
@@ -16176,13 +16180,13 @@ def _resolve_chat_argv(
             _resume_db.close()
         if latest_resume:
             resume = latest_resume
-        env["HERMES_TUI_RESUME"] = resume
+        env_set("HERMES_TUI_RESUME", resume, env=env)
 
     if sidecar_url:
-        env["HERMES_TUI_SIDECAR_URL"] = sidecar_url
+        env_set("HERMES_TUI_SIDECAR_URL", sidecar_url, env=env)
 
     if active_session_file:
-        env["HERMES_TUI_ACTIVE_SESSION_FILE"] = active_session_file
+        env_set("HERMES_TUI_ACTIVE_SESSION_FILE", active_session_file, env=env)
 
     # Profile-scoped chats must NOT attach to the dashboard's in-memory
     # gateway — it runs under the dashboard's own profile. Without the
@@ -16190,7 +16194,7 @@ def _resolve_chat_argv(
     # inherits the profile HADES_HOME set above.
     if profile_dir is None:
         if gateway_ws_url := _build_gateway_ws_url():
-            env["HERMES_TUI_GATEWAY_URL"] = gateway_ws_url
+            env_set("HERMES_TUI_GATEWAY_URL", gateway_ws_url, env=env)
 
     return list(argv), str(cwd) if cwd else None, env
 
@@ -16219,7 +16223,7 @@ def _resolve_client_ws_host() -> Optional[str]:
        run in the same container.
     3. Any other bind host (loopback or LAN IP) — preserved verbatim.
     """
-    explicit = os.environ.get("HADES_DASHBOARD_WS_HOST", "").strip()
+    explicit = env_get("HADES_DASHBOARD_WS_HOST", "").strip()
     if explicit:
         return explicit
 
@@ -17354,7 +17358,7 @@ def mount_spa(application: FastAPI):
     # `hermes serve` is the headless backend: it must NEVER serve the browser
     # SPA, even if a dist is lying around from a prior `dashboard`/build. Take
     # the no-frontend path so only the JSON-RPC/WS/API surface is reachable.
-    _headless = os.environ.get("HADES_SERVE_HEADLESS") == "1"
+    _headless = env_get("HADES_SERVE_HEADLESS") == "1"
     if _headless or not WEB_DIST.exists():
         _msg = (
             "Headless backend (hermes serve): web UI disabled — use "
@@ -18539,7 +18543,7 @@ def _write_dashboard_ready_file(actual_port: int) -> None:
     so Electron passes ``HERMES_DESKTOP_READY_FILE`` and waits for this JSON.
     Normal CLI/dashboard launches still use the stdout READY line below.
     """
-    target = os.environ.get("HADES_DESKTOP_READY_FILE")
+    target = env_get("HADES_DESKTOP_READY_FILE")
     if not target:
         return
 

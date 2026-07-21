@@ -41,7 +41,7 @@ from typing import Any, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
-from hades_constants import get_hades_dir
+from hades_constants import get_hades_dir, env_get
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
 import sys
@@ -54,7 +54,7 @@ _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
 # Separate from auxiliary.vision.timeout which governs the LLM API call.
 # Resolution: config.yaml auxiliary.vision.download_timeout → env var → 30s default.
 def _resolve_download_timeout() -> float:
-    env_val = os.getenv("HADES_VISION_DOWNLOAD_TIMEOUT", "").strip()
+    env_val = env_get("HADES_VISION_DOWNLOAD_TIMEOUT", "").strip()
     if env_val:
         try:
             return float(env_val)
@@ -136,7 +136,7 @@ def _resolve_vision_cpu_workers() -> int:
     that parses to < 1 is ignored in favor of the next source so the cap can
     never be disabled into an unbounded encode storm.
     """
-    env_val = os.getenv("HADES_VISION_MAX_CONCURRENCY", "").strip()
+    env_val = env_get("HADES_VISION_MAX_CONCURRENCY", "").strip()
     if env_val:
         try:
             parsed = int(env_val)

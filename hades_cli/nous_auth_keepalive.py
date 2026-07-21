@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hades_constants import env_get
 import threading
 from typing import Optional
 
@@ -31,7 +32,7 @@ def _timeout_seconds(value: Optional[float]) -> float:
     if value is not None:
         return float(value)
     try:
-        return float(os.getenv("HADES_NOUS_TIMEOUT_SECONDS", "15"))
+        return float(env_get("HADES_NOUS_TIMEOUT_SECONDS", "15"))
     except (TypeError, ValueError):
         return 15.0
 

@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+from hades_constants import env_get
 import platform
 import re
 import shutil
@@ -334,7 +335,7 @@ _MANAGED_SYSTEM_NAMES = {
 
 def get_managed_system() -> Optional[str]:
     """Return the package manager owning this install, if any."""
-    raw = os.getenv("HADES_MANAGED", "").strip()
+    raw = env_get("HADES_MANAGED", "").strip()
     if raw:
         normalized = raw.lower()
         if normalized in _MANAGED_TRUE_VALUES:
@@ -658,7 +659,7 @@ def format_docker_update_message() -> str:
 def format_managed_message(action: str = "modify this Hermes installation") -> str:
     """Build a user-facing error for managed installs."""
     managed_system = get_managed_system() or "a package manager"
-    raw = os.getenv("HADES_MANAGED", "").strip().lower()
+    raw = env_get("HADES_MANAGED", "").strip().lower()
 
     if managed_system == "NixOS":
         env_hint = "true" if raw in _MANAGED_TRUE_VALUES else raw or "true"
@@ -703,7 +704,7 @@ def get_container_exec_info() -> Optional[dict]:
     container.enable = true. It tells the host CLI to exec into the container
     instead of running locally.
     """
-    if os.environ.get("HADES_DEV") == "1":
+    if env_get("HADES_DEV") == "1":
         return None
 
     from hades_constants import is_container
@@ -742,7 +743,7 @@ def get_container_exec_info() -> Optional[dict]:
 # =============================================================================
 
 # Re-export from hades_constants — canonical definition lives there.
-from hades_constants import get_hades_home, get_process_hades_home  # noqa: F811,E402
+from hades_constants import env_get, get_hades_home, get_process_hades_home  # noqa: F811,E402
 from utils import atomic_replace, fast_safe_load
 
 def get_config_path() -> Path:
@@ -774,8 +775,8 @@ def _resolve_hermes_uid_gid() -> tuple[Optional[int], Optional[int]]:
     """
     if sys.platform == "win32":
         return None, None
-    uid_str = os.environ.get("HADES_UID", "").strip()
-    gid_str = os.environ.get("HADES_GID", "").strip()
+    uid_str = env_get("HADES_UID", "").strip()
+    gid_str = env_get("HADES_GID", "").strip()
     try:
         uid = int(uid_str) if uid_str else None
     except ValueError:
@@ -837,7 +838,7 @@ def _secure_dir(path):
     if is_managed():
         return
     try:
-        mode_str = os.environ.get("HADES_HOME_MODE", "").strip()
+        mode_str = env_get("HADES_HOME_MODE", "").strip()
         mode = int(mode_str, 8) if mode_str else 0o700
     except ValueError:
         mode = 0o700
@@ -857,7 +858,7 @@ def _is_container() -> bool:
     permissions.
     """
     # Explicit opt-out
-    if os.environ.get("HADES_CONTAINER") or os.environ.get("HADES_SKIP_CHMOD"):
+    if env_get("HADES_CONTAINER") or env_get("HADES_SKIP_CHMOD"):
         return True
     # Docker / Podman marker file
     if os.path.exists("/.dockerenv"):
@@ -2912,6 +2913,30 @@ DEFAULT_CONFIG = {
             # consumer projection.  It can never change a receipt status.
             "required": False,
         },
+    },
+
+    # Reversible & revisable action transactions (agent/effects).
+    # Stable behavioral settings only; no environment-variable bridge.
+    "transactions": {
+        # off — no transaction CLI commit/preview; schema and recovery
+        #   reads remain available for existing records.
+        # preview (default) — create/revise/preview/reconcile/eligibility/
+        #   receipt work; commit/release/compensate return a clear
+        #   config-gate error.
+        # commit — all three first adapter families are enabled, subject
+        #   to authority and exact approvals.
+        "mode": "preview",
+        # Run bounded transaction recovery after the owner-fenced journal
+        # pass at CLI/TUI/gateway startup.
+        "auto_reconcile_on_start": True,
+        # Oldest in-flight effects processed per recovery pass (1..1000).
+        "recovery_batch_size": 100,
+        # Upper bound for outbox not_before delays in seconds (1..604800).
+        "outbox_max_delay_seconds": 86400,
+        # manual (default) — failed commits stop and wait for a human.
+        # compensate_prefix — optionally compensate the eligible committed
+        #   prefix after a separate authority recheck.
+        "compensation_default": "manual",
     },
 
     # Tool Search (progressive disclosure for large tool surfaces).
@@ -5396,7 +5421,8 @@ def check_config_version() -> Tuple[int, int]:
 _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
     "fallback_providers", "credential_pool_strategies", "toolsets",
-    "agent", "terminal", "code_execution", "receipts", "display", "compression", "delegation",
+    "agent", "terminal", "code_execution", "receipts", "transactions",
+    "display", "compression", "delegation",
     "auxiliary", "moa", "custom_providers", "context", "memory", "gateway",
     "sessions", "streaming", "updates", "mcp_servers",
 }
@@ -5674,6 +5700,69 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                             "never in config.yaml",
                         ))
 
+    # ── transactions settings (reversible action transactions) ───────────
+    transactions = config.get("transactions")
+    if transactions is not None:
+        if not isinstance(transactions, dict):
+            issues.append(ConfigIssue(
+                "error",
+                f"transactions must be a mapping, got {type(transactions).__name__}",
+                "Use transactions: with mode and bounded settings underneath it",
+            ))
+        else:
+            tx_mode = transactions.get("mode")
+            if "mode" in transactions and tx_mode is not False and (
+                not isinstance(tx_mode, str)
+                or tx_mode.strip().lower() not in {"off", "preview", "commit"}
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "transactions.mode must be 'off', 'preview', or 'commit'",
+                    "Set mode: preview (default), off, or commit; invalid "
+                    "values fall back to preview at runtime",
+                ))
+            auto = transactions.get("auto_reconcile_on_start")
+            if "auto_reconcile_on_start" in transactions and not isinstance(
+                auto, bool
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "transactions.auto_reconcile_on_start must be a boolean",
+                    "Set auto_reconcile_on_start: true (default) or false",
+                ))
+            batch = transactions.get("recovery_batch_size")
+            if "recovery_batch_size" in transactions and (
+                not isinstance(batch, int) or isinstance(batch, bool)
+                or not 1 <= batch <= 1000
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "transactions.recovery_batch_size must be an integer in 1..1000",
+                    "Set recovery_batch_size: 100 (default)",
+                ))
+            delay = transactions.get("outbox_max_delay_seconds")
+            if "outbox_max_delay_seconds" in transactions and (
+                not isinstance(delay, int) or isinstance(delay, bool)
+                or not 1 <= delay <= 604800
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "transactions.outbox_max_delay_seconds must be an integer "
+                    "in 1..604800",
+                    "Set outbox_max_delay_seconds: 86400 (default, one day)",
+                ))
+            comp = transactions.get("compensation_default")
+            if "compensation_default" in transactions and (
+                not isinstance(comp, str)
+                or comp.strip().lower() not in {"manual", "compensate_prefix"}
+            ):
+                issues.append(ConfigIssue(
+                    "error",
+                    "transactions.compensation_default must be 'manual' or "
+                    "'compensate_prefix'",
+                    "Set compensation_default: manual (default)",
+                ))
+
     cp = config.get("custom_providers")
     if cp is not None:
         if isinstance(cp, dict):
@@ -5856,7 +5945,7 @@ def warn_deprecated_cwd_env_vars(config: Optional[Dict[str, Any]] = None) -> Non
             f"this is deprecated."
         )
     if lines:
-        hint_path = os.environ.get("HADES_HOME", "~/.hades")
+        hint_path = env_get("HADES_HOME", "~/.hades")
         lines.insert(0, "\033[33m⚠ Deprecated .env settings detected:\033[0m")
         lines.append(
             "  \033[2mMove to config.yaml instead:  "
@@ -5945,7 +6034,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     if current_ver < 5:
         config = read_raw_config()
         if "timezone" not in config:
-            old_tz = os.getenv("HADES_TIMEZONE", "")
+            old_tz = env_get("HADES_TIMEZONE", "")
             if old_tz and old_tz.strip():
                 config["timezone"] = old_tz.strip()
                 results["config_added"].append(f"timezone={old_tz.strip()} (from HERMES_TIMEZONE)")

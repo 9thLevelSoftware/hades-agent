@@ -22,6 +22,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 import os
+from hades_constants import env_get
 import threading
 import time
 from concurrent.futures import (
@@ -3597,7 +3598,7 @@ def _load_config() -> dict:
     flag is set we keep ``cli.CLI_CONFIG`` authoritative to preserve the
     flag's contract of suppressing user config.yaml settings.
     """
-    prefer_legacy = os.environ.get("HADES_IGNORE_USER_CONFIG") == "1"
+    prefer_legacy = env_get("HADES_IGNORE_USER_CONFIG") == "1"
     if not prefer_legacy:
         try:
             from hades_cli.config import load_config_readonly

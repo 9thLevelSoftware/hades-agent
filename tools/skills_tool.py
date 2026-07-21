@@ -70,7 +70,7 @@ import json
 import logging
 import time
 
-from hades_constants import get_hades_home, display_hades_home
+from hades_constants import get_hades_home, display_hades_home, env_get
 import os
 import re
 from enum import Enum
@@ -652,7 +652,7 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         from hades_cli.config import load_config
         config = load_config()
         skills_cfg = config.get("skills", {})
-        resolved_platform = platform or os.getenv("HADES_PLATFORM") or _get_session_platform()
+        resolved_platform = platform or env_get("HADES_PLATFORM") or _get_session_platform()
         global_disabled = skills_cfg.get("disabled", [])
         if resolved_platform:
             platform_disabled = cfg_get(skills_cfg, "platform_disabled", resolved_platform)
@@ -1450,11 +1450,11 @@ def skill_view(
                     )
 
         # Read tags/related_skills with backward compat:
-        # Check metadata.hermes.* first (agentskills.io convention), fall back to top-level
-        hermes_meta = {}
-        metadata = frontmatter.get("metadata")
-        if isinstance(metadata, dict):
-            hermes_meta = metadata.get("hermes", {}) or {}
+        # Check metadata.hermes.* / metadata.hades.* first (agentskills.io
+        # convention; hermes namespace wins), fall back to top-level.
+        from utils import skill_vendor_metadata
+
+        hermes_meta = skill_vendor_metadata(frontmatter)
 
         tags = _parse_tags(hermes_meta.get("tags") or frontmatter.get("tags", ""))
         related_skills = _parse_tags(

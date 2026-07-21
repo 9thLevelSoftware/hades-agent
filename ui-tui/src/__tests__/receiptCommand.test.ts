@@ -61,9 +61,8 @@ const receiptResponse = (overrides: Partial<ReceiptExecResponse> = {}): ReceiptE
 
 /** Build a SlashRunCtx double whose native rpc and slash-worker request are both observable. */
 const buildCtx = (result: Partial<ReceiptExecResponse> = {}, { stale = false } = {}) => {
-  const rpc = vi.fn((_method: string, _params?: Record<string, unknown>) =>
-    Promise.resolve(receiptResponse(result))
-  )
+  const rpc = vi.fn((_method: string, _params?: Record<string, unknown>) => Promise.resolve(receiptResponse(result)))
+
   const request = vi.fn(() => Promise.resolve({}))
   const sys = vi.fn()
   const page = vi.fn()
@@ -320,6 +319,7 @@ describe('/receipt slash command', () => {
 
   it('pages long non-detail output (pager behavior)', async () => {
     const output = Array.from({ length: 8 }, (_, i) => `line ${i}: retention detail`).join('\n')
+
     const { page, run } = buildCtx({
       action: 'retention-plan',
       output,

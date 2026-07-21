@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from hades_constants import env_get
 from typing import Any, Dict, List, Optional
 
 from agent.thread_scoped_output import thread_scoped_silence
@@ -613,7 +614,7 @@ def build_memory_write_metadata(
         ),
         "session_id": agent.session_id or "",
         "parent_session_id": agent._parent_session_id or "",
-        "platform": agent.platform or os.environ.get("HADES_SESSION_SOURCE", "cli"),
+        "platform": agent.platform or env_get("HADES_SESSION_SOURCE", "cli"),
         "tool_name": "memory",
     }
     if task_id:

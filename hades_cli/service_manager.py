@@ -17,6 +17,7 @@ profile create/delete hooks (Phase 4) and the s6 dispatch path in
 from __future__ import annotations
 
 import re
+from hades_constants import env_get
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
@@ -348,7 +349,7 @@ def _profile_dir_for_gateway_service(name: str) -> Path:
 
     profile = name[len(S6_SERVICE_PREFIX):] if name.startswith(S6_SERVICE_PREFIX) else name
     validate_profile_name(profile)
-    hermes_home = Path(os.environ.get("HADES_HOME", "/opt/data"))
+    hermes_home = Path(env_get("HADES_HOME", "/opt/data"))
     if hermes_home.parent.name == "profiles":
         root = hermes_home.parent.parent
     else:

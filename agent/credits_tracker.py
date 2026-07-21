@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hades_constants import env_get
 import re
 import time
 from dataclasses import dataclass
@@ -654,9 +655,9 @@ def dev_fixture_credits_state() -> Optional[CreditsState]:
     container env, a launch plist, …) can never surface fabricated balances/notices
     on a real account.
     """
-    if not is_truthy_value(os.environ.get("HADES_DEV_CREDITS")):
+    if not is_truthy_value(env_get("HADES_DEV_CREDITS")):
         return None
-    raw = os.environ.get("HADES_DEV_CREDITS_FIXTURE", "").strip()
+    raw = env_get("HADES_DEV_CREDITS_FIXTURE", "").strip()
     if not raw:
         return None
     name = raw

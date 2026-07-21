@@ -29,6 +29,7 @@ import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
+from hades_constants import env_get
 from tools.registry import discover_builtin_tools, registry
 from toolsets import resolve_toolset, validate_toolset
 
@@ -321,8 +322,8 @@ def get_tool_definitions(
             frozenset(disabled_toolsets) if disabled_toolsets else None,
             registry._generation,
             cfg_fp,
-            bool(os.environ.get("HADES_KANBAN_TASK")),
-            bool(os.environ.get("HADES_WORKFLOW_CONTEXT")),
+            bool(env_get("HADES_KANBAN_TASK")),
+            bool(env_get("HADES_WORKFLOW_CONTEXT")),
             bool(skip_tool_search_assembly),
         )
         cached = _tool_defs_cache.get(cache_key)
@@ -367,7 +368,7 @@ def _compute_tool_definitions(
 
     if enabled_toolsets is not None:
         effective_enabled_toolsets = list(enabled_toolsets)
-        if os.environ.get("HADES_KANBAN_TASK") and "kanban" not in effective_enabled_toolsets:
+        if env_get("HADES_KANBAN_TASK") and "kanban" not in effective_enabled_toolsets:
             # Dispatcher-spawned workers are scoped by HERMES_KANBAN_TASK and
             # must always receive the lifecycle handoff tools. Assignee
             # profiles may intentionally restrict their normal chat toolsets
@@ -1297,9 +1298,9 @@ def handle_function_call(
                 _dispatch,
                 original_args=_tool_original_args,
                 operation_metadata=operation_metadata,
-                operation_key_factory=lambda: registry.operation_key(
+                operation_key_factory=lambda effective=None: registry.operation_key(
                     function_name,
-                    function_args,
+                    effective if effective is not None else function_args,
                     task_id=task_id or "",
                     tool_call_id=tool_call_id or "",
                 ),

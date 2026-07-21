@@ -183,7 +183,7 @@ pty = [
   # any existing `pip install hermes-agent[pty]` invocations resolve cleanly
   # without pulling in extra packages.
 ]
-honcho = ["honcho-ai==2.0.1"]
+honcho = ["honcho-ai==2.2.0"]
 # Cloud memory providers — opt-in, lazy-installed via tools/lazy_deps.py
 # (memory.supermemory / memory.mem0) at first use. Exact pins MUST match the
 # LAZY_DEPS pins (enforced by tests/test_project_metadata.py). Deliberately
@@ -308,9 +308,17 @@ all = [
 hades = "hades_cli.main:main"
 hades-agent = "run_agent:main"
 hades-acp = "acp_adapter.entry:main"
+# Hermes-compat aliases: the hermes ecosystem (skills that shell out to
+# `hermes ...`, user muscle memory, third-party scripts) must keep working
+# on a hades install. Co-installing the upstream hermes-agent distribution
+# into the same environment is unsupported (script names and shim module
+# paths collide) — `hades doctor` detects and warns about that.
+hermes = "hades_cli.main:main"
+hermes-agent = "run_agent:main"
+hermes-acp = "acp_adapter.entry:main"
 
 [tool.setuptools]
-py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajectory_compressor", "toolset_distributions", "cli", "hades_bootstrap", "hades_constants", "hades_state", "hades_time", "hades_logging", "utils", "mcp_serve"]
+py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajectory_compressor", "toolset_distributions", "cli", "hades_bootstrap", "hades_constants", "hades_state", "hades_time", "hades_logging", "utils", "mcp_serve", "hermes_bootstrap", "hermes_constants", "hermes_state", "hermes_time", "hermes_logging"]
 
 [tool.setuptools.data-files]
 # i18n catalogs. locales/ is a bare data directory (no __init__.py), so it is
@@ -336,7 +344,7 @@ locales = ["locales/*.yaml"]
 "optional-mcps/n8n" = ["optional-mcps/n8n/manifest.yaml"]
 
 [tool.setuptools.package-data]
-hermes_cli = ["web_dist/**/*", "tui_dist/**/*", "scripts/install.sh", "scripts/install.ps1"]
+hades_cli = ["web_dist/**/*", "tui_dist/**/*", "scripts/install.sh", "scripts/install.ps1"]
 gateway = ["assets/**/*"]
 plugins = [
   "*/dashboard/manifest.json",
@@ -355,7 +363,7 @@ plugins = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["agent", "agent.*", "tools", "tools.*", "hades_cli", "hades_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
+include = ["agent", "agent.*", "tools", "tools.*", "hades_cli", "hades_cli.*", "hermes_cli", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

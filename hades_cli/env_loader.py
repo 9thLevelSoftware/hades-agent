@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from hades_constants import env_get
 import sys
 from pathlib import Path
 
@@ -232,7 +233,7 @@ def load_hermes_dotenv(
     """
     loaded: list[Path] = []
 
-    home_path = Path(hermes_home or os.getenv("HADES_HOME", Path.home() / ".hades"))
+    home_path = Path(hermes_home or env_get("HADES_HOME", Path.home() / ".hades"))
     user_env = home_path / ".env"
     project_env_path = Path(project_env) if project_env else None
 

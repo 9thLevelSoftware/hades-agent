@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from hades_constants import get_config_path, get_skills_dir, is_termux
+from hades_constants import env_get, get_config_path, get_skills_dir, is_termux
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +252,7 @@ def _detect_environment(env: str) -> bool:
         # kanban toolset. Mirror the same signals the kanban tools themselves
         # gate on (``tools/kanban_tools.py``) so the offer filter agrees with
         # tool availability.
-        if os.getenv("HADES_KANBAN_TASK") or os.getenv("HADES_KANBAN_BOARD"):
+        if env_get("HADES_KANBAN_TASK") or env_get("HADES_KANBAN_BOARD"):
             result = True
         else:
             try:
@@ -391,7 +391,7 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
     from gateway.session_context import get_session_env
     resolved_platform = (
         platform
-        or os.getenv("HADES_PLATFORM")
+        or env_get("HADES_PLATFORM")
         or get_session_env("HERMES_SESSION_PLATFORM")
     )
     global_disabled = _normalize_string_set(skills_cfg.get("disabled"))

@@ -42,7 +42,7 @@ from hades_cli.config import (
     load_config,
     normalize_extra_headers,
 )
-from hades_constants import OPENROUTER_BASE_URL
+from hades_constants import OPENROUTER_BASE_URL, env_get
 from utils import base_url_host_matches, base_url_hostname, env_int
 
 
@@ -885,7 +885,7 @@ def canonical_custom_identity(
         except Exception:
             candidate = ""
     if not candidate:
-        candidate = os.environ.get("HADES_INFERENCE_PROVIDER", "").strip()
+        candidate = env_get("HADES_INFERENCE_PROVIDER", "").strip()
 
     candidate_norm = _normalize_custom_provider_name(candidate)
     # A bare/non-routable candidate cannot heal a bare custom override.
@@ -1598,7 +1598,7 @@ def resolve_runtime_provider(
                 "in ~/.hades/.env, or run 'gcloud auth application-default "
                 "login' for ADC. Set the GCP project/region under vertex: in "
                 "config.yaml if they aren't embedded in the credentials. "
-                "Install the extra with: pip install 'hermes-agent[vertex]'."
+                "Install the extra with: pip install 'hades-agent[vertex]'."
             )
         return {
             "provider": "vertex",

@@ -12,6 +12,7 @@ the `platform_toolsets` key.
 import json as _json
 import logging
 import os
+from hades_constants import env_get
 import shutil
 import subprocess
 import sys
@@ -600,7 +601,7 @@ TOOLSET_ENV_REQUIREMENTS = {
 
 def _cua_driver_cmd() -> str:
     """Return the cua-driver executable name/path, honoring non-empty overrides."""
-    return os.environ.get("HADES_CUA_DRIVER_CMD", "").strip() or "cua-driver"
+    return env_get("HADES_CUA_DRIVER_CMD", "").strip() or "cua-driver"
 
 
 def _cua_driver_env() -> dict:

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+from hades_constants import env_get
 import random
 import sys
 import urllib.error
@@ -268,7 +269,7 @@ def cmd_dashboard_register(args) -> None:
     # already exists in .env); a portal merely inferred from the stored login
     # keeps the older, more conservative write-only-if-absent behaviour so we
     # don't clutter .env for the common production case.
-    portal_override = getattr(args, "portal_url", None) or os.environ.get(
+    portal_override = getattr(args, "portal_url", None) or env_get(
         "HERMES_DASHBOARD_PORTAL_URL"
     )
     custom_portal_supplied = bool(
