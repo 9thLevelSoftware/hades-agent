@@ -696,11 +696,6 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
 # Attachments — upload / list / download / delete (#35338)
 # ---------------------------------------------------------------------------
 
-# The size cap, filename sanitiser, and collision resolver now live in
-# ``kanban_db`` so the dashboard, the agent toolset, and the CLI share one
-# implementation and cannot drift. ``_safe_attachment_name`` raises a plain
-# ``ValueError`` there; the upload handler's ``except ValueError`` below maps
-# it to a 400, preserving the previous response.
 from hades_cli.kanban_db import (  # noqa: E402
     KANBAN_ATTACHMENT_MAX_BYTES,
     _collision_free_path,
@@ -751,8 +746,13 @@ async def upload_task_attachment(
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         # Resolve name collisions: foo.pdf → foo (1).pdf, foo (2).pdf, …
-        dest_path = _collision_free_path(dest_dir, safe_name)
-        candidate = dest_path.name
+        stem, dot, ext = safe_name.partition(".")
+        candidate = safe_name
+        n = 1
+        while (dest_dir / candidate).exists():
+            candidate = f"{stem} ({n}){dot}{ext}"
+            n += 1
+        dest_path = dest_dir / candidate
 
         total = 0
         try:
@@ -762,13 +762,13 @@ async def upload_task_attachment(
                     if not chunk:
                         break
                     total += len(chunk)
-                    if total > KANBAN_ATTACHMENT_MAX_BYTES:
+                    if total > _MAX_ATTACHMENT_BYTES:
                         out.close()
                         dest_path.unlink(missing_ok=True)
                         raise HTTPException(
                             status_code=413,
                             detail=(
-                                f"attachment exceeds {KANBAN_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB limit"
+                                f"attachment exceeds {_MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB limit"
                             ),
                         )
                     out.write(chunk)
@@ -2026,9 +2026,6 @@ class RenameBoardBody(BaseModel):
     description: Optional[str] = None
     icon: Optional[str] = None
     color: Optional[str] = None
-    # Board-level default project directory for new tasks. ``None`` =
-    # leave unchanged; empty string = clear; a path = validate + set.
-    default_workdir: Optional[str] = None
 
 
 def _board_counts(slug: str) -> dict[str, int]:
@@ -2073,32 +2070,23 @@ def list_boards(include_archived: bool = Query(False)):
     return {"boards": boards, "current": current}
 
 
-def _validate_workdir(raw: str) -> str:
-    """Validate a board default_workdir value; return the resolved path.
-
-    Raises :class:`HTTPException` (400) for relative or non-directory
-    paths — mirroring the create-board contract.
-    """
-    requested = Path(raw).expanduser()
-    if not requested.is_absolute():
-        raise HTTPException(
-            status_code=400,
-            detail="Project directory must be an absolute path.",
-        )
-    if not requested.is_dir():
-        raise HTTPException(
-            status_code=400,
-            detail="Project directory must be an existing directory.",
-        )
-    return str(requested.resolve())
-
-
 @router.post("/boards")
 def create_board_endpoint(payload: CreateBoardBody):
     """Create a new board. Idempotent — ``slug`` collision returns existing."""
     default_workdir = None
     if payload.default_workdir:
-        default_workdir = _validate_workdir(payload.default_workdir)
+        requested = Path(payload.default_workdir).expanduser()
+        if not requested.is_absolute():
+            raise HTTPException(
+                status_code=400,
+                detail="Project directory must be an absolute path.",
+            )
+        if not requested.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail="Project directory must be an existing directory.",
+            )
+        default_workdir = str(requested.resolve())
     try:
         meta = kanban_db.create_board(
             payload.slug,
@@ -2121,28 +2109,20 @@ def create_board_endpoint(payload: CreateBoardBody):
 
 @router.patch("/boards/{slug}")
 def rename_board(slug: str, payload: RenameBoardBody):
-    """Update a board's display metadata + default project directory (slug is immutable — create a new one to rename the directory)."""
+    """Update a board's display metadata (slug is immutable — create a new one to rename the directory)."""
     try:
         normed = kanban_db._normalize_board_slug(slug)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not normed or not kanban_db.board_exists(normed):
         raise HTTPException(status_code=404, detail=f"board {slug!r} does not exist")
-    # default_workdir: None = leave unchanged; "" = clear; path = validate + set.
-    # write_board_metadata treats a falsy value as "clear", so pass "" through.
-    default_workdir: Optional[str] = None
-    if payload.default_workdir is not None:
-        raw = payload.default_workdir.strip()
-        default_workdir = _validate_workdir(raw) if raw else ""
     meta = kanban_db.write_board_metadata(
         normed,
         name=payload.name,
         description=payload.description,
         icon=payload.icon,
         color=payload.color,
-        default_workdir=default_workdir,
     )
-    meta["default_workspace_kind"] = _default_workspace_kind(meta)
     return {"board": meta}
 
 

@@ -76,6 +76,29 @@ def test_codex_success_flushes_and_reports_persisted():
     assert result["agent_persisted"] is True
 
 
+def test_codex_path_reaches_same_observer_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda name, **kw: calls.append((name, kw)),
+    )
+    codex_agent = _make_agent(session_db=None)
+    codex_agent._current_task_id = "task-codex"
+    codex_turn = _make_turn()
+    codex_agent._codex_session.run_turn.return_value = codex_turn
+
+    run_codex_app_server_turn(
+        codex_agent,
+        user_message="hello",
+        original_user_message="hello",
+        messages=[{"role": "user", "content": "hello"}],
+        effective_task_id="task-codex",
+        should_review_memory=False,
+    )
+
+    assert [name for name, _payload in calls].count("post_turn_outcome") == 1
+
+
 def test_codex_turn_exit_reason_is_not_turn_id():
     """Regression: codex_runtime must NOT store turn.turn_id as the
     turn_exit_reason. The ``turn_id`` is an opaque codex identifier (UUID
@@ -194,6 +217,8 @@ def test_codex_turn_persists_each_message_exactly_once():
     real AIAgent._flush_messages_to_session_db to prove no #860/#42039
     duplicate-write regression on the codex path."""
     tmp = tempfile.mkdtemp(prefix="codex_persist_")
+    agent = None
+    db = None
     try:
         db = SessionDB(Path(tmp) / "state.db")
         sid = "sess-codex-once"
@@ -242,6 +267,10 @@ def test_codex_turn_persists_each_message_exactly_once():
     finally:
         import shutil
 
+        if agent is not None:
+            agent.close()
+        if db is not None:
+            db.close()
         shutil.rmtree(tmp)
 
 

@@ -2,15 +2,14 @@
 """
 Delegate Tool -- Subagent Architecture
 
-Spawns child AIAgent instances with isolated context, inherited toolsets,
+Spawns child AIAgent instances with isolated context, restricted toolsets,
 and their own terminal sessions. Supports single-task and batch (parallel)
-modes. Top-level model calls run in the background; orchestrator children
-wait for their own workers so they can synthesize the results.
+modes. The parent blocks until all children complete.
 
 Each child gets:
   - A fresh conversation (no parent history)
   - Its own task_id (own terminal session, file ops cache)
-  - The parent's toolsets, with child-only blocked tools stripped
+  - A restricted toolset (configurable, with blocked tools always stripped)
   - A focused system prompt built from the delegated goal + context
 
 The parent's context only sees the delegation call and the summary result,
@@ -785,27 +784,6 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     return [t for t in toolsets if t not in blocked_toolset_names]
 
 
-def _blocked_toolsets_for_role(role: str) -> List[str]:
-    """Return one-tool deny toolsets for a delegated child role.
-
-    ``_strip_blocked_tools`` can remove fully blocked toolsets, but it must keep
-    mixed platform bundles such as ``hermes-cli`` because those also contain
-    useful tools. Passing these exact deny toolsets to AIAgent lets
-    ``model_tools`` subtract blocked names *after* composite expansion, and the
-    restriction survives later registry/MCP refreshes through the agent's
-    stored ``disabled_toolsets``.
-    """
-    blocked_names = set(DELEGATE_BLOCKED_TOOLS)
-    if role == "orchestrator":
-        blocked_names.discard("delegate_task")
-    return sorted(
-        name
-        for name, defn in TOOLSETS.items()
-        if defn.get("tools")
-        and set(defn.get("tools", ())).issubset(blocked_names)
-    )
-
-
 def _emit_parent_console(parent_agent, line: str) -> None:
     """Emit a human-readable progress line to the parent's console.
 
@@ -1087,6 +1065,12 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Durable identity for plugin-owned delegation routing.  These are
+    # internal construction arguments and are deliberately absent from the
+    # model-facing delegate_task schema.
+    operation_id: Optional[str] = None,
+    child_session_id: Optional[str] = None,
+    routing_task_index: Optional[int] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1158,28 +1142,6 @@ def _build_child_agent(
         child_toolsets = _strip_blocked_tools(sorted(parent_toolsets))
     else:
         child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
-
-    # Blocked tools also live inside mixed platform bundles (hermes-cli,
-    # hermes-telegram, etc.) that _strip_blocked_tools must keep because they
-    # carry useful tools too. Pass exact one-tool deny toolsets through to the
-    # child so model_tools subtracts the blocked names AFTER composite
-    # expansion, and the restriction survives later registry/MCP refreshes.
-    raw_parent_disabled = getattr(parent_agent, "disabled_toolsets", None)
-    if isinstance(raw_parent_disabled, (list, tuple, set)):
-        inherited_disabled = [str(name) for name in raw_parent_disabled]
-    else:
-        inherited_disabled = []
-    if effective_role == "orchestrator":
-        # Role grants delegate_task explicitly, matching the unconditional
-        # delegation toolset re-add below.
-        inherited_disabled = [
-            name for name in inherited_disabled if name != "delegation"
-        ]
-    child_disabled_toolsets = list(
-        dict.fromkeys(
-            inherited_disabled + _blocked_toolsets_for_role(effective_role)
-        )
-    )
 
     # Orchestrators retain the 'delegation' toolset that _strip_blocked_tools
     # removed.  The re-add is unconditional on parent-toolset membership because
@@ -1324,6 +1286,137 @@ def _build_child_agent(
     # fallback_model parameter (which handles both list and dict forms).
     parent_fallback = getattr(parent_agent, "_fallback_chain", None) or None
 
+    # Runtime routing is an opt-in construction seam.  Preserve the historical
+    # child path when no resolver is registered, and preserve the configured
+    # delegation pin as an absolute bypass when *either* provider or model is
+    # fixed.  A partial pin must never be completed by policy.
+    fixed_delegation_runtime = bool(
+        str(delegation_cfg.get("provider") or "").strip()
+        or str(delegation_cfg.get("model") or "").strip()
+    )
+    runtime_resolver_present = False
+    if operation_id and child_session_id and not fixed_delegation_runtime:
+        try:
+            from hermes_cli.plugins import get_agent_runtime_resolver
+
+            runtime_resolver_present = get_agent_runtime_resolver() is not None
+        except Exception:
+            runtime_resolver_present = False
+
+    prepared_agent_runtime = None
+    runtime_routing_context = None
+    routed_runtime = None
+    child_pool = None
+    if runtime_resolver_present:
+        from agent.runtime_routing import (
+            AgentRuntimeContext,
+            AgentRuntimeRequest,
+            RUNTIME_ROUTING_CONTRACT_VERSION,
+            constructor_runtime_spec,
+            finalize_prepared_agent_runtime,
+            prepare_agent_runtime,
+            resolve_ordinary_hermes_runtime,
+        )
+
+        # Pool resolution belongs before the constructor boundary.  The
+        # selected runtime may replace it with an exact plugin-owned pool, but
+        # an inherit/shadow plan must still receive the same pool the ordinary
+        # delegation path would have attached after construction.
+        child_pool = _resolve_child_credential_pool(
+            effective_provider, parent_agent, effective_base_url
+        )
+        baseline_runtime = constructor_runtime_spec(
+            model=effective_model,
+            provider=effective_provider,
+            base_url=effective_base_url,
+            api_key=effective_api_key,
+            api_mode=effective_api_mode,
+            acp_command=effective_acp_command,
+            acp_args=effective_acp_args,
+            credential_pool=child_pool,
+            reasoning_config=child_reasoning,
+            fallback_model=parent_fallback,
+        )
+        durable_task_index = (
+            task_index if routing_task_index is None else routing_task_index
+        )
+        runtime_routing_context = AgentRuntimeContext(
+            scope="delegation",
+            task=goal,
+            session_id=child_session_id,
+            task_id=f"{operation_id}:{durable_task_index}",
+            operation_id=operation_id,
+            task_index=durable_task_index,
+            metadata={
+                "platform": str(getattr(parent_agent, "platform", None) or "subagent"),
+                "fixed_delegation_provider": False,
+                "fixed_delegation_model": False,
+            },
+        )
+        runtime_request = AgentRuntimeRequest(
+            contract_version=RUNTIME_ROUTING_CONTRACT_VERSION,
+            context=runtime_routing_context,
+            baseline=baseline_runtime,
+        )
+        prepared_agent_runtime = prepare_agent_runtime(runtime_request)
+        if prepared_agent_runtime.plan.action == "project":
+            routed_runtime = prepared_agent_runtime.plan.runtime
+        else:
+            routed_runtime = resolve_ordinary_hermes_runtime(
+                baseline_runtime,
+                owns_fallbacks=prepared_agent_runtime.plan.owns_fallbacks,
+            ).runtime
+        prepared_agent_runtime = finalize_prepared_agent_runtime(
+            prepared_agent_runtime,
+            runtime_request,
+            routed_runtime,
+        )
+
+        # Project the complete executable tuple before AIAgent.__init__.  The
+        # constructor validates the sealed handoff again, so no field can be
+        # substituted between policy and provider-client construction.
+        effective_model = routed_runtime.model
+        effective_provider = routed_runtime.provider
+        effective_base_url = routed_runtime.base_url
+        effective_api_key = routed_runtime.api_key
+        effective_api_mode = routed_runtime.api_mode or None
+        effective_acp_command = routed_runtime.acp_command
+        effective_acp_args = list(routed_runtime.acp_args)
+        child_pool = routed_runtime.credential_pool
+        child_reasoning = (
+            dict(routed_runtime.reasoning_config)
+            if routed_runtime.reasoning_config is not None
+            else None
+        )
+        parent_fallback = [dict(item) for item in routed_runtime.fallback_model]
+        if child_progress_cb is not None:
+            # The callback is created before credential resolution so ordinary
+            # delegation stays untouched. Rebuild it only for a projected
+            # runtime so every lifecycle event reports the model that will
+            # actually execute, never the parent's baseline label.
+            child_progress_cb = _build_child_progress_callback(
+                task_index,
+                goal,
+                parent_agent,
+                task_count,
+                subagent_id=subagent_id,
+                parent_id=parent_subagent_id,
+                depth=tui_depth,
+                model=effective_model,
+                toolsets=child_toolsets,
+                session_ref=child_session_ref,
+            )
+
+            def _routed_child_thinking(text: str) -> None:
+                if not text:
+                    return
+                try:
+                    child_progress_cb("_thinking", text)
+                except Exception as exc:
+                    logger.debug("Child thinking callback relay failed: %s", exc)
+
+            child_thinking_cb = _routed_child_thinking
+
     # Inherit the parent's OpenRouter provider-preference filters by default
     # (so subagents routed to the same provider honour the same routing
     # constraints).  BUT: when `delegation.provider` is set the user is
@@ -1342,7 +1435,11 @@ def _build_child_agent(
         parent_agent, "provider_data_collection", None
     ) or ""
     child_openrouter_min_coding_score = getattr(parent_agent, "openrouter_min_coding_score", None)
-    if override_provider:
+    routed_to_different_provider = bool(
+        runtime_routing_context is not None
+        and effective_provider != _parent_provider
+    )
+    if override_provider or routed_to_different_provider:
         child_providers_allowed = None
         child_providers_ignored = None
         child_providers_order = None
@@ -1385,7 +1482,6 @@ def _build_child_agent(
             prefill_messages=getattr(parent_agent, "prefill_messages", None),
             fallback_model=parent_fallback,
             enabled_toolsets=child_toolsets,
-            disabled_toolsets=child_disabled_toolsets,
             quiet_mode=True,
             ephemeral_system_prompt=child_prompt,
             log_prefix=f"[subagent-{task_index}]",
@@ -1406,6 +1502,8 @@ def _build_child_agent(
             request_overrides=(
                 dict(override_request_overrides or {})
                 if override_provider
+                else {}
+                if routed_to_different_provider
                 else dict(getattr(parent_agent, "request_overrides", {}) or {})
             ),
             openrouter_min_coding_score=child_openrouter_min_coding_score,
@@ -1413,6 +1511,13 @@ def _build_child_agent(
             iteration_budget=None,
             **child_optional_kwargs,
         )
+        if runtime_routing_context is not None:
+            child_kwargs.update(
+                session_id=child_session_id,
+                credential_pool=child_pool,
+                runtime_routing_context=runtime_routing_context,
+                prepared_agent_runtime=prepared_agent_runtime,
+            )
         if isinstance(AIAgent, type):
             child = AIAgent.__new__(AIAgent)
             AIAgent.__init__(child, **child_kwargs)
@@ -1468,13 +1573,15 @@ def _build_child_agent(
     if parent_sid and getattr(child, "_session_init_model_config", None) is not None:
         child._session_init_model_config["_delegate_from"] = parent_sid
 
-    # Share a credential pool with the child when possible so subagents can
-    # rotate credentials on rate limits instead of getting pinned to one key.
-    child_pool = _resolve_child_credential_pool(
-        effective_provider, parent_agent, effective_base_url
-    )
-    if child_pool is not None:
-        child._credential_pool = child_pool
+    # Ordinary/fixed delegation retains the historical post-construction pool
+    # attachment.  Routed delegation passed the exact selected pool into the
+    # constructor above; replacing it here would violate the sealed runtime.
+    if runtime_routing_context is None:
+        child_pool = _resolve_child_credential_pool(
+            effective_provider, parent_agent, effective_base_url
+        )
+        if child_pool is not None:
+            child._credential_pool = child_pool
 
     # Register child for interrupt propagation
     if hasattr(parent_agent, "_active_children"):
@@ -1994,18 +2101,6 @@ def _run_single_child(
 
         child_task_id = _subagent_id or f"subagent-{task_index}-{_uuid.uuid4().hex[:8]}"
         parent_task_id = getattr(parent_agent, "_current_task_id", None)
-        # Seed the child's session-cwd record from the parent's (cwd rearch):
-        # children share the parent's container, and today they inherit the
-        # parent's live env.cwd implicitly. Seeding at spawn preserves that
-        # starting directory while keeping the child's subsequent `cd`s
-        # isolated in its own record (a child's cd no longer bleeds back into
-        # the parent once readers flip to the record store).
-        try:
-            from tools.terminal_tool import get_session_cwd, record_session_cwd
-
-            record_session_cwd(child_task_id, get_session_cwd(parent_task_id))
-        except Exception as e:
-            logger.debug("Child cwd seed failed: %s", e)
         wall_start = time.time()
         parent_reads_snapshot = (
             list(file_state.known_reads(parent_task_id)) if parent_task_id else []
@@ -2466,6 +2561,34 @@ def _recover_tasks_from_json_string(
     return parsed, None
 
 
+def _background_delegation_origin(parent_agent) -> tuple[str, str, Optional[str]]:
+    """Capture durable completion ownership on the parent thread."""
+    from tools.approval import get_current_session_key
+
+    session_key = get_current_session_key(default="")
+    origin_ui_session_id = ""
+    try:
+        from gateway.session_context import get_session_env
+
+        source = get_session_env("HERMES_SESSION_SOURCE", "")
+        origin_ui_session_id = get_session_env("HERMES_UI_SESSION_ID", "")
+        if source == "tui":
+            agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
+            if agent_session_id:
+                session_key = agent_session_id
+    except Exception:
+        origin_ui_session_id = ""
+    if not session_key:
+        agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
+        if agent_session_id:
+            session_key = agent_session_id
+    return (
+        session_key,
+        origin_ui_session_id,
+        getattr(parent_agent, "session_id", None),
+    )
+
+
 def delegate_task(
     goal: Optional[str] = None,
     context: Optional[str] = None,
@@ -2474,13 +2597,15 @@ def delegate_task(
     role: Optional[str] = None,
     background: Optional[bool] = None,
     parent_agent=None,
+    operation_id: Optional[str] = None,
+    task_index_offset: int = 0,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
 
     Supports two modes:
-      - Single: provide goal (+ optional context and role)
-      - Batch:  provide tasks array [{goal, context, role}, ...]
+      - Single: provide goal (+ optional context, toolsets, role)
+      - Batch:  provide tasks array [{goal, context, toolsets, role}, ...]
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
@@ -2505,12 +2630,10 @@ def delegate_task(
     top_role = _normalize_role(role)
 
     # Background (async) delegation now applies to BOTH single tasks and
-    # batches. A batch is dispatched as ONE async unit: the whole fan-out runs
-    # on the daemon executor, joins on every child (see _execute_and_aggregate
-    # / dispatch_async_delegation_batch), and pushes a SINGLE completion event
-    # carrying the consolidated per-task results. It re-enters the conversation
-    # as one message once ALL children finish — the chat is not blocked while
-    # they run.
+    # batches. A batch simply becomes N independent async dispatches: each
+    # child runs on the daemon executor and re-enters the conversation via
+    # the completion queue on its own, carrying its own handle. There's no
+    # combined "wait for all" — fan-out is exactly N background subagents.
     background = is_truthy_value(background, default=False) if background is not None else False
 
     # Depth limit — configurable via delegation.max_spawn_depth,
@@ -2591,6 +2714,100 @@ def delegate_task(
         if not task.get("goal", "").strip():
             return tool_error(f"Task {i} is missing a 'goal'.")
 
+    # The operation identity is generated by the host, never by the model.
+    # Internal controlled reconstruction may pass the original identity and
+    # task-index offset to replay an already committed routing decision.
+    if operation_id is None:
+        from tools.async_delegation import new_delegation_id
+
+        operation_id = new_delegation_id()
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id
+        or len(operation_id) > 256
+        or any(
+            not (char.isascii() and (char.isalnum() or char in "_.:@+-"))
+            for char in operation_id
+        )
+    ):
+        return tool_error("Invalid internal delegation operation id.")
+    if (
+        isinstance(task_index_offset, bool)
+        or not isinstance(task_index_offset, int)
+        or task_index_offset < 0
+    ):
+        return tool_error("Invalid internal delegation task index offset.")
+
+    async_reservation = False
+    async_fallback_note = None
+    async_session_key = ""
+    async_origin_ui_session_id = ""
+    async_parent_session_id = getattr(parent_agent, "session_id", None)
+    if background:
+        try:
+            from gateway.session_context import async_delivery_supported
+
+            async_ok = async_delivery_supported()
+        except Exception:
+            async_ok = True
+        if not async_ok:
+            background = False
+            async_fallback_note = (
+                "background=true is not available on this endpoint (stateless "
+                "HTTP API — no channel to deliver a detached subagent result "
+                "after the turn ends), so the subagent(s) ran SYNCHRONOUSLY and "
+                "the result is included above."
+            )
+        else:
+            from tools.async_delegation import reserve_async_delegation_batch
+
+            (
+                async_session_key,
+                async_origin_ui_session_id,
+                async_parent_session_id,
+            ) = _background_delegation_origin(parent_agent)
+            reservation = reserve_async_delegation_batch(
+                delegation_id=operation_id,
+                goals=[task["goal"] for task in task_list],
+                context=context,
+                toolsets=None,
+                role=top_role,
+                model=creds["model"],
+                session_key=async_session_key,
+                origin_ui_session_id=async_origin_ui_session_id,
+                parent_session_id=async_parent_session_id,
+                child_session_ids=[
+                    f"{operation_id}:{task_index_offset + index}"
+                    for index in range(len(task_list))
+                ],
+                max_async_children=_get_max_async_children(),
+            )
+            if reservation.get("status") == "reserved":
+                async_reservation = True
+            elif reservation.get("reason") == "capacity":
+                background = False
+                async_fallback_note = (
+                    "The background delegation pool was at capacity "
+                    "(delegation.max_concurrent_children), so the subagent(s) "
+                    "ran SYNCHRONOUSLY and the result is included above. Raise "
+                    "delegation.max_concurrent_children in config.yaml to allow "
+                    "more concurrent background delegations."
+                )
+            else:
+                return json.dumps(
+                    {
+                        "status": "rejected",
+                        "mode": "background",
+                        "operation_id": operation_id,
+                        "error": reservation.get(
+                            "error", "Background dispatch failed."
+                        ),
+                        "reason": reservation.get("reason", "dispatch"),
+                        "note": "The background delegation was not started.",
+                    },
+                    ensure_ascii=False,
+                )
+
     overall_start = time.monotonic()
     results = []
 
@@ -2634,11 +2851,33 @@ def delegate_task(
                 override_acp_command=creds.get("command"),
                 override_acp_args=creds.get("args"),
                 role=effective_role,
+                operation_id=operation_id,
+                child_session_id=f"{operation_id}:{task_index_offset + i}",
+                routing_task_index=task_index_offset + i,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
             children.append((i, t, child))
-    except Exception:
+    except Exception as exc:
+        try:
+            from agent.runtime_routing import RuntimeRoutingDeferred
+
+            is_routing_deferred = isinstance(exc, RuntimeRoutingDeferred)
+        except Exception:
+            is_routing_deferred = False
+        if async_reservation:
+            try:
+                from tools.async_delegation import abort_reserved_async_delegation
+
+                abort_reserved_async_delegation(
+                    operation_id,
+                    terminalize_operation=not is_routing_deferred,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to release reserved delegation after child construction",
+                    exc_info=True,
+                )
         for _, _, child in children:
             try:
                 if hasattr(parent_agent, "_active_children"):
@@ -2657,10 +2896,34 @@ def delegate_task(
                 child.close()
             except Exception:
                 pass
+        if is_routing_deferred:
+            return json.dumps(
+                {
+                    "status": "deferred",
+                    "operation_id": operation_id,
+                    "reason": "operation_pending",
+                    "retry_after_seconds": getattr(
+                        exc, "retry_after_seconds", None
+                    ),
+                },
+                ensure_ascii=False,
+            )
         raise
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
+
+    if async_reservation:
+        from tools.async_delegation import update_reserved_async_delegation_children
+
+        update_reserved_async_delegation_children(
+            operation_id,
+            [
+                str(getattr(child, "session_id", "") or "")
+                for _, _, child in children
+                if getattr(child, "session_id", None)
+            ],
+        )
 
     def _execute_and_aggregate() -> dict:
         """Run all built children (1 or N), join on them, aggregate results,
@@ -2903,6 +3166,7 @@ def delegate_task(
         total_duration = round(time.monotonic() - overall_start, 2)
 
         return {
+            "operation_id": operation_id,
             "results": results,
             "total_duration_seconds": total_duration,
         }
@@ -2916,72 +3180,8 @@ def delegate_task(
     # keep chatting, get the combined summaries back together at the end.
     if background:
         from tools.async_delegation import dispatch_async_delegation_batch
-        from tools.approval import get_current_session_key
 
-        # Stateless request/response sessions (the API server / WebUI path)
-        # cannot route a detached subagent result back to the agent after the
-        # turn ends — there is no persistent channel and the adapter's send()
-        # is a no-op, so a background dispatch would silently never re-enter the
-        # conversation (issue #10760). Fall back to SYNCHRONOUS execution: the
-        # work still runs and its result returns in this same response, which is
-        # strictly better than a handle that never resolves. Mirrors the
-        # pool-at-capacity inline fallback below.
-        try:
-            from gateway.session_context import async_delivery_supported
-            _async_ok = async_delivery_supported()
-        except Exception:
-            _async_ok = True
-        if not _async_ok:
-            logger.info(
-                "delegate_task: async delivery unsupported on this session "
-                "(stateless HTTP API); running the batch synchronously instead."
-            )
-            _sync_result = _execute_and_aggregate()
-            if isinstance(_sync_result, dict):
-                _sync_result["note"] = (
-                    "background=true is not available in this session — it cannot "
-                    "receive a detached subagent result after the turn ends (a "
-                    "one-shot runner such as `hermes -z` or a cron job, or a "
-                    "stateless HTTP endpoint). The subagent(s) ran SYNCHRONOUSLY "
-                    "and the result is included above."
-                )
-            return json.dumps(_sync_result, ensure_ascii=False)
-
-        _session_key = get_current_session_key(default="")
-        _origin_ui_session_id = ""
-        try:
-            from gateway.session_context import get_session_env
-
-            _source = get_session_env("HERMES_SESSION_SOURCE", "")
-            _origin_ui_session_id = get_session_env("HERMES_UI_SESSION_ID", "")
-            # In desktop/TUI, the routable session key is the durable
-            # AIAgent.session_id. Context compression can rotate that id during
-            # the same turn before the TUI-side session dict is re-anchored;
-            # if we capture the stale approval/session context key here, the
-            # async completion becomes an orphan and any desktop poller may
-            # consume it. Gateway chats are different: their session_key is the
-            # platform conversation key (agent:main:...), so keep it there.
-            if _source == "tui":
-                _agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
-                if _agent_session_id:
-                    _session_key = _agent_session_id
-        except Exception:
-            _origin_ui_session_id = ""
-        if not _session_key:
-            # CLI (single-process) path: the approval contextvar is only bound
-            # during gateway/TUI turns and HERMES_SESSION_KEY is not in the CLI
-            # environment, so the key resolves empty here. Since #64240 the CLI
-            # drains completions through a positive-ownership filter keyed on
-            # the durable AIAgent.session_id — an empty session_key would fail
-            # closed and the CLI could never claim its own completions, while
-            # a restored foreign event with an empty key could leak into any
-            # unfiltered consumer (#64484). Stamp the parent's durable session
-            # id instead; compression rotations are handled on the drain side
-            # via resolve_resume_session_id lineage resolution.
-            _agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
-            if _agent_session_id:
-                _session_key = _agent_session_id
-        _parent_session_id = getattr(parent_agent, "session_id", None)
+        _parent_session_id = async_parent_session_id
         _child_agents = [c for (_, _, c) in children]
         _child_session_ids = [
             str(getattr(child, "session_id", "") or "")
@@ -3065,20 +3265,20 @@ def delegate_task(
 
         _goals = [t["goal"] for t in task_list]
         dispatch = dispatch_async_delegation_batch(
+            delegation_id=operation_id,
             goals=_goals,
             context=context,
-            # Metadata for the completion block only; subagents inherit the
-            # parent's toolsets (no model-facing toolsets arg).
             toolsets=None,
             role=top_role,
             model=creds["model"],
-            session_key=_session_key,
-            origin_ui_session_id=_origin_ui_session_id,
-            parent_session_id=_parent_session_id,
+            session_key=async_session_key,
+            origin_ui_session_id=async_origin_ui_session_id,
+            parent_session_id=async_parent_session_id,
             child_session_ids=_child_session_ids,
             runner=_batch_runner,
             interrupt_fn=_batch_interrupt,
             max_async_children=_get_max_async_children(),
+            pre_reserved=True,
         )
 
         if dispatch.get("status") == "dispatched":
@@ -3103,12 +3303,19 @@ def delegate_task(
                 "mode": "background",
                 "count": n,
                 "delegation_id": dispatch["delegation_id"],
+                "operation_id": dispatch["delegation_id"],
                 "goals": _goals,
                 "note": note,
             }
             return json.dumps(payload, ensure_ascii=False)
 
         if dispatch.get("reason") != "capacity":
+            try:
+                from tools.async_delegation import abort_reserved_async_delegation
+
+                abort_reserved_async_delegation(operation_id)
+            except Exception:
+                logger.debug("Failed to release rejected delegation reservation")
             _reject_unstarted_children(
                 dispatch.get("error", "Background dispatch failed.")
             )
@@ -3126,26 +3333,37 @@ def delegate_task(
                 ensure_ascii=False,
             )
 
-        # Pool at capacity — keep the parent-owned children attached while the
-        # batch runs synchronously.
-        logger.info(
-            "delegate_task: async pool at capacity (%s); running the whole "
-            "batch synchronously instead.",
-            dispatch.get("error", "rejected"),
+        # Reservation succeeded before construction, so a start rejection is
+        # a scheduling failure rather than a capacity fallback.
+        try:
+            from tools.async_delegation import abort_reserved_async_delegation
+
+            abort_reserved_async_delegation(operation_id)
+        except Exception:
+            logger.debug("Failed to release rejected delegation reservation")
+        _reject_unstarted_children(
+            dispatch.get("error", "Background dispatch failed.")
         )
-        _cap_result = _execute_and_aggregate()
-        if isinstance(_cap_result, dict):
-            _cap_result["note"] = (
-                "The background delegation pool was at capacity "
-                "(delegation.max_concurrent_children), so the subagent(s) ran "
-                "SYNCHRONOUSLY and the result is included above. Raise "
-                "delegation.max_concurrent_children in config.yaml to allow "
-                "more concurrent background delegations."
-            )
-        return json.dumps(_cap_result, ensure_ascii=False)
+        return json.dumps(
+            {
+                "status": "rejected",
+                "mode": "background",
+                "operation_id": operation_id,
+                "error": dispatch.get("error", "Background dispatch failed."),
+                "reason": dispatch.get("reason", "dispatch"),
+                "note": (
+                    "The background delegation was reserved but could not be "
+                    "scheduled; its unstarted child resources were released."
+                ),
+            },
+            ensure_ascii=False,
+        )
 
     # ----- Synchronous path -----
-    return json.dumps(_execute_and_aggregate(), ensure_ascii=False)
+    synchronous_result = _execute_and_aggregate()
+    if async_fallback_note:
+        synchronous_result["note"] = async_fallback_note
+    return json.dumps(synchronous_result, ensure_ascii=False)
 
 
 def _resolve_child_credential_pool(
@@ -3455,16 +3673,16 @@ def _build_top_level_description() -> str:
         "Only the final summary is returned -- intermediate tool results "
         "never enter your context window.\n\n"
         "TWO MODES (one of 'goal' or 'tasks' is required):\n"
-        "1. Single task: provide 'goal' (+ optional context and role).\n"
+        "1. Single task: provide 'goal' (+ optional context, toolsets).\n"
         f"2. Batch (parallel): provide 'tasks' array with up to {max_children} "
         f"items concurrently for this user (configured via "
         f"delegation.max_concurrent_children in config.yaml). {nesting_clause}\n\n"
         "BOTH MODES RUN IN THE BACKGROUND. delegate_task returns immediately — "
-        "you and the user keep working, and the completed result re-enters "
-        "the conversation as a new message. A "
-        "batch returns one handle, runs N subagents concurrently, and delivers "
-        "one consolidated result after ALL of them finish. Do NOT wait or poll; "
-        "just continue with other work after dispatching.\n\n"
+        "you and the user keep working, and each subagent's full result "
+        "re-enters the conversation as its own new message when it finishes. A "
+        "batch is just N independent background subagents (N handles, each "
+        "completes on its own). Do NOT wait or poll; just continue with other "
+        "work after dispatching.\n\n"
         "WHEN TO USE delegate_task:\n"
         "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
         "- Tasks that would flood your context with intermediate data\n"
@@ -3502,7 +3720,7 @@ def _build_top_level_description() -> str:
         f"Orchestrators are bounded by max_spawn_depth={max_depth} for this "
         f"user and can be disabled globally via "
         "delegation.orchestrator_enabled=false.\n"
-        "- Subagent model is NOT selectable per call: children inherit the parent model (plus its fallback chain) unless you pin all subagents to a model via delegation.provider / delegation.model in config.yaml.\n"
+        "- Subagent runtime is NOT selectable per call: when automatic routing is active each child is routed independently; otherwise children inherit the parent runtime unless delegation.provider or delegation.model is pinned in config.yaml.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
         "- Results are always returned as an array, one entry per task."
     )
@@ -3518,7 +3736,7 @@ def _build_tasks_param_description() -> str:
         f"Batch mode: tasks to run in parallel (up to {max_children} for this "
         f"user, set via delegation.max_concurrent_children). Each gets "
         "its own subagent with isolated context and terminal session. "
-        "When provided, top-level goal/context/role are ignored."
+        "When provided, top-level goal/context/toolsets are ignored."
     )
 
 
@@ -3647,13 +3865,13 @@ DELEGATE_TASK_SCHEMA = {
             "background": {
                 "type": "boolean",
                 "description": (
-                    "DEPRECATED / IGNORED. Top-level single and batch "
-                    "delegations run in the background automatically — you do "
-                    "not need to (and cannot) opt in or out. A single result or "
-                    "consolidated batch result re-enters the conversation when "
-                    "the work finishes; just continue working in the meantime. "
-                    "Setting this has no effect; the parameter remains only for "
-                    "backward compatibility."
+                    "DEPRECATED / IGNORED. Single-task delegations always run "
+                    "in the background automatically — you do not need to (and "
+                    "cannot) opt in or out. The result re-enters the "
+                    "conversation as a new message when the subagent finishes; "
+                    "just continue working in the meantime. Setting this has no "
+                    "effect; the parameter remains only for backward "
+                    "compatibility."
                 ),
             },
         },
@@ -3671,8 +3889,7 @@ def _model_background_value(args: dict, parent_agent=None) -> bool:
 
     Delegations from the top-level agent always run in the background — the
     model does not choose. This applies to both a single task and a fan-out
-    batch (the whole batch is one async unit that joins on all children and
-    returns one consolidated result). The one
+    batch (each task becomes its own independent background subagent). The one
     exception is a delegation from an orchestrator subagent (depth > 0), which
     needs its workers' results within its own turn. The live path is
     ``run_agent._dispatch_delegate_task``; this lambda mirrors it for the rare

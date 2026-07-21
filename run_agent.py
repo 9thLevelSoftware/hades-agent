@@ -143,7 +143,7 @@ from model_tools import (
     handle_function_call,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.handle_function_call")
     check_toolset_requirements,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.check_toolset_requirements")
 )
-from tools.terminal_tool import cleanup_vm, get_active_env
+from tools.terminal_tool import cleanup_vm
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
 
@@ -514,6 +514,8 @@ class AIAgent:
         pass_session_id: bool = False,
         suppress_status_output: bool = False,
         owns_session_db: bool = False,
+        runtime_routing_context: "AgentRuntimeContext" = None,
+        prepared_agent_runtime: "PreparedAgentRuntime" = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent``."""
         from agent.agent_init import init_agent
@@ -592,6 +594,8 @@ class AIAgent:
             checkpoint_max_file_size_mb=checkpoint_max_file_size_mb,
             pass_session_id=pass_session_id,
             suppress_status_output=suppress_status_output,
+            runtime_routing_context=runtime_routing_context,
+            prepared_agent_runtime=prepared_agent_runtime,
         )
 
     def _get_session_db_for_recall(self):
@@ -644,7 +648,6 @@ class AIAgent:
                 user_id=None,
                 parent_session_id=self._parent_session_id,
                 cwd=_launch_cwd_for_session(source),
-                profile_name=_profile_for_session,
             )
             self._session_db_created = True
         except Exception as e:
@@ -867,12 +870,9 @@ class AIAgent:
 
     def _ensure_lmstudio_runtime_loaded(self, config_context_length: Optional[int] = None) -> None:
         """
-        Preload the LM Studio model unless configured to rely on LM Studio JIT loading.
+        Preload the LM Studio model with at least Hermes' minimum context.
         """
         if (self.provider or "").strip().lower() != "lmstudio":
-            return
-        if (getattr(self, "lmstudio_load_mode", "explicit") or "explicit").strip().lower() == "jit":
-            logger.debug("LM Studio explicit preload skipped: lmstudio_load_mode=jit")
             return
         try:
             from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
@@ -1296,7 +1296,6 @@ class AIAgent:
             "base_url": getattr(self, "base_url", "") or "",
             "api_key": getattr(self, "api_key", "") or "",
             "api_mode": getattr(self, "api_mode", "") or "",
-            "auth_mode": getattr(self, "auth_mode", "") or "",
         }
 
     def _check_compression_model_feasibility(self) -> None:
@@ -1827,15 +1826,12 @@ class AIAgent:
         # Close and turn-start persistence can run on separate CLI threads; the
         # marker test-and-append below must be one critical section or both can
         # observe the same unmarked dict and write duplicate durable rows.
-        from agent.agent_runtime_helpers import note_turn_persisted
-
         persist_lock = getattr(self, "_session_persist_lock", None)
         if persist_lock is None:
             self._drop_trailing_empty_response_scaffolding(messages)
             self._session_messages = messages
             self._save_session_log(messages)
             self._flush_messages_to_session_db(messages, conversation_history)
-            note_turn_persisted(self)
             return
 
         with persist_lock:
@@ -1843,7 +1839,6 @@ class AIAgent:
             self._session_messages = messages
             self._save_session_log(messages)
             self._flush_messages_to_session_db(messages, conversation_history)
-            note_turn_persisted(self)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
@@ -4909,12 +4904,6 @@ class AIAgent:
 
     def _record_streamed_assistant_text(self, text: str) -> None:
         """Accumulate visible assistant text emitted through stream callbacks."""
-        # Single-writer guard (#65991): a superseded stream must not pollute the
-        # turn's accumulated text (which also feeds the interim-visible-text
-        # de-dup comparison), even when a caller reaches this directly (the
-        # tool-suppressed content path) rather than through _fire_stream_delta.
-        if self._stream_writer_superseded():
-            return
         if isinstance(text, str) and text:
             self._current_streamed_assistant_text = (
                 getattr(self, "_current_streamed_assistant_text", "") + text
@@ -5097,71 +5086,8 @@ class AIAgent:
         if not hasattr(self, "_stream_writer_dropped"):
             self._stream_writer_dropped = 0
 
-    def _claim_stream_writer(self) -> int:
-        """Claim exclusive ownership of the streaming delta sink for the calling
-        stream attempt and return its monotonic writer token (#65991).
-
-        Every streaming attempt (each provider path, each retry) calls this
-        right before it begins consuming its stream. Claiming bumps the shared
-        token, so any earlier attempt still alive on another thread is
-        immediately superseded: its cached token no longer matches and the sink
-        fences its late chunks out. The token is stored per-thread, so a thread
-        that never claimed (a non-streaming caller) is never treated as a
-        writer and can never be fenced.
-        """
-        self._ensure_stream_writer_state()
-        with self._stream_writer_lock:
-            self._stream_writer_token += 1
-            token = self._stream_writer_token
-        self._stream_writer_tls.token = token
-        return token
-
-    def _stream_writer_is_current(self, token: int) -> bool:
-        """True when ``token`` (from a prior _claim_stream_writer) is still the
-        active writer — i.e. no newer stream attempt has claimed the sink since
-        (#65991). Lets a stream loop bail out the instant it is superseded."""
-        return token == getattr(self, "_stream_writer_token", token)
-
-    def _stream_writer_superseded(self) -> bool:
-        """True when the calling thread claimed the delta sink but a newer
-        stream attempt has since claimed it — i.e. this thread is a stale
-        writer whose chunks must be dropped (#65991).
-
-        A thread that never claimed (``token is None``) is not a writer and is
-        never reported as superseded, so non-streaming delta callers are
-        unaffected.
-        """
-        tls = getattr(self, "_stream_writer_tls", None)
-        token = getattr(tls, "token", None) if tls is not None else None
-        if token is None:
-            return False
-        return token != getattr(self, "_stream_writer_token", token)
-
-    def _note_dropped_stream_writer(self, where: str) -> None:
-        """Record + log that a superseded stream's delta was discarded."""
-        try:
-            self._stream_writer_dropped = int(getattr(self, "_stream_writer_dropped", 0)) + 1
-        except Exception:
-            self._stream_writer_dropped = 1
-        # Log sparsely (first drop, then powers of two) so a chatty superseded
-        # stream can't flood the log, but a real provider problem is still
-        # visible. A silent discard would hide genuine failures.
-        _n = self._stream_writer_dropped
-        if _n == 1 or (_n & (_n - 1)) == 0:
-            logger.warning(
-                "Dropped delta from a superseded stream writer at %s "
-                "(discarded=%d this turn) — a stale stream tried to write into "
-                "the turn after a retry superseded it.",
-                where, _n,
-            )
-
     def _fire_stream_delta(self, text: str) -> None:
         """Fire all registered stream delta callbacks (display + TTS)."""
-        # Single-writer guard (#65991): a superseded stream must not interleave
-        # its tokens into the turn alongside the retry that replaced it.
-        if self._stream_writer_superseded():
-            self._note_dropped_stream_writer("_fire_stream_delta")
-            return
         # If a tool iteration set the break flag, prepend a single paragraph
         # break before the first real text delta.  This prevents the original
         # problem (text concatenation across tool boundaries) without stacking
@@ -5215,11 +5141,6 @@ class AIAgent:
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""
-        # Single-writer guard (#65991): fence out a superseded stream's
-        # reasoning deltas the same way as content deltas.
-        if self._stream_writer_superseded():
-            self._note_dropped_stream_writer("_fire_reasoning_delta")
-            return
         cb = self.reasoning_callback
         if cb is not None:
             try:
@@ -5841,12 +5762,6 @@ class AIAgent:
             opts = self._lmstudio_reasoning_options_cached()
             # "off-only" (or absent) means no real reasoning capability.
             return any(opt and opt != "off" for opt in opts)
-        # Ollama Cloud (and any Ollama-compatible server): the native
-        # /api/show capabilities list is authoritative — emit reasoning_effort
-        # only for models that declare the "thinking" capability. deepseek-v4
-        # has it; gemma3 / qwen3-coder don't. Cached per (model, base_url).
-        if base_url_host_matches(self._base_url_lower, "ollama.com"):
-            return self._ollama_supports_thinking_cached()
         if "openrouter" not in self._base_url_lower:
             return False
         if "api.mistral.ai" in self._base_url_lower:
@@ -5930,6 +5845,7 @@ class AIAgent:
             supported = None
         cache[key] = (supported, _time.monotonic())
         return bool(supported)
+
 
     def _resolve_lmstudio_summary_reasoning_effort(self) -> Optional[str]:
         """Resolve a safe top-level ``reasoning_effort`` for LM Studio.
@@ -6217,9 +6133,7 @@ class AIAgent:
                 )
 
             from agent.tool_dispatch_helpers import _plan_tool_batch_segments
-            _active_env = get_active_env(effective_task_id)
-            _exec_cwd = Path(_active_env.cwd) if _active_env is not None and _active_env.cwd else None
-            segments = _plan_tool_batch_segments(tool_calls, execution_cwd=_exec_cwd)
+            segments = _plan_tool_batch_segments(tool_calls)
 
             if len(segments) == 1:
                 kind = segments[0][0]
@@ -6330,35 +6244,6 @@ class AIAgent:
         from agent.chat_completion_helpers import handle_max_iterations
         return handle_max_iterations(self, messages, api_call_count)
 
-    def _conversation_root_id(self) -> Optional[str]:
-        """Resolve the stable conversation id for Portal usage attribution.
-
-        Returns the session-lineage ROOT id rather than the current segment
-        id, so one user-facing conversation keeps a single ``conversation=``
-        tag across context-compression rotation (`/new` starts a genuinely
-        new lineage). Delegate subagents resolve through their
-        ``_parent_session_id`` so an entire delegation tree tags as the
-        parent conversation.
-
-        Best-effort: falls back to the raw session id when the session DB
-        is unavailable or the lineage walk fails.
-        """
-        sid = getattr(self, "session_id", None)
-        if not sid:
-            return None
-        # Subagents may not have a DB row yet on their first turn; walking
-        # from the parent id still lands on the right root.
-        start = getattr(self, "_parent_session_id", None) or sid
-        db = getattr(self, "_session_db", None)
-        if db is not None:
-            try:
-                root = db.get_conversation_root(start)
-                if root:
-                    return root
-            except Exception:
-                logger.debug("Conversation root lineage walk failed", exc_info=True)
-        return start
-
     def run_conversation(
         self,
         user_message: Any,
@@ -6371,50 +6256,18 @@ class AIAgent:
         moa_config: Optional[dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
-        from agent.aux_accounting import (
-            reset_accounting_context,
-            set_accounting_context,
-        )
         from agent.conversation_loop import run_conversation
-        from agent.portal_tags import (
-            reset_conversation_context,
-            set_conversation_context,
+        return run_conversation(
+            self,
+            user_message,
+            system_message,
+            conversation_history,
+            task_id,
+            stream_callback,
+            persist_user_message,
+            persist_user_timestamp=persist_user_timestamp,
+            moa_config=moa_config,
         )
-        # Publish the conversation id for ambient Nous Portal tagging. Every
-        # LLM call made inside this turn — main loop, compression, vision,
-        # web_extract, session_search, MoA slots, background-review forks
-        # (which copy this Context into their thread) — inherits the
-        # ``conversation=<root>`` tag with zero per-call-site plumbing.
-        token = set_conversation_context(self._conversation_root_id())
-        # Publish the session accounting handles the same way so auxiliary
-        # calls record their token usage into session_model_usage (task
-        # dimension) — the fix for aux spend being invisible in analytics
-        # (issue #23270).
-        acct_token = set_accounting_context(
-            getattr(self, "_session_db", None), getattr(self, "session_id", None)
-        )
-        from agent.auxiliary_client import scoped_runtime_main
-
-        # The outer token restores the caller's Context even though turn setup
-        # replaces the value with the live runtime after fallback restoration.
-        # Keep the scope local instead of storing ContextVar tokens on the agent,
-        # which may be observed from another thread.
-        with scoped_runtime_main({}):
-            try:
-                return run_conversation(
-                    self,
-                    user_message,
-                    system_message,
-                    conversation_history,
-                    task_id,
-                    stream_callback,
-                    persist_user_message,
-                    persist_user_timestamp=persist_user_timestamp,
-                    moa_config=moa_config,
-                )
-            finally:
-                reset_accounting_context(acct_token)
-                reset_conversation_context(token)
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """

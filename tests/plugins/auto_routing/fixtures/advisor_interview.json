@@ -1,0 +1,161 @@
+{
+  "partial_requests": [
+    {
+      "request": {},
+      "expected_missing_facts": [
+        "workloads",
+        "modalities",
+        "required_capabilities",
+        "risk_and_tool_use",
+        "hard_limits",
+        "classifier_evaluator_disclosure",
+        "profiles",
+        "rules",
+        "complexity_bands",
+        "routing_vocabulary",
+        "representative_prompts",
+        "explicit_approval"
+      ]
+    },
+    {
+      "request": {
+        "workloads": {"domains": ["coding"], "examples": ["debug a service"], "expected_input_tokens": 2000, "expected_output_tokens": 500},
+        "modalities": ["text"],
+        "required_capabilities": ["structured_output"],
+        "risk_and_tool_use": {"risk_classes": ["moderate"], "requires_tools": true},
+        "hard_limits": {
+          "denied_providers": [],
+          "denied_models": [],
+          "allowed_licenses": [],
+          "allow_local": false,
+          "allow_subscription": true,
+          "max_cost_usd": 1.0,
+          "max_latency_seconds": 60.0
+        },
+        "classifier_evaluator_disclosure": {
+          "classifier_provider": "openai-codex",
+          "classifier_model": "gpt-5.4-mini",
+          "evaluator_provider": "openai-codex",
+          "evaluator_model": "gpt-5.4-mini",
+          "full_disclosure_approved": true
+        }
+      },
+      "expected_missing_facts": [
+        "profiles",
+        "rules",
+        "complexity_bands",
+        "routing_vocabulary",
+        "representative_prompts",
+        "explicit_approval"
+      ]
+    }
+  ],
+  "complete_request": {
+    "workloads": {"domains": ["coding"], "examples": ["debug a service"], "expected_input_tokens": 2000, "expected_output_tokens": 500},
+    "modalities": ["text"],
+    "required_capabilities": ["structured_output"],
+    "risk_and_tool_use": {"risk_classes": ["moderate"], "requires_tools": true},
+    "hard_limits": {
+      "denied_providers": [],
+      "denied_models": [],
+      "allowed_licenses": [],
+      "allow_local": false,
+      "allow_subscription": true,
+      "max_cost_usd": 1.0,
+      "max_latency_seconds": 60.0
+    },
+    "classifier_evaluator_disclosure": {
+      "classifier_provider": "openai-codex",
+      "classifier_model": "gpt-5.4-mini",
+      "evaluator_provider": "openai-codex",
+      "evaluator_model": "gpt-5.4-mini",
+      "full_disclosure_approved": true
+    },
+    "profiles": [
+      {
+        "profile_id": "quality-heavy",
+        "description": "Deep coding and debugging",
+        "base_rank": 20.0,
+        "match": {
+          "domains": ["coding", "debugging"],
+          "complexity": ["hard", "extreme"],
+          "modalities": ["text"],
+          "capabilities": ["tools", "structured_output"]
+        },
+        "objectives": {"quality": 0.85, "reliability": 0.10, "latency": 0.03, "cost": 0.02},
+        "limits": {"max_estimated_task_cost_usd": 1.0, "max_reasoning_effort": "high"},
+        "access_paths": {
+          "primary_runtime_id": "91381877b04f1dddcea705bd5c986fda95b921ee2b024d60c84f2924229f4d3a",
+          "fallback_runtime_ids": ["5ee30b62b2311b6150b245c58e8a97ab48a230de9cd1317a43d1962cc9e13c7f"]
+        },
+        "reasoning_bounds": {
+          "91381877b04f1dddcea705bd5c986fda95b921ee2b024d60c84f2924229f4d3a": {"default": "medium", "min": "low", "max": "high"},
+          "5ee30b62b2311b6150b245c58e8a97ab48a230de9cd1317a43d1962cc9e13c7f": {"default": "low", "min": "none", "max": "medium"}
+        }
+      },
+      {
+        "profile_id": "latency-heavy",
+        "description": "Fast interactive work",
+        "base_rank": 10.0,
+        "match": {
+          "domains": ["coding"],
+          "complexity": ["trivial", "easy", "moderate"],
+          "modalities": ["text"],
+          "capabilities": ["tools"]
+        },
+        "objectives": {"quality": 0.10, "reliability": 0.05, "latency": 0.80, "cost": 0.05},
+        "limits": {"max_estimated_latency_seconds": 10.0, "max_reasoning_effort": "medium"},
+        "access_paths": {
+          "primary_runtime_id": "5ee30b62b2311b6150b245c58e8a97ab48a230de9cd1317a43d1962cc9e13c7f",
+          "fallback_runtime_ids": ["91381877b04f1dddcea705bd5c986fda95b921ee2b024d60c84f2924229f4d3a"]
+        },
+        "reasoning_bounds": {
+          "5ee30b62b2311b6150b245c58e8a97ab48a230de9cd1317a43d1962cc9e13c7f": {"default": "low", "min": "none", "max": "medium"},
+          "91381877b04f1dddcea705bd5c986fda95b921ee2b024d60c84f2924229f4d3a": {"default": "medium", "min": "low", "max": "medium"}
+        }
+      }
+    ],
+    "rules": [
+      {"rule_id": "declared-coding", "priority": 100, "profile_id": "quality-heavy", "effect": "pin_profile", "when": {"domains_any": ["coding"]}},
+      {"rule_id": "interactive-cli", "priority": 20, "profile_id": "latency-heavy", "effect": "prefer_profile", "when": {"platforms": ["cli"], "maximum_complexity": 0.4}}
+    ],
+    "complexity_bands": {"trivial_max": 0.15, "easy_max": 0.35, "moderate_max": 0.65, "hard_max": 0.9},
+    "routing_vocabulary": {"capabilities": ["tools", "structured_output", "long_context"], "modalities": ["text", "image"]},
+    "representative_prompts": ["Debug this Python service"],
+    "explicit_approval": true
+  },
+  "legacy_complete_request": {
+    "workloads": {"domains": ["coding"], "examples": ["debug a service"], "expected_input_tokens": 2000, "expected_output_tokens": 500},
+    "modalities": ["text"],
+    "required_capabilities": ["structured_output"],
+    "risk_and_tool_use": {"risk_classes": ["moderate"], "requires_tools": true},
+    "hard_limits": {
+      "denied_providers": [],
+      "denied_models": [],
+      "allowed_licenses": [],
+      "allow_local": false,
+      "allow_subscription": true,
+      "max_cost_usd": 1.0,
+      "max_latency_seconds": 60.0
+    },
+    "objectives": {"quality": 4, "reliability": 3, "latency": 2, "cost": 1},
+    "classifier_evaluator_disclosure": {
+      "classifier_provider": "openai-codex",
+      "classifier_model": "gpt-5.4-mini",
+      "evaluator_provider": "openai-codex",
+      "evaluator_model": "gpt-5.4-mini",
+      "full_disclosure_approved": true
+    },
+    "profiles": [{"profile_id": "coding", "description": "Coding work", "base_rank": 10.0}],
+    "access_paths": {
+      "primary_runtime_id": "91381877b04f1dddcea705bd5c986fda95b921ee2b024d60c84f2924229f4d3a",
+      "fallback_runtime_ids": ["5ee30b62b2311b6150b245c58e8a97ab48a230de9cd1317a43d1962cc9e13c7f"]
+    },
+    "reasoning_bounds": {
+      "91381877b04f1dddcea705bd5c986fda95b921ee2b024d60c84f2924229f4d3a": {"default": "medium", "min": "low", "max": "high"},
+      "5ee30b62b2311b6150b245c58e8a97ab48a230de9cd1317a43d1962cc9e13c7f": {"default": "low", "min": "none", "max": "medium"}
+    },
+    "representative_prompts": ["Debug this Python service"],
+    "explicit_approval": true
+  }
+}

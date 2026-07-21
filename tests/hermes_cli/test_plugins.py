@@ -2,6 +2,7 @@
 
 import logging
 import sys
+import threading
 import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,6 +16,7 @@ from hades_cli.plugins import (
     PluginContext,
     PluginManager,
     PluginManifest,
+    PluginRuntimeResolverConflict,
     get_plugin_command_handler,
     get_plugin_commands,
     get_pre_tool_call_block_message,
@@ -84,6 +86,600 @@ def _make_plugin_dir(base: Path, name: str, *, register_body: str = "pass",
         cfg_path.write_text(yaml.safe_dump(cfg))
 
     return plugin_dir
+
+
+class _TestRuntimeResolver:
+    def __init__(self, *, close_error: Exception | None = None):
+        self.closed = 0
+        self.close_error = close_error
+
+    def requires_initial_task(self, _scope):
+        return True
+
+    def resolve(self, request):
+        return request
+
+    def record_manual_pin(self, _request):
+        return None
+
+    def record_session_continuation(self, _request):
+        return None
+
+    def close(self):
+        self.closed += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class TestAgentRuntimeResolverRegistration:
+    def test_only_one_runtime_resolver_can_register(self):
+        manager = PluginManager()
+        first = PluginContext(PluginManifest(name="first", key="first"), manager)
+        second = PluginContext(PluginManifest(name="second", key="second"), manager)
+        resolver = _TestRuntimeResolver()
+
+        first.register_agent_runtime_resolver(resolver)
+
+        assert manager.agent_runtime_resolver is resolver
+        assert manager.agent_runtime_resolver_owner == "first"
+        with pytest.raises(PluginRuntimeResolverConflict, match="already registered"):
+            second.register_agent_runtime_resolver(_TestRuntimeResolver())
+        assert manager.agent_runtime_resolver is resolver
+        assert manager.agent_runtime_resolver_owner == "first"
+
+    def test_optional_continuation_and_close_callbacks_are_not_required(self):
+        manager = PluginManager()
+        context = PluginContext(PluginManifest(name="minimal", key="minimal"), manager)
+
+        class MinimalResolver:
+            def requires_initial_task(self, _scope):
+                return False
+
+            def resolve(self, request):
+                return request
+
+            def record_manual_pin(self, _request):
+                return None
+
+        resolver = MinimalResolver()
+        context.register_agent_runtime_resolver(resolver)
+        manager.close()
+
+        assert manager.agent_runtime_resolver is None
+
+    def test_force_discovery_closes_and_clears_resolver_even_when_close_raises(
+        self, monkeypatch, caplog
+    ):
+        manager = PluginManager()
+        resolver = _TestRuntimeResolver(
+            close_error=RuntimeError("token=RESOLVER_CLOSE_SECRET")
+        )
+        manager._agent_runtime_resolver = resolver
+        manager._agent_runtime_resolver_owner = "test"
+        manager._discovered = True
+        monkeypatch.setattr(manager, "_discover_and_load_inner", lambda: None)
+        caplog.set_level("WARNING")
+
+        manager.discover_and_load(force=True)
+
+        assert resolver.closed == 1
+        assert manager.agent_runtime_resolver is None
+        assert manager.agent_runtime_resolver_owner is None
+        assert "RESOLVER_CLOSE_SECRET" not in caplog.text
+
+    def test_manager_close_is_idempotent(self):
+        manager = PluginManager()
+        resolver = _TestRuntimeResolver()
+        manager._agent_runtime_resolver = resolver
+        manager._agent_runtime_resolver_owner = "test"
+
+        manager.close()
+        manager.close()
+
+        assert resolver.closed == 1
+        assert manager.agent_runtime_resolver is None
+
+    def test_force_discovery_publishes_replacement_before_closing_old_owner(
+        self, monkeypatch
+    ):
+        manager = PluginManager()
+        order = []
+
+        class OrderedResolver(_TestRuntimeResolver):
+            def close(self):
+                order.append("old-close")
+                super().close()
+
+        old = OrderedResolver()
+        PluginContext(PluginManifest(name="old", key="old"), manager).register_agent_runtime_resolver(old)
+        manager._discovered = True
+
+        replacement = _TestRuntimeResolver()
+
+        def discover_replacement():
+            order.append("new-register")
+            PluginContext(
+                PluginManifest(name="new", key="new"), manager
+            ).register_agent_runtime_resolver(replacement)
+
+        monkeypatch.setattr(manager, "_discover_and_load_inner", discover_replacement)
+
+        manager.discover_and_load(force=True)
+
+        assert order == ["new-register", "old-close"]
+        assert manager.agent_runtime_resolver is replacement
+        assert manager.agent_runtime_resolver_owner == "new"
+
+    def test_force_publishes_replacement_before_external_close_reentry(
+        self, monkeypatch
+    ):
+        import hermes_cli.plugins as plugins_mod
+
+        manager = PluginManager()
+        replacement = _TestRuntimeResolver()
+        close_reader_results = []
+        close_reader_errors = []
+        close_reader_finished = []
+
+        class ReentrantCloseResolver(_TestRuntimeResolver):
+            def close(self):
+                done = threading.Event()
+
+                def read_manager():
+                    try:
+                        close_reader_results.append(
+                            plugins_mod.get_agent_runtime_resolver()
+                        )
+                    except BaseException as exc:
+                        close_reader_errors.append(exc)
+                    finally:
+                        done.set()
+
+                reader = threading.Thread(target=read_manager, daemon=True)
+                reader.start()
+                close_reader_finished.append(done.wait(0.2))
+                reader.join(1)
+                super().close()
+
+        old = ReentrantCloseResolver()
+        PluginContext(
+            PluginManifest(name="old", key="old"), manager
+        ).register_agent_runtime_resolver(old)
+        manager._discovered = True
+
+        def discover_replacement():
+            PluginContext(
+                PluginManifest(name="new", key="new"), manager
+            ).register_agent_runtime_resolver(replacement)
+
+        monkeypatch.setattr(manager, "_discover_and_load_inner", discover_replacement)
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
+
+        manager.discover_and_load(force=True)
+
+        assert close_reader_finished == [True]
+        assert close_reader_errors == []
+        assert close_reader_results == [replacement]
+        assert old.closed == 1
+
+    def test_loaded_plugin_attributes_runtime_resolver_registration(
+        self, tmp_path, monkeypatch
+    ):
+        plugins_dir = tmp_path / "home" / "plugins"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        _make_plugin_dir(
+            plugins_dir,
+            "router",
+            register_body=(
+                "ctx.register_agent_runtime_resolver(type('Resolver', (), {"
+                "'requires_initial_task': lambda self, scope: True, "
+                "'resolve': lambda self, request: request, "
+                "'record_manual_pin': lambda self, request: None, "
+                "'record_session_continuation': lambda self, request: None, "
+                "'close': lambda self: None})())"
+            ),
+        )
+        manager = PluginManager()
+
+        manager.discover_and_load()
+
+        loaded = manager._plugins["router"]
+        assert loaded.enabled is True
+        assert loaded.runtime_resolver_registered is True
+        listed = {item["key"]: item for item in manager.list_plugins()}
+        assert listed["router"]["runtime_resolver"] is True
+
+    def test_failed_plugin_rolls_back_owned_resolver_and_allows_replacement(
+        self, monkeypatch, caplog
+    ):
+        manager = PluginManager()
+        failed = _TestRuntimeResolver(
+            close_error=RuntimeError("token=FAILED_RESOLVER_CLOSE_SECRET")
+        )
+        replacement = _TestRuntimeResolver()
+
+        broken_module = types.SimpleNamespace()
+
+        def register_broken(ctx):
+            ctx.register_agent_runtime_resolver(failed)
+            raise RuntimeError("registration failed")
+
+        broken_module.register = register_broken
+        healthy_module = types.SimpleNamespace(
+            register=lambda ctx: ctx.register_agent_runtime_resolver(replacement)
+        )
+        modules = {"broken": broken_module, "healthy": healthy_module}
+        monkeypatch.setattr(
+            manager,
+            "_load_entrypoint_module",
+            lambda manifest: modules[manifest.name],
+        )
+        caplog.set_level("WARNING")
+
+        manager._load_plugin(
+            PluginManifest(name="broken", key="broken", source="entrypoint")
+        )
+
+        assert failed.closed == 1
+        assert manager.agent_runtime_resolver is None
+        assert manager.agent_runtime_resolver_owner is None
+        assert "FAILED_RESOLVER_CLOSE_SECRET" not in caplog.text
+
+        manager._load_plugin(
+            PluginManifest(name="healthy", key="healthy", source="entrypoint")
+        )
+
+        assert manager.agent_runtime_resolver is replacement
+        assert manager.agent_runtime_resolver_owner == "healthy"
+        assert manager._plugins["healthy"].runtime_resolver_registered is True
+
+    def test_failed_conflicting_plugin_does_not_rollback_preexisting_owner(
+        self, monkeypatch
+    ):
+        manager = PluginManager()
+        first = _TestRuntimeResolver()
+        rejected = _TestRuntimeResolver()
+        owner_manifest = PluginManifest(name="shared", key="shared")
+        PluginContext(owner_manifest, manager).register_agent_runtime_resolver(first)
+        conflicting_module = types.SimpleNamespace(
+            register=lambda ctx: ctx.register_agent_runtime_resolver(rejected)
+        )
+        monkeypatch.setattr(
+            manager,
+            "_load_entrypoint_module",
+            lambda _manifest: conflicting_module,
+        )
+
+        manager._load_plugin(
+            PluginManifest(name="shared", key="shared", source="entrypoint")
+        )
+
+        assert manager.agent_runtime_resolver is first
+        assert manager.agent_runtime_resolver_owner == "shared"
+        assert first.closed == 0
+        assert rejected.closed == 0
+        assert "already registered" in manager._plugins["shared"].error
+
+    def test_initial_discovery_blocks_resolver_reader_until_registration(
+        self, monkeypatch
+    ):
+        import hermes_cli.plugins as plugins_mod
+
+        manager = PluginManager()
+        resolver = _TestRuntimeResolver()
+        entered = threading.Event()
+        release = threading.Event()
+        reader_done = threading.Event()
+        results = []
+        errors = []
+
+        def slow_discovery():
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release discovery")
+            PluginContext(
+                PluginManifest(name="router", key="router"), manager
+            ).register_agent_runtime_resolver(resolver)
+
+        def discover():
+            try:
+                manager.discover_and_load()
+            except BaseException as exc:
+                errors.append(exc)
+
+        def read_resolver():
+            try:
+                results.append(plugins_mod.get_agent_runtime_resolver())
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                reader_done.set()
+
+        monkeypatch.setattr(manager, "_discover_and_load_inner", slow_discovery)
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
+        discovery_thread = threading.Thread(target=discover, daemon=True)
+        reader_thread = threading.Thread(target=read_resolver, daemon=True)
+        discovery_thread.start()
+        assert entered.wait(1)
+        reader_thread.start()
+        returned_while_discovery_running = reader_done.wait(0.1)
+        release.set()
+        discovery_thread.join(2)
+        reader_thread.join(2)
+
+        assert not returned_while_discovery_running
+        assert not errors
+        assert results == [resolver]
+
+    def test_force_discovery_blocks_resolver_reader_until_replacement(
+        self, monkeypatch
+    ):
+        import hermes_cli.plugins as plugins_mod
+
+        manager = PluginManager()
+        old = _TestRuntimeResolver()
+        replacement = _TestRuntimeResolver()
+        PluginContext(
+            PluginManifest(name="old", key="old"), manager
+        ).register_agent_runtime_resolver(old)
+        manager._discovered = True
+        entered = threading.Event()
+        release = threading.Event()
+        reader_done = threading.Event()
+        results = []
+        errors = []
+
+        def slow_discovery():
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release force discovery")
+            PluginContext(
+                PluginManifest(name="new", key="new"), manager
+            ).register_agent_runtime_resolver(replacement)
+
+        def force_discovery():
+            try:
+                manager.discover_and_load(force=True)
+            except BaseException as exc:
+                errors.append(exc)
+
+        def read_resolver():
+            try:
+                results.append(plugins_mod.get_agent_runtime_resolver())
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                reader_done.set()
+
+        monkeypatch.setattr(manager, "_discover_and_load_inner", slow_discovery)
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", manager)
+        force_thread = threading.Thread(target=force_discovery, daemon=True)
+        reader_thread = threading.Thread(target=read_resolver, daemon=True)
+        force_thread.start()
+        assert entered.wait(1)
+        reader_thread.start()
+        returned_while_force_running = reader_done.wait(0.1)
+        release.set()
+        force_thread.join(2)
+        reader_thread.join(2)
+
+        assert not returned_while_force_running
+        assert not errors
+        assert old.closed == 1
+        assert results == [replacement]
+
+    def test_simultaneous_first_getters_share_one_plugin_manager(self, monkeypatch):
+        import hermes_cli.plugins as plugins_mod
+
+        first_manager = PluginManager()
+        second_manager = PluginManager()
+        first_factory_entered = threading.Event()
+        second_factory_entered = threading.Event()
+        release_first = threading.Event()
+        factory_guard = threading.Lock()
+        factory_calls = 0
+        results = []
+        errors = []
+
+        def manager_factory():
+            nonlocal factory_calls
+            with factory_guard:
+                factory_calls += 1
+                call = factory_calls
+            if call == 1:
+                first_factory_entered.set()
+                if not release_first.wait(2):
+                    raise AssertionError("test did not release singleton factory")
+                return first_manager
+            second_factory_entered.set()
+            return second_manager
+
+        def get_manager():
+            try:
+                results.append(plugins_mod.get_plugin_manager())
+            except BaseException as exc:
+                errors.append(exc)
+
+        monkeypatch.setattr(plugins_mod, "_plugin_manager", None)
+        monkeypatch.setattr(plugins_mod, "PluginManager", manager_factory)
+        first_thread = threading.Thread(target=get_manager, daemon=True)
+        second_thread = threading.Thread(target=get_manager, daemon=True)
+        first_thread.start()
+        assert first_factory_entered.wait(1)
+        second_thread.start()
+        second_factory_entered.wait(0.1)
+        release_first.set()
+        first_thread.join(2)
+        second_thread.join(2)
+
+        assert not errors
+        assert factory_calls == 1
+        assert len(results) == 2
+        assert results[0] is results[1] is first_manager
+
+    def test_failed_initial_sweep_detaches_partial_resolver_and_retry_succeeds(
+        self, monkeypatch
+    ):
+        manager = PluginManager()
+        partial = _TestRuntimeResolver()
+        healthy = _TestRuntimeResolver()
+        attempts = 0
+
+        def sweep():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                PluginContext(
+                    PluginManifest(name="partial", key="partial"), manager
+                ).register_agent_runtime_resolver(partial)
+                raise RuntimeError("sweep failed")
+            PluginContext(
+                PluginManifest(name="healthy", key="healthy"), manager
+            ).register_agent_runtime_resolver(healthy)
+
+        monkeypatch.setattr(manager, "_discover_and_load_inner", sweep)
+
+        with pytest.raises(RuntimeError, match="sweep failed"):
+            manager.discover_and_load()
+
+        assert partial.closed == 1
+        assert manager.agent_runtime_resolver is None
+        assert manager.agent_runtime_resolver_owner is None
+        assert manager._discovered is False
+        assert manager._lifecycle_transition is None
+        assert manager._lifecycle_transition_owner is None
+        assert manager._active_runtime_resolver_leases == 0
+        assert manager._runtime_resolver_lease_depths == {}
+
+        manager.discover_and_load()
+
+        assert manager.agent_runtime_resolver is healthy
+        assert manager.agent_runtime_resolver_owner == "healthy"
+
+    def test_failed_force_sweep_detaches_partial_and_retry_replaces_it(
+        self, monkeypatch
+    ):
+        manager = PluginManager()
+        old = _TestRuntimeResolver()
+        partial = _TestRuntimeResolver()
+        healthy = _TestRuntimeResolver()
+        PluginContext(
+            PluginManifest(name="old", key="old"), manager
+        ).register_agent_runtime_resolver(old)
+        manager._discovered = True
+        attempts = 0
+
+        def sweep():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                PluginContext(
+                    PluginManifest(name="partial", key="partial"), manager
+                ).register_agent_runtime_resolver(partial)
+                raise RuntimeError("force sweep failed")
+            PluginContext(
+                PluginManifest(name="healthy", key="healthy"), manager
+            ).register_agent_runtime_resolver(healthy)
+
+        monkeypatch.setattr(manager, "_discover_and_load_inner", sweep)
+
+        with pytest.raises(RuntimeError, match="force sweep failed"):
+            manager.discover_and_load(force=True)
+
+        assert old.closed == 1
+        assert partial.closed == 1
+        assert manager.agent_runtime_resolver is None
+        assert manager.agent_runtime_resolver_owner is None
+        assert manager._discovered is False
+        assert manager._lifecycle_transition is None
+        assert manager._lifecycle_transition_owner is None
+        assert manager._active_runtime_resolver_leases == 0
+        assert manager._runtime_resolver_lease_depths == {}
+
+        manager.discover_and_load()
+
+        assert manager.agent_runtime_resolver is healthy
+        assert manager.agent_runtime_resolver_owner == "healthy"
+
+    def test_unrelated_initial_sweep_failure_preserves_preexisting_resolver(
+        self, monkeypatch
+    ):
+        manager = PluginManager()
+        existing = _TestRuntimeResolver()
+        PluginContext(
+            PluginManifest(name="existing", key="existing"), manager
+        ).register_agent_runtime_resolver(existing)
+        monkeypatch.setattr(
+            manager,
+            "_discover_and_load_inner",
+            lambda: (_ for _ in ()).throw(RuntimeError("unrelated sweep failed")),
+        )
+
+        with pytest.raises(RuntimeError, match="unrelated sweep failed"):
+            manager.discover_and_load()
+
+        assert manager.agent_runtime_resolver is existing
+        assert manager.agent_runtime_resolver_owner == "existing"
+        assert existing.closed == 0
+
+    def test_interrupted_force_drain_clears_phase_and_allows_retry(
+        self, monkeypatch
+    ):
+        manager = PluginManager()
+        old = _TestRuntimeResolver()
+        replacement = _TestRuntimeResolver()
+        PluginContext(
+            PluginManifest(name="old", key="old"), manager
+        ).register_agent_runtime_resolver(old)
+        manager._discovered = True
+        lease_entered = threading.Event()
+        release_lease = threading.Event()
+        lease_errors = []
+
+        def hold_lease():
+            try:
+                with manager.agent_runtime_resolver_lease():
+                    lease_entered.set()
+                    if not release_lease.wait(2):
+                        raise AssertionError("test did not release resolver lease")
+            except BaseException as exc:
+                lease_errors.append(exc)
+
+        holder = threading.Thread(target=hold_lease, daemon=True)
+        holder.start()
+        assert lease_entered.wait(1)
+        original_wait = manager._lifecycle_condition.wait
+        monkeypatch.setattr(
+            manager._lifecycle_condition,
+            "wait",
+            lambda _timeout=None: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            manager.discover_and_load(force=True)
+
+        assert manager._lifecycle_transition is None
+        assert manager._lifecycle_transition_owner is None
+        assert manager._active_runtime_resolver_leases == 1
+        assert manager._agent_runtime_resolver is old
+        assert old.closed == 0
+
+        monkeypatch.setattr(manager._lifecycle_condition, "wait", original_wait)
+        release_lease.set()
+        holder.join(2)
+        assert lease_errors == []
+        monkeypatch.setattr(
+            manager,
+            "_discover_and_load_inner",
+            lambda: PluginContext(
+                PluginManifest(name="replacement", key="replacement"), manager
+            ).register_agent_runtime_resolver(replacement),
+        )
+
+        manager.discover_and_load(force=True)
+
+        assert old.closed == 1
+        assert manager.agent_runtime_resolver is replacement
 
 
 # ── TestPluginDiscovery ────────────────────────────────────────────────────
@@ -631,6 +1227,19 @@ class TestPluginHooks:
         assert "transform_terminal_output" in VALID_HOOKS
         assert "transform_tool_result" in VALID_HOOKS
         assert "transform_llm_output" in VALID_HOOKS
+        assert "post_turn_outcome" in VALID_HOOKS
+
+    def test_post_turn_outcome_callback_failure_does_not_stop_observers(self):
+        manager = PluginManager()
+        seen = []
+        manager._hooks["post_turn_outcome"] = [
+            lambda **_kw: (_ for _ in ()).throw(RuntimeError("observer down")),
+            lambda **kw: seen.append(kw["session_id"]),
+        ]
+
+        manager.invoke_hook("post_turn_outcome", session_id="session-a")
+
+        assert seen == ["session-a"]
 
     def test_valid_hooks_include_pre_gateway_dispatch(self):
         assert "pre_gateway_dispatch" in VALID_HOOKS

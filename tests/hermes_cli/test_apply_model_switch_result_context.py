@@ -42,6 +42,12 @@ class _StubCLI:
     api_mode = ""
     _pending_model_switch_note = ""
 
+    def __init__(self):
+        self.manual_transition_sources = []
+
+    def _record_manual_runtime_transition(self, *, source):
+        self.manual_transition_sources.append(source)
+
 
 def _run_display(monkeypatch, result):
     import cli as cli_mod
@@ -118,6 +124,33 @@ def test_picker_path_shows_vendor_value_when_no_provider_cap(monkeypatch):
     assert "1,050,000" in ctx_line, (
         f"OpenRouter gpt-5.5 should show 1.05M context, got: {ctx_line!r}"
     )
+
+
+def test_successful_picker_switch_records_durable_cli_manual_pin(monkeypatch):
+    import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod, "_cprint", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli_mod, "save_config_value", lambda *_a, **_k: None)
+    result = ModelSwitchResult(
+        success=True,
+        new_model="openai/gpt-5.5",
+        target_provider="openrouter",
+        provider_changed=True,
+        api_key="secret",
+        base_url="https://openrouter.ai/api/v1",
+        api_mode="chat_completions",
+        warning_message="",
+        provider_label="OpenRouter",
+        resolved_via_alias=False,
+        capabilities=None,
+        model_info=None,
+        is_global=False,
+    )
+    shell = _StubCLI()
+
+    cli_mod.HermesCLI._apply_model_switch_result(shell, result, False)
+
+    assert shell.manual_transition_sources == ["cli_model_command"]
 
 
 def test_picker_path_falls_back_to_model_info_when_resolver_empty(monkeypatch):

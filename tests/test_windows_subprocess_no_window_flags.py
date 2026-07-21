@@ -283,6 +283,36 @@ def test_shell_hooks_hide_hook_command_windows(monkeypatch):
     assert captured[0][1]["creationflags"] == _CREATE_NO_WINDOW
 
 
+def test_shell_hooks_launch_bare_shell_script_with_git_bash_windows(monkeypatch):
+    from agent import shell_hooks
+
+    captured = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    bash = r"C:\Program Files\Git\bin\bash.exe"
+    script = r"C:\Users\Alice Smith\.hermes\hooks\audit.sh"
+    monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+    monkeypatch.setattr(shell_hooks, "_resolve_windows_bash", lambda: bash)
+    monkeypatch.setattr(shell_hooks, "windows_hide_flags", lambda: _CREATE_NO_WINDOW)
+    monkeypatch.setattr(shell_hooks.subprocess, "run", fake_run)
+
+    result = shell_hooks._spawn(
+        shell_hooks.ShellHookSpec(
+            event="post_tool_call",
+            command=f'"{script}" --label "two words"',
+        ),
+        "{}",
+    )
+
+    assert result["returncode"] == 0
+    assert captured[0][0] == [bash, script, "--label", "two words"]
+    assert captured[0][1]["shell"] is False
+    assert captured[0][1]["creationflags"] == _CREATE_NO_WINDOW
+
+
 def test_inline_skill_shell_hides_bash_window(monkeypatch):
     from agent import skill_preprocessing
 

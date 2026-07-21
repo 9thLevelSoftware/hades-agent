@@ -1,0 +1,104 @@
+{
+  "llm": {
+    "allow_provider_override": true,
+    "allowed_providers": ["openai-codex"],
+    "allow_model_override": true,
+    "allowed_models": ["gpt-5.4-mini"]
+  },
+  "activation": {"mode": "shadow"},
+  "scopes": {"fresh_sessions": true, "delegation": true},
+  "classifier": {
+    "provider": "openai-codex",
+    "model": "gpt-5.4-mini",
+    "reasoning_effort": "low",
+    "timeout_seconds": 15,
+    "disclosure": "full"
+  },
+  "safe_default": "inherit",
+  "policy": {
+    "eligible_sources": ["configured_providers", "installed_local_models"],
+    "uninstalled_local_models": "deny",
+    "local_models": {
+      "require_open_weights": true,
+      "require_compatible_hardware": true
+    },
+    "denied_providers": [],
+    "denied_models": [],
+    "max_estimated_task_cost_usd": 2.0,
+    "max_estimated_latency_seconds": 120.0,
+    "max_routing_overhead_usd_per_day": 1.0,
+    "max_experiment_cost_usd_per_day": 2.0,
+    "max_evaluator_calls_per_day": 20,
+    "max_canary_fraction": 0.05,
+    "max_reasoning_effort": "high",
+    "allow_subscription": true,
+    "allow_paid_access_probes": false,
+    "allowed_licenses": [],
+    "minimum_context_tokens": 0,
+    "canary_high_risk_tasks": false
+  },
+  "adaptation": {
+    "enabled": true,
+    "mode": "autonomous",
+    "canary_fraction": 0.05,
+    "minimum_canary_samples": 20,
+    "rollback_threshold": 0.1
+  },
+  "rules": [
+    {
+      "rule_id": "coding-profile",
+      "priority": 100,
+      "profile_id": "coding",
+      "effect": "prefer_profile",
+      "when": {"domains_any": ["coding"]},
+      "assessment_overrides": {}
+    }
+  ],
+  "complexity_bands": {
+    "trivial_max": 0.2,
+    "easy_max": 0.4,
+    "moderate_max": 0.7,
+    "hard_max": 0.9
+  },
+  "routing_vocabulary": {
+    "capabilities": ["tools", "long_context", "vision", "audio", "structured_output"],
+    "modalities": ["text", "image", "audio", "video"]
+  },
+  "profiles": {
+    "coding": {
+      "profile_id": "coding",
+      "description": "Tool-using software development tasks",
+      "base_rank": 70,
+      "match": {
+        "domains": ["coding"],
+        "complexity": ["moderate"],
+        "modalities": ["text"],
+        "capabilities": ["tools"]
+      },
+      "objectives": {
+        "quality": 4,
+        "reliability": 3,
+        "latency": 2,
+        "cost": 1
+      },
+      "primary": {
+        "runtime": {
+          "provider": "openai-codex",
+          "model": "gpt-5.4",
+          "auth_identity": "subscription:default",
+          "credential_pool_identity": "pool:codex",
+          "endpoint_identity": "endpoint:codex",
+          "api_mode": "codex_responses",
+          "local_backend": "",
+          "inventory_revision": "inventory-1"
+        },
+        "reasoning": {"default": "medium", "min": "low", "max": "high"},
+        "supported_reasoning_efforts": [],
+        "revision_status": "active"
+      },
+      "fallbacks": [],
+      "provenance": []
+    }
+  },
+  "economics_overrides": {}
+}

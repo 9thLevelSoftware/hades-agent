@@ -1,7 +1,7 @@
 """End-to-end tests for ACP MCP server registration and tool-result reporting.
 
 Exercises the full flow through the ACP server layer:
-  new_session(mcpServers) → MCP tools registered → prompt() →
+  new_session(mcpServers) → prompt() registers MCP tools →
     tool_progress_callback (ToolCallStart) →
     step_callback with results (ToolCallUpdate with rawOutput) →
     session_update events arrive at the mock client
@@ -36,7 +36,19 @@ from acp_adapter.tools import build_tool_start
 
 @pytest.fixture()
 def mock_manager():
-    return SessionManager(agent_factory=lambda: MagicMock(name="MockAIAgent"))
+    fake = MagicMock(name="MockAIAgent")
+    fake.model = "test-model"
+    fake.provider = "openrouter"
+    fake.base_url = "https://openrouter.example/v1"
+    fake.api_mode = "chat_completions"
+    fake.enabled_toolsets = ["hermes-acp"]
+    fake.disabled_toolsets = None
+    fake.tools = []
+    fake.valid_tool_names = set()
+    fake.run_conversation.return_value = {"final_response": "", "messages": []}
+    manager = SessionManager(agent_factory=lambda **_kwargs: fake)
+    manager._test_agent = fake
+    return manager
 
 
 @pytest.fixture()
@@ -85,6 +97,13 @@ class TestMcpRegistrationE2E:
         with patch("tools.mcp_tool.register_mcp_servers", side_effect=mock_register), \
              patch("model_tools.get_tool_definitions", return_value=fake_tools):
             resp = await acp_agent.new_session(cwd="/tmp", mcp_servers=servers)
+            state = mock_manager.get_session(resp.session_id)
+            assert state.agent is None
+            assert registered_configs == {}
+            await acp_agent.prompt(
+                session_id=resp.session_id,
+                prompt=[TextContentBlock(type="text", text="first task")],
+            )
 
         assert isinstance(resp, NewSessionResponse)
         state = mock_manager.get_session(resp.session_id)
@@ -145,7 +164,7 @@ class TestMcpRegistrationE2E:
                 ],
             }
 
-        state.agent.run_conversation = mock_run_conversation
+        mock_manager._test_agent.run_conversation = mock_run_conversation
 
         prompt = [TextContentBlock(type="text", text="run echo hello")]
         resp = await acp_agent.prompt(prompt=prompt, session_id=session_id)
@@ -221,7 +240,7 @@ class TestMcpRegistrationE2E:
 
             return {"final_response": "Done.", "messages": []}
 
-        state.agent.run_conversation = mock_run
+        mock_manager._test_agent.run_conversation = mock_run
 
         prompt = [TextContentBlock(type="text", text="test")]
         await acp_agent.prompt(prompt=prompt, session_id=session_id)
@@ -269,6 +288,11 @@ class TestMcpSanitizationE2E:
         with patch("tools.mcp_tool.register_mcp_servers", side_effect=mock_register), \
              patch("model_tools.get_tool_definitions", return_value=fake_tools):
             resp = await acp_agent.new_session(cwd="/tmp", mcp_servers=servers)
+            assert registered_configs == {}
+            await acp_agent.prompt(
+                session_id=resp.session_id,
+                prompt=[TextContentBlock(type="text", text="first task")],
+            )
 
         state = mock_manager.get_session(resp.session_id)
 
@@ -279,11 +303,11 @@ class TestMcpSanitizationE2E:
 
 
 class TestSessionLifecycleMcpE2E:
-    """Verify MCP servers are registered on all session lifecycle methods."""
+    """Verify lifecycle methods stage MCP servers for the next prompt."""
 
     @pytest.mark.asyncio
     async def test_load_session_registers_mcp(self, acp_agent, mock_manager):
-        """load_session re-registers MCP servers (spec says agents may not retain them)."""
+        """load_session stages MCP servers and the next prompt registers them."""
         # Create a session first
         create_resp = await acp_agent.new_session(cwd="/tmp")
         sid = create_resp.session_id
@@ -306,12 +330,17 @@ class TestSessionLifecycleMcpE2E:
         with patch("tools.mcp_tool.register_mcp_servers", side_effect=mock_register), \
              patch("model_tools.get_tool_definitions", return_value=[]):
             await acp_agent.load_session(cwd="/tmp", session_id=sid, mcp_servers=servers)
+            assert registered == {}
+            await acp_agent.prompt(
+                session_id=sid,
+                prompt=[TextContentBlock(type="text", text="continue")],
+            )
 
         assert "srv" in registered
 
     @pytest.mark.asyncio
     async def test_resume_session_registers_mcp(self, acp_agent, mock_manager):
-        """resume_session re-registers MCP servers."""
+        """resume_session stages MCP servers and the next prompt registers them."""
         create_resp = await acp_agent.new_session(cwd="/tmp")
         sid = create_resp.session_id
 
@@ -333,12 +362,17 @@ class TestSessionLifecycleMcpE2E:
         with patch("tools.mcp_tool.register_mcp_servers", side_effect=mock_register), \
              patch("model_tools.get_tool_definitions", return_value=[]):
             await acp_agent.resume_session(cwd="/tmp", session_id=sid, mcp_servers=servers)
+            assert registered == {}
+            await acp_agent.prompt(
+                session_id=sid,
+                prompt=[TextContentBlock(type="text", text="continue")],
+            )
 
         assert "srv2" in registered
 
     @pytest.mark.asyncio
     async def test_fork_session_registers_mcp(self, acp_agent, mock_manager):
-        """fork_session registers MCP servers on the new forked session."""
+        """fork_session stages MCP servers and the fork's first prompt registers them."""
         create_resp = await acp_agent.new_session(cwd="/tmp")
         sid = create_resp.session_id
 
@@ -351,11 +385,15 @@ class TestSessionLifecycleMcpE2E:
             registered.update(config_map)
             return []
 
-        # Need to set up the forked session's agent too
         with patch("tools.mcp_tool.register_mcp_servers", side_effect=mock_register), \
              patch("model_tools.get_tool_definitions", return_value=[]):
             fork_resp = await acp_agent.fork_session(
                 cwd="/tmp", session_id=sid, mcp_servers=servers
+            )
+            assert registered == {}
+            await acp_agent.prompt(
+                session_id=fork_resp.session_id,
+                prompt=[TextContentBlock(type="text", text="fork task")],
             )
 
         assert fork_resp.session_id != ""

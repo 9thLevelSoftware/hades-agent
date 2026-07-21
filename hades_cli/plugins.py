@@ -43,6 +43,7 @@ import os
 import sys
 import threading
 import types
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Union
@@ -75,6 +76,10 @@ class PluginToolOverrideError(PermissionError):
     """Raised when a plugin attempts to override a built-in tool without
     operator opt-in via ``plugins.entries.<plugin_id>.allow_tool_override``.
     """
+
+
+class PluginRuntimeResolverConflict(RuntimeError):
+    """Raised when more than one plugin tries to own runtime selection."""
 
 
 logger = logging.getLogger(__name__)
@@ -158,6 +163,8 @@ VALID_HOOKS: Set[str] = {
     "pre_api_request",
     "post_api_request",
     "api_request_error",
+    # Content-free, fail-open observer fired once after a turn is finalized.
+    "post_turn_outcome",
     "on_session_start",
     "on_session_end",
     "on_session_finalize",
@@ -330,6 +337,7 @@ class LoadedPlugin:
     hooks_registered: List[str] = field(default_factory=list)
     middleware_registered: List[str] = field(default_factory=list)
     commands_registered: List[str] = field(default_factory=list)
+    runtime_resolver_registered: bool = False
     enabled: bool = False
     error: Optional[str] = None
     # True for a bundled platform plugin recorded as a deferred (not-yet-
@@ -348,6 +356,7 @@ class PluginContext:
     def __init__(self, manifest: PluginManifest, manager: "PluginManager"):
         self.manifest = manifest
         self._manager = manager
+        self._agent_runtime_resolver_registration = None
         # Lazy-built host-owned LLM facade — see ctx.llm property below.
         self._llm: Any = None
 
@@ -616,6 +625,27 @@ class PluginContext:
                 kwargs["parent_agent"] = agent
 
         return registry.dispatch(tool_name, args, **kwargs)
+
+    # -- agent runtime resolver registration -------------------------------
+
+    def register_agent_runtime_resolver(self, resolver) -> None:
+        """Register the process-wide pre-construction agent runtime resolver.
+
+        Runtime selection changes credentials, provider, model, and cache
+        identity.  Silent first-wins ordering would therefore be unsafe: a
+        second owner is a deterministic hard error rather than a warning.
+        """
+        required = (
+            "requires_initial_task",
+            "resolve",
+            "record_manual_pin",
+        )
+        if any(not callable(getattr(resolver, name, None)) for name in required):
+            raise TypeError("Agent runtime resolver does not implement the required contract")
+        owner = self.manifest.key or self.manifest.name
+        self._manager._register_agent_runtime_resolver(resolver, owner)
+        self._agent_runtime_resolver_registration = resolver
+        logger.info("Plugin '%s' registered the agent runtime resolver", owner)
 
     # -- context engine registration -----------------------------------------
 
@@ -1255,6 +1285,13 @@ class PluginManager:
     """Central manager that discovers, loads, and invokes plugins."""
 
     def __init__(self) -> None:
+        self._lifecycle_lock = threading.RLock()
+        self._lifecycle_condition = threading.Condition(self._lifecycle_lock)
+        self._lifecycle_transition: Optional[str] = None
+        self._lifecycle_transition_owner: Optional[int] = None
+        self._active_runtime_resolver_leases = 0
+        self._runtime_resolver_lease_depths: Dict[int, int] = {}
+        self._pending_runtime_resolver_closes: List[Any] = []
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
         self._middleware: Dict[str, List[Callable]] = {}
@@ -1262,6 +1299,8 @@ class PluginManager:
         self._plugin_platform_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
         self._context_engine = None  # Set by a plugin via register_context_engine()
+        self._agent_runtime_resolver = None
+        self._agent_runtime_resolver_owner: Optional[str] = None
         self._plugin_commands: Dict[str, dict] = {}  # Slash commands registered by plugins
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
@@ -1278,6 +1317,171 @@ class PluginManager:
         # function with the slack_bolt signature ``(ack, body, action)``.
         self._slack_action_handlers: List[tuple] = []
 
+    @property
+    def agent_runtime_resolver(self):
+        """The single registered pre-construction runtime resolver, if any."""
+        with self._lifecycle_condition:
+            self._wait_for_resolver_read_locked()
+            return self._agent_runtime_resolver
+
+    @property
+    def agent_runtime_resolver_owner(self) -> Optional[str]:
+        with self._lifecycle_condition:
+            self._wait_for_resolver_read_locked()
+            return self._agent_runtime_resolver_owner
+
+    def _wait_for_resolver_read_locked(self) -> None:
+        thread_id = threading.get_ident()
+        while self._lifecycle_transition == "discovering":
+            if self._lifecycle_transition_owner == thread_id:
+                return
+            self._lifecycle_condition.wait()
+
+    def _register_agent_runtime_resolver(self, resolver, owner: str) -> None:
+        thread_id = threading.get_ident()
+        with self._lifecycle_condition:
+            while (
+                self._lifecycle_transition is not None
+                and self._lifecycle_transition_owner != thread_id
+            ):
+                self._lifecycle_condition.wait()
+            existing = self._agent_runtime_resolver
+            if existing is not None:
+                existing_owner = self._agent_runtime_resolver_owner or "another plugin"
+                raise PluginRuntimeResolverConflict(
+                    f"Agent runtime resolver is already registered by {existing_owner!r}"
+                )
+            self._agent_runtime_resolver = resolver
+            self._agent_runtime_resolver_owner = owner
+
+    @contextmanager
+    def agent_runtime_resolver_lease(self):
+        """Keep one resolver alive without holding a lock across its callback."""
+        thread_id = threading.get_ident()
+        while True:
+            self.discover_and_load()
+            with self._lifecycle_condition:
+                while self._lifecycle_transition is not None:
+                    if self._lifecycle_transition_owner == thread_id:
+                        break
+                    if (
+                        self._lifecycle_transition == "draining"
+                        and self._runtime_resolver_lease_depths.get(thread_id, 0)
+                    ):
+                        break
+                    self._lifecycle_condition.wait()
+                if not self._discovered:
+                    continue
+                resolver = self._agent_runtime_resolver
+                self._active_runtime_resolver_leases += 1
+                self._runtime_resolver_lease_depths[thread_id] = (
+                    self._runtime_resolver_lease_depths.get(thread_id, 0) + 1
+                )
+                break
+        try:
+            yield resolver
+        finally:
+            with self._lifecycle_condition:
+                self._active_runtime_resolver_leases -= 1
+                depth = self._runtime_resolver_lease_depths[thread_id] - 1
+                if depth:
+                    self._runtime_resolver_lease_depths[thread_id] = depth
+                else:
+                    self._runtime_resolver_lease_depths.pop(thread_id, None)
+                self._lifecycle_condition.notify_all()
+
+    def _begin_resolver_drain_locked(self, *, error_message: str) -> None:
+        thread_id = threading.get_ident()
+        if self._runtime_resolver_lease_depths.get(thread_id, 0):
+            raise RuntimeError(error_message)
+        while self._lifecycle_transition is not None:
+            if self._lifecycle_transition_owner == thread_id:
+                raise RuntimeError(error_message)
+            self._lifecycle_condition.wait()
+        self._lifecycle_transition = "draining"
+        self._lifecycle_transition_owner = thread_id
+        try:
+            while self._active_runtime_resolver_leases:
+                self._lifecycle_condition.wait()
+        except BaseException:
+            # Nothing has been detached yet. Publish the unchanged resolver so
+            # cancellation cannot strand every later reader/writer in drain.
+            self._finish_lifecycle_transition_locked()
+            raise
+        self._lifecycle_transition = "discovering"
+
+    def _finish_lifecycle_transition_locked(self) -> None:
+        self._lifecycle_transition = None
+        self._lifecycle_transition_owner = None
+        self._lifecycle_condition.notify_all()
+
+    def _close_agent_runtime_resolver(self) -> None:
+        """Detach and best-effort close the resolver exactly once."""
+        with self._lifecycle_condition:
+            self._begin_resolver_drain_locked(
+                error_message="Cannot close plugins during an active resolver call"
+            )
+            resolver = self._agent_runtime_resolver
+            self._agent_runtime_resolver = None
+            self._agent_runtime_resolver_owner = None
+            self._finish_lifecycle_transition_locked()
+        self._best_effort_close_agent_runtime_resolver(resolver)
+
+    @staticmethod
+    def _best_effort_close_agent_runtime_resolver(resolver) -> None:
+        if resolver is None:
+            return
+        close = getattr(resolver, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                # Resolver errors may contain provider URLs or credentials.
+                logger.warning("Agent runtime resolver close failed: resolver_error")
+
+    def _rollback_agent_runtime_resolver(self, resolver, owner: str) -> None:
+        """Detach only the exact resolver registered by a failed plugin load."""
+        thread_id = threading.get_ident()
+        owns_transition = False
+        detached = None
+        with self._lifecycle_condition:
+            while (
+                self._lifecycle_transition is not None
+                and self._lifecycle_transition_owner != thread_id
+            ):
+                self._lifecycle_condition.wait()
+            if (
+                self._agent_runtime_resolver is not resolver
+                or self._agent_runtime_resolver_owner != owner
+            ):
+                return
+            if self._lifecycle_transition is None:
+                self._begin_resolver_drain_locked(
+                    error_message=(
+                        "Cannot roll back plugins during an active resolver call"
+                    )
+                )
+                owns_transition = True
+            if (
+                self._agent_runtime_resolver is not resolver
+                or self._agent_runtime_resolver_owner != owner
+            ):
+                if owns_transition:
+                    self._finish_lifecycle_transition_locked()
+                return
+            self._agent_runtime_resolver = None
+            self._agent_runtime_resolver_owner = None
+            if owns_transition:
+                detached = resolver
+                self._finish_lifecycle_transition_locked()
+            else:
+                self._pending_runtime_resolver_closes.append(resolver)
+        self._best_effort_close_agent_runtime_resolver(detached)
+
+    def close(self) -> None:
+        """Release process-local plugin services; safe to call repeatedly."""
+        self._close_agent_runtime_resolver()
+
     # -----------------------------------------------------------------------
     # Public
     # -----------------------------------------------------------------------
@@ -1289,36 +1493,99 @@ class PluginManager:
         changes or newly-added bundled backends become visible in long-lived
         sessions without requiring a full agent restart.
         """
-        if self._discovered and not force:
-            return
-        if env_var_enabled("HERMES_SAFE_MODE"):
-            logger.info("HERMES_SAFE_MODE=1 — plugin discovery skipped")
+        thread_id = threading.get_ident()
+        resolver_before = None
+        resolver_owner_before = None
+        with self._lifecycle_condition:
+            if force and self._runtime_resolver_lease_depths.get(thread_id, 0):
+                raise RuntimeError(
+                    "Cannot reload plugins during an active resolver call"
+                )
+            if (
+                not force
+                and self._discovered
+                and self._lifecycle_transition != "discovering"
+            ):
+                return
+            while self._lifecycle_transition is not None:
+                if self._lifecycle_transition_owner == thread_id:
+                    if force:
+                        raise RuntimeError(
+                            "Cannot reload plugins during plugin discovery"
+                        )
+                    return
+                if (
+                    not force
+                    and self._lifecycle_transition == "draining"
+                    and self._discovered
+                ):
+                    return
+                self._lifecycle_condition.wait()
+            if not force and self._discovered:
+                return
+            resolver_before = self._agent_runtime_resolver
+            resolver_owner_before = self._agent_runtime_resolver_owner
+            if force:
+                self._begin_resolver_drain_locked(
+                    error_message=(
+                        "Cannot reload plugins during an active resolver call"
+                    )
+                )
+                detached_resolver = self._agent_runtime_resolver
+                self._agent_runtime_resolver = None
+                self._agent_runtime_resolver_owner = None
+                if detached_resolver is not None:
+                    self._pending_runtime_resolver_closes.append(detached_resolver)
+                self._clear_plugin_registries_locked()
+            else:
+                self._lifecycle_transition = "discovering"
+                self._lifecycle_transition_owner = thread_id
+            # Re-entrancy guard for plugin register() callbacks. Other threads
+            # still wait on the transition state before reading a resolver.
             self._discovered = True
-            return
-        if force:
-            self._plugins.clear()
-            self._hooks.clear()
-            self._middleware.clear()
-            self._plugin_tool_names.clear()
-            self._plugin_platform_names.clear()
-            self._cli_commands.clear()
-            self._plugin_commands.clear()
-            self._plugin_skills.clear()
-            self._aux_tasks.clear()
-            self._slack_action_handlers.clear()
-            self._context_engine = None
-        # Set the flag up front as a re-entrancy guard (a plugin's register()
-        # can transitively trigger discovery again), but reset it if the sweep
-        # raises so a failed scan is NOT cached as "discovered with an empty
-        # registry" — callers swallow the exception and would otherwise be
-        # permanently stranded on the early-return above (the "No web provider
-        # configured" class of failures).
-        self._discovered = True
+
         try:
+            if env_var_enabled("HERMES_SAFE_MODE"):
+                logger.info("HERMES_SAFE_MODE=1 — plugin discovery skipped")
+                return
             self._discover_and_load_inner()
         except BaseException:
-            self._discovered = False
+            with self._lifecycle_condition:
+                current_resolver = self._agent_runtime_resolver
+                current_owner = self._agent_runtime_resolver_owner
+                if current_resolver is not None and (
+                    force
+                    or current_resolver is not resolver_before
+                    or current_owner != resolver_owner_before
+                ):
+                    self._agent_runtime_resolver = None
+                    self._agent_runtime_resolver_owner = None
+                    self._pending_runtime_resolver_closes.append(current_resolver)
+                self._discovered = False
             raise
+        finally:
+            retired_resolvers = []
+            with self._lifecycle_condition:
+                if self._lifecycle_transition_owner == thread_id:
+                    retired_resolvers = self._pending_runtime_resolver_closes
+                    self._pending_runtime_resolver_closes = []
+                    self._finish_lifecycle_transition_locked()
+            for retired_resolver in retired_resolvers:
+                self._best_effort_close_agent_runtime_resolver(retired_resolver)
+
+    def _clear_plugin_registries_locked(self) -> None:
+        """Clear plugin-owned registries during an exclusive reload phase."""
+        self._plugins.clear()
+        self._hooks.clear()
+        self._middleware.clear()
+        self._plugin_tool_names.clear()
+        self._plugin_platform_names.clear()
+        self._cli_commands.clear()
+        self._plugin_commands.clear()
+        self._plugin_skills.clear()
+        self._aux_tasks.clear()
+        self._slack_action_handlers.clear()
+        self._context_engine = None
 
     def _discover_and_load_inner(self) -> None:
         """The actual discovery sweep — see :meth:`discover_and_load`."""
@@ -1780,6 +2047,7 @@ class PluginManager:
         from tools.registry import registry as _registry
         _plugin_id = manifest.key or manifest.name
         _slug = _plugin_id.replace("/", "__").replace("-", "_")
+        ctx: Optional[PluginContext] = None
         _registry.register_plugin_override_policy(
             f"{_NS_PARENT}.{_slug}",
             PluginContext(manifest, self)._tool_override_allowed(""),
@@ -1813,6 +2081,7 @@ class PluginManager:
                 _mw_counts_before = {
                     kind: len(cbs) for kind, cbs in self._middleware.items()
                 }
+                _runtime_resolver_owner_before = self._agent_runtime_resolver_owner
                 register_fn(ctx)
                 loaded.tools_registered = [
                     t for t in self._plugin_tool_names
@@ -1832,6 +2101,12 @@ class PluginManager:
                     c for c in self._plugin_commands
                     if self._plugin_commands[c].get("plugin") == manifest.name
                 ]
+                loaded.runtime_resolver_registered = (
+                    self._agent_runtime_resolver_owner
+                    == (manifest.key or manifest.name)
+                    and self._agent_runtime_resolver_owner
+                    != _runtime_resolver_owner_before
+                )
                 loaded.enabled = True
                 logger.debug(
                     "  registered: %d tool(s), %d hook(s), %d middleware, %d slash command(s), %d CLI command(s)",
@@ -1846,6 +2121,14 @@ class PluginManager:
                 )
 
         except Exception as exc:
+            if (
+                ctx is not None
+                and ctx._agent_runtime_resolver_registration is not None
+            ):
+                self._rollback_agent_runtime_resolver(
+                    ctx._agent_runtime_resolver_registration,
+                    _plugin_id,
+                )
             loaded.error = str(exc)
             logger.warning(
                 "Failed to load plugin '%s': %s",
@@ -2019,6 +2302,7 @@ class PluginManager:
                     "hooks": len(loaded.hooks_registered),
                     "middleware": len(loaded.middleware_registered),
                     "commands": len(loaded.commands_registered),
+                    "runtime_resolver": loaded.runtime_resolver_registered,
                     "error": loaded.error,
                 }
             )
@@ -2052,13 +2336,16 @@ class PluginManager:
 # ---------------------------------------------------------------------------
 
 _plugin_manager: Optional[PluginManager] = None
+_plugin_manager_lock = threading.RLock()
 
 
 def get_plugin_manager() -> PluginManager:
     """Return (and lazily create) the global PluginManager singleton."""
     global _plugin_manager
     if _plugin_manager is None:
-        _plugin_manager = PluginManager()
+        with _plugin_manager_lock:
+            if _plugin_manager is None:
+                _plugin_manager = PluginManager()
     return _plugin_manager
 
 
@@ -2372,6 +2659,19 @@ def _ensure_plugins_discovered(force: bool = False) -> PluginManager:
 def get_plugin_context_engine():
     """Return the plugin-registered context engine, or None."""
     return _ensure_plugins_discovered()._context_engine
+
+
+def get_agent_runtime_resolver():
+    """Return the single plugin runtime resolver after lazy discovery."""
+    return _ensure_plugins_discovered().agent_runtime_resolver
+
+
+@contextmanager
+def lease_agent_runtime_resolver():
+    """Lease the resolver across one invocation so reload cannot close it."""
+    manager = get_plugin_manager()
+    with manager.agent_runtime_resolver_lease() as resolver:
+        yield resolver
 
 
 def get_plugin_command_handler(name: str) -> Optional[Callable]:

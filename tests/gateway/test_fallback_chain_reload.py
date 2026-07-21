@@ -209,8 +209,8 @@ def test_background_and_main_agent_paths_call_refresh():
     source = (
         Path(__file__).resolve().parent.parent.parent / "gateway" / "run.py"
     ).read_text(encoding="utf-8")
-    assert "fallback_model=self._refresh_fallback_model()" in source
-    assert source.count("fallback_model=self._refresh_fallback_model()") >= 2
+    assert source.count("else self._refresh_fallback_model()") >= 2
+    assert 'routing_handoff["fallback_model"]' in source
     # The cached-agent reuse path (the load-bearing fix for a long-lived
     # session in a running gateway) must apply the refreshed chain.
     assert "self._apply_fallback_chain_to_agent(" in source

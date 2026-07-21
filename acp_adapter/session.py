@@ -11,6 +11,7 @@ from __future__ import annotations
 from hades_constants import get_hades_home
 
 import copy
+import inspect
 import json
 import logging
 import os
@@ -160,9 +161,16 @@ class SessionState:
     """Tracks per-session state for an ACP-managed Hades agent."""
 
     session_id: str
-    agent: Any  # AIAgent instance
+    agent: Any | None = None  # Built on the first model prompt.
     cwd: str = "."
     model: str = ""
+    requested_provider: str | None = None
+    base_url: str | None = None
+    api_mode: str | None = None
+    manual_runtime_pin: bool = False
+    manual_pin_source: str | None = None
+    mcp_servers: List[Any] = field(default_factory=list, repr=False)
+    mcp_servers_registered: bool = False
     history: List[Dict[str, Any]] = field(default_factory=list)
     cancel_event: Any = None  # threading.Event
     is_running: bool = False
@@ -170,6 +178,7 @@ class SessionState:
     runtime_lock: Any = field(default_factory=Lock)
     current_prompt_text: str = ""
     interrupted_prompt_text: str = ""
+    is_resume: bool = False
 
 
 class SessionManager:
@@ -197,17 +206,14 @@ class SessionManager:
     # ---- public API ---------------------------------------------------------
 
     def create_session(self, cwd: str = ".") -> SessionState:
-        """Create a new session with a unique ID and a fresh AIAgent."""
+        """Allocate and persist a session without constructing a provider client."""
         import threading
 
         cwd = _translate_acp_cwd(cwd)
         session_id = str(uuid.uuid4())
-        agent = self._make_agent(session_id=session_id, cwd=cwd)
         state = SessionState(
             session_id=session_id,
-            agent=agent,
             cwd=cwd,
-            model=getattr(agent, "model", "") or "",
             cancel_event=threading.Event(),
         )
         with self._lock:
@@ -240,7 +246,7 @@ class SessionManager:
         return existed or db_existed
 
     def fork_session(self, session_id: str, cwd: str = ".") -> Optional[SessionState]:
-        """Deep-copy a session's history into a new session."""
+        """Deep-copy session state while deferring the fork's agent construction."""
         import threading
 
         cwd = _translate_acp_cwd(cwd)
@@ -249,16 +255,15 @@ class SessionManager:
             return None
 
         new_id = str(uuid.uuid4())
-        agent = self._make_agent(
-            session_id=new_id,
-            cwd=cwd,
-            model=original.model or None,
-        )
         state = SessionState(
             session_id=new_id,
-            agent=agent,
             cwd=cwd,
-            model=getattr(agent, "model", original.model) or original.model,
+            model=original.model,
+            requested_provider=original.requested_provider,
+            base_url=original.base_url,
+            api_mode=original.api_mode,
+            manual_runtime_pin=original.manual_runtime_pin,
+            manual_pin_source=original.manual_pin_source,
             history=copy.deepcopy(original.history),
             cancel_event=threading.Event(),
         )
@@ -385,6 +390,76 @@ class SessionManager:
         if state is not None:
             self._persist(state)
 
+    def ensure_agent(self, state: SessionState, *, task: Any) -> Any:
+        """Construct the canonical ACP agent once the first model task is known."""
+        if state.agent is not None:
+            return state.agent
+
+        from agent.runtime_routing import (
+            AgentRuntimeContext,
+            apply_manual_runtime_transition,
+            constructor_runtime_spec,
+            runtime_resolver_requires_initial_task,
+        )
+        route_first_prompt = runtime_resolver_requires_initial_task("fresh_session")
+        context = None
+        if route_first_prompt:
+            context = AgentRuntimeContext(
+                scope="fresh_session",
+                task=task,
+                session_id=state.session_id,
+                task_id=state.session_id,
+                is_resume=state.is_resume,
+                manual_runtime_pin=state.manual_runtime_pin,
+                manual_pin_source=state.manual_pin_source,
+                metadata={"platform": "acp"},
+            )
+        fallback_model: list[dict[str, Any]] = []
+        if route_first_prompt or state.manual_runtime_pin:
+            from hermes_cli.config import load_config
+            from hermes_cli.fallback_config import get_fallback_chain
+
+            fallback_model = get_fallback_chain(load_config())
+        agent = self._make_agent(
+            session_id=state.session_id,
+            cwd=state.cwd,
+            model=state.model or None,
+            requested_provider=state.requested_provider,
+            base_url=state.base_url,
+            api_mode=state.api_mode,
+            fallback_model=fallback_model or None,
+            mcp_server_names=[server.name for server in state.mcp_servers],
+            runtime_routing_context=context,
+        )
+        state.agent = agent
+        state.model = getattr(agent, "model", state.model) or state.model
+        if state.manual_runtime_pin:
+            runtime = constructor_runtime_spec(
+                model=state.model,
+                provider=getattr(agent, "provider", None) or state.requested_provider,
+                base_url=getattr(agent, "base_url", None),
+                api_key=getattr(agent, "api_key", None),
+                api_mode=getattr(agent, "api_mode", None),
+                acp_command=getattr(agent, "acp_command", None),
+                acp_args=getattr(agent, "acp_args", None),
+                credential_pool=getattr(
+                    agent,
+                    "credential_pool",
+                    getattr(agent, "_credential_pool", None),
+                ),
+                reasoning_config=getattr(agent, "reasoning_config", None),
+                fallback_model=fallback_model,
+            )
+            apply_manual_runtime_transition(
+                agent,
+                session_id=state.session_id,
+                source=state.manual_pin_source or "acp_model_selection",
+                runtime=runtime,
+                fallback_model=fallback_model,
+            )
+        self._persist(state)
+        return agent
+
     # ---- persistence via SessionDB ------------------------------------------
 
     def _get_db(self):
@@ -422,15 +497,19 @@ class SessionManager:
         # Ensure model is a plain string (not a MagicMock or other proxy).
         model_str = str(state.model) if state.model else None
         session_meta = {"cwd": state.cwd}
-        provider = getattr(state.agent, "provider", None)
-        base_url = getattr(state.agent, "base_url", None)
-        api_mode = getattr(state.agent, "api_mode", None)
+        provider = getattr(state.agent, "provider", None) or state.requested_provider
+        base_url = getattr(state.agent, "base_url", None) or state.base_url
+        api_mode = getattr(state.agent, "api_mode", None) or state.api_mode
         if isinstance(provider, str) and provider.strip():
             session_meta["provider"] = provider.strip()
         if isinstance(base_url, str) and base_url.strip():
             session_meta["base_url"] = base_url.strip()
         if isinstance(api_mode, str) and api_mode.strip():
             session_meta["api_mode"] = api_mode.strip()
+        if state.manual_runtime_pin:
+            session_meta["manual_runtime_pin"] = True
+            if state.manual_pin_source:
+                session_meta["manual_pin_source"] = state.manual_pin_source
         cwd_json = json.dumps(session_meta)
 
         try:
@@ -441,7 +520,7 @@ class SessionManager:
                     session_id=state.session_id,
                     source="acp",
                     model=model_str,
-                    model_config={"cwd": state.cwd},
+                    model_config=session_meta,
                 )
             else:
                 # Update model_config (contains cwd) if changed.
@@ -495,7 +574,7 @@ class SessionManager:
             logger.warning("Failed to persist ACP session %s", state.session_id, exc_info=True)
 
     def _restore(self, session_id: str) -> Optional[SessionState]:
-        """Load a session from the database into memory, recreating the AIAgent."""
+        """Load persisted ACP state while keeping agent construction deferred."""
         import threading
 
         db = self._get_db()
@@ -520,6 +599,8 @@ class SessionManager:
         requested_provider = row.get("billing_provider")
         restored_base_url = row.get("billing_base_url")
         restored_api_mode = None
+        manual_runtime_pin = False
+        manual_pin_source = None
         mc = row.get("model_config")
         if mc:
             try:
@@ -529,6 +610,8 @@ class SessionManager:
                     requested_provider = meta.get("provider") or requested_provider
                     restored_base_url = meta.get("base_url") or restored_base_url
                     restored_api_mode = meta.get("api_mode") or restored_api_mode
+                    manual_runtime_pin = meta.get("manual_runtime_pin") is True
+                    manual_pin_source = meta.get("manual_pin_source")
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -540,33 +623,23 @@ class SessionManager:
         # otherwise re-fire the pre-request defensive repair on every request
         # for the rest of the session (see hades_state.get_messages_as_conversation).
         try:
-            history = db.get_messages_as_conversation(
-                session_id, repair_alternation=True
-            )
+            history = db.get_messages_as_conversation(session_id)
         except Exception:
             logger.warning("Failed to load messages for ACP session %s", session_id, exc_info=True)
             history = []
 
-        try:
-            agent = self._make_agent(
-                session_id=session_id,
-                cwd=cwd,
-                model=model,
-                requested_provider=requested_provider,
-                base_url=restored_base_url,
-                api_mode=restored_api_mode,
-            )
-        except Exception:
-            logger.warning("Failed to recreate agent for ACP session %s", session_id, exc_info=True)
-            return None
-
         state = SessionState(
             session_id=session_id,
-            agent=agent,
             cwd=cwd,
-            model=model or getattr(agent, "model", "") or "",
+            model=model or "",
+            requested_provider=requested_provider,
+            base_url=restored_base_url,
+            api_mode=restored_api_mode,
+            manual_runtime_pin=manual_runtime_pin,
+            manual_pin_source=manual_pin_source,
             history=history,
             cancel_event=threading.Event(),
+            is_resume=True,
         )
         with self._lock:
             self._sessions[session_id] = state
@@ -596,9 +669,35 @@ class SessionManager:
         requested_provider: str | None = None,
         base_url: str | None = None,
         api_mode: str | None = None,
+        fallback_model: Any = None,
+        mcp_server_names: List[str] | None = None,
+        runtime_routing_context: Any = None,
     ):
         if self._agent_factory is not None:
-            return self._agent_factory()
+            factory_kwargs = {
+                "session_id": session_id,
+                "cwd": cwd,
+                "model": model,
+                "requested_provider": requested_provider,
+                "base_url": base_url,
+                "api_mode": api_mode,
+                "fallback_model": fallback_model,
+                "mcp_server_names": mcp_server_names,
+                "runtime_routing_context": runtime_routing_context,
+            }
+            try:
+                parameters = inspect.signature(self._agent_factory).parameters
+            except (TypeError, ValueError):
+                return self._agent_factory()
+            if any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            ):
+                return self._agent_factory(**factory_kwargs)
+            accepted = {
+                key: value for key, value in factory_kwargs.items() if key in parameters
+            }
+            return self._agent_factory(**accepted)
 
         from run_agent import AIAgent
         from hades_cli.config import load_config
@@ -624,28 +723,44 @@ class SessionManager:
             "platform": "acp",
             "enabled_toolsets": _expand_acp_enabled_toolsets(
                 ["hades-acp"],
-                mcp_server_names=configured_mcp_servers,
+                mcp_server_names=[
+                    *configured_mcp_servers,
+                    *(mcp_server_names or []),
+                ],
             ),
             "quiet_mode": True,
             "session_id": session_id,
             "session_db": self._get_db(),
             "model": model or default_model,
         }
+        if fallback_model is not None:
+            kwargs["fallback_model"] = fallback_model
 
-        try:
-            runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
+        if runtime_routing_context is not None:
             kwargs.update(
                 {
-                    "provider": runtime.get("provider"),
-                    "api_mode": api_mode or runtime.get("api_mode"),
-                    "base_url": base_url or runtime.get("base_url"),
-                    "api_key": runtime.get("api_key"),
-                    "command": runtime.get("command"),
-                    "args": list(runtime.get("args") or []),
+                    "provider": requested_provider or config_provider,
+                    "api_mode": api_mode,
+                    "base_url": base_url,
+                    "runtime_routing_context": runtime_routing_context,
                 }
             )
-        except Exception:
-            logger.debug("ACP session falling back to default provider resolution", exc_info=True)
+
+        if runtime_routing_context is None:
+            try:
+                runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
+                kwargs.update(
+                    {
+                        "provider": runtime.get("provider"),
+                        "api_mode": api_mode or runtime.get("api_mode"),
+                        "base_url": base_url or runtime.get("base_url"),
+                        "api_key": runtime.get("api_key"),
+                        "command": runtime.get("command"),
+                        "args": list(runtime.get("args") or []),
+                    }
+                )
+            except Exception:
+                logger.debug("ACP session falling back to default provider resolution", exc_info=True)
 
         _register_task_cwd(session_id, cwd)
         agent = AIAgent(**kwargs)

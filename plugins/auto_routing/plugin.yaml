@@ -1,0 +1,8 @@
+name: auto-routing
+version: "0.3.0"
+description: "Profile-local executable-inventory advisor and cache-safe Auto model router"
+author: "Hermes fork contributors"
+kind: standalone
+hooks:
+  - pre_api_request
+  - post_turn_outcome

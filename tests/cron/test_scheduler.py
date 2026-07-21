@@ -5,7 +5,7 @@ import itertools
 import json
 import logging
 import os
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import ANY, AsyncMock, patch, MagicMock
 
 import pytest
 
@@ -1697,7 +1697,9 @@ class TestRunJobSessionPersistence:
         assert error is None
         assert final_response == "ok"
         heartbeat.assert_called_once_with(
-            "heartbeat-job", expected_owner="owner-token"
+            "heartbeat-job",
+            expected_owner="owner-token",
+            expected_job_revision_sha256=ANY,
         )
 
     def test_run_job_resets_secret_source_cache_before_reload(self, tmp_path, monkeypatch):
@@ -2700,6 +2702,7 @@ class TestSilentDelivery:
             False,
             "Agent completed but produced empty response (model error, timeout, or misconfiguration)",
             delivery_error=None,
+            expected_job_revision_sha256=ANY,
         )
 
 
@@ -2720,7 +2723,7 @@ class TestOneShotDispatchClaim:
     def test_claim_runs_before_run_job(self):
         order = []
         with patch("cron.scheduler.get_due_jobs", return_value=[self._oneshot()]), \
-             patch("cron.scheduler.claim_dispatch", side_effect=lambda _id: order.append("claim") or True), \
+             patch("cron.scheduler.claim_dispatch", side_effect=lambda _id, **_kwargs: order.append("claim") or True), \
              patch("cron.scheduler.run_job", side_effect=lambda _j, **_kw: order.append("run") or (True, "# out", "ok", None)), \
              patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
              patch("cron.scheduler._deliver_result"), \
@@ -2741,6 +2744,238 @@ class TestOneShotDispatchClaim:
         run_mock.assert_not_called()
         deliver_mock.assert_not_called()
         mark_mock.assert_not_called()
+
+
+class TestDispatchedJobRevisionCAS:
+    """A stale worker may finish, but never mutates a same-ID replacement."""
+
+    @staticmethod
+    def _job(*, recurring: bool) -> dict:
+        schedule = (
+            {"kind": "interval", "seconds": 60, "display": "every 1m"}
+            if recurring
+            else {"kind": "once", "run_at": "2026-07-20T12:00:00+00:00"}
+        )
+        return {
+            "id": "revision-cas-job",
+            "name": "original",
+            "prompt": "original",
+            "deliver": "local",
+            "schedule": schedule,
+            "schedule_display": "every 1m" if recurring else "once",
+            "repeat": {"times": 3 if recurring else 1, "completed": 0},
+            "enabled": True,
+            "state": "scheduled",
+            "next_run_at": "2020-01-01T00:00:00+00:00",
+        }
+
+    @pytest.mark.parametrize("recurring", [False, True])
+    def test_real_tick_preserves_same_id_reschedule_after_dispatch(
+        self,
+        tmp_path,
+        recurring,
+    ):
+        from cron.jobs import (
+            create_job,
+            load_jobs,
+            save_jobs,
+            update_job,
+            use_cron_store,
+        )
+        from cron.scheduler import tick
+
+        job_id = ""
+
+        def replace_during_run(_job, **_kwargs):
+            replacement = update_job(
+                job_id,
+                {
+                    # next_run_at and repeat.completed are scheduler
+                    # bookkeeping and intentionally excluded from the stable
+                    # job projection.  The user-update launch revision must
+                    # still make this reschedule a distinct CAS incarnation.
+                    "next_run_at": "2099-02-01T00:00:00+00:00",
+                    "repeat": {
+                        "times": 3 if recurring else 1,
+                        "completed": 0,
+                    },
+                },
+            )
+            assert replacement is not None
+            return True, "# output", "ok", None
+
+        with use_cron_store(tmp_path):
+            created = create_job(
+                prompt="original",
+                schedule=(
+                    "every 1m" if recurring else "2098-01-01T00:00:00Z"
+                ),
+                name="original",
+                repeat=3 if recurring else 1,
+                deliver="local",
+            )
+            job_id = created["id"]
+            stored_jobs = load_jobs()
+            stored_jobs[0]["next_run_at"] = "2020-01-01T00:00:00+00:00"
+            save_jobs(stored_jobs)
+            with patch(
+                "cron.scheduler.run_job",
+                side_effect=replace_during_run,
+            ), patch(
+                "cron.scheduler.save_job_output",
+                return_value=tmp_path / "out.md",
+            ), patch(
+                "cron.scheduler._deliver_result",
+                return_value=None,
+            ), patch(
+                "agent.secret_scope.build_profile_secret_scope",
+                return_value=object(),
+            ), patch(
+                "agent.secret_scope.set_secret_scope",
+                return_value=object(),
+            ), patch("agent.secret_scope.reset_secret_scope"):
+                assert tick(verbose=False, sync=True) == 1
+
+            stored = load_jobs()
+            assert len(stored) == 1
+            replacement = stored[0]
+            assert replacement["id"] == job_id
+            assert replacement["name"] == "original"
+            assert replacement["prompt"] == "original"
+            assert replacement["repeat"]["completed"] == 0
+            assert replacement["next_run_at"] == "2099-02-01T00:00:00+00:00"
+            assert replacement["last_run_at"] is None
+            assert replacement["last_status"] is None
+
+    def test_same_id_reschedule_before_claim_rejects_stale_run(self, tmp_path):
+        from cron.jobs import load_jobs, save_jobs, update_job, use_cron_store
+        from cron.scheduler import run_one_job
+
+        with use_cron_store(tmp_path):
+            save_jobs([self._job(recurring=False)])
+            dispatched = load_jobs()[0]
+            replacement = update_job(
+                dispatched["id"],
+                {
+                    "next_run_at": "2099-03-01T00:00:00+00:00",
+                    "repeat": {"times": 1, "completed": 0},
+                },
+            )
+            assert replacement is not None
+            with patch("cron.scheduler.run_job") as run_mock:
+                assert run_one_job(dispatched) is True
+            run_mock.assert_not_called()
+
+            stored = load_jobs()
+            assert len(stored) == 1
+            assert stored[0]["next_run_at"] == "2099-03-01T00:00:00+00:00"
+            assert stored[0]["repeat"]["completed"] == 0
+            assert stored[0].get("last_status") is None
+
+    @pytest.mark.parametrize("recurring", [False, True])
+    def test_removed_after_due_snapshot_never_executes(
+        self,
+        tmp_path,
+        recurring,
+    ):
+        from cron.jobs import (
+            get_due_jobs as read_due_jobs,
+            load_jobs,
+            remove_job,
+            save_jobs,
+            use_cron_store,
+        )
+        from cron.scheduler import tick
+
+        with use_cron_store(tmp_path):
+            save_jobs([self._job(recurring=recurring)])
+
+            def snapshot_then_remove():
+                due = read_due_jobs()
+                assert len(due) == 1
+                assert remove_job(due[0]["id"]) is True
+                return due
+
+            with patch(
+                "cron.scheduler.get_due_jobs",
+                side_effect=snapshot_then_remove,
+            ), patch("cron.scheduler.run_job") as run_mock, patch(
+                "cron.scheduler.mark_job_run"
+            ) as mark_mock:
+                tick(verbose=False, sync=True)
+
+            run_mock.assert_not_called()
+            mark_mock.assert_not_called()
+            assert load_jobs() == []
+
+    @pytest.mark.parametrize("recurring", [False, True])
+    def test_replacement_after_due_snapshot_is_not_executed_or_mutated(
+        self,
+        tmp_path,
+        recurring,
+    ):
+        from cron.jobs import (
+            get_due_jobs as read_due_jobs,
+            load_jobs,
+            remove_job,
+            save_jobs,
+            use_cron_store,
+        )
+        from cron.scheduler import tick
+
+        replacement = self._job(recurring=recurring)
+        replacement["prompt"] = "replacement"
+        replacement["next_run_at"] = "2099-03-01T00:00:00+00:00"
+
+        with use_cron_store(tmp_path):
+            save_jobs([self._job(recurring=recurring)])
+
+            def snapshot_then_replace():
+                due = read_due_jobs()
+                assert len(due) == 1
+                assert remove_job(due[0]["id"]) is True
+                save_jobs([replacement])
+                return due
+
+            with patch(
+                "cron.scheduler.get_due_jobs",
+                side_effect=snapshot_then_replace,
+            ), patch("cron.scheduler.run_job") as run_mock, patch(
+                "cron.scheduler.mark_job_run"
+            ) as mark_mock:
+                tick(verbose=False, sync=True)
+
+            run_mock.assert_not_called()
+            mark_mock.assert_not_called()
+            assert load_jobs() == [replacement]
+
+    def test_matching_revision_runs_and_settles_normally(self, tmp_path):
+        from cron.jobs import load_jobs, save_jobs, use_cron_store
+        from cron.scheduler import run_one_job
+
+        with use_cron_store(tmp_path):
+            save_jobs([self._job(recurring=False)])
+            dispatched = load_jobs()[0]
+            with patch(
+                "cron.scheduler.run_job",
+                return_value=(True, "# output", "ok", None),
+            ), patch(
+                "cron.scheduler.save_job_output",
+                return_value=tmp_path / "out.md",
+            ), patch(
+                "cron.scheduler._deliver_result",
+                return_value=None,
+            ), patch(
+                "agent.secret_scope.build_profile_secret_scope",
+                return_value=object(),
+            ), patch(
+                "agent.secret_scope.set_secret_scope",
+                return_value=object(),
+            ), patch("agent.secret_scope.reset_secret_scope"):
+                assert run_one_job(dispatched) is True
+
+            # Finite one-shot completion still deletes the original job.
+            assert load_jobs() == []
 
 
 class TestBuildJobPromptSilentHint:
@@ -4942,43 +5177,3 @@ class TestMultiTargetDeliveryContinuesOnFailure:
         assert "a@example.com" in result
         assert "b@example.com" in result
         assert mock_pool.submit.call_count == 2
-
-
-class TestSetCronSessionTitle:
-    """Robust cron session titling: #50535/#50536/#50537."""
-
-    def test_sets_title_when_no_collision(self):
-        from cron.scheduler import _set_cron_session_title
-        db = MagicMock()
-        db.set_session_title.return_value = True
-        out = _set_cron_session_title(db, "sess-1", "Nightly Synthesis")
-        assert out == "Nightly Synthesis"
-        db.set_session_title.assert_called_once_with("sess-1", "Nightly Synthesis")
-
-    def test_dedupes_on_duplicate_title(self):
-        # First write collides (ValueError); helper falls back to lineage #N.
-        from cron.scheduler import _set_cron_session_title
-        db = MagicMock()
-        db.set_session_title.side_effect = [ValueError("in use"), True]
-        db.get_next_title_in_lineage.return_value = "Nightly Synthesis #2"
-        out = _set_cron_session_title(db, "sess-1", "Nightly Synthesis")
-        assert out == "Nightly Synthesis #2"
-        db.get_next_title_in_lineage.assert_called_once_with("Nightly Synthesis")
-
-    def test_reraises_when_no_lineage_support(self):
-        from cron.scheduler import _set_cron_session_title
-        db = MagicMock(spec=["set_session_title"])
-        db.set_session_title.side_effect = ValueError("in use")
-        with pytest.raises(ValueError):
-            _set_cron_session_title(db, "sess-1", "Dup")
-
-    def test_returns_none_for_blank_base(self):
-        from cron.scheduler import _set_cron_session_title
-        db = MagicMock()
-        assert _set_cron_session_title(db, "sess-1", "   ") is None
-        db.set_session_title.assert_not_called()
-
-    def test_returns_none_without_db_or_session(self):
-        from cron.scheduler import _set_cron_session_title
-        assert _set_cron_session_title(None, "sess-1", "X") is None
-        assert _set_cron_session_title(MagicMock(), "", "X") is None

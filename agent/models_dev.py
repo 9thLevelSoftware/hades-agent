@@ -408,6 +408,7 @@ class ModelCapabilities:
     context_window: int = 200000
     max_output_tokens: int = 8192
     model_family: str = ""
+    reasoning_options: tuple[str, ...] = ()
 
 
 def _get_provider_models(provider: str) -> Optional[Dict[str, Any]]:
@@ -483,7 +484,25 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
         supports_vision = "image" in input_mods
     else:
         supports_vision = bool(entry.get("attachment", False))
-    supports_reasoning = bool(entry.get("reasoning", False))
+    raw_reasoning = entry.get("reasoning", False)
+    supports_reasoning = bool(raw_reasoning)
+    raw_reasoning_options: Any = entry.get("reasoning_options")
+    if isinstance(raw_reasoning, dict):
+        raw_reasoning_options = (
+            raw_reasoning.get("allowed_options")
+            or raw_reasoning.get("options")
+            or raw_reasoning.get("efforts")
+            or raw_reasoning_options
+        )
+    if not isinstance(raw_reasoning_options, (list, tuple)):
+        raw_reasoning_options = ()
+    reasoning_options = tuple(
+        dict.fromkeys(
+            str(option).strip().lower()
+            for option in raw_reasoning_options
+            if str(option).strip()
+        )
+    )
 
     # Extract limits
     limit = entry.get("limit", {})
@@ -505,6 +524,7 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
         context_window=context_window,
         max_output_tokens=max_output_tokens,
         model_family=model_family,
+        reasoning_options=reasoning_options,
     )
 
 

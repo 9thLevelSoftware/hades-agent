@@ -186,7 +186,6 @@ def _reinstall_sidecar_deps() -> None:
             text=True,
             check=False,
             timeout=_NPM_REINSTALL_TIMEOUT,
-            creationflags=windows_hide_flags(),
         )
         if result.returncode != 0:
             logger.warning(
@@ -199,7 +198,6 @@ def _reinstall_sidecar_deps() -> None:
                 text=True,
                 check=False,
                 timeout=_NPM_REINSTALL_TIMEOUT,
-                creationflags=windows_hide_flags(),
             )
     except subprocess.TimeoutExpired:
         # A wedged npm (dead registry, network blackhole) must not stall the
@@ -949,9 +947,6 @@ class PhotonAdapter(BasePlatformAdapter):
                 text=True,
                 timeout=10,
                 check=False,
-                # Windows: suppress the brief console flash this short-lived
-                # node patch run would otherwise pop on every sidecar start.
-                creationflags=windows_hide_flags(),
             )
             if patch.returncode != 0:
                 raise RuntimeError((patch.stderr or patch.stdout or "").strip())
@@ -970,10 +965,6 @@ class PhotonAdapter(BasePlatformAdapter):
             stderr=subprocess.STDOUT,
             env=env,
             start_new_session=(sys.platform != "win32"),
-            # Windows: run the persistent sidecar headless so it does not open
-            # (or leave) a visible console window. CREATE_NO_WINDOW only (no
-            # DETACHED_PROCESS) so the stdin/stdout pipes above stay usable.
-            creationflags=windows_hide_flags(),
         )
 
         # Pump sidecar stderr/stdout into our logger so users see crashes.

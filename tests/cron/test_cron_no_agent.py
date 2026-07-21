@@ -12,6 +12,8 @@ Covers:
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import re
 from unittest.mock import patch
 
 import pytest
@@ -68,6 +70,354 @@ def test_create_job_no_agent_stores_field(hermes_env):
     assert job["script"] == "watchdog.sh"
     # Prompt can be empty/None for no_agent jobs.
     assert job["prompt"] in {None, ""}
+
+
+def test_no_agent_script_launch_claim_is_scheduler_owned_and_single_use(
+    hermes_env,
+    monkeypatch,
+):
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+
+    script_path = hermes_env / "scripts" / "claim.py"
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[2]))
+    script_path.write_text("# populated after job creation\n", encoding="utf-8")
+    job = create_job(
+        prompt=None,
+        schedule="every 5m",
+        name="claim",
+        script="claim.py",
+        no_agent=True,
+        script_launch_claim=True,
+        deliver="local",
+    )
+    script_path.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "from cron.script_claim import consume_script_launch_claim\n"
+        f"job_id = {job['id']!r}\n"
+        "home = Path(os.environ['HERMES_HOME'])\n"
+        "first = consume_script_launch_claim(home=home, expected_job_id=job_id)\n"
+        "second = consume_script_launch_claim(home=home, expected_job_id=job_id)\n"
+        "raise SystemExit(0 if first and not second else 1)\n",
+        encoding="utf-8",
+    )
+
+    ok, _document, _response, error = run_job(job)
+
+    assert ok is True
+    assert error is None
+
+
+def test_no_agent_script_launch_claim_is_redacted_from_script_output(hermes_env):
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+
+    script_path = hermes_env / "scripts" / "echo-claim.py"
+    script_path.write_text(
+        "import os\n"
+        "print('claim-capability=' + os.environ['_CRON_INTERNAL_LAUNCH_CAPABILITY'])\n",
+        encoding="utf-8",
+    )
+    job = create_job(
+        prompt=None,
+        schedule="every 5m",
+        name="echo-claim",
+        script="echo-claim.py",
+        no_agent=True,
+        script_launch_claim=True,
+        deliver="local",
+    )
+
+    ok, _document, response, error = run_job(job)
+
+    assert ok is True
+    assert error is None
+    assert not re.search(r"claim-capability=\\S+", response)
+
+
+def test_script_launch_capabilities_are_independent_per_scheduler_run(
+    hermes_env,
+    monkeypatch,
+):
+    from cron.jobs import create_job
+    from cron.script_claim import (
+        consume_script_launch_claim,
+        issue_script_launch_claim,
+    )
+
+    script_path = hermes_env / "scripts" / "claim.py"
+    script_path.write_text("print('claim')\n", encoding="utf-8")
+    job = create_job(
+        prompt=None,
+        schedule="every 5m",
+        name="claim",
+        script="claim.py",
+        no_agent=True,
+        script_launch_claim=True,
+        deliver="local",
+    )
+    first = issue_script_launch_claim(
+        home=hermes_env,
+        job_id=job["id"],
+        dispatched_job=job,
+    )
+    second = issue_script_launch_claim(
+        home=hermes_env,
+        job_id=job["id"],
+        dispatched_job=job,
+    )
+
+    for name, value in first.environment.items():
+        monkeypatch.setenv(name, value)
+    assert consume_script_launch_claim(home=hermes_env, expected_job_id=job["id"])
+    for name, value in second.environment.items():
+        monkeypatch.setenv(name, value)
+    assert consume_script_launch_claim(home=hermes_env, expected_job_id=job["id"])
+
+
+def test_script_launch_capability_rejects_same_id_job_replacement(
+    hermes_env,
+    monkeypatch,
+):
+    from cron.jobs import create_job, update_job
+    from cron.script_claim import (
+        consume_script_launch_claim,
+        issue_script_launch_claim,
+    )
+
+    script_path = hermes_env / "scripts" / "claim.py"
+    script_path.write_text("print('claim')\n", encoding="utf-8")
+    job = create_job(
+        prompt=None,
+        schedule="every 5m",
+        name="claim",
+        script="claim.py",
+        no_agent=True,
+        script_launch_claim=True,
+        deliver="local",
+    )
+    claim = issue_script_launch_claim(
+        home=hermes_env,
+        job_id=job["id"],
+        dispatched_job=job,
+    )
+    assert update_job(job["id"], {"schedule": "every 10m"}) is not None
+
+    for name, value in claim.environment.items():
+        monkeypatch.setenv(name, value)
+
+    assert not consume_script_launch_claim(
+        home=hermes_env,
+        expected_job_id=job["id"],
+    )
+
+
+def test_script_launch_capability_rejects_job_changed_before_issuance(
+    hermes_env,
+):
+    """The scheduler may authorize only the exact snapshot it dispatched."""
+    from cron.jobs import create_job, update_job
+    from cron.script_claim import issue_script_launch_claim
+
+    script_path = hermes_env / "scripts" / "claim.py"
+    script_path.write_text("print('claim')\n", encoding="utf-8")
+    dispatched = create_job(
+        prompt=None,
+        schedule="every 5m",
+        name="claim",
+        script="claim.py",
+        no_agent=True,
+        script_launch_claim=True,
+        deliver="local",
+    )
+    assert update_job(dispatched["id"], {"schedule": "every 10m"}) is not None
+
+    with pytest.raises(ValueError, match="changed before launch capability issuance"):
+        issue_script_launch_claim(
+            home=hermes_env,
+            job_id=dispatched["id"],
+            dispatched_job=dispatched,
+        )
+
+
+def test_strict_cron_store_lock_fails_closed_without_cross_process_locking(
+    hermes_env,
+    monkeypatch,
+):
+    import cron.jobs as jobs_module
+    from cron.jobs import CronStoreLockError, locked_cron_store_strict
+
+    monkeypatch.setattr(jobs_module, "fcntl", None)
+    monkeypatch.setattr(jobs_module, "msvcrt", None)
+
+    with pytest.raises(CronStoreLockError, match="unavailable"):
+        with locked_cron_store_strict(hermes_env):
+            pytest.fail("strict cron mutation guard must not fail open")
+
+
+def test_strict_windows_cron_store_lock_has_bounded_contention(
+    hermes_env,
+    monkeypatch,
+):
+    import cron.jobs as jobs_module
+    from cron.jobs import CronStoreLockError, locked_cron_store_strict
+
+    class ContendedMsvcrt:
+        LK_NBLCK = 2
+        LK_UNLCK = 0
+
+        @staticmethod
+        def locking(*_args):
+            raise OSError("injected lock contention")
+
+    monkeypatch.setattr(jobs_module, "fcntl", None)
+    monkeypatch.setattr(jobs_module, "msvcrt", ContendedMsvcrt)
+    monkeypatch.setattr(jobs_module, "_JOBS_LOCK_TIMEOUT_SECONDS", 0)
+
+    with pytest.raises(CronStoreLockError, match="timed out"):
+        with locked_cron_store_strict(hermes_env):
+            pytest.fail("strict Windows cron mutation guard must not fail open")
+
+
+def test_script_launch_capability_edit_revert_does_not_resurrect_claim(
+    hermes_env,
+    monkeypatch,
+):
+    from cron.jobs import create_job, update_job
+    from cron.script_claim import (
+        consume_script_launch_claim,
+        issue_script_launch_claim,
+    )
+
+    script_path = hermes_env / "scripts" / "claim.py"
+    script_path.write_text("print('claim')\n", encoding="utf-8")
+    dispatched = create_job(
+        prompt=None,
+        schedule="every 5m",
+        name="claim",
+        script="claim.py",
+        no_agent=True,
+        script_launch_claim=True,
+        deliver="local",
+    )
+    claim = issue_script_launch_claim(
+        home=hermes_env,
+        job_id=dispatched["id"],
+        dispatched_job=dispatched,
+    )
+    assert update_job(dispatched["id"], {"schedule": "every 10m"}) is not None
+    assert update_job(dispatched["id"], {"schedule": "every 5m"}) is not None
+    for name, value in claim.environment.items():
+        monkeypatch.setenv(name, value)
+
+    assert not consume_script_launch_claim(
+        home=hermes_env,
+        expected_job_id=dispatched["id"],
+    )
+
+
+@pytest.mark.parametrize("changed_field", ["schedule", "script", "workdir"])
+def test_script_launch_issuance_binds_user_launch_authority(
+    hermes_env,
+    changed_field,
+):
+    from cron.jobs import create_job, update_job
+    from cron.script_claim import issue_script_launch_claim
+
+    script_path = hermes_env / "scripts" / "claim.py"
+    script_path.write_text("print('claim')\n", encoding="utf-8")
+    replacement_path = hermes_env / "scripts" / "replacement.py"
+    replacement_path.write_text("print('replacement')\n", encoding="utf-8")
+    workdir = hermes_env / "work"
+    workdir.mkdir()
+    dispatched = create_job(
+        prompt=None,
+        schedule="every 5m",
+        name="claim",
+        script="claim.py",
+        no_agent=True,
+        script_launch_claim=True,
+        deliver="local",
+    )
+    updates = {
+        "schedule": "every 10m",
+        "script": "replacement.py",
+        "workdir": str(workdir),
+    }
+    assert update_job(
+        dispatched["id"],
+        {changed_field: updates[changed_field]},
+    ) is not None
+
+    with pytest.raises(ValueError, match="changed before launch capability issuance"):
+        issue_script_launch_claim(
+            home=hermes_env,
+            job_id=dispatched["id"],
+            dispatched_job=dispatched,
+        )
+
+
+def test_run_one_job_accepts_finite_dispatch_bookkeeping(
+    hermes_env,
+    monkeypatch,
+):
+    from cron.jobs import create_job
+    from cron.scheduler import run_one_job
+
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[2]))
+    script_path = hermes_env / "scripts" / "claim.py"
+    job = create_job(
+        prompt=None,
+        schedule="2099-01-01T00:00:00Z",
+        name="claim",
+        script="claim.py",
+        no_agent=True,
+        script_launch_claim=True,
+        deliver="local",
+        repeat=1,
+    )
+    script_path.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "from cron.script_claim import consume_script_launch_claim\n"
+        f"ok = consume_script_launch_claim(home=Path(os.environ['HERMES_HOME']), expected_job_id={job['id']!r})\n"
+        "raise SystemExit(0 if ok else 1)\n",
+        encoding="utf-8",
+    )
+
+    assert run_one_job(job, verbose=False) is True
+
+
+def test_tick_accepts_recurring_next_run_bookkeeping(
+    hermes_env,
+    monkeypatch,
+):
+    from cron.jobs import create_job
+    from cron import scheduler
+
+    monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[2]))
+    script_path = hermes_env / "scripts" / "claim.py"
+    job = create_job(
+        prompt=None,
+        schedule="every 5m",
+        name="claim",
+        script="claim.py",
+        no_agent=True,
+        script_launch_claim=True,
+        deliver="local",
+    )
+    script_path.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "from cron.script_claim import consume_script_launch_claim\n"
+        f"ok = consume_script_launch_claim(home=Path(os.environ['HERMES_HOME']), expected_job_id={job['id']!r})\n"
+        "raise SystemExit(0 if ok else 1)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(scheduler, "get_due_jobs", lambda: [job])
+
+    assert scheduler.tick(verbose=False, sync=True) == 1
 
 
 def test_create_job_default_is_not_no_agent(hermes_env):

@@ -27,46 +27,26 @@ AnythingLLM, NextChat, ChatBox, etc.) can connect to hermes-agent
 through this adapter by pointing at http://localhost:8642/v1 and
 authenticating with API_SERVER_KEY.
 
-When ``gateway.multiplex_profiles`` is on, the default profile owns this
-listener and secondary profiles are reached via a URL prefix — same contract
-as the webhook adapter:
-
-    GET  /p/<profile>/v1/models
-    POST /p/<profile>/v1/chat/completions
-    ...
-
 Requires:
 - aiohttp (already available in the gateway)
 """
 
 import asyncio
-import errno
 import hashlib
 import hmac
 import json
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 import logging
 import os
+import socket as _socket
 import re
 import sqlite3
-import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-# Sentinel returned by _resolve_request_profile when a /p/<profile>/ prefix
-# names a profile this gateway does not serve (→ 404). Distinct from None
-# (no prefix / multiplexing off → handle as the default profile).
-_PROFILE_REJECTED = object()
-
-# Profile selected by the /p/<profile>/ URL prefix for the current request.
-# Set by the profile-prefix middleware; read by handlers / _run_agent.
-_api_request_profile: ContextVar[Optional[str]] = ContextVar(
-    "api_server_request_profile", default=None
-)
 
 def _approval_event_choices(*, smart_denied: bool, allow_permanent: bool) -> list[str]:
     if smart_denied:
@@ -932,11 +912,6 @@ class APIServerAdapter(BasePlatformAdapter):
     # ``async_delivery_supported()``.
     supports_async_delivery: bool = False
 
-    # Same statelessness applies to the startup auto-resume prompt: no client
-    # is waiting to answer "session restored — what next?", so a resumed turn
-    # should complete the interrupted work rather than acknowledge (#57056).
-    interactive_resume: bool = False
-
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.API_SERVER)
         extra = config.extra or {}
@@ -1000,10 +975,6 @@ class APIServerAdapter(BasePlatformAdapter):
         # (the /v1/runs path tracks its own in-flight set via
         # _active_run_tasks).
         self._inflight_agent_runs: int = 0
-        # Back-reference to the owning GatewayRunner (set by gateway/run.py)
-        # so /api/platforms/{platform}/events can resolve sibling adapters.
-        # BasePlatformAdapter declares the class-level default of None.
-        self.gateway_runner: Optional[Any] = None
         # Requests admitted before their handler reaches agent bookkeeping.
         # Shutdown counts this reservation so the request cannot slip through
         # the drain between its first await and _run_agent()/task registration.
@@ -1055,6 +1026,32 @@ class APIServerAdapter(BasePlatformAdapter):
             status=503,
             headers={"Retry-After": "1"},
         )
+
+    @staticmethod
+    def _runtime_routing_retry_response(result: Any) -> Optional["web.Response"]:
+        """Map a typed routing deferral to the API's retryable 503 contract."""
+        if not isinstance(result, dict) or not result.get("retryable"):
+            return None
+        message = _redact_api_error_text(
+            result.get("error") or "Runtime selection is still in progress."
+        )
+        body = _openai_error(
+            message,
+            err_type="server_error",
+            code="runtime_routing_deferred",
+        )
+        retry = result.get("retry_after_seconds")
+        hermes = {"retryable": True, "retry_after_seconds": retry}
+        body["error"]["hermes"] = hermes
+        headers: Dict[str, str] = {}
+        if retry is not None:
+            try:
+                import math
+
+                headers["Retry-After"] = str(max(1, math.ceil(float(retry))))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        return web.json_response(body, status=503, headers=headers)
 
     def _activate_admitted_request(self) -> None:
         """Transfer this request's drain reservation to agent bookkeeping."""
@@ -1245,13 +1242,7 @@ class APIServerAdapter(BasePlatformAdapter):
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
-            # Compare as bytes: ``hmac.compare_digest`` raises TypeError on a
-            # str containing non-ASCII characters, and ``token`` is the raw
-            # client-supplied header. A stray non-ASCII byte in the key would
-            # otherwise crash this handler (500) instead of returning a clean
-            # 401. Encoding both sides keeps the timing-safe comparison and
-            # matches web_server.py's dashboard-token check.
-            if hmac.compare_digest(token.encode(), self._api_key.encode()):
+            if hmac.compare_digest(token, self._api_key):
                 return None  # Auth OK
 
         logger.warning(
@@ -1592,7 +1583,7 @@ class APIServerAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     def _ensure_session_db(self):
-        """Lazily initialise and return the SessionDB for the active profile home.
+        """Lazily initialise and return the shared SessionDB instance.
 
         Sessions are persisted to ``state.db`` so that ``hermes sessions list``
         shows API-server conversations alongside CLI and gateway ones.
@@ -1681,6 +1672,12 @@ class APIServerAdapter(BasePlatformAdapter):
             return None
         return self._model_routes.get(model_alias)
 
+    def _resolve_request_route(self, model_alias: Any) -> Optional[Dict[str, Any]]:
+        """Resolve operator aliases without pinning the advertised API name."""
+        if not isinstance(model_alias, str) or model_alias == self._model_name:
+            return None
+        return self._resolve_route(model_alias)
+
     def _session_model_override_for(self, session_key: Optional[str]) -> Optional[Dict[str, Any]]:
         """Return the gateway's session ``/model`` override for *session_key*, if any.
 
@@ -1697,10 +1694,336 @@ class APIServerAdapter(BasePlatformAdapter):
             runner = _gateway_runner_ref()
             if runner is None:
                 return None
+            rehydrate = getattr(runner, "_rehydrate_session_model_override", None)
+            if callable(rehydrate):
+                rehydrate(session_key)
             override = runner._session_model_overrides.get(session_key)
             return dict(override) if isinstance(override, dict) else None
         except Exception:
             return None
+
+    def _api_session_is_persisted(self, session_id: Optional[str]) -> bool:
+        """Return whether this request continues a started Hermes session.
+
+        ``POST /api/sessions`` deliberately persists an empty row before the
+        first prompt.  Row existence alone therefore cannot mean "resume": it
+        would suppress first-task routing and leave the new session without an
+        authoritative route binding.  Require evidence that the lifecycle has
+        actually started — transcript rows, a previously frozen public runtime
+        binding, an ended lifecycle, or a durable compression lineage.
+        """
+        if not session_id:
+            return False
+        row_found = False
+        try:
+            db = self._ensure_session_db()
+            if db is None:
+                return False
+            row = db.get_session(session_id)
+            if row is None:
+                return False
+            row_found = True
+            raw_model_config = row.get("model_config")
+            if isinstance(raw_model_config, dict):
+                model_config = raw_model_config
+            elif isinstance(raw_model_config, str) and raw_model_config.strip():
+                parsed = json.loads(raw_model_config)
+                model_config = parsed if isinstance(parsed, dict) else {}
+            else:
+                model_config = {}
+            if model_config.get("_branched_from"):
+                raw_branch_count = model_config.get("_branch_point_message_count")
+                if raw_branch_count is None:
+                    return False
+                branch_count = max(0, int(raw_branch_count))
+                current_count = max(0, int(row.get("message_count") or 0))
+                if current_count <= branch_count:
+                    return False
+            if int(row.get("message_count") or 0) > 0:
+                return True
+            if row.get("ended_at") is not None or row.get("end_reason"):
+                return True
+            if any(
+                model_config.get(key)
+                for key in (
+                    "provider",
+                    "base_url",
+                    "api_mode",
+                    "runtime_manual_pin_source",
+                )
+            ):
+                return True
+
+            lineage_reader = getattr(db, "get_compression_lineage", None)
+            if callable(lineage_reader):
+                lineage = lineage_reader(session_id)
+                if isinstance(lineage, (list, tuple)) and len(lineage) > 1:
+                    return True
+            return False
+        except Exception:
+            # Once a durable row is known to exist, unreadable lifecycle
+            # metadata must never turn an established conversation into a new
+            # semantic decision.  Fail conservatively to resume; resolver
+            # replay can still recover a valid binding, while a missing one
+            # safely inherits with resume_binding_missing.
+            return row_found
+
+    def _sync_api_session_runtime_metadata(
+        self,
+        session_id: Optional[str],
+        agent: Any,
+    ) -> None:
+        """Merge a routed agent's public runtime identity into SessionDB.
+
+        API session and fork endpoints can create the row before AIAgent's
+        deferred first-turn upsert.  Preserve lifecycle markers already in
+        ``model_config`` while recording only the generic credential-free
+        runtime projection; never persist provider keys, pools, or fallbacks.
+        """
+        if not session_id:
+            return
+        try:
+            binding = getattr(agent, "_runtime_routing_binding", None)
+            runtime = getattr(binding, "runtime", None)
+            if runtime is None:
+                return
+            from agent.runtime_routing import session_runtime_metadata
+
+            metadata = session_runtime_metadata(
+                runtime,
+                manual_pin_source=getattr(binding, "manual_pin_source", None),
+            )
+            if not metadata:
+                return
+            db = self._ensure_session_db()
+            row = db.get_session(session_id) if db is not None else None
+            if not row:
+                return
+            raw_config = row.get("model_config")
+            if isinstance(raw_config, dict):
+                model_config = dict(raw_config)
+            elif isinstance(raw_config, str) and raw_config.strip():
+                parsed = json.loads(raw_config)
+                if not isinstance(parsed, dict):
+                    return
+                model_config = dict(parsed)
+            else:
+                model_config = {}
+            model_config.update(metadata)
+            db.update_session_meta(
+                session_id,
+                json.dumps(
+                    model_config,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                model=metadata.get("model") or None,
+            )
+        except Exception:
+            logger.warning(
+                "API session runtime metadata persistence failed: "
+                "session_store_error"
+            )
+
+    def _resolve_api_baseline_runtime(
+        self,
+        *,
+        session_id: Optional[str],
+        gateway_session_key: Optional[str],
+        route: Optional[Dict[str, Any]],
+    ) -> tuple[str, dict, Any, list]:
+        """Resolve the ordinary API-server runtime with established precedence."""
+        from gateway.run import (
+            GatewayRunner,
+            _resolve_gateway_model,
+            _resolve_runtime_agent_kwargs,
+            _resolve_runtime_agent_kwargs_for_provider,
+        )
+
+        runtime_kwargs = _resolve_runtime_agent_kwargs()
+        reasoning_config = GatewayRunner._load_reasoning_config()
+        model = _resolve_gateway_model()
+        runtime_model = runtime_kwargs.pop("model", None)
+        if runtime_model:
+            model = runtime_model
+
+        session_override = self._session_model_override_for(
+            gateway_session_key or session_id
+        )
+        selected = session_override or route
+        if selected:
+            if selected.get("provider"):
+                try:
+                    provider_kwargs = _resolve_runtime_agent_kwargs_for_provider(
+                        selected["provider"]
+                    )
+                    provider_kwargs.pop("model", None)
+                    runtime_kwargs.update(provider_kwargs)
+                except Exception:
+                    runtime_kwargs["provider"] = selected["provider"]
+            if selected.get("model"):
+                model = selected["model"]
+            for key in ("api_key", "base_url", "api_mode", "credential_pool"):
+                if selected.get(key) is not None:
+                    runtime_kwargs[key] = selected[key]
+            if route and session_override:
+                logger.debug(
+                    "api_server model route skipped: session /model override wins for %s",
+                    gateway_session_key or session_id,
+                )
+            elif route:
+                logger.debug(
+                    "api_server model route applied: model=%s provider=%s",
+                    model,
+                    runtime_kwargs.get("provider"),
+                )
+
+        return (
+            model,
+            runtime_kwargs,
+            reasoning_config,
+            GatewayRunner._load_fallback_model(),
+        )
+
+    def _prepare_api_agent_runtime(
+        self,
+        *,
+        initial_task: Any,
+        conversation_history: Optional[List[Dict[str, Any]]],
+        session_id: Optional[str],
+        gateway_session_key: Optional[str],
+        route: Optional[Dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Run Auto policy before ordinary API credential/provider resolution."""
+        from agent.runtime_routing import (
+            AgentRuntimeContext,
+            AgentRuntimeRequest,
+            RUNTIME_ROUTING_CONTRACT_VERSION,
+            constructor_runtime_spec,
+            finalize_prepared_agent_runtime,
+            prepare_agent_runtime_for_construction,
+        )
+        from gateway.run import (
+            GatewayRunner,
+            _load_gateway_config,
+            _resolve_gateway_model,
+        )
+
+        cfg = _load_gateway_config()
+        requested_model = _resolve_gateway_model(cfg)
+        requested_runtime: dict[str, Any] = {}
+        model_cfg = cfg.get("model") if isinstance(cfg, dict) else None
+        if isinstance(model_cfg, dict):
+            requested_runtime = {
+                "provider": model_cfg.get("provider"),
+                "base_url": model_cfg.get("base_url"),
+                "api_mode": model_cfg.get("api_mode"),
+            }
+
+        session_override = self._session_model_override_for(
+            gateway_session_key or session_id
+        )
+        manual = session_override or route
+        if manual:
+            requested_model = manual.get("model") or requested_model
+            for key in (
+                "provider",
+                "base_url",
+                "api_key",
+                "api_mode",
+                "credential_pool",
+            ):
+                if manual.get(key) is not None:
+                    requested_runtime[key] = manual[key]
+
+        requested_reasoning = GatewayRunner._load_reasoning_config()
+        host_fallbacks = GatewayRunner._load_fallback_model()
+        baseline = constructor_runtime_spec(
+            model=requested_model or "",
+            provider=requested_runtime.get("provider"),
+            base_url=requested_runtime.get("base_url"),
+            api_key=requested_runtime.get("api_key"),
+            api_mode=requested_runtime.get("api_mode"),
+            acp_command=requested_runtime.get("command"),
+            acp_args=requested_runtime.get("args"),
+            credential_pool=requested_runtime.get("credential_pool"),
+            reasoning_config=requested_reasoning,
+            fallback_model=host_fallbacks,
+        )
+        stable_session_id = str(session_id or f"api-{uuid.uuid4().hex}")
+        task_id = "api-" + hashlib.sha256(
+            stable_session_id.encode("utf-8")
+        ).hexdigest()[:24]
+        # Caller-provided context is not proof of a Hermes continuation. Only
+        # a durable session may replay a prior Auto decision.
+        is_resume = self._api_session_is_persisted(session_id)
+        context = AgentRuntimeContext(
+            scope="fresh_session",
+            task=None if is_resume else initial_task,
+            session_id=stable_session_id,
+            task_id=task_id,
+            is_resume=is_resume,
+            manual_runtime_pin=bool(manual),
+            manual_pin_source=(
+                "api_session_model_override"
+                if session_override
+                else "api_configured_model_route"
+                if route
+                else None
+            ),
+            metadata={"platform": "api_server", "surface": "api_server"},
+        )
+        request = AgentRuntimeRequest(
+            contract_version=RUNTIME_ROUTING_CONTRACT_VERSION,
+            context=context,
+            baseline=baseline,
+        )
+        prepared = prepare_agent_runtime_for_construction(
+            request,
+            session_store=self._ensure_session_db(),
+        )
+        if prepared.plan.action == "project":
+            effective = prepared.plan.runtime
+        else:
+            model, runtime, reasoning, fallbacks = self._resolve_api_baseline_runtime(
+                session_id=session_id,
+                gateway_session_key=gateway_session_key,
+                route=route,
+            )
+            effective = constructor_runtime_spec(
+                model=model,
+                provider=runtime.get("provider"),
+                base_url=runtime.get("base_url"),
+                api_key=runtime.get("api_key"),
+                api_mode=runtime.get("api_mode"),
+                acp_command=runtime.get("command"),
+                acp_args=runtime.get("args"),
+                credential_pool=runtime.get("credential_pool"),
+                reasoning_config=reasoning,
+                fallback_model=([] if prepared.plan.owns_fallbacks else fallbacks),
+            )
+        prepared = finalize_prepared_agent_runtime(prepared, request, effective)
+        return {
+            "model": effective.model,
+            "runtime": {
+                "provider": effective.provider,
+                "base_url": effective.base_url,
+                "api_key": effective.api_key,
+                "api_mode": effective.api_mode,
+                "command": effective.acp_command,
+                "args": list(effective.acp_args),
+                "credential_pool": effective.credential_pool,
+            },
+            "reasoning_config": (
+                dict(effective.reasoning_config)
+                if effective.reasoning_config is not None
+                else None
+            ),
+            "fallback_model": [dict(item) for item in effective.fallback_model],
+            "context": context,
+            "prepared": prepared,
+        }
 
     def _create_agent(
         self,
@@ -1712,6 +2035,8 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
         route: Optional[Dict[str, Any]] = None,
+        initial_task: Any = None,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1743,75 +2068,40 @@ class APIServerAdapter(BasePlatformAdapter):
         )
         from hades_cli.tools_config import _get_platform_tools
 
-        runtime_kwargs = _resolve_runtime_agent_kwargs()
-        reasoning_config = GatewayRunner._load_reasoning_config()
-        model = _resolve_gateway_model()
+        from agent.runtime_routing import runtime_resolver_requires_initial_task
 
-        # When the primary provider's auth fails (expired token / 429 quota
-        # cap), _resolve_runtime_agent_kwargs() falls through to the fallback
-        # provider chain, whose runtime dict carries its own ``model`` key.
-        # Pop it and let it override the config model, mirroring the native
-        # gateway path (_resolve_session_agent_runtime in run.py). Otherwise
-        # the explicit ``model=model`` below collides with the ``**runtime_kwargs``
-        # spread → "got multiple values for keyword argument 'model'", 500ing
-        # every /v1/chat/completions request while a fallback is active.
-        runtime_model = runtime_kwargs.pop("model", None)
-        if runtime_model:
-            model = runtime_model
-
-        # Per-client model routing (model_routes config).  The route was
-        # resolved from the request's ``model`` field by the HTTP handler.
-        # Precedence (highest first): session ``/model`` override → model_routes
-        # route → global config — an explicit user-issued ``/model`` on the
-        # session always beats static per-client route config.
-        session_override = self._session_model_override_for(
-            gateway_session_key or session_id
-        )
-        if route and not session_override:
-            if route.get("provider"):
-                # Resolve real credentials for the routed provider (mirrors
-                # the channel_overrides path in gateway/run.py) so a route
-                # without an explicit api_key/base_url still gets the right
-                # provider auth instead of the default provider's key.
-                try:
-                    from gateway.run import _resolve_runtime_agent_kwargs_for_provider
-                    provider_kwargs = _resolve_runtime_agent_kwargs_for_provider(
-                        route["provider"]
-                    )
-                    provider_kwargs.pop("model", None)
-                    runtime_kwargs.update(provider_kwargs)
-                except Exception:
-                    # Fall back to just switching the provider name; explicit
-                    # per-route api_key/base_url below can still complete auth.
-                    runtime_kwargs["provider"] = route["provider"]
-            if route.get("model"):
-                model = route["model"]
-            # Per-route secrets are upstream provider credentials. Never log
-            # them (compare _check_auth: caller auth stays the global bearer
-            # key checked with hmac.compare_digest).
-            if route.get("api_key"):
-                runtime_kwargs["api_key"] = route["api_key"]
-            if route.get("base_url"):
-                runtime_kwargs["base_url"] = route["base_url"]
-            logger.debug(
-                "api_server model route applied: model=%s provider=%s",
-                model,
-                runtime_kwargs.get("provider"),
+        routing_handoff = None
+        if (
+            initial_task is not None
+            and runtime_resolver_requires_initial_task("fresh_session")
+        ):
+            routing_handoff = self._prepare_api_agent_runtime(
+                initial_task=initial_task,
+                conversation_history=conversation_history,
+                session_id=session_id,
+                gateway_session_key=gateway_session_key,
+                route=route,
             )
-        elif route and session_override:
-            logger.debug(
-                "api_server model route skipped: session /model override wins for %s",
-                gateway_session_key or session_id,
+            model = routing_handoff["model"]
+            runtime_kwargs = routing_handoff["runtime"]
+            reasoning_config = routing_handoff["reasoning_config"]
+            fallback_model = routing_handoff["fallback_model"]
+        else:
+            (
+                model,
+                runtime_kwargs,
+                reasoning_config,
+                fallback_model,
+            ) = self._resolve_api_baseline_runtime(
+                session_id=session_id,
+                gateway_session_key=gateway_session_key,
+                route=route,
             )
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
         max_iterations = _current_max_iterations()
-
-        # Load fallback provider chain so the API server platform has the
-        # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
-        fallback_model = GatewayRunner._load_fallback_model()
 
         agent = AIAgent(
             model=model,
@@ -1831,7 +2121,14 @@ class APIServerAdapter(BasePlatformAdapter):
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
             gateway_session_key=gateway_session_key,
+            runtime_routing_context=(
+                routing_handoff["context"] if routing_handoff is not None else None
+            ),
+            prepared_agent_runtime=(
+                routing_handoff["prepared"] if routing_handoff is not None else None
+            ),
         )
+        self._sync_api_session_runtime_metadata(session_id, agent)
         return agent
 
     # ------------------------------------------------------------------
@@ -1901,32 +2198,20 @@ class APIServerAdapter(BasePlatformAdapter):
         })
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
-        """GET /v1/models — list hermes-agent and any configured model_routes aliases.
-
-        Under ``/p/<profile>/v1/models`` (multiplex on) the advertised primary
-        model id follows that profile's name/config, not the default adapter's
-        cached ``_model_name``.
-        """
+        """GET /v1/models — list hermes-agent and any configured model_routes aliases."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
 
         now = int(time.time())
-        # Middleware already entered the profile runtime scope when a /p/
-        # prefix was present, so get_active_profile_name() resolves correctly.
-        model_name = (
-            self._resolve_model_name("")
-            if _api_request_profile.get()
-            else self._model_name
-        )
         models = [
             {
-                "id": model_name,
+                "id": self._model_name,
                 "object": "model",
                 "created": now,
                 "owned_by": "hermes",
                 "permission": [],
-                "root": model_name,
+                "root": self._model_name,
                 "parent": None,
             }
         ]
@@ -1934,7 +2219,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # Only the alias and resolved model name are exposed — never provider
         # credentials.
         for alias, route_cfg in self._model_routes.items():
-            if alias == model_name:
+            if alias == self._model_name:
                 continue  # already listed above
             models.append({
                 "id": alias,
@@ -1943,7 +2228,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "owned_by": "hermes",
                 "permission": [],
                 "root": route_cfg.get("model", alias),
-                "parent": model_name,
+                "parent": self._model_name,
             })
 
         return web.json_response({"object": "list", "data": models})
@@ -2344,14 +2629,18 @@ class APIServerAdapter(BasePlatformAdapter):
         # SessionDB's native parent_session_id/end_reason visibility model rather
         # than inventing a parallel fork store.
         db.end_session(source_id, "branched")
+        messages = db.get_messages(source_id)
         db.create_session(
             fork_id,
             "api_server",
             model=source.get("model"),
+            model_config={
+                "_branched_from": source_id,
+                "_branch_point_message_count": len(messages),
+            },
             system_prompt=source.get("system_prompt"),
             parent_session_id=source_id,
         )
-        messages = db.get_messages(source_id)
         db.replace_messages(fork_id, messages)
         title = body.get("title")
         if title is None:
@@ -2681,7 +2970,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # Per-client model routing: if the requested model matches a
         # configured model_routes alias, this request's agent is created
         # with that route's model/provider instead of the global default.
-        route = self._resolve_route(model_name)
+        route = self._resolve_request_route(model_name)
 
         if stream:
             import queue as _q
@@ -2809,6 +3098,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
+        retry_response = self._runtime_routing_retry_response(result)
+        if retry_response is not None:
+            return retry_response
         final_response = _resolve_media_to_data_urls(result.get("final_response") or "")
         is_partial = bool(result.get("partial"))
         is_failed = bool(result.get("failed"))
@@ -3009,6 +3301,10 @@ class APIServerAdapter(BasePlatformAdapter):
             is_failed = bool(result.get("failed")) if isinstance(result, dict) else False
             completed = bool(result.get("completed", True)) if isinstance(result, dict) else True
             err_msg = result.get("error") if isinstance(result, dict) else None
+            retryable = bool(result.get("retryable")) if isinstance(result, dict) else False
+            retry_after_seconds = (
+                result.get("retry_after_seconds") if isinstance(result, dict) else None
+            )
             if agent_error is not None:
                 is_failed = True
                 err_msg = err_msg or str(agent_error)
@@ -3040,6 +3336,16 @@ class APIServerAdapter(BasePlatformAdapter):
                         "message": err_msg,
                         "type": type(agent_error).__name__ if agent_error else "agent_error",
                     }
+                    if retryable:
+                        finish_chunk["error"].update(
+                            {
+                                "code": "runtime_routing_deferred",
+                                "hermes": {
+                                    "retryable": True,
+                                    "retry_after_seconds": retry_after_seconds,
+                                },
+                            }
+                        )
                 finish_chunk["hermes"] = {
                     "completed": completed,
                     "partial": is_partial,
@@ -3047,6 +3353,14 @@ class APIServerAdapter(BasePlatformAdapter):
                     "error": err_msg,
                     "error_code": "output_truncated" if finish_reason == "length" else "agent_error",
                 }
+                if retryable:
+                    finish_chunk["hermes"].update(
+                        {
+                            "retryable": True,
+                            "retry_after_seconds": retry_after_seconds,
+                            "error_code": "runtime_routing_deferred",
+                        }
+                    )
             await response.write(f"data: {json.dumps(finish_chunk)}\n\n".encode())
             await response.write(b"data: [DONE]\n\n")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
@@ -3191,6 +3505,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
         final_response_text = ""
         agent_error: Optional[str] = None
+        agent_retryable = False
+        agent_retry_after_seconds = None
         usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         terminal_snapshot_persisted = False
 
@@ -3502,8 +3818,11 @@ class APIServerAdapter(BasePlatformAdapter):
                     await _emit_text_delta(agent_final)
                 if agent_final and not final_response_text:
                     final_response_text = agent_final
-                if isinstance(result, dict) and result.get("error") and not final_response_text:
-                    agent_error = _redact_api_error_text(result["error"])
+                if isinstance(result, dict):
+                    agent_retryable = bool(result.get("retryable"))
+                    agent_retry_after_seconds = result.get("retry_after_seconds")
+                    if result.get("error") and not final_response_text:
+                        agent_error = _redact_api_error_text(result["error"])
             except Exception as e:  # noqa: BLE001
                 logger.error("Error running agent for streaming responses: %s", e, exc_info=True)
                 agent_error = _redact_api_error_text(e)
@@ -3576,6 +3895,18 @@ class APIServerAdapter(BasePlatformAdapter):
                 failed_env = _envelope("failed")
                 failed_env["output"] = final_items
                 failed_env["error"] = {"message": _redact_api_error_text(agent_error), "type": "server_error"}
+                if agent_retryable:
+                    retry_metadata = {
+                        "retryable": True,
+                        "retry_after_seconds": agent_retry_after_seconds,
+                    }
+                    failed_env["error"].update(
+                        {
+                            "code": "runtime_routing_deferred",
+                            "hermes": retry_metadata,
+                        }
+                    )
+                    failed_env["hermes"] = retry_metadata
                 failed_env["usage"] = {
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
@@ -3794,7 +4125,7 @@ class APIServerAdapter(BasePlatformAdapter):
         session_id = stored_session_id or str(uuid.uuid4())
 
         # Per-client model routing for /v1/responses (see model_routes).
-        route = self._resolve_route(body.get("model"))
+        route = self._resolve_request_route(body.get("model"))
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
         if stream:
@@ -3910,6 +4241,9 @@ class APIServerAdapter(BasePlatformAdapter):
                     status=500,
                 )
 
+        retry_response = self._runtime_routing_retry_response(result)
+        if retry_response is not None:
+            return retry_response
         final_response = _resolve_media_to_data_urls(result.get("final_response", ""))
         if not final_response:
             final_response = _redact_api_error_text(result.get("error", "(No response generated)"))
@@ -4550,20 +4884,16 @@ class APIServerAdapter(BasePlatformAdapter):
         another thread to stop in-progress LLM calls.
         """
         loop = asyncio.get_running_loop()
-        # Capture before hopping to the executor — ContextVars do not follow
-        # run_in_executor threads, so the profile scope must be re-entered
-        # inside _run() from this explicit value.
-        request_profile = _api_request_profile.get()
 
         def _run():
             from gateway.session_context import clear_session_vars
 
-            with self._profile_scope(request_profile):
-                tokens = self._bind_api_server_session(
-                    chat_id=session_id or "",
-                    session_key=gateway_session_key or session_id or "",
-                    session_id=session_id or "",
-                )
+            tokens = self._bind_api_server_session(
+                chat_id=session_id or "",
+                session_key=gateway_session_key or session_id or "",
+                session_id=session_id or "",
+            )
+            try:
                 try:
                     agent = self._create_agent(
                         ephemeral_system_prompt=ephemeral_system_prompt,
@@ -4574,29 +4904,52 @@ class APIServerAdapter(BasePlatformAdapter):
                         tool_complete_callback=tool_complete_callback,
                         gateway_session_key=gateway_session_key,
                         route=route,
-                    )
-                    if agent_ref is not None:
-                        agent_ref[0] = agent
-                    effective_task_id = session_id or str(uuid.uuid4())
-                    result = agent.run_conversation(
-                        user_message=user_message,
+                        initial_task=user_message,
                         conversation_history=conversation_history,
-                        task_id=effective_task_id,
                     )
-                    usage = {
-                        "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                        "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                        "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-                    }
-                    # Include the effective session ID in the result so callers
-                    # (e.g. X-Hermes-Session-Id header) can track compression-
-                    # triggered session rotations. (#16938)
-                    _eff_sid = getattr(agent, "session_id", session_id)
-                    if isinstance(_eff_sid, str) and _eff_sid:
-                        result["session_id"] = _eff_sid
-                    return result, usage
-                finally:
-                    clear_session_vars(tokens)
+                except Exception as exc:
+                    from agent.runtime_routing import RuntimeRoutingDeferred
+
+                    if not isinstance(exc, RuntimeRoutingDeferred):
+                        raise
+                    retry = exc.retry_after_seconds
+                    return (
+                        {
+                            "final_response": "",
+                            "error": "Runtime selection is still in progress.",
+                            "failed": True,
+                            "completed": False,
+                            "retryable": True,
+                            "retry_after_seconds": retry,
+                        },
+                        {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0,
+                        },
+                    )
+                if agent_ref is not None:
+                    agent_ref[0] = agent
+                effective_task_id = session_id or str(uuid.uuid4())
+                result = agent.run_conversation(
+                    user_message=user_message,
+                    conversation_history=conversation_history,
+                    task_id=effective_task_id,
+                )
+                usage = {
+                    "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                    "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                }
+                # Include the effective session ID in the result so callers
+                # (e.g. X-Hermes-Session-Id header) can track compression-
+                # triggered session rotations. (#16938)
+                _eff_sid = getattr(agent, "session_id", session_id)
+                if isinstance(_eff_sid, str) and _eff_sid:
+                    result["session_id"] = _eff_sid
+                return result, usage
+            finally:
+                clear_session_vars(tokens)
 
         self._activate_admitted_request()
         self._inflight_agent_runs += 1
@@ -4795,10 +5148,7 @@ class APIServerAdapter(BasePlatformAdapter):
         )
 
         # Per-client model routing for /v1/runs (see model_routes).
-        route = self._resolve_route(body.get("model"))
-        # Background task outlives the HTTP response (and thus the middleware
-        # profile scope). Capture now and re-enter inside the task/executor.
-        request_profile = _api_request_profile.get()
+        route = self._resolve_request_route(body.get("model"))
 
         async def _run_and_close():
             try:
@@ -4815,15 +5165,16 @@ class APIServerAdapter(BasePlatformAdapter):
                         last_event="run.cancelled",
                     )
                     return
-                with self._profile_scope(request_profile):
-                    agent = self._create_agent(
-                        ephemeral_system_prompt=ephemeral_system_prompt,
-                        session_id=session_id,
-                        stream_delta_callback=_text_cb,
-                        tool_progress_callback=event_cb,
-                        gateway_session_key=gateway_session_key,
-                        route=route,
-                    )
+                agent = self._create_agent(
+                    ephemeral_system_prompt=ephemeral_system_prompt,
+                    session_id=session_id,
+                    stream_delta_callback=_text_cb,
+                    tool_progress_callback=event_cb,
+                    gateway_session_key=gateway_session_key,
+                    route=route,
+                    initial_task=user_message,
+                    conversation_history=conversation_history,
+                )
                 self._active_run_agents[run_id] = agent
 
                 def _approval_notify(approval_data: Dict[str, Any]) -> None:
@@ -4867,41 +5218,40 @@ class APIServerAdapter(BasePlatformAdapter):
                     effective_task_id = session_id or run_id
                     approval_token = None
                     session_tokens = []
-                    with self._profile_scope(request_profile):
+                    try:
+                        # Bind approval/session identity for this API run via
+                        # contextvars so concurrent runs do not share process
+                        # environment state.
+                        approval_token = set_current_session_key(approval_session_key)
+                        session_tokens = self._bind_api_server_session(
+                            session_key=approval_session_key,
+                        )
+                        register_gateway_notify(approval_session_key, _approval_notify)
+                        r = agent.run_conversation(
+                            user_message=user_message,
+                            conversation_history=conversation_history,
+                            task_id=effective_task_id,
+                        )
+                    finally:
                         try:
-                            # Bind approval/session identity for this API run via
-                            # contextvars so concurrent runs do not share process
-                            # environment state.
-                            approval_token = set_current_session_key(approval_session_key)
-                            session_tokens = self._bind_api_server_session(
-                                session_key=approval_session_key,
-                            )
-                            register_gateway_notify(approval_session_key, _approval_notify)
-                            r = agent.run_conversation(
-                                user_message=user_message,
-                                conversation_history=conversation_history,
-                                task_id=effective_task_id,
-                            )
+                            unregister_gateway_notify(approval_session_key)
                         finally:
-                            try:
-                                unregister_gateway_notify(approval_session_key)
-                            finally:
-                                if approval_token is not None:
-                                    try:
-                                        reset_current_session_key(approval_token)
-                                    except Exception:
-                                        pass
-                                if session_tokens:
-                                    try:
-                                        clear_session_vars(session_tokens)
-                                    except Exception:
-                                        pass
-                        u = {
-                            "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
-                            "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
-                            "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
-                        }
-                        return r, u
+                            if approval_token is not None:
+                                try:
+                                    reset_current_session_key(approval_token)
+                                except Exception:
+                                    pass
+                            if session_tokens:
+                                try:
+                                    clear_session_vars(session_tokens)
+                                except Exception:
+                                    pass
+                    u = {
+                        "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                        "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
+                        "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
+                    }
+                    return r, u
 
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
                 if run_id in self._stopping_run_ids:
@@ -4964,6 +5314,31 @@ class APIServerAdapter(BasePlatformAdapter):
                     pass
                 raise
             except Exception as exc:
+                from agent.runtime_routing import RuntimeRoutingDeferred
+
+                if isinstance(exc, RuntimeRoutingDeferred):
+                    retry = exc.retry_after_seconds
+                    payload = {
+                        "event": "run.failed",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                        "error": "Runtime selection is still in progress.",
+                        "retryable": True,
+                        "retry_after_seconds": retry,
+                    }
+                    self._set_run_status(
+                        run_id,
+                        "failed",
+                        error=payload["error"],
+                        retryable=True,
+                        retry_after_seconds=retry,
+                        last_event="run.failed",
+                    )
+                    try:
+                        _put_event_if_active(payload)
+                    except Exception:
+                        pass
+                    return
                 logger.exception("[api_server] run %s failed", run_id)
                 self._set_run_status(
                     run_id,
@@ -5279,6 +5654,21 @@ class APIServerAdapter(BasePlatformAdapter):
             pass
         return True
 
+    def _port_is_available(self) -> bool:
+        """Return True when the configured listen port is free."""
+        try:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as _s:
+                _s.settimeout(1)
+                _s.connect(('127.0.0.1', self._port))
+            logger.error(
+                "[%s] Port %d already in use. Set a different port in config.yaml: "
+                "platforms.api_server.port",
+                self.name, self._port,
+            )
+            return False
+        except (ConnectionRefusedError, OSError):
+            return True
+
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Start the aiohttp web server."""
         if not AIOHTTP_AVAILABLE:
@@ -5286,6 +5676,9 @@ class APIServerAdapter(BasePlatformAdapter):
             return False
 
         if not self._api_key_passes_startup_guard():
+            return False
+
+        if not self._port_is_available():
             return False
 
         try:
@@ -5301,9 +5694,6 @@ class APIServerAdapter(BasePlatformAdapter):
             ]
             self._app = web.Application(middlewares=mws, client_max_size=MAX_REQUEST_BYTES)
             assert self._app is not None
-            # Native routes + multiplex /p/<profile>/… mirrors. Same handlers;
-            # the profile-prefix middleware validates the prefix and scopes
-            # config/credentials to that profile when multiplexing is on.
             for method, path, handler in self._http_route_table():
                 self._app.router.add_route(method, path, handler)
                 self._app.router.add_route(method, f"/p/{{profile}}{path}", handler)
@@ -5354,55 +5744,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
             self._runner = web.AppRunner(self._app)
             await self._runner.setup()
-            # Bind directly instead of probing 127.0.0.1 first — the old
-            # single-family pre-probe raced the real bind and reported a
-            # TIME_WAIT socket as "in use" (#10297), failing gateway
-            # restarts for up to ~60s.
-            #
-            # SO_REUSEADDR is platform-dependent (same rationale as the
-            # webhook adapter, #65482):
-            #   - macOS (BSD semantics): two sockets with SO_REUSEADDR can
-            #     silently split traffic while both report success — disable.
-            #   - Linux: SO_REUSEADDR only permits rebinding past TIME_WAIT
-            #     (a second live listener needs SO_REUSEPORT, never set), so
-            #     keep the default (enabled) for instant restart rebinds.
-            self._site = web.TCPSite(
-                self._runner,
-                self._host,
-                self._port,
-                reuse_address=False if sys.platform == "darwin" else None,
-            )
-            try:
-                await self._site.start()
-            except OSError as exc:
-                await self._runner.cleanup()
-                self._runner = None
-                self._site = None
-                if getattr(exc, "errno", None) == errno.EADDRINUSE:
-                    # A port conflict is a configuration error, not a
-                    # transient blip — another process holds the port for
-                    # its lifetime. A bare ``return False`` makes the
-                    # reconnect watcher in gateway.run treat it as retryable
-                    # and loop forever at the backoff cap (observed: 1568+
-                    # retries over 5 days across multi-profile setups all
-                    # defaulting to the same port, #52132), filling
-                    # errors.log and leaking the adapter's ResponseStore
-                    # fds each retry. Non-retryable drops it from the
-                    # reconnect queue; the operator recovers with
-                    # ``/platform resume api_server`` after changing the port.
-                    self._set_fatal_error(
-                        "api_server_port_in_use",
-                        f"Port {self._port} already in use. Set "
-                        f"platforms.api_server.port in config.yaml to a "
-                        f"different value, then `/platform resume api_server`.",
-                        retryable=False,
-                    )
-                logger.error(
-                    "[%s] Could not bind %s:%d: %s. Set a different port in "
-                    "config.yaml: platforms.api_server.port",
-                    self.name, self._host, self._port, exc,
-                )
-                return False
+            self._site = web.TCPSite(self._runner, self._host, self._port)
+            await self._site.start()
 
             self._mark_connected()
             logger.info(

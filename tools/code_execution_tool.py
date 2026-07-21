@@ -53,7 +53,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 _IS_WINDOWS = platform.system() == "Windows"
-from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Optional
 
 from tools.thread_context import propagate_context_to_thread
 
@@ -1032,8 +1032,16 @@ class _RedactedOutputSpill:
 
 
 def _truncate_execute_output(text: str, limit: int) -> str:
-    truncated, _ = _truncate_stdout_text(text, limit=limit)
-    return truncated
+    if len(text) <= limit:
+        return text
+    head = int(limit * 0.4)
+    tail = limit - head
+    omitted = len(text) - head - tail
+    return (
+        text[:head]
+        + f"\n\n... [OUTPUT TRUNCATED - {omitted:,} chars omitted out of {len(text):,} total] ...\n\n"
+        + text[-tail:]
+    )
 
 
 def _prepare_execute_output(
@@ -1052,7 +1060,7 @@ def _prepare_execute_output(
         budget=budget,
     )
     artifact_path = None
-    if len(cleaned.encode("utf-8", errors="replace")) > limit:
+    if len(cleaned) > limit:
         artifact_path = existing_artifact_path or _persist_execute_artifact(
             cleaned, budget=budget,
         )
@@ -1122,65 +1130,6 @@ def _attach_execute_artifacts(
         _register_execute_artifact_digest(result, artifact_path, context)
     return result
 
-
-def _assemble_stdout_result(
-    head: bytes,
-    tail: bytes = b"",
-    *,
-    total_bytes: Optional[int] = None,
-) -> Tuple[str, Dict[str, Any]]:
-    """Build display stdout plus explicit truncation metadata.
-
-    The agent receives execute_code results as JSON. A textual truncation
-    marker can be missed or later re-truncated by a client layer, so keep the
-    marker for humans and also expose byte counts for deterministic handling.
-    """
-    captured = head + tail
-    total = len(captured) if total_bytes is None else max(total_bytes, len(captured))
-    truncated = total > len(captured)
-    omitted = max(0, total - len(captured))
-
-    if truncated:
-        stdout_text = (
-            head.decode("utf-8", errors="replace")
-            + f"\n\n... [OUTPUT TRUNCATED - {omitted:,} bytes omitted "
-            f"out of {total:,} total] ...\n\n"
-            + tail.decode("utf-8", errors="replace")
-        )
-    else:
-        stdout_text = captured.decode("utf-8", errors="replace")
-
-    metadata: Dict[str, Any] = {
-        "stdout_truncated": truncated,
-        "stdout_bytes_captured": len(captured),
-        "stdout_bytes_total": total,
-        "stdout_bytes_omitted": omitted,
-    }
-    if truncated:
-        metadata["warning"] = (
-            "execute_code stdout was truncated; the script did run, but only "
-            "the captured head/tail output is included. Re-run only with "
-            "narrower output if the omitted data is required."
-        )
-    return stdout_text, metadata
-
-
-def _truncate_stdout_text(
-    stdout_text: str,
-    limit: int = MAX_STDOUT_BYTES,
-) -> Tuple[str, Dict[str, Any]]:
-    """Cap a complete stdout string by bytes using the same head/tail policy."""
-    stdout_bytes = stdout_text.encode("utf-8", errors="replace")
-    if len(stdout_bytes) <= limit:
-        return _assemble_stdout_result(stdout_bytes)
-
-    head_bytes = int(limit * 0.4)
-    tail_bytes = limit - head_bytes
-    return _assemble_stdout_result(
-        stdout_bytes[:head_bytes],
-        stdout_bytes[-tail_bytes:],
-        total_bytes=len(stdout_bytes),
-    )
 
 # Environment variable scrubbing rules (shared between the local + remote
 # backends).  Secret-substring block is applied first; anything left must
@@ -1987,10 +1936,7 @@ def _rpc_server_loop(
                     continue
 
                 if not rpc_token or not secrets.compare_digest(
-                    # Compare as bytes: compare_digest raises TypeError on a
-                    # str with non-ASCII characters, and the token comes from
-                    # sandbox-script-supplied JSON.
-                    str(request.get("token") or "").encode(), rpc_token.encode()
+                    str(request.get("token") or ""), rpc_token
                 ):
                     resp = json.dumps({"error": "Unauthorized RPC request"})
                     conn.sendall((resp + "\n").encode())
@@ -2382,10 +2328,7 @@ def _rpc_poll_loop(
                     continue
 
                 if not rpc_token or not secrets.compare_digest(
-                    # Compare as bytes: compare_digest raises TypeError on a
-                    # str with non-ASCII characters, and the token comes from
-                    # sandbox-script-supplied JSON.
-                    str(request.get("token") or "").encode(), rpc_token.encode()
+                    str(request.get("token") or ""), rpc_token
                 ):
                     logger.debug("Unauthorized RPC request in %s", req_file)
                     env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
@@ -2614,7 +2557,7 @@ def _execute_remote(
             timeout=timeout,
         )
 
-        stdout_text = script_result.get("output", "") or ""
+        stdout_text = script_result.get("output", "")
         exit_code = script_result.get("returncode", -1)
         status = "success"
 
@@ -2664,23 +2607,17 @@ def _execute_remote(
     duration = round(time.monotonic() - exec_start, 2)
 
     # --- Post-process output (same as local path) ---
-    cleaned_stdout = _clean_execute_text(stdout_text)
-    stdout_text, stdout_metadata = _truncate_stdout_text(
-        cleaned_stdout, limit=max_stdout_bytes,
-    )
-    _, stdout_artifact_path, stdout_image_parts = _prepare_execute_output(
-        cleaned_stdout, max_stdout_bytes, budget=context.artifact_budget,
+    stdout_text, stdout_artifact_path, stdout_image_parts = _prepare_execute_output(
+        stdout_text, max_stdout_bytes, budget=context.artifact_budget,
     )
 
     # Build response
     result: Dict[str, Any] = {
         "status": status,
         "output": stdout_text,
-        "exit_code": exit_code,
         "tool_calls_made": tool_call_counter[0],
         "duration_seconds": duration,
     }
-    result.update(stdout_metadata)
 
     if status == "timeout":
         timeout_msg = f"Script timed out after {timeout}s and was killed."
@@ -3137,13 +3074,8 @@ class ExecutionKernel:
                     "duration_seconds": 0,
                 }
 
-            cleaned_stdout = _clean_execute_text(response.get("stdout", ""))
-            stdout, stdout_metadata = _truncate_stdout_text(
-                cleaned_stdout,
-                limit=self.max_stdout_bytes,
-            )
-            _, output_artifact, output_images = _prepare_execute_output(
-                cleaned_stdout,
+            stdout, output_artifact, output_images = _prepare_execute_output(
+                response.get("stdout", ""),
                 self.max_stdout_bytes,
                 budget=self.context.artifact_budget,
             )
@@ -3163,7 +3095,6 @@ class ExecutionKernel:
                 "persistent": True,
                 "kernel_id": self.kernel_id,
             }
-            result.update(stdout_metadata)
             if stderr:
                 result["error"] = stderr
                 result["output"] = (stdout + "\n--- stderr ---\n" + stderr).strip()
@@ -3898,7 +3829,7 @@ def execute_code(
         # Env scrubbing and tool whitelist apply identically in both modes.
         _mode = _get_execution_mode()
         _child_python = _resolve_child_python(_mode)
-        _child_cwd = _resolve_child_cwd(_mode, tmpdir, task_id=task_id or "")
+        _child_cwd = _resolve_child_cwd(_mode, tmpdir)
         _script_path = os.path.join(tmpdir, "script.py")
 
         proc = subprocess.Popen(
@@ -4031,11 +3962,18 @@ def execute_code(
         stderr_reader.join(timeout=3)
         stdout_spill.close()
 
-        stdout_full, stdout_metadata = _assemble_stdout_result(
-            b"".join(stdout_head_chunks),
-            b"".join(stdout_tail_chunks),
-            total_bytes=stdout_total_bytes[0],
-        )
+        stdout_head = b"".join(stdout_head_chunks).decode("utf-8", errors="replace")
+        stdout_tail = b"".join(stdout_tail_chunks).decode("utf-8", errors="replace")
+        if stdout_total_bytes[0] > max_stdout_bytes:
+            omitted = stdout_total_bytes[0] - len(stdout_head) - len(stdout_tail)
+            stdout_full = (
+                stdout_head
+                + f"\n\n... [OUTPUT TRUNCATED - {omitted:,} chars omitted "
+                f"out of {stdout_total_bytes[0]:,} total] ...\n\n"
+                + stdout_tail
+            )
+        else:
+            stdout_full = stdout_head + stdout_tail
         stderr_text = _clean_execute_text(
             b"".join(stderr_chunks).decode("utf-8", errors="replace")
         )
@@ -4052,7 +3990,7 @@ def execute_code(
             stdout_full,
             max_stdout_bytes,
             budget=context.artifact_budget,
-            already_truncated=bool(stdout_metadata["stdout_truncated"]),
+            already_truncated=stdout_total_bytes[0] > max_stdout_bytes,
             existing_artifact_path=full_stdout_artifact_path,
         )
 
@@ -4070,11 +4008,9 @@ def execute_code(
         result: Dict[str, Any] = {
             "status": status,
             "output": stdout_text,
-            "exit_code": exit_code,
             "tool_calls_made": tool_call_counter[0],
             "duration_seconds": duration,
         }
-        result.update(stdout_metadata)
 
         if status == "timeout":
             timeout_msg = f"Script timed out after {timeout}s and was killed."
@@ -4378,43 +4314,17 @@ def _resolve_child_python(mode: str) -> str:
     return sys.executable
 
 
-def _resolve_child_cwd(mode: str, staging_dir: str, task_id: str = "") -> str:
+def _resolve_child_cwd(mode: str, staging_dir: str) -> str:
     """Resolve the working directory for the execute_code subprocess.
 
     - ``strict``: the staging tmpdir (today's behavior).
-    - ``project``: the session's own cwd — its per-session cwd record
-      (written after every completed terminal command), then the raw
-      per-session cwd override registered via ``session.cwd.set`` /
-      ``register_task_env_overrides``, then the session's TERMINAL_CWD
-      (same as the terminal tool), or ``os.getcwd()`` if none points at a
-      real dir. Falls back to the staging tmpdir as a last resort so we
-      never invoke Popen with a nonexistent cwd.
-
-    This mirrors the resolution ladder file tools and the terminal use
-    (record → registered override → TERMINAL_CWD), so all file-writing
-    paths within a session agree on the working directory. (#56047)
+    - ``project``: the session's TERMINAL_CWD (same as the terminal tool), or
+      ``os.getcwd()`` if TERMINAL_CWD is unset or doesn't point at a real dir.
+      Falls back to the staging tmpdir as a last resort so we never invoke
+      Popen with a nonexistent cwd.
     """
     if mode != "project":
         return staging_dir
-    if task_id:
-        # 1. The session's cwd record — IS the session's `cd` state.
-        try:
-            from tools.terminal_tool import get_session_cwd
-
-            recorded = get_session_cwd(task_id)
-        except Exception:
-            recorded = None
-        if recorded and os.path.isdir(recorded):
-            return recorded
-        # 2. Registered workspace override (session.cwd.set → gateway/TUI/ACP).
-        try:
-            from tools.file_tools import _registered_task_cwd_override
-
-            session_cwd = _registered_task_cwd_override(task_id)
-        except Exception:
-            session_cwd = None
-        if session_cwd and os.path.isdir(session_cwd):
-            return session_cwd
     raw = os.environ.get("TERMINAL_CWD", "").strip()
     if raw:
         expanded = os.path.expanduser(raw)

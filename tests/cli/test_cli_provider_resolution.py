@@ -172,6 +172,141 @@ def test_runtime_resolution_failure_is_not_sticky(monkeypatch):
     assert shell.agent is not None
 
 
+def test_routed_cli_construction_preflights_before_baseline_credentials(monkeypatch):
+    """An active projected route must not touch an unavailable baseline first."""
+    cli = _import_cli()
+    from agent.runtime_routing import AgentRuntimeSpec
+    import agent.runtime_routing as runtime_routing
+
+    projected = AgentRuntimeSpec(
+        model="routed-model",
+        provider="routed-provider",
+        base_url="https://routed.invalid/v1",
+        api_key="routed-secret",
+        resolution_state="resolved",
+        api_mode="chat_completions",
+    )
+    prepared = SimpleNamespace(
+        plan=SimpleNamespace(action="project", runtime=projected)
+    )
+    finalized = SimpleNamespace(plan=prepared.plan)
+    captured = {}
+
+    monkeypatch.setattr(runtime_routing, "prepare_agent_runtime", lambda request: prepared)
+    monkeypatch.setattr(
+        runtime_routing,
+        "runtime_resolver_requires_initial_task",
+        lambda scope: scope == "fresh_session",
+    )
+    monkeypatch.setattr(
+        runtime_routing,
+        "finalize_prepared_agent_runtime",
+        lambda value, request, effective: (
+            finalized
+            if value is prepared and effective is projected
+            else pytest.fail("unexpected runtime handoff")
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.mcp_startup.wait_for_mcp_discovery", lambda: None
+    )
+
+    class _DummyAgent:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            self.model = kwargs["model"]
+            self.provider = kwargs["provider"]
+            self.base_url = kwargs["base_url"]
+            self.api_key = kwargs["api_key"]
+            self.api_mode = kwargs["api_mode"]
+            self.acp_command = kwargs.get("acp_command")
+            self.acp_args = kwargs.get("acp_args") or []
+            self._credential_pool = kwargs.get("credential_pool")
+
+    monkeypatch.setattr(cli, "AIAgent", _DummyAgent)
+    shell = cli.HermesCLI(compact=True, max_turns=1)
+    shell.model = "baseline-model"
+    shell.provider = "missing-baseline"
+    shell.requested_provider = "missing-baseline"
+    shell._runtime_manual_pin = False
+    shell._install_tool_callbacks = lambda: None
+    shell._ensure_tirith_security = lambda: None
+    shell._ensure_runtime_credentials = lambda: pytest.fail(
+        "projected routing must run before baseline credential resolution"
+    )
+
+    assert shell._init_agent(initial_task="clean first task") is True
+    assert captured["model"] == "routed-model"
+    assert captured["provider"] == "routed-provider"
+    assert captured["prepared_agent_runtime"] is finalized
+    assert captured["runtime_routing_context"].task == "clean first task"
+    assert captured["runtime_routing_context"].session_id == shell.session_id
+
+
+def test_resume_replays_durable_compression_lineage_before_routing(monkeypatch):
+    from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
+    import agent.runtime_routing as runtime_routing
+
+    db = SimpleNamespace(get_compression_lineage=lambda _session_id: ["parent", "child"])
+    shell = SimpleNamespace(
+        _resumed=True,
+        _session_db=db,
+        session_id="child",
+    )
+    observed = {}
+
+    def _repair(session_id, *, session_store):
+        observed["session_id"] = session_id
+        observed["session_store"] = session_store
+        return 1
+
+    monkeypatch.setattr(
+        runtime_routing, "repair_runtime_session_continuations_from_store", _repair
+    )
+
+    CLIAgentSetupMixin._repair_runtime_routing_continuations(shell)
+
+    assert observed == {"session_id": "child", "session_store": db}
+
+
+def test_cli_image_attachment_is_part_of_clean_initial_routing_task(
+    monkeypatch,
+    tmp_path,
+):
+    cli = _import_cli()
+    image_path = tmp_path / "first-turn.png"
+    payload = b"\x89PNG\r\n\x1a\nfirst-turn-image"
+    image_path.write_bytes(payload)
+    captured = {}
+
+    shell = SimpleNamespace(
+        _secret_capture_callback=None,
+        _last_turn_interrupted=False,
+        agent=None,
+        _active_agent_route_signature=None,
+        _resolve_turn_agent_config=lambda _message: {
+            "model": "baseline-model",
+            "runtime": {},
+            "signature": None,
+            "request_overrides": None,
+        },
+        _init_agent=lambda **kwargs: captured.update(kwargs) or False,
+    )
+    monkeypatch.setattr(cli, "_cprint", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "agent.runtime_routing.runtime_resolver_requires_initial_task",
+        lambda scope: scope == "fresh_session",
+    )
+
+    assert cli.HermesCLI.chat(shell, "inspect this", images=[image_path]) is None
+
+    assert captured["initial_task"] == [
+        {"type": "text", "text": "inspect this"},
+        {"type": "image", "data": payload, "mime_type": "image/png"},
+    ]
+    assert str(image_path) not in repr(captured["initial_task"])
+
+
 def test_runtime_resolution_rebuilds_agent_on_routing_change(monkeypatch):
     cli = _import_cli()
 

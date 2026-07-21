@@ -1024,7 +1024,11 @@ def resolve_per_model_reasoning_effort(model: str, overrides: dict | None) -> di
     return None
 
 
-def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
+def resolve_reasoning_config(
+    cfg: dict | None,
+    model: str = "",
+    requested_effort=None,
+) -> dict | None:
     """Resolve the effective reasoning config for *model* from a config dict.
 
     Single chokepoint for reasoning-effort resolution, shared by every
@@ -1033,7 +1037,8 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
 
     1. Per-model override from ``agent.reasoning_overrides``
        (spelling-tolerant — see :func:`resolve_per_model_reasoning_effort`)
-    2. Global ``agent.reasoning_effort`` — the raw value is passed through
+    2. A generic bounded plugin request, when supplied.
+    3. Global ``agent.reasoning_effort`` — the raw value is passed through
        so a YAML boolean ``False`` (``reasoning_effort: false``/``off``/
        ``no``) means "thinking disabled", never silently re-enabled.
 
@@ -1046,6 +1051,9 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
         model: The effective model for this surface/session. When empty,
                it is derived from the config's ``model`` section (string
                form, or a dict's ``default``/``model`` keys).
+        requested_effort: Optional generic plugin effort. Provider/model
+               overrides remain authoritative. Invalid values fall through
+               to the existing global behavior.
 
     Returns:
         The parsed reasoning config dict, or None when unset/unrecognized
@@ -1072,6 +1080,11 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
     if per_model is not None:
         return per_model
 
+    if requested_effort is not None:
+        requested = parse_reasoning_effort(requested_effort)
+        if requested is not None:
+            return requested
+
     # Global fallback — keep the raw value; coercing with ``or ""`` turns a
     # YAML boolean False into "", silently re-enabling thinking for users
     # who explicitly disabled it.
@@ -1083,6 +1096,27 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
             "Unknown reasoning_effort '%s', using default (medium)", effort
         )
     return result
+
+
+def effective_generic_reasoning_effort(config: dict | None) -> str | None:
+    """Extract the canonical generic effort from ordinary reasoning config.
+
+    This deliberately understands only Hades' provider-independent
+    ``enabled``/``effort`` shape. Provider transports remain responsible for
+    translating that generic config to their wire representation.
+    """
+    if not isinstance(config, dict):
+        return None
+    enabled = config.get("enabled")
+    if type(enabled) is not bool:
+        return None
+    if enabled is False:
+        return "none" if "effort" not in config else None
+    effort = config.get("effort")
+    if not isinstance(effort, str):
+        return None
+    normalized = effort.strip().casefold()
+    return normalized if normalized in VALID_REASONING_EFFORTS else None
 
 
 def is_termux() -> bool:

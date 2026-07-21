@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -17,6 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent.plugin_llm import (
+    PLUGIN_LLM_REASONING_CONTRACT_VERSION,
     PluginLlm,
     PluginLlmCompleteResult,
     PluginLlmImageInput,
@@ -556,6 +558,119 @@ class TestPluginLlmFacade:
             "confidence": 0.99,
         }
         assert result.content_type == "json"
+
+    def test_complete_structured_forwards_reasoning_config(self):
+        captured = {}
+        requested = {"effort": "low"}
+
+        def fake_caller(**kwargs):
+            captured.update(kwargs)
+            return "openai-codex", "gpt-5.4", _fake_response('{"complexity": 0.5}')
+
+        llm = make_plugin_llm_for_test(
+            plugin_id="auto-routing",
+            policy=_TrustPolicy(plugin_id="auto-routing"),
+            sync_caller=fake_caller,
+        )
+        llm.complete_structured(
+            instructions="Classify",
+            input=[PluginLlmTextInput(text="fix a flaky test")],
+            json_mode=True,
+            reasoning_config=requested,
+        )
+        assert captured["reasoning_config"] == {"effort": "low"}
+        assert captured["reasoning_config"] is not requested
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["complete", "complete_structured", "acomplete", "acomplete_structured"],
+    )
+    def test_every_public_facade_method_accepts_reasoning_config(self, method_name):
+        parameter = inspect.signature(getattr(PluginLlm, method_name)).parameters[
+            "reasoning_config"
+        ]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is None
+        assert PLUGIN_LLM_REASONING_CONTRACT_VERSION == 1
+
+    @pytest.mark.parametrize(
+        ("method_name", "injected"),
+        [
+            ("complete", True),
+            ("complete", False),
+            ("complete_structured", True),
+            ("complete_structured", False),
+            ("acomplete", True),
+            ("acomplete", False),
+            ("acomplete_structured", True),
+            ("acomplete_structured", False),
+        ],
+    )
+    def test_every_public_entry_point_defensively_forwards_reasoning_config(
+        self,
+        method_name: str,
+        injected: bool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, Any] = {}
+        requested = {
+            "effort": "low",
+            "provider_options": {"summary": "auto"},
+        }
+        structured = "structured" in method_name
+        asynchronous = method_name.startswith("a")
+        response = _fake_response('{"ok": true}' if structured else "ok")
+
+        def sync_injected(**kwargs):
+            captured.update(kwargs)
+            return "openai-codex", "gpt-5.4", response
+
+        async def async_injected(**kwargs):
+            captured.update(kwargs)
+            return "openai-codex", "gpt-5.4", response
+
+        def sync_host(**kwargs):
+            captured.update(kwargs)
+            return response
+
+        async def async_host(**kwargs):
+            captured.update(kwargs)
+            return response
+
+        if not injected:
+            monkeypatch.setattr(
+                "agent.auxiliary_client.async_call_llm"
+                if asynchronous
+                else "agent.auxiliary_client.call_llm",
+                async_host if asynchronous else sync_host,
+            )
+        llm = make_plugin_llm_for_test(
+            plugin_id="auto-routing",
+            policy=_TrustPolicy(plugin_id="auto-routing"),
+            sync_caller=sync_injected if injected and not asynchronous else None,
+            async_caller=async_injected if injected and asynchronous else None,
+        )
+        method = getattr(llm, method_name)
+
+        if structured:
+            invocation = method(
+                instructions="Return JSON",
+                input=[PluginLlmTextInput(text="classify")],
+                json_mode=True,
+                reasoning_config=requested,
+            )
+        else:
+            invocation = method(
+                [{"role": "user", "content": "classify"}],
+                reasoning_config=requested,
+            )
+        if asynchronous:
+            asyncio.run(invocation)
+
+        forwarded = captured["reasoning_config"]
+        assert forwarded == requested
+        assert forwarded is not requested
+        assert forwarded["provider_options"] is not requested["provider_options"]
 
     def test_complete_structured_returns_text_on_unparseable_response(self):
         def fake_caller(**_kwargs):

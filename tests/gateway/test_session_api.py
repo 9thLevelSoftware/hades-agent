@@ -1,5 +1,6 @@
 """Focused tests for API server session-control endpoints."""
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -209,6 +210,17 @@ async def test_session_fork_uses_current_sessiondb_branch_primitives(adapter, se
     assert fork["title"] == "Alternative"
     assert [m["content"] for m in session_db.get_messages(fork["id"])] == ["first path", "answer"]
     assert session_db.get_session(source_id)["end_reason"] == "branched"
+    fork_row = session_db.get_session(fork["id"])
+    assert json.loads(fork_row["model_config"]) == {
+        "_branched_from": source_id,
+        "_branch_point_message_count": 2,
+    }
+    # Copied history is the new independent session's starting point, not a
+    # completed child turn. Its first new prompt must still reach fresh routing.
+    assert adapter._api_session_is_persisted(fork["id"]) is False
+    session_db.append_message(fork["id"], "user", "new fork direction")
+    session_db.append_message(fork["id"], "assistant", "new answer")
+    assert adapter._api_session_is_persisted(fork["id"]) is True
 
 
 @pytest.mark.asyncio

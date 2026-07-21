@@ -1887,6 +1887,40 @@ class TestAgentCacheMessageCountRebaseline:
         assert self._guard_would_reuse(runner, "telegram:s1", "s1") is False
 
     @pytest.mark.asyncio
+    async def test_rebaseline_preserves_projected_route_identity(self, tmp_path):
+        """Refreshing the count must preserve every cache-coherence field.
+
+        Routed agents use the fifth tuple element to prove that the cached
+        agent is still bound to the exact projected route.  Dropping that
+        identity during the post-turn refresh makes turn two classify/build
+        again even though the same process owns all transcript writes.
+        """
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "sessions.db")
+        db.create_session("s1", source="telegram")
+        runner = self._runner_with_db(db)
+        agent = object()
+        route_identity = "openrouter/selected-model"
+
+        with runner._agent_cache_lock:
+            runner._agent_cache["telegram:s1"] = (
+                agent,
+                "sig",
+                0,
+                "s1",
+                route_identity,
+            )
+
+        db.append_message("s1", role="user", content="first turn")
+        db.append_message("s1", role="assistant", content="first response")
+        await runner._refresh_agent_cache_message_count("telegram:s1", "s1")
+
+        with runner._agent_cache_lock:
+            cached = runner._agent_cache["telegram:s1"]
+        assert cached == (agent, "sig", 2, "s1", route_identity)
+
+    @pytest.mark.asyncio
     async def test_rebaseline_is_fail_safe_and_skips_legacy_and_pending(self, tmp_path):
         """Re-baseline must never crash and must leave legacy 2-tuples and
         pending-sentinel entries untouched."""

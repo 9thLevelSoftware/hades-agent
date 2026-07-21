@@ -41,15 +41,14 @@ Payment / credit exhaustion fallback:
 """
 
 import contextlib
-import contextvars
 import hashlib
-import inspect
 import json
 import logging
 import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -106,8 +105,9 @@ OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
 from agent.credential_pool import load_pool
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
-from hades_cli.config import get_hades_home
-from hades_constants import OPENROUTER_BASE_URL, env_get
+from agent.process_bootstrap import build_keepalive_http_client
+from hades_constants import get_hades_home, OPENROUTER_BASE_URL, env_get
+get_hermes_home = get_hades_home
 from utils import base_url_host_matches, base_url_hostname, env_float, model_forces_max_completion_tokens, normalize_proxy_env_vars
 
 logger = logging.getLogger(__name__)
@@ -159,46 +159,21 @@ def _resolve_aux_verify(base_url: Optional[str]) -> Any:
         return True
 
 
-_WARNED_KEEPALIVE_IMPORT_SKEW = False
-
-
 def _openai_http_client_kwargs(
     base_url: Optional[str],
     *,
     async_mode: bool = False,
 ) -> Dict[str, Any]:
     """Inject keepalive httpx client with env-only proxy (not macOS system proxy)."""
-    try:
-        from agent.process_bootstrap import build_keepalive_http_client
-        client = build_keepalive_http_client(
-            str(base_url or ""),
-            async_mode=async_mode,
-            verify=_resolve_aux_verify(base_url),
-        )
-    except (ImportError, AttributeError):
-        # Version-skewed installs (#64333): a process whose sys.path resolves
-        # an older agent/process_bootstrap.py without this helper — seen when
-        # the Desktop app's bundled runtime lags a git-installed source tree
-        # that newer callers (cron scheduler) were written against. Every cron
-        # job died on this ImportError before any agent logic ran. Degrade
-        # gracefully to the OpenAI SDK's default httpx client (respects macOS
-        # system proxy, no pool-level keepalive expiry) instead of failing the
-        # whole job, and say so once — silent version skew is how this bug
-        # went unnoticed until jobs were already dead on arrival.
-        global _WARNED_KEEPALIVE_IMPORT_SKEW
-        if not _WARNED_KEEPALIVE_IMPORT_SKEW:
-            _WARNED_KEEPALIVE_IMPORT_SKEW = True
-            logger.warning(
-                "agent.process_bootstrap.build_keepalive_http_client is "
-                "unavailable — mixed/stale install detected (#64333). Falling "
-                "back to the SDK default HTTP client. Run `hermes update` (or "
-                "reinstall the Desktop app) to resync the runtime."
-            )
-        client = None
-
+    client = build_keepalive_http_client(
+        str(base_url or ""),
+        async_mode=async_mode,
+        verify=_resolve_aux_verify(base_url),
+    )
     if client is None:
         return {}
     return {"http_client": client}
+
 
 def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     kwargs = {**_openai_http_client_kwargs(base_url), **kwargs}
@@ -914,6 +889,7 @@ class _CodexCompletionsAdapter:
         self._model = model
 
     def create(self, **kwargs) -> Any:
+        exact_verification = kwargs.pop("_exact_verification", False) is True
         messages = kwargs.get("messages", [])
         model = kwargs.get("model", self._model)
 
@@ -962,6 +938,21 @@ class _CodexCompletionsAdapter:
             "input": input_items or [{"role": "user", "content": ""}],
             "store": False,
         }
+
+        # Explicit access verification is the one Codex-backend path where an
+        # output limit is mandatory even if a particular backend rejects it.
+        # A rejection safely fails the single bounded probe; silently omitting
+        # the bound could allow an open-ended billable response.  Ordinary
+        # auxiliary requests retain their historical backend-compatible shape.
+        exact_output_bound = kwargs.get("_exact_output_token_bound")
+        if exact_output_bound is not None:
+            if (
+                isinstance(exact_output_bound, bool)
+                or not isinstance(exact_output_bound, int)
+                or exact_output_bound <= 0
+            ):
+                raise ValueError("exact output token bound must be a positive integer")
+            resp_kwargs["max_output_tokens"] = exact_output_bound
 
         # Preserve the chat.completions timeout contract. This adapter is used
         # by auxiliary calls such as context compression; if the timeout is not
@@ -1229,7 +1220,10 @@ class _CodexCompletionsAdapter:
         )
         return SimpleNamespace(
             choices=[choice],
-            model=model,
+            model=(
+                getattr(final, "provider_model", None)
+                or (None if exact_verification else model)
+            ),
             usage=usage,
         )
 
@@ -1310,6 +1304,7 @@ class _AnthropicCompletionsAdapter:
         from agent.anthropic_adapter import build_anthropic_kwargs, create_anthropic_message
         from agent.transports import get_transport
 
+        exact_verification = kwargs.pop("_exact_verification", False) is True
         messages = kwargs.get("messages", [])
         model = kwargs.get("model", self._model)
         tools = kwargs.get("tools")
@@ -1390,7 +1385,17 @@ class _AnthropicCompletionsAdapter:
                     existing = {}
                 anthropic_kwargs["extra_body"] = {**existing, **passthrough}
 
-        response = create_anthropic_message(self._client, anthropic_kwargs)
+        if exact_verification:
+            response = create_anthropic_message(
+                self._client,
+                anthropic_kwargs,
+                prefer_stream=False,
+            )
+        else:
+            response = create_anthropic_message(
+                self._client,
+                anthropic_kwargs,
+            )
         _transport = get_transport("anthropic_messages")
         _nr = _transport.normalize_response(
             response, strip_tool_prefix=self._is_oauth
@@ -1423,7 +1428,10 @@ class _AnthropicCompletionsAdapter:
         )
         return SimpleNamespace(
             choices=[choice],
-            model=model,
+            model=(
+                getattr(response, "model", None)
+                or (None if exact_verification else model)
+            ),
             usage=usage,
         )
 
@@ -2210,7 +2218,7 @@ def _read_main_model() -> str:
     that gate on "the active main model" (e.g. ``vision_analyze``'s native
     fast path) see the live runtime, not the persisted config default.
     """
-    override = _runtime_main_value("model")
+    override = _RUNTIME_MAIN_MODEL
     if isinstance(override, str) and override.strip():
         return override.strip()
     try:
@@ -2237,7 +2245,7 @@ def _read_main_provider() -> str:
     Runtime override: see ``_read_main_model`` — same mechanism for the
     provider half of the runtime tuple.
     """
-    override = _runtime_main_value("provider")
+    override = _RUNTIME_MAIN_PROVIDER
     if isinstance(override, str) and override.strip():
         return override.strip().lower()
     try:
@@ -2266,7 +2274,7 @@ def _read_main_api_key() -> str:
     the main model's credentials instead of falling to ``no-key-required``
     (issue #9318).
     """
-    override = _runtime_main_value("api_key")
+    override = _RUNTIME_MAIN_API_KEY
     if isinstance(override, str) and override.strip():
         return override.strip()
     try:
@@ -2287,7 +2295,7 @@ def _read_main_base_url() -> str:
 
     Same override-then-config pattern as ``_read_main_api_key``.
     """
-    override = _runtime_main_value("base_url")
+    override = _RUNTIME_MAIN_BASE_URL
     if isinstance(override, str) and override.strip():
         return override.strip()
     try:
@@ -2323,55 +2331,13 @@ def _read_main_api_key_if_same_host(aux_base_url: str) -> str:
     return _read_main_api_key()
 
 
-# Compatibility mirrors for older readers/tests. The authoritative value is
-# the ContextVar below: gateway sessions can overlap in one process, so a
-# process-global tuple is not safe as routing or cache-key input.
+# Process-local override set by AIAgent at session/turn start. Single-threaded
+# per turn — no lock needed. Cleared by ``clear_runtime_main()``.
 _RUNTIME_MAIN_PROVIDER: str = ""
 _RUNTIME_MAIN_MODEL: str = ""
 _RUNTIME_MAIN_BASE_URL: str = ""
-_RUNTIME_MAIN_API_KEY: Any = ""
+_RUNTIME_MAIN_API_KEY: str = ""
 _RUNTIME_MAIN_API_MODE: str = ""
-_RUNTIME_MAIN_AUTH_MODE: str = ""
-_RUNTIME_MAIN_CONTEXT: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
-    contextvars.ContextVar("auxiliary_runtime_main", default=None)
-)
-_RUNTIME_MAIN_COMPAT_SNAPSHOT: Tuple[Any, ...] = ("", "", "", "", "", "")
-_RUNTIME_MAIN_COMPAT_LOCK = threading.Lock()
-
-
-def _compat_runtime_main() -> Optional[Dict[str, Any]]:
-    """Expose deliberately patched legacy globals in a single main context.
-
-    ``set_runtime_main`` mirrors values into the old module attributes for
-    introspection, but those mirrors must never become runtime inputs. A direct
-    patch is recognized only when it differs from the mirrored snapshot and
-    only on the main thread, keeping concurrent session workers isolated.
-    """
-    if threading.current_thread() is not threading.main_thread():
-        return None
-    values = (
-        _RUNTIME_MAIN_PROVIDER,
-        _RUNTIME_MAIN_MODEL,
-        _RUNTIME_MAIN_BASE_URL,
-        _RUNTIME_MAIN_API_KEY,
-        _RUNTIME_MAIN_API_MODE,
-        _RUNTIME_MAIN_AUTH_MODE,
-    )
-    if values == _RUNTIME_MAIN_COMPAT_SNAPSHOT:
-        return None
-    return dict(zip(_MAIN_RUNTIME_FIELDS, values))
-
-
-def _runtime_main_value(field: str) -> Any:
-    """Read one runtime field through context-local/controlled legacy state."""
-    runtime = _RUNTIME_MAIN_CONTEXT.get()
-    if runtime is None:
-        runtime = _compat_runtime_main()
-    if isinstance(runtime, dict):
-        value = runtime.get(field)
-        if value:
-            return value
-    return ""
 
 
 def set_runtime_main(
@@ -2379,85 +2345,38 @@ def set_runtime_main(
     model: str,
     *,
     base_url: str = "",
-    api_key: Any = "",
+    api_key: str = "",
     api_mode: str = "",
-    auth_mode: str = "",
-) -> contextvars.Token:
-    """Record the current context's live main runtime for auxiliary routing.
+) -> None:
+    """Record the live runtime provider/model/credentials for the current AIAgent.
 
-    Context-local state prevents concurrent gateway sessions from overwriting
-    one another while retaining compatibility mirrors for legacy readers.
+    Called by ``run_agent.AIAgent._sync_runtime_main_for_aux_routing`` (or
+    equivalent setter) at the top of each turn so that
+    ``_read_main_provider`` / ``_read_main_model`` reflect CLI/gateway
+    overrides instead of the stale config.yaml default.
+
+    For ``custom:`` providers, ``base_url`` and ``api_key`` must also be
+    recorded so that ``_resolve_auto`` can construct a valid client in
+    Step 1 instead of falling through to the aggregator chain.
     """
     global _RUNTIME_MAIN_PROVIDER, _RUNTIME_MAIN_MODEL
     global _RUNTIME_MAIN_BASE_URL, _RUNTIME_MAIN_API_KEY, _RUNTIME_MAIN_API_MODE
-    global _RUNTIME_MAIN_AUTH_MODE, _RUNTIME_MAIN_COMPAT_SNAPSHOT
-    runtime = {
-        "provider": (provider or "").strip().lower(),
-        "model": (model or "").strip(),
-        "base_url": (base_url or "").strip(),
-        "api_key": (
-            api_key.strip()
-            if isinstance(api_key, str)
-            else api_key if callable(api_key) else ""
-        ),
-        "api_mode": (api_mode or "").strip(),
-        "auth_mode": (auth_mode or "").strip().lower(),
-    }
-    # Publish authoritative context before updating locked compatibility
-    # mirrors; concurrent sessions never read those mirrors at runtime.
-    token = _RUNTIME_MAIN_CONTEXT.set(runtime)
-    with _RUNTIME_MAIN_COMPAT_LOCK:
-        (
-            _RUNTIME_MAIN_PROVIDER,
-            _RUNTIME_MAIN_MODEL,
-            _RUNTIME_MAIN_BASE_URL,
-            _RUNTIME_MAIN_API_KEY,
-            _RUNTIME_MAIN_API_MODE,
-            _RUNTIME_MAIN_AUTH_MODE,
-        ) = (runtime[field] for field in _MAIN_RUNTIME_FIELDS)
-        _RUNTIME_MAIN_COMPAT_SNAPSHOT = tuple(
-            runtime[field] for field in _MAIN_RUNTIME_FIELDS
-        )
-    return token
-
-
-def reset_runtime_main(token: contextvars.Token) -> None:
-    """Restore the runtime binding that preceded one scoped turn."""
-    if token is None:
-        return
-    try:
-        _RUNTIME_MAIN_CONTEXT.reset(token)
-    except (RuntimeError, ValueError):
-        # A token cannot be reset from another copied Context. Background
-        # workers inherit values, not ownership of the parent's token.
-        pass
-
-
-@contextlib.contextmanager
-def scoped_runtime_main(main_runtime: Optional[Dict[str, Any]]):
-    """Temporarily bind an explicit runtime without touching legacy mirrors."""
-    runtime = _normalize_main_runtime(main_runtime)
-    token = _RUNTIME_MAIN_CONTEXT.set(runtime or None)
-    try:
-        yield runtime
-    finally:
-        _RUNTIME_MAIN_CONTEXT.reset(token)
+    _RUNTIME_MAIN_PROVIDER = (provider or "").strip().lower()
+    _RUNTIME_MAIN_MODEL = (model or "").strip()
+    _RUNTIME_MAIN_BASE_URL = (base_url or "").strip()
+    _RUNTIME_MAIN_API_KEY = api_key.strip() if isinstance(api_key, str) else ""
+    _RUNTIME_MAIN_API_MODE = (api_mode or "").strip()
 
 
 def clear_runtime_main() -> None:
-    """Clear the runtime override in the current context."""
+    """Clear the runtime override (e.g. on session end)."""
     global _RUNTIME_MAIN_PROVIDER, _RUNTIME_MAIN_MODEL
     global _RUNTIME_MAIN_BASE_URL, _RUNTIME_MAIN_API_KEY, _RUNTIME_MAIN_API_MODE
-    global _RUNTIME_MAIN_AUTH_MODE, _RUNTIME_MAIN_COMPAT_SNAPSHOT
-    _RUNTIME_MAIN_CONTEXT.set(None)
-    with _RUNTIME_MAIN_COMPAT_LOCK:
-        _RUNTIME_MAIN_PROVIDER = ""
-        _RUNTIME_MAIN_MODEL = ""
-        _RUNTIME_MAIN_BASE_URL = ""
-        _RUNTIME_MAIN_API_KEY = ""
-        _RUNTIME_MAIN_API_MODE = ""
-        _RUNTIME_MAIN_AUTH_MODE = ""
-        _RUNTIME_MAIN_COMPAT_SNAPSHOT = ("", "", "", "", "", "")
+    _RUNTIME_MAIN_PROVIDER = ""
+    _RUNTIME_MAIN_MODEL = ""
+    _RUNTIME_MAIN_BASE_URL = ""
+    _RUNTIME_MAIN_API_KEY = ""
+    _RUNTIME_MAIN_API_MODE = ""
 
 
 def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -2876,14 +2795,6 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
     surface as the main agent. The OpenAI SDK accepts ``Callable[[], str]``
     for ``api_key`` and calls it before every request.
     """
-    if main_runtime is None:
-        # Context-local state is inherited by tool worker wrappers while
-        # remaining isolated across concurrent gateway sessions. Never fall
-        # back to compatibility mirrors here: another session may have written
-        # them most recently, which would leak its endpoint/key into this call.
-        main_runtime = _RUNTIME_MAIN_CONTEXT.get()
-        if main_runtime is None:
-            main_runtime = _compat_runtime_main()
     if not isinstance(main_runtime, dict):
         return {}
     normalized: Dict[str, Any] = {}
@@ -3411,7 +3322,13 @@ def _evict_cached_clients(provider: str) -> None:
         for key in stale_keys:
             client = _client_cache.get(key, (None, None, None))[0]
             if client is not None:
-                _close_cached_client(client)
+                _force_close_async_httpx(client)
+                try:
+                    close_fn = getattr(client, "close", None)
+                    if callable(close_fn):
+                        close_fn()
+                except Exception:
+                    pass
             _client_cache.pop(key, None)
 
 
@@ -3791,20 +3708,10 @@ def _auth_refresh_provider_for_route(
 def _fallback_entry_timeout(task: Optional[str], fb_label: str) -> Optional[float]:
     """Resolve a per-entry ``timeout`` for a configured fallback candidate.
 
-    A fallback candidate previously inherited the exact timeout the primary
-    provider was called with. When that deadline was tuned for the primary
-    (or the primary simply consumed its whole budget before failing over),
-    the fallback aborted on the same clock even when independently healthy —
-    a 163k-token compression that needs ~90s on the fallback died at the
-    primary's 30s deadline every turn (#62452).
-
     Entries in ``auxiliary.<task>.fallback_chain`` may declare their own
-    ``timeout`` (seconds). This helper reads it by parsing the entry index
-    out of the label minted by :func:`_try_configured_fallback_chain`
-    (``fallback_chain[<i>](<provider>)`` — our own stable format). Returns
-    ``None`` when the label is not a configured-chain candidate, the entry
-    has no ``timeout``, or the value is invalid — callers then keep the
-    task-level timeout, preserving existing behavior.
+    ``timeout`` (seconds). Returns ``None`` when the label is not a
+    configured-chain candidate, the entry has no ``timeout``, or the value
+    is invalid.
     """
     if not task or not fb_label:
         return None
@@ -3850,19 +3757,9 @@ def _call_fallback_candidate_sync(
     once with a rebuilt client; if the retry also auth-fails (non-refreshable
     expired token), mark the provider unhealthy and return ``None`` so the
     caller can continue to the next fallback layer. Non-auth errors raise.
-
-    ``effective_timeout`` is the task-level deadline; a configured-chain
-    candidate with its own ``timeout`` entry gets that instead, so a
-    fallback tuned differently from the primary is allowed its own budget
-    (#62452).
     """
     fb_timeout = _fallback_entry_timeout(task, fb_label)
     if fb_timeout is not None and fb_timeout != effective_timeout:
-        logger.info(
-            "Auxiliary %s: %s using its configured timeout %.0fs "
-            "(task-level was %.0fs)",
-            task or "call", fb_label, fb_timeout, effective_timeout,
-        )
         effective_timeout = fb_timeout
     fb_base = str(getattr(fb_client, "base_url", "") or "")
     fb_kwargs = _build_call_kwargs(
@@ -3922,14 +3819,6 @@ async def _call_fallback_candidate_async(
     reasoning_config: Optional[dict],
 ) -> Optional[Any]:
     """Async mirror of :func:`_call_fallback_candidate_sync`."""
-    fb_timeout = _fallback_entry_timeout(task, fb_label)
-    if fb_timeout is not None and fb_timeout != effective_timeout:
-        logger.info(
-            "Auxiliary %s: %s using its configured timeout %.0fs "
-            "(task-level was %.0fs)",
-            task or "call", fb_label, fb_timeout, effective_timeout,
-        )
-        effective_timeout = fb_timeout
     fb_base = str(getattr(fb_client, "base_url", "") or "")
     fb_kwargs = _build_call_kwargs(
         fb_label, fb_model, messages,
@@ -4402,6 +4291,17 @@ def _resolve_auto(
     runtime_api_key = runtime.get("api_key", "")
     runtime_api_mode = str(runtime.get("api_mode") or "")
 
+    # Fall back to process-local globals when main_runtime dict was not
+    # provided or was incomplete.  ``set_runtime_main()`` now records
+    # base_url/api_key/api_mode alongside provider/model, so custom:
+    # providers get the full credential surface in Step 1 of the
+    # auto-detect chain.
+    if not runtime_base_url and _RUNTIME_MAIN_BASE_URL:
+        runtime_base_url = _RUNTIME_MAIN_BASE_URL
+    if not runtime_api_key and _RUNTIME_MAIN_API_KEY:
+        runtime_api_key = _RUNTIME_MAIN_API_KEY
+    if not runtime_api_mode and _RUNTIME_MAIN_API_MODE:
+        runtime_api_mode = _RUNTIME_MAIN_API_MODE
 
     # ── Warn once if OPENAI_BASE_URL is set but config.yaml uses a named
     #    provider (not 'custom').  This catches the common "env poisoning"
@@ -4467,36 +4367,21 @@ def _resolve_auto(
         resolved_provider = main_provider
         explicit_base_url = runtime_base_url or None
         explicit_api_key = None
-        if runtime_base_url and main_provider == "custom":
-            # Anonymous custom endpoint (OPENAI_BASE_URL / config.model.base_url)
-            # — pass through with explicit base_url + api_key.
+        if runtime_base_url and (main_provider == "custom" or main_provider.startswith("custom:")):
             resolved_provider = "custom"
             explicit_base_url = runtime_base_url
             explicit_api_key = runtime_api_key or None
         elif main_provider.startswith("custom:"):
-            # Named custom provider (custom_providers / providers dict entry).
             _has_named_entry = False
             try:
-                from hades_cli.runtime_provider import _get_named_custom_provider
+                from hermes_cli.runtime_provider import _get_named_custom_provider
                 _has_named_entry = _get_named_custom_provider(main_provider) is not None
             except ImportError:
                 pass
             if _has_named_entry:
-                # KEEP the full ``custom:<name>`` so resolve_provider_client
-                # lands in the named-custom-provider arm — that arm honours the
-                # entry's api_mode (e.g. anthropic_messages →
-                # AnthropicAuxiliaryClient, avoiding the /anthropic→/v1 rewrite
-                # that 404s against proxies like Palantir Foundry's Anthropic
-                # surface).  Do NOT collapse to plain "custom"; that path
-                # strips /anthropic and routes through OpenAI chat.completions.
-                # base_url and api_key come from the named entry itself, so
-                # leave the explicit_* overrides unset.
                 resolved_provider = main_provider
                 explicit_base_url = None
             elif runtime_base_url:
-                # Config-less named custom provider (#34777): the entry only
-                # exists in the live runtime, so collapse to the anonymous
-                # custom arm with the runtime endpoint + key.
                 resolved_provider = "custom"
                 explicit_base_url = runtime_base_url
                 explicit_api_key = runtime_api_key or None
@@ -4715,14 +4600,12 @@ def resolve_provider_client(
     # Normalise aliases
     provider = _normalize_aux_provider(provider)
 
-    # Universal model-resolution fallback for concrete providers. ``auto`` is
-    # intentionally excluded: `_resolve_auto(main_runtime=...)` returns the
-    # model paired with the provider it actually selected. Pre-filling an auto
-    # call from `_read_main_model()` can leak a stale process-global runtime
-    # into a different provider (for example Claude model slug on Codex OAuth)
-    # and override that correctly resolved model.
-    #
-    # Concrete provider resolution order:
+    # Universal model-resolution fallback chain.  Callers (notably title
+    # generation, vision, session search, and other auxiliary tasks) can
+    # reach this function without an explicit model — the user picked their
+    # main provider, didn't bother configuring a per-task ``auxiliary.<task>.model``,
+    # and just expects "use my main model for side tasks too."  Resolve in
+    # this order, stopping at the first non-empty answer:
     #
     #   1. ``model`` argument (caller knew what they wanted)
     #   2. Provider's catalog default — cheap/fast model the provider
@@ -5567,7 +5450,6 @@ def resolve_vision_provider_client(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
     async_mode: bool = False,
-    main_runtime: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
     """Resolve the client actually used for vision tasks.
 
@@ -5576,7 +5458,6 @@ def resolve_vision_provider_client(
     backends, so users can intentionally force experimental providers. Auto mode
     stays conservative and only tries vision backends known to work today.
     """
-    runtime = _normalize_main_runtime(main_runtime)
     requested, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         "vision", provider, model, base_url, api_key
     )
@@ -5602,7 +5483,6 @@ def resolve_vision_provider_client(
             explicit_base_url=resolved_base_url,
             explicit_api_key=resolved_api_key,
             api_mode=resolved_api_mode,
-            main_runtime=runtime,
         )
         if client is None:
             return provider_for_base_override, None, None
@@ -5626,8 +5506,8 @@ def resolve_vision_provider_client(
         #                   live from the catalog — tried when
         #                   DEEPINFRA_API_KEY is set)
         #   5. Stop
-        main_provider = str(runtime.get("provider") or _read_main_provider())
-        main_model = str(runtime.get("model") or _read_main_model())
+        main_provider = _read_main_provider()
+        main_model = _read_main_model()
         if main_provider and main_provider not in {"auto", ""}:
             # A provider-specific vision default wins over the user's chat model:
             # static overrides (xiaomi/zai) and catalog-backed discovery (the
@@ -5690,15 +5570,10 @@ def resolve_vision_provider_client(
                 rpc_api_key = None
                 rpc_api_mode = resolved_api_mode
                 if main_provider == "custom" or main_provider.startswith("custom:"):
-                    runtime_base_url = runtime.get("base_url")
-                    if runtime_base_url:
-                        rpc_base_url = runtime_base_url
-                        rpc_api_key = runtime.get("api_key") or None
-                        rpc_api_mode = (
-                            resolved_api_mode
-                            or runtime.get("api_mode")
-                            or None
-                        )
+                    if _RUNTIME_MAIN_BASE_URL:
+                        rpc_base_url = _RUNTIME_MAIN_BASE_URL
+                        rpc_api_key = _RUNTIME_MAIN_API_KEY or None
+                        rpc_api_mode = resolved_api_mode or _RUNTIME_MAIN_API_MODE or None
                     else:
                         # No live runtime recorded (non-gateway caller): fall
                         # back to resolving the configured custom endpoint.
@@ -5712,7 +5587,6 @@ def resolve_vision_provider_client(
                     api_mode=rpc_api_mode,
                     explicit_base_url=rpc_base_url,
                     explicit_api_key=rpc_api_key,
-                    main_runtime=runtime,
                     is_vision=True)
                 if rpc_client is not None:
                     logger.info(
@@ -5755,7 +5629,6 @@ def resolve_vision_provider_client(
                 base_url=_zai_url,
                 api_key=resolved_api_key or None,
                 api_mode="chat_completions",
-                main_runtime=runtime,
                 is_vision=True,
             )
             if client is not None:
@@ -5763,7 +5636,6 @@ def resolve_vision_provider_client(
         # Fallback: try without explicit base_url (old behavior)
         client, final_model = _get_cached_client(requested, resolved_model, async_mode,
                                                  api_mode=resolved_api_mode,
-                                                 main_runtime=runtime,
                                                  is_vision=True)
         if client is None:
             return requested, None, None
@@ -5771,7 +5643,6 @@ def resolve_vision_provider_client(
 
     client, final_model = _get_cached_client(requested, resolved_model, async_mode,
                                              api_mode=resolved_api_mode,
-                                             main_runtime=runtime,
                                              is_vision=True)
     if client is None:
         return requested, None, None
@@ -5839,38 +5710,6 @@ _client_cache_lock = threading.Lock()
 _CLIENT_CACHE_MAX_SIZE = 64  # safety belt — evict oldest when exceeded
 
 
-class _CallableCacheDiscriminator:
-    """Hash a credential callback by identity without exposing its state."""
-
-    __slots__ = ("_callback",)
-
-    def __init__(self, callback: Any) -> None:
-        # Retain the callback so its id cannot be reused while cached.
-        self._callback = callback
-
-    def __hash__(self) -> int:
-        return id(self._callback)
-
-    def __eq__(self, other: object) -> bool:
-        return (
-            isinstance(other, _CallableCacheDiscriminator)
-            and self._callback is other._callback
-        )
-
-    def __repr__(self) -> str:
-        return "<callable-api-key>"
-
-
-def _runtime_cache_discriminator(field: str, value: Any) -> Any:
-    """Return a hashable, secret-safe runtime cache-key component."""
-    if field == "api_key" and callable(value):
-        return _CallableCacheDiscriminator(value)
-    if field == "api_key" and isinstance(value, str) and value:
-        digest = hashlib.blake2b(value.encode("utf-8"), digest_size=16).digest()
-        return ("api-key-digest", digest)
-    return value
-
-
 def _client_cache_key(
     provider: str,
     *,
@@ -5884,10 +5723,7 @@ def _client_cache_key(
     model: Optional[str] = None,
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
-    runtime_key = tuple(
-        _runtime_cache_discriminator(field, runtime.get(field, ""))
-        for field in _MAIN_RUNTIME_FIELDS
-    ) if provider == "auto" else ()
+    runtime_key = tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
     # `auto` can now resolve through task-specific or main fallback policy,
     # so the task participates in the cache key. Non-auto providers keep the
     # old cache shape because the explicit provider/model tuple is sufficient.
@@ -5902,16 +5738,21 @@ def _client_cache_key(
     # APIConnectionError that fails the sibling advisor (root cause of the run2
     # double-advisor "Connection error" collapse). Keying on model gives each
     # model its own client, so concurrent fan-out calls never cross-close.
-    model_key = model or runtime.get("model", "")
-    api_key_key = _runtime_cache_discriminator("api_key", api_key or "")
-    return (provider, async_mode, base_url or "", api_key_key, api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key)
+    model_key = model or ""
+    return (provider, async_mode, base_url or "", api_key or "", api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key)
 
 
 def _store_cached_client(cache_key: tuple, client: Any, default_model: Optional[str], *, bound_loop: Any = None) -> None:
     with _client_cache_lock:
         old_entry = _client_cache.get(cache_key)
         if old_entry is not None and old_entry[0] is not client:
-            _close_cached_client(old_entry[0])
+            _force_close_async_httpx(old_entry[0])
+            try:
+                close_fn = getattr(old_entry[0], "close", None)
+                if callable(close_fn):
+                    close_fn()
+            except Exception:
+                pass
         _client_cache[cache_key] = (client, default_model, bound_loop)
 
 
@@ -6013,31 +5854,30 @@ def _force_close_async_httpx(client: Any) -> None:
         pass
 
 
-def _close_cached_client(client: Any) -> None:
-    """Apply the canonical best-effort close policy to one cached client."""
-    if client is None:
-        return
-    _force_close_async_httpx(client)
-    try:
-        close_fn = getattr(client, "close", None)
-        if callable(close_fn) and not inspect.iscoroutinefunction(close_fn):
-            close_fn()
-    except Exception:
-        pass
-
-
 def shutdown_cached_clients() -> None:
     """Close all cached clients (sync and async) to prevent event-loop errors.
 
     Call this during CLI shutdown, *before* the event loop is closed, to
     avoid ``AsyncHttpxClientWrapper.__del__`` raising on a dead loop.
     """
+    import inspect
+
     with _client_cache_lock:
         for key, entry in list(_client_cache.items()):
             client = entry[0]
             if client is None:
                 continue
-            _close_cached_client(client)
+            # Mark any async httpx transport as closed first (prevents __del__
+            # from scheduling aclose() on a dead event loop).
+            _force_close_async_httpx(client)
+            # Sync clients: close the httpx connection pool cleanly.
+            # Async clients: skip — we already neutered __del__ above.
+            try:
+                close_fn = getattr(client, "close", None)
+                if close_fn and not inspect.iscoroutinefunction(close_fn):
+                    close_fn()
+            except Exception:
+                pass
         _client_cache.clear()
 
 
@@ -6187,20 +6027,13 @@ def _get_cached_client(
             if cache_key not in _client_cache:
                 # Safety belt: if the cache has grown beyond the max, evict
                 # the oldest entries (FIFO — dict preserves insertion order).
-                # Do not close an evicted client here: another caller may be
-                # mid-request with the object it obtained from this cache.
-                # Dropping the cache reference lets normal refcount/GC cleanup
-                # happen after in-flight users release it.
                 while len(_client_cache) >= _CLIENT_CACHE_MAX_SIZE:
-                    evict_key = next(iter(_client_cache))
+                    evict_key, evict_entry = next(iter(_client_cache.items()))
+                    _force_close_async_httpx(evict_entry[0])
                     del _client_cache[evict_key]
                 _client_cache[cache_key] = (client, default_model, bound_loop)
             else:
-                built_client = client
                 client, default_model, _ = _client_cache[cache_key]
-                # This concurrently built loser was never exposed to a caller,
-                # so it is safe to close immediately.
-                _close_cached_client(built_client)
     return client, model or default_model
 
 
@@ -6792,12 +6625,7 @@ def _build_call_kwargs(
     return kwargs
 
 
-def _validate_llm_response(
-    response: Any,
-    task: Optional[str] = None,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
-) -> Any:
+def _validate_llm_response(response: Any, task: str = None) -> Any:
     """Validate that an LLM response has the expected .choices[0].message shape.
 
     Fails fast with a clear error instead of letting malformed payloads
@@ -6805,21 +6633,11 @@ def _validate_llm_response(
     AttributeError (e.g. "'str' object has no attribute 'choices'").
 
     See #7264.
-
-    Also the single accounting chokepoint for auxiliary usage: every
-    successful non-streaming aux response passes through here exactly once,
-    so token usage is recorded against the ambient session context published
-    by the agent loop (``agent.aux_accounting``, issue #23270). Recording is
-    best-effort and never affects validation. *provider*/*base_url* are
-    optional accounting hints — fallback-path calls omit them and the row
-    keeps the model (read from the response itself) with an empty route.
     """
     if response is None:
         raise RuntimeError(
             f"Auxiliary {task or 'call'}: LLM returned None response"
         )
-    from agent.aux_accounting import record_aux_usage
-    record_aux_usage(response, task, provider=provider, base_url=base_url)
     # Allow SimpleNamespace responses from adapters (CodexAuxiliaryClient,
     # AnthropicAuxiliaryClient) — they have .choices[0].message.
     try:
@@ -6899,6 +6717,320 @@ def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
     return value
 
 
+class OneShotTransportError(RuntimeError):
+    """An exact one-shot request failed after entering the transport."""
+
+
+_EXACT_ONE_SHOT_EXECUTOR_ID = "agent.auxiliary_client.call_llm_exact_once"
+_EXACT_ONE_SHOT_EXECUTOR_VERSION = "2"
+_EXACT_ONE_SHOT_PROTOCOL_OVERHEAD_TOKENS = 256
+_EXACT_ONE_SHOT_API_MODES = frozenset(
+    {"chat_completions", "codex_responses", "anthropic_messages"}
+)
+
+
+@dataclass(frozen=True)
+class ExactOneShotCapability:
+    """Immutable public contract for the exact request built by this module."""
+
+    executor_id: str
+    executor_version: str
+    api_mode: str
+    maximum_input_tokens: int
+    maximum_output_tokens: int
+    protocol_overhead_tokens: int
+    execution_shape_fingerprint: str
+
+    def public_record(self) -> Dict[str, Any]:
+        return {
+            "executor_id": self.executor_id,
+            "executor_version": self.executor_version,
+            "api_mode": self.api_mode,
+            "maximum_input_tokens": self.maximum_input_tokens,
+            "maximum_output_tokens": self.maximum_output_tokens,
+            "protocol_overhead_tokens": self.protocol_overhead_tokens,
+            "execution_shape_fingerprint": self.execution_shape_fingerprint,
+        }
+
+
+def _exact_one_shot_request_shapes(
+    *,
+    model: str,
+    api_mode: str,
+    messages: list,
+    temperature: Optional[float],
+    max_tokens: int,
+    tools: list,
+) -> list[Dict[str, Any]]:
+    """Build every possible non-secret wire shape for the fixed executor.
+
+    UTF-8 byte length is a tokenizer-independent upper bound for user-supplied
+    text tokens.  The explicit protocol reserve covers provider framing and
+    special tokens that are not represented in the JSON request.
+    """
+    normalized_mode = str(api_mode or "").strip().lower()
+    if normalized_mode not in _EXACT_ONE_SHOT_API_MODES:
+        raise ValueError("verification_api_mode_unsupported")
+    if (
+        isinstance(max_tokens, bool)
+        or not isinstance(max_tokens, int)
+        or max_tokens <= 0
+    ):
+        raise ValueError("exact output token bound must be a positive integer")
+
+    if normalized_mode == "codex_responses":
+        from agent.codex_responses_adapter import _chat_messages_to_responses_input
+
+        instructions = "You are a helpful assistant."
+        replay_messages: List[Dict[str, Any]] = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content") or ""
+            if role == "system":
+                instructions = content if isinstance(content, str) else str(content)
+            else:
+                replay_messages.append(message)
+        input_items = _chat_messages_to_responses_input(
+            replay_messages,
+            is_github_responses=False,
+        )
+        return [{
+            "model": model,
+            "instructions": instructions,
+            "input": input_items or [{"role": "user", "content": ""}],
+            "store": False,
+            "max_output_tokens": max_tokens,
+        }]
+
+    if normalized_mode == "anthropic_messages":
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        # OAuth adds a fixed Claude Code system prefix.  Bind and reserve the
+        # larger of both translator shapes without exposing credential type.
+        return [
+            build_anthropic_kwargs(
+                model=model,
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens,
+                reasoning_config=None,
+                is_oauth=is_oauth,
+            )
+            for is_oauth in (False, True)
+        ]
+
+    token_field = (
+        "max_completion_tokens"
+        if model_forces_max_completion_tokens(model)
+        else "max_tokens"
+    )
+    return [{
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "tools": tools,
+        token_field: max_tokens,
+    }]
+
+
+def build_exact_one_shot_capability(
+    *,
+    model: str,
+    api_mode: str,
+    messages: list,
+    temperature: Optional[float],
+    max_tokens: int,
+    tools: list,
+    execution_shape: Dict[str, Any],
+) -> ExactOneShotCapability:
+    """Describe and conservatively bound the request the executor will send."""
+    shapes = _exact_one_shot_request_shapes(
+        model=model,
+        api_mode=api_mode,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        tools=tools,
+    )
+    serialized_shapes = [
+        json.dumps(shape, sort_keys=True, separators=(",", ":"), default=str)
+        for shape in shapes
+    ]
+    fingerprint_payload = json.dumps(
+        {
+            "executor_id": _EXACT_ONE_SHOT_EXECUTOR_ID,
+            "executor_version": _EXACT_ONE_SHOT_EXECUTOR_VERSION,
+            "execution_shape": execution_shape,
+            "requests": shapes,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    maximum_input_tokens = max(
+        len(shape.encode("utf-8")) for shape in serialized_shapes
+    ) + _EXACT_ONE_SHOT_PROTOCOL_OVERHEAD_TOKENS
+    return ExactOneShotCapability(
+        executor_id=_EXACT_ONE_SHOT_EXECUTOR_ID,
+        executor_version=_EXACT_ONE_SHOT_EXECUTOR_VERSION,
+        api_mode=str(api_mode or "").strip().lower(),
+        maximum_input_tokens=maximum_input_tokens,
+        maximum_output_tokens=max_tokens,
+        protocol_overhead_tokens=_EXACT_ONE_SHOT_PROTOCOL_OVERHEAD_TOKENS,
+        execution_shape_fingerprint=hashlib.sha256(
+            fingerprint_payload.encode("utf-8")
+        ).hexdigest(),
+    )
+
+
+def _create_exact_runtime_client(
+    *,
+    provider: str,
+    model: str,
+    base_url: str,
+    api_key: Any,
+    api_mode: str,
+    timeout: float,
+) -> Any:
+    """Build a client from an already-resolved runtime without re-resolution.
+
+    This seam must stay deliberately boring: it may translate the selected API
+    mode, but it must never consult provider credentials, pools, model config,
+    or a fallback provider.  Those choices were already made by the runtime
+    resolver and are part of the verification target's identity.
+    """
+    if not str(provider or "").strip() or not str(model or "").strip():
+        raise RuntimeError("exact one-shot runtime identity is incomplete")
+    exact_base_url = str(base_url or "").strip()
+    has_key = bool(api_key) if not callable(api_key) else True
+    if not exact_base_url or not has_key:
+        raise RuntimeError("exact one-shot runtime execution is incomplete")
+
+    normalized_mode = str(api_mode or "").strip().lower()
+    if normalized_mode == "anthropic_messages":
+        from agent.anthropic_adapter import _is_oauth_token, build_anthropic_client
+
+        real_client = build_anthropic_client(
+            api_key,
+            exact_base_url,
+            timeout=timeout,
+        )
+        is_oauth = (
+            isinstance(api_key, str) and _is_oauth_token(api_key)
+        )
+        return AnthropicAuxiliaryClient(
+            real_client,
+            model,
+            api_key,
+            exact_base_url,
+            is_oauth=is_oauth,
+        )
+
+    if normalized_mode not in {"chat_completions", "codex_responses"}:
+        raise RuntimeError(
+            f"exact one-shot API mode is unsupported: {normalized_mode!r}"
+        )
+
+    clean_base_url, default_query = _extract_url_query_params(exact_base_url)
+    client_kwargs: Dict[str, Any] = {}
+    if default_query:
+        client_kwargs["default_query"] = default_query
+    client = _create_openai_client(
+        api_key=api_key,
+        base_url=clean_base_url,
+        **client_kwargs,
+    )
+    if normalized_mode == "codex_responses":
+        return CodexAuxiliaryClient(client, model)
+    return client
+
+
+def call_llm_exact_once(
+    *,
+    provider: str,
+    model: str,
+    base_url: str,
+    api_key: Any,
+    api_mode: str,
+    messages: list,
+    temperature: Optional[float],
+    max_tokens: int,
+    tools: list,
+    timeout: float = 30.0,
+    main_runtime: Optional[Dict[str, Any]] = None,
+    capability: Optional[ExactOneShotCapability] = None,
+) -> Any:
+    """Execute exactly one completion request against one resolved path.
+
+    This deliberately bypasses every retry, parameter-removal, credential
+    refresh, and provider/model fallback branch owned by :func:`call_llm`.
+    Client construction only translates the already-selected API mode; it does
+    not re-resolve credentials, provider, endpoint, or model.  Only the single
+    ``chat.completions.create`` below can enter the model transport.
+    """
+    if main_runtime is not None:
+        expected = {
+            "provider": provider,
+            "model": model,
+            "base_url": base_url,
+            "api_key": api_key,
+            "api_mode": api_mode,
+        }
+        if any(main_runtime.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("exact one-shot runtime binding changed")
+
+    if capability is not None:
+        rebuilt = build_exact_one_shot_capability(
+            model=model,
+            api_mode=api_mode,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            execution_shape={
+                "provider": str(provider or "").strip().lower(),
+                "api_mode": str(api_mode or "").strip().lower(),
+                "runtime_max_output_tokens": capability.maximum_output_tokens,
+            },
+        )
+        if rebuilt != capability:
+            raise RuntimeError("exact one-shot request capability changed")
+
+    client = _create_exact_runtime_client(
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        api_mode=api_mode,
+        timeout=timeout,
+    )
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "tools": tools,
+        "timeout": timeout,
+    }
+    if str(api_mode or "").strip().lower() in {
+        "codex_responses",
+        "anthropic_messages",
+    }:
+        kwargs["max_tokens"] = max_tokens
+        kwargs["_exact_verification"] = True
+        if str(api_mode or "").strip().lower() == "codex_responses":
+            kwargs["_exact_output_token_bound"] = max_tokens
+    elif model_forces_max_completion_tokens(model):
+        kwargs["max_completion_tokens"] = max_tokens
+    else:
+        kwargs["max_tokens"] = max_tokens
+    try:
+        return client.chat.completions.create(**kwargs)
+    except Exception as error:
+        raise OneShotTransportError(
+            "exact one-shot provider request outcome is uncertain"
+        ) from error
+
+
 def call_llm(
     task: str = None,
     *,
@@ -6953,11 +7085,6 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
-    # Capture one immutable runtime snapshot for keying, resolution, retries,
-    # and fallbacks. Reading ambient state independently in each phase lets a
-    # concurrent /model switch produce a key for one runtime and a client for
-    # another.
-    main_runtime = _normalize_main_runtime(main_runtime)
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     if api_mode:
@@ -6972,7 +7099,6 @@ def call_llm(
             base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key,
             async_mode=False,
-            main_runtime=main_runtime,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning(
@@ -6983,7 +7109,6 @@ def call_llm(
                 provider="auto",
                 model=resolved_model,
                 async_mode=False,
-                main_runtime=main_runtime,
             )
         if client is None:
             raise RuntimeError(
@@ -7093,8 +7218,7 @@ def call_llm(
         # for the transient retry every auxiliary task shares. (PR #16587)
         try:
             return _validate_llm_response(
-                client.chat.completions.create(**kwargs), task,
-                provider=resolved_provider, base_url=_base_info)
+                client.chat.completions.create(**kwargs), task)
         except Exception as transient_err:
             if not _is_transient_transport_error(transient_err):
                 raise
@@ -7586,9 +7710,6 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
-    # Keep every async phase on the same runtime identity, even if another
-    # session switches models while this task is awaiting network I/O.
-    main_runtime = _normalize_main_runtime(main_runtime)
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
@@ -7601,7 +7722,6 @@ async def async_call_llm(
             base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key,
             async_mode=True,
-            main_runtime=main_runtime,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning(
@@ -7612,7 +7732,6 @@ async def async_call_llm(
                 provider="auto",
                 model=resolved_model,
                 async_mode=True,
-                main_runtime=main_runtime,
             )
         if client is None:
             raise RuntimeError(
@@ -7628,7 +7747,6 @@ async def async_call_llm(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
-            main_runtime=main_runtime,
         )
         if client is None:
             _explicit = (resolved_provider or "").strip().lower()
@@ -7679,8 +7797,7 @@ async def async_call_llm(
         # for the rationale. (PR #16587)
         try:
             return _validate_llm_response(
-                await client.chat.completions.create(**kwargs), task,
-                provider=resolved_provider, base_url=_client_base)
+                await client.chat.completions.create(**kwargs), task)
         except Exception as transient_err:
             if not _is_transient_transport_error(transient_err):
                 raise

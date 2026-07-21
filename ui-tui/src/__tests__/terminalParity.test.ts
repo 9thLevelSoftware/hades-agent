@@ -17,10 +17,13 @@ describe('terminalParityHints', () => {
   it('suggests IDE setup only for VS Code-family terminals that still need bindings', async () => {
     const readFile = vi.fn().mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }))
 
-    const hints = await terminalParityHints({ TERM_PROGRAM: 'vscode' } as NodeJS.ProcessEnv, {
-      fileOps: { readFile },
-      homeDir: '/tmp/fake-home'
-    })
+    const hints = await terminalParityHints(
+      { APPDATA: 'C:/Users/me/AppData/Roaming', TERM_PROGRAM: 'vscode' } as NodeJS.ProcessEnv,
+      {
+        fileOps: { readFile },
+        homeDir: '/tmp/fake-home'
+      }
+    )
 
     expect(hints.some(h => h.key === 'ide-setup')).toBe(true)
   })
@@ -67,10 +70,13 @@ describe('terminalParityHints', () => {
       ])
     )
 
-    const hints = await terminalParityHints({ TERM_PROGRAM: 'vscode' } as NodeJS.ProcessEnv, {
-      fileOps: { readFile },
-      homeDir: '/tmp/fake-home'
-    })
+    const hints = await terminalParityHints(
+      { APPDATA: 'C:/Users/me/AppData/Roaming', TERM_PROGRAM: 'vscode' } as NodeJS.ProcessEnv,
+      {
+        fileOps: { readFile },
+        homeDir: '/tmp/fake-home'
+      }
+    )
 
     expect(hints.some(h => h.key === 'ide-setup')).toBe(false)
   })

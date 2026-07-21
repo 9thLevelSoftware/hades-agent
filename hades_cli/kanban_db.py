@@ -2997,56 +2997,37 @@ def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
 # Attachments
 # ---------------------------------------------------------------------------
 
-# The attachment size cap is the module-level ``KANBAN_ATTACHMENT_MAX_BYTES``
-# (defined near the top of this file) — one constant shared by the dashboard
-# HTTP endpoint, the agent toolset, and the CLI so the limit cannot drift
-# between surfaces.
-
 
 class AttachmentTooLarge(ValueError):
-    """Raised when an attachment exceeds the configured size cap.
-
-    Subclasses :class:`ValueError` so generic ``except ValueError`` handlers
-    (e.g. the dashboard's 400 fallback) still catch it, while callers that
-    want a distinct user-facing message (the tool/CLI 413-equivalent) can
-    catch it specifically.
-    """
+    """Raised when an attachment payload exceeds the configured size cap."""
 
 
 def _safe_attachment_name(raw: str) -> str:
-    """Reduce a client-supplied filename to a safe basename.
+    """Sanitise a user-supplied attachment filename.
 
-    Strips any directory components (both separators) so a malicious
-    ``../../etc/passwd`` or ``C:\\x`` collapses to its leaf. Drops control
-    chars and leading dots so we never write a dotfile or a name with
-    embedded NULs/newlines. Rejects empty / dotfile-only names. The result
-    is only ever joined under the per-task attachments dir, never used
-    verbatim as a path from the client.
-
-    Raises :class:`ValueError` on an unusable name; HTTP callers map that
-    to a 400.
+    Strips path separators and leading dots so the name is safe to use as a
+    flat filename inside :func:`task_attachments_dir`.
     """
-    name = (raw or "").replace("\\", "/").split("/")[-1].strip()
-    name = "".join(ch for ch in name if ch.isprintable() and ch not in "\x00").strip()
-    name = name.lstrip(".").strip()
-    if not name:
-        raise ValueError("invalid attachment filename")
-    return name[:200]
+    import re as _re
+    name = raw.strip().replace("\\", "/").rsplit("/", 1)[-1].lstrip(".")
+    name = _re.sub(r"[^\w. ()\[\]-]", "_", name) if name else "attachment"
+    return name or "attachment"
 
 
-def _collision_free_path(dest_dir: Path, safe_name: str) -> Path:
-    """Return a path under ``dest_dir`` that doesn't clobber an existing file.
-
-    ``foo.pdf`` → ``foo.pdf``, then ``foo (1).pdf``, ``foo (2).pdf``, …
-    ``safe_name`` must already be sanitised via :func:`_safe_attachment_name`.
-    """
-    stem, dot, ext = safe_name.partition(".")
-    candidate = safe_name
-    n = 1
-    while (dest_dir / candidate).exists():
-        candidate = f"{stem} ({n}){dot}{ext}"
-        n += 1
-    return dest_dir / candidate
+def _collision_free_path(directory: Path, name: str) -> tuple[Path, str]:
+    """Return ``(path, final_name)`` that does not collide with *directory*'s contents."""
+    candidate = directory / name
+    if not candidate.exists():
+        return candidate, name
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    idx = 1
+    while True:
+        new_name = f"{stem} ({idx}){suffix}"
+        candidate = directory / new_name
+        if not candidate.exists():
+            return candidate, new_name
+        idx += 1
 
 
 def store_attachment_bytes(
@@ -3057,54 +3038,34 @@ def store_attachment_bytes(
     *,
     content_type: Optional[str] = None,
     uploaded_by: Optional[str] = None,
+    max_bytes: int = KANBAN_ATTACHMENT_MAX_BYTES,
     board: Optional[str] = None,
-    max_bytes: Optional[int] = None,
 ) -> int:
-    """Validate, size-check, persist a blob, and record its metadata row.
+    """Write *data* to disk and record the attachment row atomically.
 
-    This is the single write path shared by the dashboard endpoint, the
-    agent toolset (``kanban_attach`` / ``kanban_attach_url``), and the CLI
-    (``hermes kanban attach``) so name-sanitisation, the size cap, and the
-    collision-resolution all behave identically everywhere.
-
-    Steps: enforce ``max_bytes``, sanitise ``filename`` to a safe basename,
-    write the bytes under :func:`task_attachments_dir` with a
-    collision-free name, then insert the ``task_attachments`` row via
-    :func:`add_attachment`. Returns the new attachment id.
-
-    Raises :class:`AttachmentTooLarge` when ``data`` exceeds ``max_bytes``,
-    or :class:`ValueError` for a bad filename / unknown task. On any failure
-    after the blob is written (e.g. the task disappeared) the orphaned blob
-    is removed before re-raising.
+    Raises :class:`AttachmentTooLarge` if ``len(data)`` exceeds *max_bytes*.
     """
-    if max_bytes is None:
-        max_bytes = KANBAN_ATTACHMENT_MAX_BYTES
     if len(data) > max_bytes:
         raise AttachmentTooLarge(
-            f"attachment exceeds {max_bytes // (1024 * 1024)} MB limit"
+            f"attachment is {len(data)} bytes, limit is {max_bytes}"
         )
-    safe_name = _safe_attachment_name(filename)
+    safe = _safe_attachment_name(filename)
     dest_dir = task_attachments_dir(task_id, board=board)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = _collision_free_path(dest_dir, safe_name)
-    dest_path.write_bytes(data)
+    dest, final_name = _collision_free_path(dest_dir, safe)
     try:
+        dest.write_bytes(data)
         return add_attachment(
             conn,
             task_id,
-            filename=dest_path.name,
-            stored_path=str(dest_path.resolve()),
+            filename=final_name,
+            stored_path=str(dest),
             content_type=content_type,
             size=len(data),
             uploaded_by=uploaded_by,
         )
     except Exception:
-        # Don't leave an orphan blob if the metadata insert fails (most
-        # commonly: the task id doesn't exist).
-        try:
-            dest_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        dest.unlink(missing_ok=True)
         raise
 
 

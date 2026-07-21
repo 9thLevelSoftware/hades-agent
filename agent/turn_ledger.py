@@ -19,7 +19,9 @@ finalizer's lazy-logger pattern (no import cycle with conversation_loop).
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -305,8 +307,115 @@ def persist_turn_outcome(
     try:
         record_turn_outcome_safely(getattr(agent, "_session_db", None), record)
     finally:
-        _bump_sidecar_for_skills(record)
+        try:
+            _bump_sidecar_for_skills(record)
+        finally:
+            _emit_post_turn_outcome(agent, record)
     return record
+
+
+def _nonnegative_int(value: Any, *, maximum: int = 10_000_000) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return min(max(parsed, 0), maximum)
+
+
+def _nonnegative_float(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return parsed if math.isfinite(parsed) and parsed >= 0 else 0.0
+
+
+def _opaque_identifier(namespace: str, value: str) -> str:
+    return hashlib.sha256(
+        f"{namespace}\0{value}".encode("utf-8", errors="surrogatepass")
+    ).hexdigest()
+
+
+def _emit_post_turn_outcome(agent: Any, record: TurnOutcomeRecord) -> None:
+    try:
+        _emit_post_turn_outcome_unchecked(agent, record)
+    except Exception:
+        # Observability is never allowed to change a completed user turn.
+        return
+
+
+def _emit_post_turn_outcome_unchecked(
+    agent: Any,
+    record: TurnOutcomeRecord,
+) -> None:
+    from agent.turn_outcome import TURN_OUTCOMES
+
+    raw_session_id = str(record.session_id or "")
+    raw_turn_id = str(record.turn_id or "")
+    raw_task_id = str(getattr(agent, "_current_task_id", "") or "")
+    if record.outcome not in TURN_OUTCOMES or any(
+        not value or len(value) > 4096
+        for value in (raw_session_id, raw_turn_id, raw_task_id)
+    ):
+        return
+    turn_id = _opaque_identifier("turn", raw_turn_id)
+    try:
+        from agent.runtime_routing import public_runtime_binding
+
+        public = public_runtime_binding(agent)
+    except Exception:
+        public = {}
+    runtime_binding = None
+    if (
+        public
+        and public.get("session_id") == raw_session_id
+        and public.get("task_id") == raw_task_id
+    ):
+        candidate = {
+            "scope": public.get("scope"),
+            "session_id": public.get("session_id"),
+            "task_id": public.get("task_id"),
+            "action": public.get("action"),
+            "model": public.get("model"),
+            "provider": public.get("provider"),
+            "decision_id": public.get("decision_id"),
+        }
+        runtime_binding = candidate
+        session_id = candidate["session_id"]
+        task_id = candidate["task_id"]
+    else:
+        session_id = _opaque_identifier("session", raw_session_id)
+        task_id = _opaque_identifier("task", raw_task_id)
+    try:
+        from hermes_constants import effective_generic_reasoning_effort
+
+        effort = effective_generic_reasoning_effort(
+            getattr(agent, "reasoning_config", None)
+        )
+    except Exception:
+        effort = None
+    payload = {
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "task_id": task_id,
+        "observed_at_unix": _nonnegative_float(record.created_at),
+        "outcome": record.outcome,
+        "api_calls": _nonnegative_int(record.api_calls),
+        "tool_iterations": _nonnegative_int(record.tool_iterations),
+        "retry_count": _nonnegative_int(record.retry_count),
+        "cost_usd": _nonnegative_float(record.cost_usd_delta),
+        "input_tokens": _nonnegative_int(record.input_tokens_delta),
+        "output_tokens": _nonnegative_int(record.output_tokens_delta),
+        "cache_read_tokens": _nonnegative_int(record.cache_read_tokens_delta),
+        "reasoning_effort": effort,
+        "runtime_binding": runtime_binding,
+    }
+    try:
+        from hermes_cli.plugins import invoke_hook
+
+        invoke_hook("post_turn_outcome", **payload)
+    except Exception:
+        return
 
 
 def skills_loaded_from(agent: Any) -> tuple[str, ...]:

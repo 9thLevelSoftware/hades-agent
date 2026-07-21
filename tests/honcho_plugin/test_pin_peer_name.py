@@ -16,6 +16,7 @@ chosen ``user_peer_id`` can be asserted without touching the network.
 
 import hashlib
 import json
+import os
 from unittest.mock import MagicMock
 
 
@@ -751,6 +752,28 @@ class TestPinTransition:
         sig_unpinned = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
         assert sig_pinned["honcho.pin_peer_name"] != sig_unpinned["honcho.pin_peer_name"]
+
+    def test_cache_busting_signature_uses_content_when_mtime_is_preserved(self, tmp_path, monkeypatch):
+        """A same-size rewrite with a preserved mtime must not reuse stale Honcho config."""
+        from gateway.run import GatewayRunner
+
+        cfg_path = tmp_path / "honcho.json"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(GatewayRunner, "_HONCHO_CACHE_BUSTING_MEMO", {})
+
+        # Keep the payload size identical so neither mtime nor size can mask
+        # the stale-cache regression on filesystems with coarse timestamps.
+        cfg_path.write_text('{"apiKey":"k","peerName":"Igor","pinPeerName":true,"pad":"x"}')
+        original_stat = cfg_path.stat()
+        sig_pinned = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
+
+        cfg_path.write_text('{"apiKey":"k","peerName":"Igor","pinPeerName":false,"pad":""}')
+        os.utime(cfg_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        assert cfg_path.stat().st_mtime_ns == original_stat.st_mtime_ns
+        sig_unpinned = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
+
+        assert sig_pinned["honcho.pin_peer_name"] is True
+        assert sig_unpinned["honcho.pin_peer_name"] is False
 
     def test_cache_busting_signature_reflects_user_peer_aliases(self, tmp_path, monkeypatch):
         from gateway.run import GatewayRunner

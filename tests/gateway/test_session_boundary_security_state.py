@@ -194,6 +194,77 @@ async def test_branch_clears_session_scoped_approval_and_yolo_state():
 
 
 @pytest.mark.asyncio
+async def test_branch_clears_parent_model_reasoning_overrides_and_pending_note():
+    """The stable chat key must not carry a parent /model pin into its branch."""
+    runner, session_key = _make_branch_runner()
+    other_key = "agent:main:telegram:dm:other-chat"
+    runner._session_model_overrides = {
+        session_key: {"model": "parent/model", "provider": "parent-provider"},
+        other_key: {"model": "other/model", "provider": "other-provider"},
+    }
+    runner._session_reasoning_overrides = {
+        session_key: {"enabled": True, "effort": "high"},
+        other_key: {"enabled": True, "effort": "low"},
+    }
+    runner._pending_model_notes = {
+        session_key: "[Note: parent model switch]",
+        other_key: "[Note: other model switch]",
+    }
+
+    result = await runner._handle_branch_command(_make_event("/branch"))
+
+    assert "Branched to" in result
+    assert session_key not in runner._session_model_overrides
+    assert session_key not in runner._session_reasoning_overrides
+    assert session_key not in runner._pending_model_notes
+    assert runner._session_model_overrides[other_key]["model"] == "other/model"
+    assert runner._session_reasoning_overrides[other_key]["effort"] == "low"
+    assert runner._pending_model_notes[other_key] == "[Note: other model switch]"
+
+
+@pytest.mark.asyncio
+async def test_branch_normalizes_recovered_topic_source_before_clearing_runtime_state():
+    """A lobby-shaped Telegram command clears the recovered topic's stable key."""
+    from gateway.run import GatewayRunner
+
+    runner, _raw_key = _make_branch_runner()
+    raw_source = _make_source()
+    raw_source.thread_id = ""
+    recovered_source = _make_source()
+    recovered_source.thread_id = "42"
+    recovered_key = build_session_key(recovered_source)
+    raw_key = build_session_key(raw_source)
+    assert recovered_key != raw_key
+
+    runner._recover_telegram_topic_thread_id = MagicMock(return_value="42")
+    runner._session_model_overrides = {
+        recovered_key: {"model": "parent/model"},
+        raw_key: {"model": "unrelated/raw-lobby"},
+    }
+    runner._session_reasoning_overrides = {
+        recovered_key: {"enabled": True, "effort": "high"},
+        raw_key: {"enabled": True, "effort": "low"},
+    }
+    runner._pending_model_notes = {
+        recovered_key: "[parent topic note]",
+        raw_key: "[unrelated lobby note]",
+    }
+    runner._evict_cached_agent = MagicMock()
+
+    event = MessageEvent(text="/branch", source=raw_source, message_id="m1")
+    result = await GatewayRunner._handle_branch_command(runner, event)
+
+    assert "Branched to" in result
+    assert recovered_key not in runner._session_model_overrides
+    assert recovered_key not in runner._session_reasoning_overrides
+    assert recovered_key not in runner._pending_model_notes
+    assert raw_key in runner._session_model_overrides
+    assert raw_key in runner._session_reasoning_overrides
+    assert raw_key in runner._pending_model_notes
+    runner._evict_cached_agent.assert_called_once_with(recovered_key)
+
+
+@pytest.mark.asyncio
 async def test_branch_preserves_persisted_assistant_metadata():
     runner, _session_key = _make_branch_runner()
     runner.session_store.load_transcript.return_value = [
@@ -223,6 +294,20 @@ async def test_branch_preserves_persisted_assistant_metadata():
     assert assistant_kwargs["reasoning_details"] == [{"type": "summary", "text": "step"}]
     assert assistant_kwargs["codex_reasoning_items"] == [{"id": "r1", "type": "reasoning"}]
     assert assistant_kwargs["codex_message_items"] == [{"id": "m1", "type": "message"}]
+
+
+@pytest.mark.asyncio
+async def test_branch_records_the_copied_transcript_boundary():
+    runner, _session_key = _make_branch_runner()
+
+    result = await runner._handle_branch_command(_make_event("/branch"))
+
+    assert "Branched to" in result
+    create_kwargs = runner._session_db._db.create_session.call_args.kwargs
+    assert create_kwargs["model_config"] == {
+        "_branched_from": "current-session",
+        "_branch_point_message_count": 2,
+    }
 
 
 def test_clear_session_boundary_security_state_is_scoped():

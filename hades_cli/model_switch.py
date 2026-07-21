@@ -30,7 +30,6 @@ from hades_cli.providers import (
     custom_provider_slug,
     determine_api_mode,
     get_label,
-    host_mandated_api_mode,
     is_aggregator,
     resolve_provider_full,
 )
@@ -1256,21 +1255,6 @@ def switch_model(
             if not api_key:
                 api_key = "no-key-required"
 
-    # --- Resolve api_mode from the final (provider, base_url) before validation ---
-    # Two cases this closes, both surfaced when the switched model's reasoning
-    # is actually applied (post the reasoning-unification refactor):
-    #   1. api_mode empty (e.g. alias cleared it above) → fill from the endpoint.
-    #   2. api_mode carried a STALE value from the previous session state
-    #      (e.g. a same-provider /model switch to gpt-5.x on api.openai.com that
-    #      kept the prior openrouter/chat_completions mode). A host that mandates
-    #      one wire protocol must override the stale value — otherwise the request
-    #      goes out on chat_completions and OpenAI 400s on tools+reasoning_effort.
-    _mandated_mode = host_mandated_api_mode(base_url)
-    if _mandated_mode is not None:
-        api_mode = _mandated_mode
-    elif not api_mode:
-        api_mode = determine_api_mode(target_provider, base_url)
-
     # --- Normalize model name for target provider ---
     new_model = normalize_model_for_provider(new_model, target_provider)
 
@@ -1496,7 +1480,7 @@ def list_authenticated_providers(
     refresh: bool = False,
     probe_custom_providers: bool = True,
     probe_current_custom_provider: bool = False,
-    for_picker: bool = False,
+    discovery_provenance: bool = False,
 ) -> List[dict]:
     """Detect which providers have credentials and list their curated models.
 
@@ -1543,8 +1527,11 @@ def list_authenticated_providers(
     from hades_cli.auth import PROVIDER_REGISTRY
     from hades_cli.models import (
         OPENROUTER_MODELS, _PROVIDER_MODELS,
-        _MODELS_DEV_PREFERRED, _merge_with_models_dev, cached_provider_model_ids,
+        _discover_exact_resolver,
+        _MODELS_DEV_PREFERRED, _merge_with_models_dev,
+        cached_provider_model_discovery, cached_provider_model_ids,
         clear_provider_models_cache, get_curated_nous_model_ids,
+        provider_model_discovery,
     )
 
     # Explicit refresh: drop every provider's cached model-id list so the
@@ -1560,6 +1547,7 @@ def list_authenticated_providers(
 
 
     results: List[dict] = []
+    _discovery_records: dict[tuple[str, str], object] = {}
     seen_slugs: set = set()  # lowercase-normalized to catch case variants (#9545)
     seen_mdev_ids: set = set()  # prevent duplicate entries for aliases (e.g. kimi-coding + kimi-coding-cn)
     _current_provider_norm = str(current_provider or "").strip().lower()
@@ -1567,6 +1555,49 @@ def list_authenticated_providers(
 
     def _can_probe_custom_provider(*, row_is_current: bool) -> bool:
         return bool(probe_custom_providers or (probe_current_custom_provider and row_is_current))
+
+    def _provider_models(provider: str) -> list[str]:
+        """Return models and retain the exact discovery record when requested."""
+        if not discovery_provenance:
+            return cached_provider_model_ids(provider)
+        discovery = cached_provider_model_discovery(
+            provider,
+            force_refresh=refresh,
+        )
+        _discovery_records[(provider, provider)] = discovery
+        return list(discovery.models)
+
+    def _exact_resolver_discovery(provider: str, resolver_name: str):
+        """Probe one named resolver at most once during this inventory build."""
+        key = (provider, resolver_name)
+        discovery = _discovery_records.get(key)
+        if discovery is None:
+            discovery = provider_model_discovery(
+                provider,
+                force_refresh=refresh,
+                resolver_name=resolver_name,
+            )
+            _discovery_records[key] = discovery
+        return discovery
+
+    def _configured_resolver_discovery(
+        provider: str,
+        resolver_name: str,
+        models: tuple[str, ...],
+    ):
+        """Resolve identity without bypassing a disabled live-model probe."""
+        key = (provider, resolver_name)
+        discovery = _discovery_records.get(key)
+        if discovery is None:
+            discovery = _discover_exact_resolver(
+                provider,
+                resolver_name,
+                force_refresh=refresh,
+                probe_live=False,
+                configured_models=models,
+            )
+            _discovery_records[key] = discovery
+        return discovery
 
     # Effective base URLs of every built-in row we emit (normalized lower+rstrip).
     # Section 4 uses this to hide ``custom_providers`` entries that point at the
@@ -1754,7 +1785,7 @@ def list_authenticated_providers(
         # /model picker sees the SAME list `hermes model` would build, with
         # disk caching to keep the picker open snappy. Falls back to the
         # curated static list when the live fetcher returns nothing.
-        model_ids = cached_provider_model_ids(hermes_id)
+        model_ids = _provider_models(hermes_id)
         if not model_ids:
             model_ids = curated.get(hermes_id, [])
             if hermes_id in _MODELS_DEV_PREFERRED:
@@ -1844,20 +1875,6 @@ def list_authenticated_providers(
             try:
                 if _credential_pool_is_usable(hermes_slug):
                     has_creds = True
-                elif for_picker:
-                    # For the interactive /model picker, also show providers
-                    # whose credential pool has entries but all are temporarily
-                    # rate-limited.  Rate limits are per-model for many
-                    # providers (e.g. Google Gemini) — switching to a different
-                    # model under the same provider may work even when all keys
-                    # are in cooldown.
-                    try:
-                        from agent.credential_pool import load_pool
-                        _pool = load_pool(hermes_slug)
-                        if _pool.has_credentials():
-                            has_creds = True
-                    except Exception:
-                        pass
             except Exception as exc:
                 logger.debug("Credential pool check failed for %s: %s", hermes_slug, exc)
         # Fallback: check external credential files directly.
@@ -1891,12 +1908,12 @@ def list_authenticated_providers(
             # catalog. ``cached_provider_model_ids()`` falls back to the
             # curated list when the live endpoint is unreachable, so this
             # is safe for unauthenticated and offline cases too.
-            model_ids = cached_provider_model_ids(hermes_slug)
+            model_ids = _provider_models(hermes_slug)
         # For aws_sdk providers (bedrock), use live discovery so the list
         # reflects the active region (eu.*, ap.*) not the static us.* list.
         elif overlay.auth_type == "aws_sdk":
             try:
-                _ids = cached_provider_model_ids(hermes_slug)
+                _ids = _provider_models(hermes_slug)
                 model_ids = _ids if _ids else (curated.get(hermes_slug, []) or curated.get(pid, []))
             except Exception:
                 model_ids = curated.get(hermes_slug, []) or curated.get(pid, [])
@@ -1941,7 +1958,7 @@ def list_authenticated_providers(
             # Unified pathway — see Section 1 rationale. Fall back to the
             # curated dict (with models.dev merge for preferred providers)
             # when the live fetcher comes up empty.
-            model_ids = cached_provider_model_ids(hermes_slug)
+            model_ids = _provider_models(hermes_slug)
             if not model_ids:
                 model_ids = curated.get(hermes_slug, []) or curated.get(pid, [])
                 if hermes_slug in _MODELS_DEV_PREFERRED:
@@ -2013,13 +2030,13 @@ def list_authenticated_providers(
         # region (eu.*, us.*, ap.*) instead of the hardcoded us.* static list.
         if _cp_config and getattr(_cp_config, "auth_type", "") == "aws_sdk":
             try:
-                _ids = cached_provider_model_ids(_cp.slug)
+                _ids = _provider_models(_cp.slug)
                 _cp_model_ids = _ids if _ids else curated.get(_cp.slug, [])
             except Exception:
                 _cp_model_ids = curated.get(_cp.slug, [])
         else:
             # Unified pathway — same as sections 1 and 2.
-            _cp_model_ids = cached_provider_model_ids(_cp.slug)
+            _cp_model_ids = _provider_models(_cp.slug)
             if not _cp_model_ids:
                 _cp_model_ids = curated.get(_cp.slug, [])
         _cp_total = len(_cp_model_ids)
@@ -2120,17 +2137,22 @@ def list_authenticated_providers(
                 bool(api_key) or not has_explicit_models
             )
             if should_probe:
-                try:
-                    from hades_cli.models import fetch_api_models
-                    live_models = fetch_api_models(
-                        api_key,
-                        api_url,
-                        headers=_extra_headers_from_config(ep_cfg) or None,
-                    )
-                    if live_models:
-                        models_list = live_models
-                except Exception:
-                    pass
+                if discovery_provenance:
+                    discovery = _exact_resolver_discovery(ep_name, ep_name)
+                    if discovery.models:
+                        models_list = list(discovery.models)
+                else:
+                    try:
+                        from hades_cli.models import fetch_api_models
+                        live_models = fetch_api_models(
+                            api_key,
+                            api_url,
+                            headers=_extra_headers_from_config(ep_cfg) or None,
+                        )
+                        if live_models:
+                            models_list = live_models
+                    except Exception:
+                        pass
 
             results.append({
                 "slug": ep_name,
@@ -2176,14 +2198,19 @@ def list_authenticated_providers(
     ):
         _models = [current_model] if current_model else []
         if refresh or probe_current_custom_provider:
-            try:
-                from hades_cli.models import fetch_api_models
+            if discovery_provenance:
+                discovery = _exact_resolver_discovery("custom", "custom")
+                if discovery.models:
+                    _models = list(discovery.models)
+            else:
+                try:
+                    from hades_cli.models import fetch_api_models
 
-                _live_models = fetch_api_models("", str(current_base_url).strip().rstrip("/"))
-                if _live_models:
-                    _models = _live_models
-            except Exception:
-                pass
+                    _live_models = fetch_api_models("", str(current_base_url).strip().rstrip("/"))
+                    if _live_models:
+                        _models = _live_models
+                except Exception:
+                    pass
         results.append({
             "slug": "custom",
             "name": "Custom endpoint",
@@ -2396,19 +2423,25 @@ def list_authenticated_providers(
                 and grp.get("discover_models", True)
             )
             if should_probe:
-                try:
-                    from hades_cli.models import fetch_api_models
+                if discovery_provenance:
+                    discovery = _exact_resolver_discovery(slug, slug)
+                    if discovery.models:
+                        grp["models"] = list(discovery.models)
+                        grp["total_models"] = len(discovery.models)
+                else:
+                    try:
+                        from hades_cli.models import fetch_api_models
 
-                    live_models = fetch_api_models(
-                        api_key,
-                        api_url,
-                        headers=grp.get("extra_headers") or None,
-                    )
-                    if live_models:
-                        grp["models"] = live_models
-                        grp["total_models"] = len(live_models)
-                except Exception:
-                    pass
+                        live_models = fetch_api_models(
+                            api_key,
+                            api_url,
+                            headers=grp.get("extra_headers") or None,
+                        )
+                        if live_models:
+                            grp["models"] = live_models
+                            grp["total_models"] = len(live_models)
+                    except Exception:
+                        pass
             results.append({
                 "slug": slug,
                 "name": grp["name"],
@@ -2439,6 +2472,68 @@ def list_authenticated_providers(
                 _row["models"] = [current_model, *_models]
                 _row["total_models"] = _row.get("total_models", len(_models)) + 1
             break
+
+    if discovery_provenance:
+        from hades_cli.models import (
+            ProviderModelDiscovery,
+            provider_model_discovery,
+        )
+
+        for row in results:
+            if "discovery" in row:
+                continue
+            slug = str(row.get("slug") or "").strip()
+            resolver_name = str(row.get("resolver_name") or slug).strip()
+            discovery = _discovery_records.get((slug, resolver_name))
+            if discovery is None:
+                visible_models = tuple(
+                    str(model) for model in (row.get("models") or [])
+                )
+                if row.get("is_user_defined"):
+                    discovery = _configured_resolver_discovery(
+                        slug,
+                        resolver_name,
+                        visible_models,
+                    )
+                else:
+                    discovery = _exact_resolver_discovery(
+                        slug,
+                        resolver_name,
+                    )
+            visible = tuple(str(model) for model in (row.get("models") or []))
+            if visible != discovery.models:
+                model_provenance = {
+                    model: discovery.model_provenance.get(
+                        model,
+                        "configured_declared",
+                    )
+                    for model in visible
+                }
+                provenance_details = {
+                    model: discovery.provenance_details.get(
+                        model,
+                        {"source": "configured"},
+                    )
+                    for model in visible
+                }
+                discovery = ProviderModelDiscovery(
+                    provider=discovery.provider,
+                    resolver_name=discovery.resolver_name,
+                    models=visible,
+                    model_provenance=model_provenance,
+                    provenance_details=provenance_details,
+                    live_attempt_status=discovery.live_attempt_status,
+                    observed_at=discovery.observed_at,
+                    credential_fingerprint=discovery.credential_fingerprint,
+                    endpoint_identity=discovery.endpoint_identity,
+                    auth_identity=discovery.auth_identity,
+                    credential_pool_identity=(
+                        discovery.credential_pool_identity
+                    ),
+                    api_mode=discovery.api_mode,
+                    source=discovery.source,
+                )
+            row["discovery"] = discovery.to_payload()
 
     # Sort: current provider first, then by model count descending
     results.sort(key=lambda r: (not r["is_current"], -r["total_models"]))
@@ -2503,7 +2598,6 @@ def list_picker_providers(
         custom_providers=custom_providers,
         max_models=max_models,
         current_model=current_model,
-        for_picker=True,
     )
     if include_moa:
         providers = _prepend_moa_picker_provider(providers, current_provider=current_provider)

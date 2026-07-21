@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { join } from 'node:path'
+
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   configureDetectedTerminalKeybindings,
@@ -8,19 +10,6 @@ import {
   shouldPromptForTerminalSetup,
   stripJsonComments
 } from '../lib/terminalSetup.js'
-
-// Tests run from developer shells as well as CI. An inherited SSH_* variable
-// must not silently force every configure call down the remote-session reject
-// path; remote behavior is tested explicitly with per-call env objects below.
-beforeEach(() => {
-  vi.stubEnv('SSH_CONNECTION', '')
-  vi.stubEnv('SSH_TTY', '')
-  vi.stubEnv('SSH_CLIENT', '')
-})
-
-afterEach(() => {
-  vi.unstubAllEnvs()
-})
 
 describe('terminalSetup helpers', () => {
   it('detects VS Code family terminals from environment', () => {
@@ -32,10 +21,10 @@ describe('terminalSetup helpers', () => {
 
   it('computes VS Code style config dirs cross-platform', () => {
     expect(getVSCodeStyleConfigDir('Code', 'darwin', {} as NodeJS.ProcessEnv, '/home/me')).toBe(
-      '/home/me/Library/Application Support/Code/User'
+      join('/home/me', 'Library', 'Application Support', 'Code', 'User')
     )
     expect(getVSCodeStyleConfigDir('Code', 'linux', {} as NodeJS.ProcessEnv, '/home/me')).toBe(
-      '/home/me/.config/Code/User'
+      join('/home/me', '.config', 'Code', 'User')
     )
     expect(
       getVSCodeStyleConfigDir(
@@ -44,7 +33,7 @@ describe('terminalSetup helpers', () => {
         { APPDATA: 'C:/Users/me/AppData/Roaming' } as NodeJS.ProcessEnv,
         '/home/me'
       )
-    ).toBe('C:/Users/me/AppData/Roaming/Code/User')
+    ).toBe(join('C:/Users/me/AppData/Roaming', 'Code', 'User'))
   })
 
   it('strips line comments from keybindings JSON', () => {
@@ -335,7 +324,7 @@ describe('configureTerminalKeybindings', () => {
     const readMissing = vi.fn().mockRejectedValue(Object.assign(new Error('missing'), { code: 'ENOENT' }))
     await expect(
       shouldPromptForTerminalSetup({
-        env: { TERM_PROGRAM: 'vscode' } as NodeJS.ProcessEnv,
+        env: { APPDATA: 'C:/Users/me/AppData/Roaming', TERM_PROGRAM: 'vscode' } as NodeJS.ProcessEnv,
         fileOps: { readFile: readMissing }
       })
     ).resolves.toBe(true)
@@ -383,7 +372,7 @@ describe('configureTerminalKeybindings', () => {
 
     await expect(
       shouldPromptForTerminalSetup({
-        env: { TERM_PROGRAM: 'vscode' } as NodeJS.ProcessEnv,
+        env: { APPDATA: 'C:/Users/me/AppData/Roaming', TERM_PROGRAM: 'vscode' } as NodeJS.ProcessEnv,
         fileOps: { readFile: readComplete }
       })
     ).resolves.toBe(false)
