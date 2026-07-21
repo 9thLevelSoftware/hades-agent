@@ -170,11 +170,11 @@ def _build_server() -> Any:
     mcp = FastMCP(
         "hermes-tools",
         instructions=(
-            "Hades Agent's tool surface, exposed for use inside a Codex "
-            "session. Use these for capabilities Codex's built-in toolset "
-            "doesn't cover: web search/extract, browser automation, "
-            "subagent delegation, vision, image generation, persistent "
-            "memory, skills, and cross-session search."
+            "Hades Agent tools available inside a Codex session for capabilities "
+            "Codex's built-ins do not cover: web search/extract, browser automation, "
+            "vision analysis, image generation, skills list/view, text-to-speech, "
+            "and kanban handoff tools. Agent-loop tools (delegate_task, memory, "
+            "session_search, todo) are NOT available in this MCP callback surface."
         ),
     )
 

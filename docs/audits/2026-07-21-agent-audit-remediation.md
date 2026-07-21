@@ -29,9 +29,9 @@ Each phase is completed fully before its PR is opened.
 | L4-01 | Background review `in_flight` + aggressive prompts | 2 | done (phase-2) |
 | L4-02 | Full skill inject without token budget | 2 | done (phase-2) |
 | L4-06 | Skill config values may inject secrets | 2 | done (phase-2) |
-| L2-03 | Unbounded codex notification queues | 3 | pending |
-| L2-04 / L4-05 | hermes-tools MCP over-advertises tools | 3 | pending |
-| L2-02 (soft) | hermes-tools elicitation auto-accept | 3 | pending |
+| L2-03 | Unbounded codex notification queues | 3 | done (phase-3) |
+| L2-04 / L4-05 | hermes-tools MCP over-advertises tools | 3 | done (phase-3) |
+| L2-02 (soft) | hermes-tools elicitation auto-accept | 3 | done (phase-3) |
 | L1-03 | External memory prefetch blocks hot path | 4 | pending |
 | L1-04 | Sync executor falls back to inline I/O | 4 | pending |
 | L3-06 (partial) | Trace upload exception scrubbing | 5 | pending |

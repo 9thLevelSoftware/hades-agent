@@ -40,6 +40,11 @@ _UNSAFE_KANBAN_ROOT_CHARS = re.compile(r'["\'\n\r\t`\[\]]')
 # `codex --version` parsed at install time; bumping is a one-line change here.
 MIN_CODEX_VERSION = (0, 125, 0)
 
+# Bound streaming queues so a wedged turn loop cannot OOM the process if
+# codex floods item/* notifications (audit L2-03). When full, drop oldest.
+_NOTIFICATION_QUEUE_MAX = 2000
+_SERVER_REQUEST_QUEUE_MAX = 256
+
 
 def _safe_kanban_writable_root(path: Optional[str]) -> Optional[str]:
     """Return an absolute kanban root safe to embed in a codex -c config, or None.
@@ -179,12 +184,14 @@ class CodexAppServerClient:
         self._next_id = 1
         self._pending: dict[int, _Pending] = {}
         self._pending_lock = threading.Lock()
-        self._notifications: queue.Queue = queue.Queue()
-        self._server_requests: queue.Queue = queue.Queue()
+        self._notifications: queue.Queue = queue.Queue(maxsize=_NOTIFICATION_QUEUE_MAX)
+        self._server_requests: queue.Queue = queue.Queue(maxsize=_SERVER_REQUEST_QUEUE_MAX)
         self._stderr_lines: list[str] = []
         self._stderr_lock = threading.Lock()
         self._closed = False
         self._initialized = False
+        self._dropped_notifications = 0
+        self._dropped_server_requests = 0
 
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader.start()
@@ -372,6 +379,57 @@ class CodexAppServerClient:
             with self._stderr_lock:
                 self._stderr_lines.append(f"<stdout reader error> {exc}")
 
+    def _put_bounded(self, q: queue.Queue, msg: dict, *, kind: str) -> None:
+        """Enqueue with backpressure: drop oldest on overflow rather than OOM.
+
+        Server-initiated requests (approvals/elicitation) get an error reply
+        before eviction so codex does not hang waiting forever (Codex review P1).
+        """
+        try:
+            q.put_nowait(msg)
+            return
+        except queue.Full:
+            pass
+        dropped = None
+        try:
+            dropped = q.get_nowait()
+        except queue.Empty:
+            pass
+        if kind == "server_request" and isinstance(dropped, dict) and "id" in dropped:
+            try:
+                self.respond_error(
+                    dropped["id"],
+                    -32000,
+                    "server request queue full; dropped oldest request",
+                )
+            except Exception:  # pragma: no cover - best-effort nack
+                logger.debug("failed to nack dropped codex server request", exc_info=True)
+        try:
+            q.put_nowait(msg)
+        except queue.Full:  # pragma: no cover - extreme race
+            if kind == "server_request" and "id" in msg:
+                try:
+                    self.respond_error(
+                        msg["id"],
+                        -32000,
+                        "server request queue full; could not enqueue",
+                    )
+                except Exception:
+                    pass
+        if kind == "notification":
+            self._dropped_notifications += 1
+            if self._dropped_notifications in (1, 10, 100) or self._dropped_notifications % 500 == 0:
+                logger.warning(
+                    "codex app-server: dropped %s notifications (queue full)",
+                    self._dropped_notifications,
+                )
+        else:
+            self._dropped_server_requests += 1
+            logger.warning(
+                "codex app-server: dropped server request (queue full, total=%s)",
+                self._dropped_server_requests,
+            )
+
     def _dispatch(self, msg: dict) -> None:
         # Reply (has id + result/error, no method)
         if "id" in msg and ("result" in msg or "error" in msg):
@@ -385,11 +443,11 @@ class CodexAppServerClient:
             return
         # Server-initiated request (has id + method)
         if "id" in msg and "method" in msg:
-            self._server_requests.put(msg)
+            self._put_bounded(self._server_requests, msg, kind="server_request")
             return
         # Notification (no id)
         if "method" in msg:
-            self._notifications.put(msg)
+            self._put_bounded(self._notifications, msg, kind="notification")
 
     def _read_stderr(self) -> None:
         if self._proc.stderr is None:
