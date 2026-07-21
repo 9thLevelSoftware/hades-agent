@@ -4986,7 +4986,7 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
             encoding = getattr(sys.stdout, "encoding", None) or "ascii"
             print(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
-    from hades_constants import with_hades_node_path
+    from hades_constants import find_node_executable, with_hades_node_path
 
     npm = find_node_executable("npm")
     if not npm:
@@ -5726,7 +5726,7 @@ def cmd_gui(args: argparse.Namespace):
     except Exception:
         pass
 
-    from hades_constants import with_hades_node_path
+    from hades_constants import find_node_executable, with_hades_node_path
 
     # with_hades_node_path() copies os.environ when called with no arg.
     env = with_hades_node_path()
