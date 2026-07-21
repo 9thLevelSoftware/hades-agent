@@ -371,6 +371,10 @@ class MemoryManager:
             raise ValueError("external_prefetch_timeout must be positive")
         self._external_prefetch_threads: Dict[str, threading.Thread] = {}
         self._external_prefetch_lock = threading.Lock()
+        # Last successful external prefetch text per provider so a stuck
+        # in-flight call can still serve stale-but-useful context instead of
+        # returning empty on every subsequent turn (audit L1-03).
+        self._last_external_prefetch: Dict[str, str] = {}
         # Background executor for end-of-turn sync/prefetch. Lazily created on
         # first use so the common builtin-only path spawns no extra threads.
         # A single worker serializes a provider's writes (turn N must land
@@ -381,6 +385,9 @@ class MemoryManager:
         # Futures are tracked by durability class so shutdown can give writes
         # a bounded FIFO drain, then explicitly report anything abandoned.
         self._background_futures: Dict[Future, str] = {}
+        # Tasks deferred when the executor cannot be created (never run heavy
+        # external network I/O inline on the turn path — audit L1-04).
+        self._deferred_background: list = []
         self._shutting_down = False
         self._shutdown_drain_state: Dict[str, Any] = {
             "status": "not_started",
@@ -559,10 +566,11 @@ class MemoryManager:
             if existing is not None:
                 if existing.is_alive():
                     logger.debug(
-                        "Memory provider '%s' prefetch is still running; skipping this turn",
+                        "Memory provider '%s' prefetch is still running; "
+                        "returning last-good cache if any",
                         provider.name,
                     )
-                    return ""
+                    return self._last_external_prefetch.get(provider.name, "")
                 self._external_prefetch_threads.pop(provider.name, None)
             self._external_prefetch_threads[provider.name] = thread
             thread.start()
@@ -570,19 +578,22 @@ class MemoryManager:
         thread.join(self._external_prefetch_timeout)
         if thread.is_alive():
             logger.warning(
-                "Memory provider '%s' prefetch timed out after %.1fs; skipping it until "
-                "the stuck call returns",
+                "Memory provider '%s' prefetch timed out after %.1fs; returning "
+                "last-good cache until the stuck call returns",
                 provider.name,
                 self._external_prefetch_timeout,
             )
-            return ""
+            return self._last_external_prefetch.get(provider.name, "")
 
         with self._external_prefetch_lock:
             if self._external_prefetch_threads.get(provider.name) is thread:
                 self._external_prefetch_threads.pop(provider.name, None)
         if error_box:
             raise error_box["value"]
-        return result_box.get("value", "")
+        value = result_box.get("value", "")
+        if value and value.strip():
+            self._last_external_prefetch[provider.name] = value
+        return value
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn.
@@ -692,8 +703,18 @@ class MemoryManager:
             if self._shutting_down:
                 logger.warning("Memory manager is shutting down; rejecting late %s task", kind)
                 return
-            # Creation failure outside shutdown: preserve the historical
-            # fail-safe behavior and run the operation inline.
+            # Never run external provider network I/O inline on the turn path
+            # (audit L1-04). Defer until an executor is available, or run
+            # inline only when the manager is builtin-only (disk-local).
+            if self._has_external and kind in ("write", "prefetch"):
+                logger.warning(
+                    "Memory sync executor unavailable; deferring %s task "
+                    "(will not block the turn path with external I/O)",
+                    kind,
+                )
+                with self._sync_executor_lock:
+                    self._deferred_background.append((fn, kind))
+                return
             try:
                 fn()
             except Exception as e:  # pragma: no cover - fn guards internally
@@ -707,12 +728,27 @@ class MemoryManager:
                 if self._shutting_down:
                     logger.warning("Memory manager is shutting down; rejecting late %s task", kind)
                     return
+                # Drain any tasks deferred while the executor was unavailable.
+                deferred = list(self._deferred_background)
+                self._deferred_background.clear()
+                for deferred_fn, deferred_kind in deferred:
+                    fut = executor.submit(deferred_fn)
+                    self._background_futures[fut] = deferred_kind
+                    fut.add_done_callback(self._forget_background_future)
                 future = executor.submit(fn)
                 self._background_futures[future] = kind
             future.add_done_callback(self._forget_background_future)
         except RuntimeError:
             if self._shutting_down:
                 logger.warning("Memory manager shut down during %s submission; task rejected", kind)
+                return
+            if self._has_external and kind in ("write", "prefetch"):
+                logger.warning(
+                    "Memory sync executor reject during %s submission; deferring task",
+                    kind,
+                )
+                with self._sync_executor_lock:
+                    self._deferred_background.append((fn, kind))
                 return
             try:
                 fn()
