@@ -103,7 +103,7 @@ def _resolve_concurrent_tool_timeout() -> float | None:
         value = float(raw)
     except ValueError:
         logger.warning(
-            "invalid HERMES_CONCURRENT_TOOL_TIMEOUT_S=%r; using %.0fs",
+            "invalid HADES_CONCURRENT_TOOL_TIMEOUT_S=%r; using %.0fs",
             raw,
             _DEFAULT_CONCURRENT_TOOL_TIMEOUT_S,
         )
