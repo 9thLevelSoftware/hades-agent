@@ -52,6 +52,46 @@ _UNCAPPED_PICKER_PROVIDERS: frozenset[str] = frozenset({"opencode-zen", "opencod
 logger = logging.getLogger(__name__)
 
 
+# Opaque internal model-ID display
+# ---------------------------------------------------------------------------
+# Some proxies (notably Palantir Foundry's LLM-proxy) identify models by
+# resource-instance IDs that are deeply nested, verbose, and pure noise to
+# read in CLI status output, e.g.:
+#
+#   ri.language-model-service..language-model.anthropic-claude-4-7-opus
+#
+# The provider_label already carries the routing context, so the only useful
+# information left in the opaque ID is the trailing slug. Strip the boilerplate
+# prefix for *display* — never for wire-side comparison, persistence, config
+# writes, alias lookup, or anything that round-trips back into the API.
+
+_OPAQUE_MODEL_PREFIXES: tuple[str, ...] = (
+    "ri.language-model-service..language-model.",
+)
+
+
+def format_model_for_display(model_name: str) -> str:
+    """Return a human-friendly form of *model_name* for CLI status output.
+
+    Strips known opaque proxy prefixes (Palantir Foundry's
+    ``ri.language-model-service..language-model.*``) and returns the
+    trailing slug. Falls through to the original string for everything
+    else, so real model IDs are untouched.
+
+    This is a DISPLAY-ONLY helper. Do NOT use the return value for any
+    wire-side operation — the proxy expects the full opaque ID, and
+    callers that compare or persist must keep the original.
+    """
+    if not model_name:
+        return model_name
+    for prefix in _OPAQUE_MODEL_PREFIXES:
+        if model_name.startswith(prefix):
+            tail = model_name[len(prefix):]
+            return tail if tail else model_name
+    return model_name
+
+
+
 def _declared_model_ids(value: Any) -> list[str]:
     """Return configured model IDs from supported config shapes.
 

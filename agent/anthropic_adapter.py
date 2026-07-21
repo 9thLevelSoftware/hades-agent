@@ -279,6 +279,25 @@ def _supports_xhigh_effort(model: str) -> bool:
     return not any(v in m for v in _NO_XHIGH_CLAUDE_SUBSTRINGS)
 
 
+def translate_anthropic_reasoning_effort(
+    model: str,
+    requested_effort: Any,
+) -> tuple[str, str | int]:
+    """Return the thinking mode and provider value emitted for an effort.
+
+    Adaptive Claude models receive ``output_config.effort``.  Legacy/manual
+    models receive a numeric ``thinking.budget_tokens``; unrecognized generic
+    strengths intentionally retain the request path's 8K medium budget.
+    """
+    effort = str(requested_effort or "medium").lower()
+    if _supports_adaptive_thinking(model):
+        adaptive_effort = ADAPTIVE_EFFORT_MAP.get(effort, "medium")
+        if adaptive_effort == "xhigh" and not _supports_xhigh_effort(model):
+            adaptive_effort = "max"
+        return ("adaptive", adaptive_effort)
+    return ("manual", THINKING_BUDGET.get(effort, 8000))
+
+
 def _forbids_sampling_params(model: str) -> bool:
     """Return True for models that 400 on any non-default temperature/top_p/top_k.
 
@@ -1572,6 +1591,11 @@ def read_hades_oauth_credentials() -> Optional[Dict[str, Any]]:
         except (json.JSONDecodeError, OSError, IOError) as e:
             logger.debug("Failed to read Hades OAuth credentials: %s", e)
     return None
+
+
+def read_hermes_oauth_credentials() -> Optional[Dict[str, Any]]:
+    """Backward-compatible alias for :func:`read_hades_oauth_credentials`."""
+    return read_hades_oauth_credentials()
 
 
 # ---------------------------------------------------------------------------
