@@ -97,7 +97,7 @@ def get_safe_write_roots() -> set[str]:
 
 
 def _classify_write_denial(path: str) -> Optional[str]:
-    """Return ``'credential'``, ``'safe_root'``, or ``None`` if writes are allowed."""
+    """Return ``'credential'``, ``'session_state'``, ``'safe_root'``, or ``None``."""
     home = os.path.realpath(os.path.expanduser("~"))
     resolved = os.path.realpath(os.path.expanduser(str(path)))
 
@@ -124,10 +124,10 @@ def _classify_write_denial(path: str) -> Optional[str]:
         # falsify conversation history and invalidate resume/compression state.
         try:
             if resolved == os.path.realpath(os.path.join(base_real, "state.db")):
-                return True
+                return "session_state"
             sessions_real = os.path.realpath(os.path.join(base_real, "sessions"))
             if resolved == sessions_real or resolved.startswith(sessions_real + os.sep):
-                return True
+                return "session_state"
         except Exception:
             pass
         try:
@@ -171,6 +171,11 @@ def get_write_denied_error(path: str, *, verb: str = "Write") -> Optional[str]:
         return (
             f"{verb} denied: '{path}' is outside HERMES_WRITE_SAFE_ROOT "
             f"({roots_display}). Unset the variable or add this path's directory prefix."
+        )
+    if denial == "session_state":
+        return (
+            f"{verb} denied: '{path}' is a protected session transcript store "
+            "(state.db / sessions/). Use Hermes session tools instead of rewriting history."
         )
     return f"{verb} denied: '{path}' is a protected system/credential file."
 
@@ -528,20 +533,25 @@ def get_cross_profile_warning(path: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _find_sandbox_mirror_segments(parts: tuple) -> Optional[int]:
-    """Return the index of the inner ``.hermes`` part in a sandbox-mirror path.
+# Host-side and remote/container mirror basenames. Hades default is ``.hades``;
+# legacy Hermes remotes and some sandbox layouts still use ``.hermes`` (#32049).
+_SANDBOX_MIRROR_HOME_NAMES = frozenset({".hades", ".hermes"})
 
-    Matches ``…/sandboxes/<backend>/<task>/home/.hermes/…`` and returns the
-    index where the inner Hermes-state portion starts. Returns ``None`` for
+
+def _find_sandbox_mirror_segments(parts: tuple) -> Optional[int]:
+    """Return the index of the inner home-state part in a sandbox-mirror path.
+
+    Matches ``…/sandboxes/<backend>/<task>/home/.<hades|hermes>/…`` and returns
+    the index where the inner Hermes-state portion starts. Returns ``None`` for
     paths that do not contain the sandbox-mirror shape.
     """
     for i, part in enumerate(parts):
         if part != "sandboxes":
             continue
-        # Need at least: sandboxes / <backend> / <task> / home / .hermes / <thing>
+        # Need at least: sandboxes / <backend> / <task> / home / .<name> / <thing>
         if i + 5 >= len(parts):
             continue
-        if parts[i + 3] == "home" and parts[i + 4] == ".hades":
+        if parts[i + 3] == "home" and parts[i + 4] in _SANDBOX_MIRROR_HOME_NAMES:
             return i + 4
     return None
 

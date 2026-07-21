@@ -42,9 +42,29 @@ class TestClassifySandboxMirrorTarget:
         assert result is not None
         assert result["target_path"] == str(target.resolve())
         assert result["mirror_root"].endswith(
+            "sandboxes/docker/default/home/.hades"
+        )
+        assert result["inner_path"] == "profiles/group1/SOUL.md"
+
+    def test_legacy_hermes_mirror_basename_classified(self, tmp_path):
+        """Remote/container layouts still use home/.hermes (#32049)."""
+        from agent.file_safety import classify_sandbox_mirror_target
+
+        target = (
+            tmp_path
+            / "sandboxes" / "docker" / "default" / "home" / ".hermes"
+            / "profiles" / "group1" / "SOUL.md"
+        )
+        target.parent.mkdir(parents=True)
+        target.write_text("# legacy mirror\n")
+
+        result = classify_sandbox_mirror_target(str(target))
+        assert result is not None
+        assert result["mirror_root"].endswith(
             "sandboxes/docker/default/home/.hermes"
         )
         assert result["inner_path"] == "profiles/group1/SOUL.md"
+
 
     @pytest.mark.parametrize(
         "backend,inner",
@@ -168,7 +188,7 @@ class TestGetSandboxMirrorWarning:
         warn = get_sandbox_mirror_warning(str(target))
         assert warn is not None
         # Must name the mirror root so the user can locate the sandbox.
-        assert "sandboxes/docker/default/home/.hermes" in warn
+        assert "sandboxes/docker/default/home/.hades" in warn
         # Must hint at what the agent likely meant.
         assert "profiles/group1/SOUL.md" in warn
         # Must name the bypass kwarg shared with the cross-profile guard.

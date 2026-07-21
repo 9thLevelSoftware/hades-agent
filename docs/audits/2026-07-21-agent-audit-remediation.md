@@ -21,10 +21,10 @@ Each phase is completed fully before its PR is opened.
 
 | ID | Summary | Phase | Status |
 |----|---------|-------|--------|
-| L3-01 | `file_safety` returns bare `True` for session state | 1 | pending |
-| L3-02 | Sandbox mirror only matches `.hades`, not `.hermes` | 1 | pending |
-| L2-01 | Codex kanban writable_roots string injection | 1 | pending |
-| L2-05 | ACP file attach skips read denylist | 1 | pending |
+| L3-01 | `file_safety` returns bare `True` for session state | 1 | done (phase-1) |
+| L3-02 | Sandbox mirror only matches `.hades`, not `.hermes` | 1 | done (phase-1) |
+| L2-01 | Codex kanban writable_roots string injection | 1 | done (phase-1) |
+| L2-05 | ACP file attach skips read denylist | 1 | done (phase-1) |
 | L1-02 | Turn retry budget resets on failover | 2 | pending |
 | L4-01 | Background review `in_flight` + aggressive prompts | 2 | pending |
 | L4-02 | Full skill inject without token budget | 2 | pending |

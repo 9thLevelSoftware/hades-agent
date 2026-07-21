@@ -96,6 +96,24 @@ _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="acp-agent")
 _LIST_SESSIONS_PAGE_SIZE = 50
 _MAX_ACP_RESOURCE_BYTES = 512 * 1024
 _TEXT_RESOURCE_MIME_PREFIXES = ("text/",)
+
+
+def _acp_file_read_denied(path: Path) -> Optional[str]:
+    """Return a denial message when ACP must not inline a local file path.
+
+    Shares the same credential / hub / project-.env denylist as file tools
+    (``agent.file_safety.get_read_block_error``). Best-effort: unexpected
+    classifier errors are logged and treated as allow so normal workspace
+    attaches keep working.
+    """
+    try:
+        from agent.file_safety import get_read_block_error
+
+        return get_read_block_error(str(path))
+    except Exception:  # noqa: BLE001 — attach path must not crash the prompt
+        logger.debug("ACP read-denylist check failed for %s", path, exc_info=True)
+        return None
+
 _TEXT_RESOURCE_MIME_TYPES = {
     "application/json",
     "application/javascript",
@@ -239,6 +257,18 @@ def _resource_link_to_parts(block: ResourceContentBlock) -> list[dict[str, Any]]
                 name=name,
                 title=title,
                 body="[Resource link only; Hermes cannot read non-file ACP resource URIs directly.]",
+            ),
+        }]
+
+    denied = _acp_file_read_denied(path)
+    if denied:
+        return [{
+            "type": "text",
+            "text": _format_resource_text(
+                uri=uri,
+                name=name,
+                title=title,
+                body=f"[Access denied: {denied}]",
             ),
         }]
 
