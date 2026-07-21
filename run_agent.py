@@ -123,6 +123,8 @@ from hades_cli.timeouts import (
 )
 
 _hades_home = get_hades_home()
+# Backward-compat alias — agent_init.py references _ra()._hermes_home
+_hermes_home = _hades_home
 _project_env = Path(__file__).parent / '.env'
 _loaded_env_paths = load_hermes_dotenv(hermes_home=_hades_home, project_env=_project_env)
 if _loaded_env_paths:
