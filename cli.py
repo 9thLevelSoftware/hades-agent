@@ -15510,6 +15510,9 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             relaunch(self._pending_relaunch, preserve_inherited=False)
 
 
+
+# Backward-compat alias for tests/external callers
+HermesCLI = HadesCLI
 # ============================================================================
 # Main Entry Point
 # ============================================================================

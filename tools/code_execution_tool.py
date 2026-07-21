@@ -53,7 +53,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 _IS_WINDOWS = platform.system() == "Windows"
-from typing import Any, Dict, Iterable, List, Literal, Optional
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 from tools.thread_context import propagate_context_to_thread
 

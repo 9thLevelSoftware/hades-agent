@@ -2146,3 +2146,9 @@ def build_context_files_prompt(
     if not sections:
         return ""
     return "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n" + "\n".join(sections)
+
+# Backward-compat alias for code still referencing the old name
+HERMES_AGENT_HELP_GUIDANCE = HADES_AGENT_HELP_GUIDANCE
+
+# Backward-compat aliases for tests still referencing old names
+_find_hermes_md = _find_hades_md
