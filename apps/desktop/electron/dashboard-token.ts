@@ -13,7 +13,7 @@ async function fetchPublicText(url, options: any = {}) {
   const { protocol } = new URL(url)
 
   if (protocol !== 'http:' && protocol !== 'https:') {
-    throw new Error(`Unsupported Hermes backend URL protocol: ${protocol}`)
+    throw new Error(`Unsupported Hades backend URL protocol: ${protocol}`)
   }
 
   const timeoutMs = options.timeoutMs ?? DEFAULT_TOKEN_FETCH_TIMEOUT_MS
@@ -85,7 +85,7 @@ function isForeignBackendToken({ servedToken, spawnToken, childAlive }) {
  * failing loudly on a foreign backend. `childAlive` is a thunk so liveness is
  * sampled after the fetch, not before.
  */
-async function adoptServedDashboardToken(baseUrl, spawnToken, { childAlive, label = 'Hermes backend', ...options }) {
+async function adoptServedDashboardToken(baseUrl, spawnToken, { childAlive, label = 'Hades backend', ...options }) {
   const servedToken = await resolveServedDashboardToken(baseUrl, spawnToken, options).catch(error => {
     options.rememberLog?.(`[boot] could not read served dashboard token (${label}): ${error.message}`)
 

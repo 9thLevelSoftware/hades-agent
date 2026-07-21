@@ -390,7 +390,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
 export const useTheme = (): ThemeContextValue => useContext(ThemeContext)
 
-/** Sync the desktop skin with the active Hermes backend theme on connect. */
+/** Sync the desktop skin with the active Hades backend theme on connect. */
 export function useSyncThemeFromBackend(backendThemeName: string | undefined, setTheme: (name: string) => void) {
   useEffect(() => {
     if (backendThemeName && BUILTIN_THEMES[backendThemeName]) {

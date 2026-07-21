@@ -1,6 +1,6 @@
 # Desktop Engineering Guide
 
-How to build Hermes Desktop well. This is a judgment guide, not an inventory —
+How to build Hades Desktop well. This is a judgment guide, not an inventory —
 it teaches the invariants and the reasoning behind them so a change fits the app
 even as files move. Read it with the repository `AGENTS.md` (root rules still
 apply) and [`DESIGN.md`](./DESIGN.md) for the visual and interaction contract.
@@ -89,7 +89,7 @@ There are three distinct switch shapes, and conflating them is the classic bug:
 - A **connection/mode apply** (local ↔ remote ↔ cloud) is the soft re-home:
   shell mounted, gateway-bound stores explicitly wiped, then reconnect. Query
   invalidation alone cannot evict live session stores — wipe them.
-- A **runtime home change** (switching the underlying `HERMES_HOME` profile) is
+- A **runtime home change** (switching the underlying `HADES_HOME` profile) is
   a hard re-home: the window legitimately reloads and state resets by remount.
 - A **live profile swap** in the same window activates another profile's socket
   while background profiles keep streaming; lists merge rather than wipe, and

@@ -6,7 +6,7 @@ const copy = {
   availableTitle: 'New update available',
   availableBody: 'A new version of Hades is ready to install.',
   availableTitleBackend: 'Backend update available',
-  availableBodyBackend: 'A newer version of the connected Hermes backend is ready to install.',
+  availableBodyBackend: 'A newer version of the connected Hades backend is ready to install.',
   availableBodyNoChangelog: 'A newer version is ready. Release notes aren’t available for this install type.'
 }
 
