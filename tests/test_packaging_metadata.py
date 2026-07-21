@@ -156,6 +156,14 @@ def test_bundled_plugin_manifests_ship_in_both_wheel_and_sdist():
     )
 
 
+def test_distribution_metadata_includes_plugin_skills():
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    package_data = data["tool"]["setuptools"]["package-data"]
+    assert "**/skills/*/SKILL.md" in package_data["plugins"]
+    manifest = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+    assert "recursive-include plugins SKILL.md" in manifest
+
+
 # Minimum non-vulnerable Starlette: CVE-2026-48710 ("BadHost") was fixed in
 # 1.0.1. Anything below that lets a malformed Host header desync
 # ``request.url.path`` from the dispatched ASGI path, bypassing path-based

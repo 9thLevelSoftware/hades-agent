@@ -58,14 +58,6 @@ def _scan_context_content(content: str, filename: str) -> str:
     BLOCKED at this layer because the file would otherwise enter the
     system prompt verbatim and the user has no chance to intervene.
     """
-    # Editors (Windows Notepad, PowerShell Out-File without -Encoding
-    # utf8NoBOM, some VS Code profiles) prefix a UTF-8 BOM as an encoding
-    # artifact, not a prompt injection. Strip a leading U+FEFF silently so a
-    # context file (SOUL.md, AGENTS.md, ...) is not blocked wholesale; BOMs
-    # elsewhere in the content remain subject to the threat scan below.
-    if content.startswith("\ufeff"):
-        content = content[1:]
-
     findings = _scan_for_threats(content, scope="context")
     if findings:
         logger.warning("Context file %s blocked: %s", filename, ", ".join(findings))
@@ -122,7 +114,6 @@ def _strip_yaml_frontmatter(content: str) -> str:
     strip it so only the human-readable markdown body is injected into the
     system prompt.
     """
-    content = content.lstrip("\ufeff")  # tolerate UTF-8 BOM (Windows editors)
     if content.startswith("---"):
         end = content.find("\n---", 3)
         if end != -1:
@@ -266,10 +257,6 @@ KANBAN_GUIDANCE = (
     "- **Deliverables.** Files a human wants go in "
     "`kanban_complete(artifacts=[<absolute paths>])` (top-level param; paths in "
     "`metadata` are NOT uploaded). Files must exist at completion.\n"
-    "- **Attachments.** Attach real downloadable artifacts instead of pasting "
-    "links in comments: `kanban_attach` (base64) or `kanban_attach_url` "
-    "(server-side public http(s) fetch); 25 MB cap, `kanban_attachments` "
-    "lists them. Workers may only attach to their own task.\n"
     "- **Created cards.** List ids in `kanban_complete(created_cards=[...])` "
     "ONLY when captured from a successful `kanban_create` return — never invent "
     "or paste ids; the kernel rejects the completion on any phantom id.\n"
@@ -2073,7 +2060,6 @@ def build_context_files_prompt(
     cwd: Optional[str] = None,
     skip_soul: bool = False,
     context_length: Optional[int] = None,
-    allow_install_tree_fallback: bool = False,
 ) -> str:
     """Discover and load context files for the system prompt.
 
@@ -2095,9 +2081,6 @@ def build_context_files_prompt(
     """
     if cwd is None:
         cwd = os.getcwd()
-        cwd_is_fallback = True
-    else:
-        cwd_is_fallback = False
 
     cwd_path = Path(cwd).resolve()
     sections = []

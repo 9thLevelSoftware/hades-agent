@@ -30,11 +30,8 @@ from rich.panel import Panel
 from hades_constants import display_hades_home, is_termux as _is_termux_environment
 from hades_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL,
-    discover_local_cdp_url,
-    find_free_debug_port,
     is_browser_debug_ready,
     launch_chrome_debug,
-    local_port_in_use,
     manual_chrome_debug_command,
 )
 
@@ -690,7 +687,7 @@ class CLICommandsMixin:
 
     def _handle_resume_command(self, cmd_original: str) -> None:
         """Handle /resume <session_id_or_title> — switch to a previous session mid-conversation."""
-        from cli import _cprint, _sync_process_session_id
+        from cli import _cprint, _retire_cli_agent, _sync_process_session_id
         parts = cmd_original.split(None, 1)
         target = parts[1].strip() if len(parts) > 1 else ""
 
@@ -771,15 +768,19 @@ class CLICommandsMixin:
             _cprint("  Already on that session.")
             return
 
-        old_session_id = self.session_id
+        old_agent = self.agent
+        old_messages = None
         # Flush un-persisted messages before ending the old session (#47202).
-        if self.agent:
+        if old_agent:
             try:
-                self.agent._flush_messages_to_session_db(
+                old_agent._flush_messages_to_session_db(
                     self.conversation_history
                 )
             except Exception:
                 pass
+            old_messages = getattr(old_agent, "_session_messages", None)
+            if not isinstance(old_messages, list):
+                old_messages = list(self.conversation_history)
         # End current session
         try:
             self._session_db.end_session(self.session_id, "resumed_other")
@@ -789,17 +790,15 @@ class CLICommandsMixin:
         # Switch to the target session
         self.session_id = target_id
         self._resumed = True
+        # ``None`` means classify from durable branch-boundary metadata. This
+        # lets a process-cold resume of an untouched branch stay fresh while a
+        # branch that already handled a child prompt replays its binding.
+        self._runtime_branch_pending_fresh = None
         self._pending_title = None
         _sync_process_session_id(target_id)
 
-        # Load conversation history (strip transcript-only metadata entries).
-        # repair_alternation: this /resume feeds LIVE REPLAY — ``restored``
-        # becomes ``self.conversation_history`` for subsequent turns. Heal a
-        # durable ``user;user`` violation once here instead of re-firing the
-        # pre-request repair on every request for the rest of the session.
-        restored = self._session_db.get_messages_as_conversation(
-            target_id, repair_alternation=True
-        )
+        # Load conversation history (strip transcript-only metadata entries)
+        restored = self._session_db.get_messages_as_conversation(target_id)
         restored = [m for m in (restored or []) if m.get("role") != "session_meta"]
         self.conversation_history = restored
 
@@ -809,36 +808,25 @@ class CLICommandsMixin:
         except Exception:
             pass
 
-        # Sync the agent if already initialised
-        if self.agent:
-            self.agent.session_id = target_id
-            self.agent.reset_session_state()
-            if hasattr(self.agent, "_last_flushed_db_idx"):
-                self.agent._last_flushed_db_idx = len(self.conversation_history)
-            if hasattr(self.agent, "_todo_store"):
-                try:
-                    from tools.todo_tool import TodoStore
-                    self.agent._todo_store = TodoStore()
-                except Exception:
-                    pass
-            if hasattr(self.agent, "_invalidate_system_prompt"):
-                self.agent._invalidate_system_prompt()
+        # Runtime binding and prompt cache are session-scoped. Restore the
+        # target's non-secret runtime identity, release the source provider
+        # client, and force a clean AIAgent construction on the next prompt.
+        self._restore_session_runtime(session_meta)
+        try:
+            import cli as _cli
 
-            # Notify memory providers that session_id rotated to a resumed
-            # session. reset=False — the provider's accumulated state is
-            # still valid; it just needs to target the new session_id for
-            # subsequent writes. See #6672.
-            try:
-                _mm = getattr(self.agent, "_memory_manager", None)
-                if _mm is not None:
-                    _mm.on_session_switch(
-                        target_id,
-                        parent_session_id=old_session_id or "",
-                        reset=False,
-                        reason="resume",
-                    )
-            except Exception:
-                pass
+            if _cli._active_agent_ref is old_agent:
+                _cli._active_agent_ref = None
+        except Exception:
+            pass
+        self.agent = None
+        self._active_agent_route_signature = None
+        if old_agent:
+            # Memory/context finalization can involve provider I/O. Retire it
+            # together with client/resource teardown so /resume returns
+            # immediately while preserving end-before-close ordering exactly
+            # once on the tracked worker.
+            _retire_cli_agent(old_agent, memory_messages=old_messages or [])
 
         title_part = f" \"{session_meta['title']}\"" if session_meta.get("title") else ""
         msg_count = len([m for m in self.conversation_history if m.get("role") == "user"])
@@ -892,7 +880,7 @@ class CLICommandsMixin:
         explore a different approach without losing the original session state.
         Inspired by Claude Code's /branch command.
         """
-        from cli import _cprint, _sync_process_session_id
+        from cli import _cprint, _retire_cli_agent, _sync_process_session_id
         if not self.conversation_history:
             _cprint("  No conversation to branch — send a message first.")
             return
@@ -924,27 +912,27 @@ class CLICommandsMixin:
 
         # Save the current session's state before branching
         parent_session_id = self.session_id
+        branch_point_message_count = len(self.conversation_history)
 
-        # Flush un-persisted messages before ending the old session (#47202).
-        if self.agent:
-            try:
-                self.agent._flush_messages_to_session_db(
-                    self.conversation_history
-                )
-            except Exception:
-                pass
-
-        # End the old session
-        try:
-            self._session_db.end_session(self.session_id, "branched")
-        except Exception:
-            pass
+        # Project the child's baseline without mutating the live parent. The
+        # actual runtime reset happens only after the complete child row,
+        # transcript, and title exist, keeping a failed branch transactional.
+        baseline = getattr(self, "_initial_runtime_baseline", None)
+        if isinstance(baseline, dict):
+            child_model = baseline.get("model", self.model)
+            child_reasoning = baseline.get(
+                "reasoning_config", self.reasoning_config
+            )
+        else:
+            child_model = self.model
+            child_reasoning = self.reasoning_config
 
         # Create the new session with parent link.
         # Persist a stable ``_branched_from`` marker in model_config so
         # list_sessions_rich() can keep the branch visible in /resume and
         # /sessions even after the parent is reopened and re-ended with a
         # different end_reason (e.g. tui_shutdown overwriting 'branched').
+        child_created = False
         try:
             self._session_db.create_session(
                 session_id=new_session_id,
@@ -952,18 +940,18 @@ class CLICommandsMixin:
                 model=self.model,
                 model_config={
                     "max_iterations": self.max_turns,
-                    "reasoning_config": self.reasoning_config,
+                    "reasoning_config": child_reasoning,
                     "_branched_from": parent_session_id,
+                    "_branch_point_message_count": branch_point_message_count,
                 },
                 parent_session_id=parent_session_id,
             )
-        except Exception as e:
-            _cprint(f"  Failed to create branch session: {e}")
-            return
+            child_created = True
 
-        # Copy conversation history to the new session
-        for msg in self.conversation_history:
-            try:
+            # A partial transcript is not a valid branch. Any copy/title
+            # failure deletes the provisional child and leaves the parent
+            # agent, runtime pin, and lifecycle untouched.
+            for msg in self.conversation_history:
                 self._session_db.append_message(
                     session_id=new_session_id,
                     role=msg.get("role", "user"),
@@ -973,54 +961,80 @@ class CLICommandsMixin:
                     tool_call_id=msg.get("tool_call_id"),
                     reasoning=msg.get("reasoning"),
                 )
-            except Exception:
-                pass  # Best-effort copy
-
-        # Set title on the branch
-        try:
             self._session_db.set_session_title(new_session_id, branch_title)
-        except Exception:
-            pass
+        except Exception as e:
+            if child_created:
+                try:
+                    self._session_db.delete_session(new_session_id)
+                except Exception:
+                    pass
+            _cprint(f"  Failed to create branch session: {e}")
+            return
+
+        # Only after the child is complete may the parent cross its boundary.
+        # Flush un-persisted messages before ending the old session (#47202).
+        if self.agent:
+            try:
+                self.agent._flush_messages_to_session_db(
+                    self.conversation_history
+                )
+            except Exception:
+                pass
+
+        try:
+            self._session_db.end_session(self.session_id, "branched")
+        except Exception as e:
+            try:
+                self._session_db.delete_session(new_session_id)
+            except Exception:
+                pass
+            _cprint(f"  Failed to create branch session: {e}")
+            return
+
+        # A branch is a new routing boundary. A parent-session /model pin is
+        # neither persisted nor offered as the child's fallback.
+        self._restore_invocation_runtime_baseline()
 
         # Switch to the new session
         self._transfer_session_yolo(self.session_id, new_session_id)
         self.session_id = new_session_id
         self.session_start = now
         self._pending_title = None
-        self._resumed = True  # Prevents auto-title generation
+        # Keep resume-style transcript semantics while making routing treat the
+        # first actual child prompt as a new independent decision boundary.
+        self._resumed = True
+        self._runtime_branch_pending_fresh = True
         _sync_process_session_id(new_session_id)
 
-        # Sync the agent
-        if self.agent:
-            self.agent.session_id = new_session_id
-            self.agent.session_start = now
-            self.agent.reset_session_state()
-            if hasattr(self.agent, "_last_flushed_db_idx"):
-                self.agent._last_flushed_db_idx = len(self.conversation_history)
-            if hasattr(self.agent, "_todo_store"):
-                try:
-                    from tools.todo_tool import TodoStore
-                    self.agent._todo_store = TodoStore()
-                except Exception:
-                    pass
-            if hasattr(self.agent, "_invalidate_system_prompt"):
-                self.agent._invalidate_system_prompt()
+        # Runtime bindings, provider clients, and prompt caches are scoped to
+        # the parent session. Retire that agent with its memory lineage switch,
+        # then construct the child lazily from its first semantic prompt so Auto
+        # routing can decide for the child itself.
+        old_agent = self.agent
+        try:
+            import cli as _cli
 
-            # Notify memory providers that session_id forked to a new branch.
+            if _cli._active_agent_ref is old_agent:
+                _cli._active_agent_ref = None
+        except Exception:
+            pass
+        self.agent = None
+        self._active_agent_route_signature = None
+        if old_agent:
             # reset=False — the branched session carries the transcript
-            # forward, so provider state tracks the lineage. parent_session_id
-            # links the branch back to the original. See #6672.
-            try:
-                _mm = getattr(self.agent, "_memory_manager", None)
-                if _mm is not None:
-                    _mm.on_session_switch(
-                        new_session_id,
-                        parent_session_id=parent_session_id or "",
-                        reset=False,
-                        reason="branch",
-                    )
-            except Exception:
-                pass
+            # forward, so provider state tracks the lineage. The switch runs at
+            # the head of tracked retirement after prior parent work drains:
+            # slow remote providers cannot block /branch, while shutdown still
+            # cannot overtake the switch.
+            _retire_cli_agent(
+                old_agent,
+                memory_session_switch={
+                    "new_session_id": new_session_id,
+                    "parent_session_id": parent_session_id or "",
+                    "reset": False,
+                    "reason": "branch",
+                },
+            )
 
         msg_count = len([m for m in self.conversation_history if m.get("role") == "user"])
         _cprint(
@@ -1689,16 +1703,76 @@ class CLICommandsMixin:
         task_num = self._background_task_counter
         task_id = f"bg_{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
-        # Make sure we have valid credentials
-        if not self._ensure_runtime_credentials():
-            _cprint("  (>_<) Cannot start background task: no valid credentials.")
-            return
+        from agent.runtime_routing import (
+            RuntimeRoutingDeferred,
+            constructor_runtime_spec,
+            runtime_resolver_requires_initial_task,
+        )
+
+        routing_enabled = runtime_resolver_requires_initial_task("fresh_session")
+        turn_route = self._resolve_turn_agent_config(prompt)
+        if routing_enabled:
+            try:
+                handoff = self._runtime_routing_handoff(
+                    initial_task=prompt,
+                    session_id=task_id,
+                    task_id=task_id,
+                    model_override=turn_route["model"],
+                    runtime_override=turn_route["runtime"],
+                    is_resume=False,
+                    # Invocation-level CLI overrides apply to every session made
+                    # by that invocation.  A /model switch in the foreground is a
+                    # pin for that foreground session only.
+                    manual_runtime_pin=bool(
+                        getattr(self, "_initial_runtime_manual_pin", False)
+                    ),
+                    manual_pin_source=(
+                        "cli_explicit_runtime"
+                        if getattr(self, "_initial_runtime_manual_pin", False)
+                        else None
+                    ),
+                    update_host_state=False,
+                )
+            except Exception as exc:
+                if isinstance(exc, RuntimeRoutingDeferred):
+                    _cprint("  (>_<) Background routing is busy; retry the command shortly.")
+                else:
+                    _cprint("  (>_<) Cannot route background task right now.")
+                return
+            if handoff is None:
+                _cprint("  (>_<) Cannot start background task: no valid credentials.")
+                return
+            routing_context, prepared_runtime, effective_runtime = handoff
+            effective_fallbacks = [
+                dict(item) for item in effective_runtime.fallback_model
+            ]
+        else:
+            # Preserve the historical background constructor when no routing
+            # resolver is installed.
+            if not self._ensure_runtime_credentials():
+                _cprint("  (>_<) Cannot start background task: no valid credentials.")
+                return
+            turn_route = self._resolve_turn_agent_config(prompt)
+            runtime = turn_route["runtime"]
+            effective_runtime = constructor_runtime_spec(
+                model=turn_route["model"],
+                provider=runtime.get("provider"),
+                base_url=runtime.get("base_url"),
+                api_key=runtime.get("api_key"),
+                api_mode=runtime.get("api_mode"),
+                acp_command=runtime.get("command"),
+                acp_args=runtime.get("args"),
+                credential_pool=runtime.get("credential_pool"),
+                reasoning_config=self.reasoning_config,
+                fallback_model=self._fallback_model,
+            )
+            routing_context = None
+            prepared_runtime = None
+            effective_fallbacks = self._fallback_model
 
         _cprint(f"  🔄 Background task #{task_num} started: \"{prompt[:60]}{'...' if len(prompt) > 60 else ''}\"")
         _cprint(f"  Task ID: {task_id}")
         _cprint("  You can continue chatting — results will appear when done.\n")
-
-        turn_route = self._resolve_turn_agent_config(prompt)
 
         def run_background():
             set_sudo_password_callback(self._sudo_password_callback)
@@ -1709,13 +1783,18 @@ class CLICommandsMixin:
                 pass
             try:
                 bg_agent = AIAgent(
-                    model=turn_route["model"],
-                    api_key=turn_route["runtime"].get("api_key"),
-                    base_url=turn_route["runtime"].get("base_url"),
-                    provider=turn_route["runtime"].get("provider"),
-                    api_mode=turn_route["runtime"].get("api_mode"),
-                    acp_command=turn_route["runtime"].get("command"),
-                    acp_args=turn_route["runtime"].get("args"),
+                    model=effective_runtime.model,
+                    api_key=effective_runtime.api_key,
+                    base_url=effective_runtime.base_url,
+                    provider=effective_runtime.provider,
+                    api_mode=effective_runtime.api_mode,
+                    acp_command=effective_runtime.acp_command,
+                    acp_args=list(effective_runtime.acp_args),
+                    credential_pool=(
+                        effective_runtime.credential_pool
+                        if routing_enabled
+                        else None
+                    ),
                     max_tokens=turn_route["runtime"].get("max_tokens"),
                     max_iterations=self.max_turns,
                     enabled_toolsets=self.enabled_toolsets,
@@ -1724,7 +1803,11 @@ class CLICommandsMixin:
                     session_id=task_id,
                     platform="cli",
                     session_db=self._session_db,
-                    reasoning_config=self.reasoning_config,
+                    reasoning_config=(
+                        dict(effective_runtime.reasoning_config)
+                        if effective_runtime.reasoning_config is not None
+                        else None
+                    ),
                     service_tier=self.service_tier,
                     request_overrides=turn_route.get("request_overrides"),
                     providers_allowed=self._providers_only,
@@ -1734,8 +1817,30 @@ class CLICommandsMixin:
                     provider_require_parameters=self._provider_require_params,
                     provider_data_collection=self._provider_data_collection,
                     openrouter_min_coding_score=self._openrouter_min_coding_score,
-                    fallback_model=self._fallback_model,
+                    fallback_model=effective_fallbacks,
+                    runtime_routing_context=routing_context,
+                    prepared_agent_runtime=prepared_runtime,
                 )
+                if (
+                    routing_context is not None
+                    and routing_context.manual_runtime_pin
+                ):
+                    try:
+                        from agent.runtime_routing import (
+                            apply_manual_runtime_transition,
+                        )
+
+                        apply_manual_runtime_transition(
+                            bg_agent,
+                            session_id=task_id,
+                            source=routing_context.manual_pin_source
+                            or "cli_explicit_runtime",
+                            runtime=effective_runtime,
+                            fallback_model=self._fallback_model,
+                        )
+                    except Exception:
+                        # The explicit runtime is already active locally.
+                        pass
                 # Silence raw spinner; route thinking through TUI widget when no foreground agent is active.
                 bg_agent._print_fn = lambda *_a, **_kw: None
 
@@ -1918,48 +2023,26 @@ class CLICommandsMixin:
 
             print()
 
-            # Check if a Chromium-family browser is already serving CDP on the debug port.
-            # For the default-local URL, probe both loopbacks (IPv4 + IPv6): a
-            # squatter on 127.0.0.1:<port> (e.g. an IDE's JS debugger) can push
-            # the debug browser to bind [::1] only.
-            _is_default = cdp_url == _DEFAULT_CDP
-            if _is_default:
-                _found = discover_local_cdp_url(_port, timeout=1.0)
-                _already_open = _found is not None
-                if _found:
-                    cdp_url = _found
-            else:
-                _already_open = is_browser_debug_ready(cdp_url, timeout=1.0)
+            # Check if a Chromium-family browser is already serving CDP on the debug port
+            _already_open = is_browser_debug_ready(cdp_url, timeout=1.0)
 
             if _already_open:
-                print(f"   ✓ Chromium-family browser is already listening at {cdp_url}")
-            elif _is_default:
-                _launch_port = _port
-                if local_port_in_use(_port):
-                    _launch_port = find_free_debug_port(_port)
-                    print(
-                        f"   ⚠ Port {_port} is occupied by another application that isn't a CDP browser"
-                    )
-                    print(
-                        f"     (an IDE debugger or dev server may be using it) — launching on port {_launch_port} instead..."
-                    )
-                else:
-                    # Try to auto-launch a Chromium-family browser with remote debugging
-                    print("   Chromium-family browser isn't running with remote debugging — attempting to launch...")
-                _launch = launch_chrome_debug(_launch_port, _plat.system())
+                print(f"   ✓ Chromium-family browser is already listening on port {_port}")
+            elif cdp_url == _DEFAULT_CDP:
+                # Try to auto-launch a Chromium-family browser with remote debugging
+                print("   Chromium-family browser isn't running with remote debugging — attempting to launch...")
+                _launch = launch_chrome_debug(_port, _plat.system())
                 if _launch.launched:
                     # Wait for the DevTools discovery endpoint to come up
                     for _wait in range(10):
-                        _found = discover_local_cdp_url(_launch_port, timeout=1.0)
-                        if _found:
-                            cdp_url = _found
+                        if is_browser_debug_ready(cdp_url, timeout=1.0):
                             _already_open = True
                             break
                         time.sleep(0.5)
                     if _already_open:
-                        print(f"   ✓ Chromium-family browser launched and listening on port {_launch_port}")
+                        print(f"   ✓ Chromium-family browser launched and listening on port {_port}")
                     else:
-                        print(f"   ⚠ Browser launched but port {_launch_port} isn't responding yet")
+                        print(f"   ⚠ Browser launched but port {_port} isn't responding yet")
                         print("     Try again in a few seconds — the debug instance may still be starting")
                 else:
                     print("   ⚠ Could not auto-launch a Chromium-family browser")
@@ -1967,7 +2050,7 @@ class CLICommandsMixin:
                     if _hint:
                         print(f"     {_hint}")
                     sys_name = _plat.system()
-                    chrome_cmd = manual_chrome_debug_command(_launch_port, sys_name)
+                    chrome_cmd = manual_chrome_debug_command(_port, sys_name)
                     if chrome_cmd:
                         print("     Launch a Chromium-family browser manually:")
                         print(f"     {chrome_cmd}")

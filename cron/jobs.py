@@ -10,8 +10,10 @@ import copy
 from contextvars import ContextVar
 from dataclasses import dataclass
 import hashlib
+import hmac
 import json
 import logging
+import secrets
 import shutil
 import tempfile
 import threading
@@ -35,9 +37,13 @@ except ImportError:  # pragma: no cover - non-Windows
 from datetime import datetime, timedelta
 from pathlib import Path
 from hades_constants import get_hades_home
-from typing import Optional, Dict, List, Any, Set, Tuple, Union
+from typing import Optional, Dict, List, Any, Mapping, Set, Tuple, Union
 
 logger = logging.getLogger(__name__)
+
+
+class CronStoreLockError(RuntimeError):
+    """The cross-process cron store lock could not be acquired safely."""
 
 from hades_time import now as _hermes_now
 from utils import atomic_replace
@@ -114,6 +120,7 @@ _cron_store_override: ContextVar[Optional[_CronStorePaths]] = ContextVar(
     "cron_store_override",
     default=None,
 )
+
 
 
 # Import-time snapshot of the compatibility constants, so deliberate
@@ -255,7 +262,7 @@ def _jobs_lock_file() -> Path:
 
 
 @contextlib.contextmanager
-def _jobs_lock():
+def _jobs_lock(*, require_cross_process: bool = False):
     """Serialize a load_jobs→modify→save_jobs critical section.
 
     Combines the in-process threading lock (cheap mutual exclusion between
@@ -276,6 +283,14 @@ def _jobs_lock():
     """
     depth = getattr(_jobs_lock_state, "depth", 0)
     if depth:
+        if require_cross_process and not getattr(
+            _jobs_lock_state,
+            "cross_process_held",
+            False,
+        ):
+            raise CronStoreLockError(
+                "cron cross-process lock is unavailable in the current lock scope"
+            )
         _jobs_lock_state.depth = depth + 1
         try:
             yield
@@ -285,6 +300,7 @@ def _jobs_lock():
 
     with _jobs_file_lock:
         _jobs_lock_state.depth = 1
+        _jobs_lock_state.cross_process_held = False
         lock_fd = None
         try:
             try:
@@ -313,6 +329,10 @@ def _jobs_lock():
                             break
                         except (OSError, IOError):
                             if time.monotonic() >= _deadline:
+                                message = (
+                                    "timed out waiting for the cron jobs "
+                                    "cross-process lock"
+                                )
                                 logger.error(
                                     "Timed out after %.0fs waiting for the cron "
                                     "jobs lock (%s) — another process is holding "
@@ -326,11 +346,45 @@ def _jobs_lock():
                                 except OSError:
                                     pass
                                 lock_fd = None
+                                if require_cross_process:
+                                    raise CronStoreLockError(message)
                                 break
                             time.sleep(0.1)
                 elif msvcrt is not None:
-                    getattr(msvcrt, "locking")(lock_fd.fileno(), getattr(msvcrt, "LK_LOCK"), 1)
+                    if require_cross_process:
+                        _deadline = time.monotonic() + _JOBS_LOCK_TIMEOUT_SECONDS
+                        while True:
+                            try:
+                                getattr(msvcrt, "locking")(
+                                    lock_fd.fileno(),
+                                    getattr(msvcrt, "LK_NBLCK"),
+                                    1,
+                                )
+                                break
+                            except (OSError, IOError):
+                                if time.monotonic() >= _deadline:
+                                    raise CronStoreLockError(
+                                        "timed out waiting for the cron jobs "
+                                        "cross-process lock"
+                                    )
+                                time.sleep(0.1)
+                    else:
+                        getattr(msvcrt, "locking")(
+                            lock_fd.fileno(),
+                            getattr(msvcrt, "LK_LOCK"),
+                            1,
+                        )
+                elif require_cross_process:
+                    raise CronStoreLockError(
+                        "cron cross-process locking is unavailable on this platform"
+                    )
+                if lock_fd is not None:
+                    _jobs_lock_state.cross_process_held = True
             except (OSError, IOError) as e:
+                if require_cross_process:
+                    raise CronStoreLockError(
+                        "cron cross-process lock acquisition failed"
+                    ) from e
                 # Never let a locking failure take down cron writes — fall back to
                 # in-process-only protection (still held via _jobs_file_lock).
                 logger.warning("jobs.json cross-process lock unavailable (%s); "
@@ -350,12 +404,205 @@ def _jobs_lock():
                         lock_fd.close()
         finally:
             _jobs_lock_state.depth = 0
+            _jobs_lock_state.cross_process_held = False
+
+
+@contextlib.contextmanager
+def locked_cron_store(home: Union[str, Path]):
+    """Route to one profile and hold its jobs.json mutation lock.
+
+    Callers that also need a profile-config lock must acquire that lock first.
+    Management control paths already use that ordering, so this scoped helper
+    cannot invert their config → cron dependency or deadlock with cron CRUD.
+    """
+    with use_cron_store(home):
+        with _jobs_lock():
+            yield
+
+
+@contextlib.contextmanager
+def locked_cron_store_strict(home: Union[str, Path]):
+    """Hold the profile cron lock or fail closed if it is not cross-process safe."""
+    with use_cron_store(home):
+        with _jobs_lock(require_cross_process=True):
+            yield
 
 # Fields on a cron job that must never change after creation. ``id`` is used
 # as a filesystem path component under ``OUTPUT_DIR``; allowing it to be
 # updated lets an unsafe value (``../escape``, absolute path, nested) leak
 # into output writes/deletes.
 _IMMUTABLE_JOB_FIELDS = frozenset({"id"})
+_LAUNCH_REVISION_KEY = "_launch_revision"
+_SCRIPT_LAUNCH_CAPABILITIES_KEY = "_script_launch_capabilities"
+_SCRIPT_LAUNCH_REVISION_EXCLUDED_FIELDS = frozenset({
+    "_script_launch_capability",
+    _SCRIPT_LAUNCH_CAPABILITIES_KEY,
+    # The one-shot owner heartbeat changes while the child is running.  It is
+    # already bound separately by claim_dispatch/heartbeat_run_claim and is
+    # not part of the script configuration being authorized here.
+    "run_claim",
+    "fire_claim",
+    # The ticker advances recurring work before handing the immutable due-job
+    # snapshot to run_one_job(). This is execution bookkeeping, not authority.
+    "next_run_at",
+    # Prior executions update these fields after the launch authority has
+    # already been consumed. They describe outcomes, not what may execute.
+    "last_run_at",
+    "last_status",
+    "last_error",
+    "last_delivery_error",
+})
+
+
+def _script_launch_home_fingerprint() -> str:
+    """Bind an ephemeral launch capability to this exact cron profile."""
+    profile_home = _current_cron_store().cron_dir.parent.resolve()
+    return hashlib.sha256(str(profile_home).encode("utf-8")).hexdigest()
+
+
+def _script_launch_job_revision(job: Mapping[str, Any]) -> str:
+    """Fingerprint one exact launchable job configuration.
+
+    Scheduler-owned claims, timing, counters, and prior outcome fields are
+    excluded; user-controlled launch authority remains bound. Consequently a
+    same-ID replacement cannot authorize a different launch configuration.
+    """
+    # Scheduler snapshots are read-normalized while the store mutation paths
+    # inspect raw persisted records. Canonicalize both sides to the same
+    # compatibility shape before hashing so legacy nullable/missing display
+    # fields do not create a false replacement mismatch.
+    normalized = _normalize_job_record(dict(job))
+    document = {}
+    for key, value in normalized.items():
+        if key in _SCRIPT_LAUNCH_REVISION_EXCLUDED_FIELDS:
+            continue
+        if key == "repeat" and isinstance(value, Mapping):
+            # claim_dispatch increments this before run_job receives the
+            # dispatched snapshot. The user-owned finite limit remains bound.
+            value = {
+                repeat_key: repeat_value
+                for repeat_key, repeat_value in value.items()
+                if repeat_key != "completed"
+            }
+        document[key] = value
+    payload = json.dumps(
+        document,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def issue_script_launch_capability(
+    job_id: str,
+    *,
+    expected_job_revision_sha256: str,
+) -> str:
+    """Persist one opaque capability for one enabled no-agent script launch.
+
+    The raw capability exists only in the scheduler process and its immediate
+    child environment.  The cron store records a digest and exact binding so a
+    manually supplied environment value cannot authorize a scheduled command.
+    """
+    capability = secrets.token_urlsafe(32)
+    capability_sha256 = hashlib.sha256(capability.encode("utf-8")).hexdigest()
+    state = {
+        "job_id": str(job_id),
+        "profile_home_sha256": _script_launch_home_fingerprint(),
+    }
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if str(job.get("id")) != str(job_id):
+                continue
+            if not (
+                bool(job.get("no_agent"))
+                and bool(job.get("script_launch_claim"))
+            ):
+                raise ValueError("cron job is not eligible for a launch capability")
+            current_revision = _script_launch_job_revision(job)
+            if not hmac.compare_digest(
+                current_revision,
+                str(expected_job_revision_sha256),
+            ):
+                raise ValueError(
+                    "cron job changed before launch capability issuance"
+                )
+            state["job_revision_sha256"] = current_revision
+            claims = job.get(_SCRIPT_LAUNCH_CAPABILITIES_KEY)
+            if not isinstance(claims, dict):
+                claims = {}
+            claims[capability_sha256] = state
+            job[_SCRIPT_LAUNCH_CAPABILITIES_KEY] = claims
+            job.pop("_script_launch_capability", None)
+            save_jobs(jobs)
+            return capability
+    raise ValueError("cron job disappeared before launch capability issuance")
+
+
+def consume_script_launch_capability(job_id: str, capability: str) -> bool:
+    """Atomically verify and consume one scheduler-issued capability."""
+    if not isinstance(capability, str) or not capability:
+        return False
+    capability_sha256 = hashlib.sha256(capability.encode("utf-8")).hexdigest()
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if str(job.get("id")) != str(job_id):
+                continue
+            claims = job.get(_SCRIPT_LAUNCH_CAPABILITIES_KEY)
+            state = (
+                claims.get(capability_sha256)
+                if isinstance(claims, dict)
+                else None
+            )
+            if not isinstance(state, dict):
+                return False
+            valid = (
+                state.get("job_id") == str(job_id)
+                and hmac.compare_digest(
+                    str(state.get("profile_home_sha256", "")),
+                    _script_launch_home_fingerprint(),
+                )
+                and hmac.compare_digest(
+                    str(state.get("job_revision_sha256", "")),
+                    _script_launch_job_revision(job),
+                )
+            )
+            # Presentation is single-use even when the bound job was replaced.
+            # Otherwise reverting the record could resurrect a stale launch.
+            claims.pop(capability_sha256, None)
+            if claims:
+                job[_SCRIPT_LAUNCH_CAPABILITIES_KEY] = claims
+            else:
+                job.pop(_SCRIPT_LAUNCH_CAPABILITIES_KEY, None)
+            save_jobs(jobs)
+            return valid
+    return False
+
+
+def revoke_script_launch_capability(job_id: str, capability: str) -> bool:
+    """Remove this exact unconsumed launch capability after script exit."""
+    if not isinstance(capability, str) or not capability:
+        return False
+    capability_sha256 = hashlib.sha256(capability.encode("utf-8")).hexdigest()
+    with _jobs_lock():
+        jobs = load_jobs()
+        for job in jobs:
+            if str(job.get("id")) != str(job_id):
+                continue
+            claims = job.get(_SCRIPT_LAUNCH_CAPABILITIES_KEY)
+            if not isinstance(claims, dict) or capability_sha256 not in claims:
+                return False
+            claims.pop(capability_sha256, None)
+            if claims:
+                job[_SCRIPT_LAUNCH_CAPABILITIES_KEY] = claims
+            else:
+                job.pop(_SCRIPT_LAUNCH_CAPABILITIES_KEY, None)
+            save_jobs(jobs)
+            return True
+    return False
 
 
 def _job_output_dir(job_id: str) -> Path:
@@ -432,6 +679,8 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
     ensure consumers never crash while formatting or running those records.
     """
     normalized = _apply_skill_fields(job)
+    normalized.pop("_script_launch_capability", None)
+    normalized.pop("_script_launch_capabilities", None)
     job_id = _coerce_job_text(normalized.get("id"), "unknown")
     prompt = _coerce_job_text(normalized.get("prompt"))
     normalized["id"] = job_id
@@ -866,16 +1115,13 @@ def load_jobs() -> List[Dict[str, Any]]:
     _strict_retry = False  # track whether we used the strict=False fallback
 
     try:
-        # utf-8-sig: Windows Notepad / PowerShell 5.1 Set-Content -Encoding UTF8
-        # write a leading BOM; json.load under plain utf-8 raises
-        # JSONDecodeError("Unexpected UTF-8 BOM") and takes down cron.
-        with open(jobs_file, 'r', encoding='utf-8-sig') as f:
+        with open(jobs_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except json.JSONDecodeError:
         # Retry with strict=False to handle bare control chars in string values
         _strict_retry = True
         try:
-            with open(jobs_file, 'r', encoding='utf-8-sig') as f:
+            with open(jobs_file, 'r', encoding='utf-8') as f:
                 data = json.loads(f.read(), strict=False)
         except Exception as e:
             logger.error("Failed to auto-repair jobs.json: %s", e)
@@ -1088,6 +1334,7 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    script_launch_claim: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1132,6 +1379,9 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        script_launch_claim: When True on a no-agent script, the scheduler
+                supplies one ephemeral scheduler-owned launch claim for the
+                script's child process to consume exactly once.
 
     Returns:
         The created job dict
@@ -1231,6 +1481,7 @@ def create_job(
         "base_url": normalized_base_url,
         "script": normalized_script,
         "no_agent": normalized_no_agent,
+        "script_launch_claim": bool(script_launch_claim) and normalized_no_agent,
         "context_from": context_from,
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),
@@ -1248,6 +1499,12 @@ def create_job(
         "last_status": None,
         "last_error": None,
         "last_delivery_error": None,
+        # Rotated by every user-facing update.  Schedule bookkeeping fields
+        # such as next_run_at must be excluded from the stable launch
+        # projection, so this nonce supplies the CAS incarnation that lets a
+        # dispatched worker distinguish an edit/reschedule (including an ABA
+        # edit/revert) from scheduler-owned bookkeeping.
+        _LAUNCH_REVISION_KEY: secrets.token_hex(16),
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
@@ -1320,14 +1577,6 @@ def list_jobs(include_disabled: bool = False) -> List[Dict[str, Any]]:
     jobs = [_normalize_job_record(j) for j in load_jobs()]
     if not include_disabled:
         jobs = [j for j in jobs if j.get("enabled", True)]
-    try:
-        from cron.executions import latest_executions
-
-        latest = latest_executions([job.get("id", "") for job in jobs])
-    except Exception:
-        latest = {}
-    for job in jobs:
-        job["latest_execution"] = latest.get(job.get("id", ""))
     return jobs
 
 
@@ -1359,6 +1608,11 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
             previous_inference_axes = _normalized_inference_axes(job)
             updated = _apply_skill_fields({**job, **updates})
+            updated[_LAUNCH_REVISION_KEY] = secrets.token_hex(16)
+            # A user-facing edit revokes every not-yet-consumed launch. This
+            # prevents edit/revert ABA from resurrecting an older capability.
+            updated.pop(_SCRIPT_LAUNCH_CAPABILITIES_KEY, None)
+            updated.pop("_script_launch_capability", None)
             schedule_changed = "schedule" in updates
             inference_fields_changed = bool(
                 {"provider", "model", "base_url", "no_agent"}.intersection(updates)
@@ -1429,6 +1683,27 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
             jobs[i] = updated
             save_jobs(jobs)
             return _normalize_job_record(jobs[i])
+    return None
+
+
+def restore_job_snapshot(job_id: str, snapshot: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Restore an exact persisted job snapshot for transactional compensation."""
+    if str(snapshot.get("id")) != str(job_id):
+        raise ValueError("job snapshot identity does not match restore id")
+    restored = dict(snapshot)
+    # Restoring launch configuration must not resurrect capabilities issued
+    # before the failed mutation, nor reopen an edit/revert ABA window.
+    restored[_LAUNCH_REVISION_KEY] = secrets.token_hex(16)
+    restored.pop(_SCRIPT_LAUNCH_CAPABILITIES_KEY, None)
+    restored.pop("_script_launch_capability", None)
+    with _jobs_lock():
+        jobs = load_jobs()
+        for index, current in enumerate(jobs):
+            if str(current.get("id")) != str(job_id):
+                continue
+            jobs[index] = restored
+            save_jobs(jobs)
+            return _normalize_job_record(restored)
     return None
 
 
@@ -1514,7 +1789,8 @@ def remove_job(job_id: str) -> bool:
 
 
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
-                 delivery_error: Optional[str] = None):
+                 delivery_error: Optional[str] = None, *,
+                 expected_job_revision_sha256: Optional[str] = None) -> bool:
     """
     Mark a job as having been run.
     
@@ -1528,6 +1804,16 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         jobs = load_jobs()
         for i, job in enumerate(jobs):
             if job["id"] == job_id:
+                if expected_job_revision_sha256 is not None and not hmac.compare_digest(
+                    _script_launch_job_revision(job),
+                    str(expected_job_revision_sha256),
+                ):
+                    logger.info(
+                        "mark_job_run: job_id %s was replaced after dispatch; "
+                        "leaving the replacement untouched",
+                        job_id,
+                    )
+                    return False
                 now = _hermes_now().isoformat()
                 job["last_run_at"] = now
                 job["last_status"] = "ok" if success else "error"
@@ -1568,7 +1854,7 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                         # Remove the job (limit reached)
                         jobs.pop(i)
                         save_jobs(jobs)
-                        return
+                        return True
                 
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
@@ -1603,12 +1889,17 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                     job["state"] = "scheduled"
 
                 save_jobs(jobs)
-                return
+                return True
 
         logger.warning("mark_job_run: job_id %s not found, skipping save", job_id)
+        return False
 
 
-def claim_dispatch(job_id: str) -> bool:
+def claim_dispatch(
+    job_id: str,
+    *,
+    expected_job_revision_sha256: Optional[str] = None,
+) -> bool:
     """Atomically claim a finite one-shot job dispatch BEFORE execution.
 
     Increments ``repeat.completed`` under the cross-process jobs lock and
@@ -1630,6 +1921,16 @@ def claim_dispatch(job_id: str) -> bool:
         for i, job in enumerate(jobs):
             if job["id"] != job_id:
                 continue
+            if expected_job_revision_sha256 is not None and not hmac.compare_digest(
+                _script_launch_job_revision(job),
+                str(expected_job_revision_sha256),
+            ):
+                logger.info(
+                    "claim_dispatch: job_id %s was replaced after dispatch; "
+                    "rejecting the stale launch",
+                    job_id,
+                )
+                return False
             if job.get("schedule", {}).get("kind") != "once":
                 return True  # recurring jobs use advance_next_run(), not dispatch claims
             repeat = job.get("repeat")
@@ -1663,6 +1964,13 @@ def claim_dispatch(job_id: str) -> bool:
             )
             return True
 
+        if expected_job_revision_sha256 is not None:
+            logger.info(
+                "claim_dispatch: job_id %s was removed after dispatch; "
+                "rejecting the stale launch",
+                job_id,
+            )
+            return False
         logger.debug(
             "claim_dispatch: job_id %s not in store — proceeding without claim "
             "(handed-in job dict; nothing to persist a claim against)",
@@ -1671,7 +1979,12 @@ def claim_dispatch(job_id: str) -> bool:
         return True
 
 
-def heartbeat_run_claim(job_id: str, *, expected_owner: str) -> bool:
+def heartbeat_run_claim(
+    job_id: str,
+    *,
+    expected_owner: str,
+    expected_job_revision_sha256: Optional[str] = None,
+) -> bool:
     """Refresh a one-shot's ``run_claim`` timestamp while its run is alive.
 
     Called periodically from the scheduler's run monitor (#62002) so a
@@ -1692,6 +2005,11 @@ def heartbeat_run_claim(job_id: str, *, expected_owner: str) -> bool:
         for job in jobs:
             if job.get("id") != job_id:
                 continue
+            if expected_job_revision_sha256 is not None and not hmac.compare_digest(
+                _script_launch_job_revision(job),
+                str(expected_job_revision_sha256),
+            ):
+                return False
             if job.get("schedule", {}).get("kind") != "once":
                 return False
             claim = job.get("run_claim")
@@ -1703,7 +2021,11 @@ def heartbeat_run_claim(job_id: str, *, expected_owner: str) -> bool:
     return False
 
 
-def advance_next_run(job_id: str) -> bool:
+def advance_next_run(
+    job_id: str,
+    *,
+    expected_job_revision_sha256: Optional[str] = None,
+) -> bool:
     """Preemptively advance next_run_at for a recurring job before execution.
 
     Call this BEFORE run_job() so that if the process crashes mid-execution,
@@ -1719,6 +2041,16 @@ def advance_next_run(job_id: str) -> bool:
         jobs = load_jobs()
         for job in jobs:
             if job["id"] == job_id:
+                if expected_job_revision_sha256 is not None and not hmac.compare_digest(
+                    _script_launch_job_revision(job),
+                    str(expected_job_revision_sha256),
+                ):
+                    logger.info(
+                        "advance_next_run: job_id %s was replaced after dispatch; "
+                        "leaving the replacement untouched",
+                        job_id,
+                    )
+                    return False
                 kind = job.get("schedule", {}).get("kind")
                 if kind not in {"cron", "interval"}:
                     return False

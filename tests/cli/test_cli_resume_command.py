@@ -1,3 +1,5 @@
+import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -136,6 +138,157 @@ class TestCliResumeCommand:
         assert cli_obj.session_id == "sess_001"
         assert "Resumed session sess_001" in printed
         assert "Research" in printed
+
+    def test_resume_rebuilds_agent_from_target_session_runtime(self):
+        cli_obj = _make_cli()
+        old_agent = MagicMock()
+        cli_obj.agent = old_agent
+        cli_obj._active_agent_route_signature = ("old", "provider")
+        cli_obj.model = "old-model"
+        cli_obj.provider = "old-provider"
+        cli_obj.requested_provider = "old-provider"
+        cli_obj.api_key = "old-secret"
+        cli_obj._explicit_api_key = "old-explicit-secret"
+        cli_obj.base_url = "https://old.invalid/v1"
+        cli_obj._explicit_base_url = "https://old.invalid/v1"
+        cli_obj.api_mode = "chat_completions"
+        cli_obj.reasoning_config = {"effort": "low"}
+        cli_obj._credential_pool = object()
+        cli_obj._runtime_manual_pin = False
+        cli_obj._runtime_manual_pin_source = None
+        target = {
+            "id": "target-session",
+            "title": "Target",
+            "model": "target-model",
+            "model_config": json.dumps(
+                {
+                    "provider": "custom:target",
+                    "base_url": "https://target.invalid/v1",
+                    "api_mode": "anthropic_messages",
+                    "reasoning_config": {"effort": "high"},
+                    "runtime_manual_pin_source": "cli_model_command",
+                }
+            ),
+        }
+        cli_obj._session_db.get_session.return_value = target
+        cli_obj._session_db.get_messages_as_conversation.return_value = []
+        cli_obj._session_db.resolve_resume_session_id.return_value = "target-session"
+
+        with (
+            patch(
+                "hermes_cli.main._resolve_session_by_name_or_id",
+                return_value="target-session",
+            ),
+            patch("cli._cprint"),
+        ):
+            cli_obj._handle_resume_command("/resume target-session")
+
+        old_agent._flush_messages_to_session_db.assert_called_once_with([])
+        import cli as cli_mod
+
+        assert cli_mod._drain_retired_cli_agents(timeout=1) is True
+        old_agent.shutdown_memory_provider.assert_called_once_with([])
+        old_agent.release_clients.assert_not_called()
+        assert cli_obj.agent is None
+        assert cli_obj._active_agent_route_signature is None
+        assert cli_obj.model == "target-model"
+        assert cli_obj.provider == "custom:target"
+        assert cli_obj.requested_provider == "custom:target"
+        assert cli_obj.base_url == "https://target.invalid/v1"
+        assert cli_obj._explicit_base_url == "https://target.invalid/v1"
+        assert cli_obj.api_mode == "anthropic_messages"
+        assert cli_obj.reasoning_config == {"effort": "high"}
+        assert cli_obj.api_key is None
+        assert cli_obj._explicit_api_key is None
+        assert cli_obj._credential_pool is None
+        assert cli_obj._runtime_manual_pin is True
+        assert cli_obj._runtime_manual_pin_source == "cli_model_command"
+
+    def test_resume_finalizes_memory_then_closes_agent_on_retirement_worker(
+        self, monkeypatch
+    ):
+        """Resume returns before memory teardown, then drains end-before-close once."""
+        import cli as cli_mod
+
+        cli_obj = _make_cli()
+        old_agent = MagicMock()
+        cli_obj.agent = old_agent
+        target = {"id": "target-session", "title": "Target", "model": "target-model"}
+        cli_obj._session_db.get_session.return_value = target
+        cli_obj._session_db.get_messages_as_conversation.return_value = []
+        cli_obj._session_db.resolve_resume_session_id.return_value = "target-session"
+        shutdown_started = threading.Event()
+        allow_shutdown = threading.Event()
+        command_done = threading.Event()
+        ordering = []
+
+        def _blocking_memory_shutdown(messages):
+            ordering.append(("memory", list(messages)))
+            shutdown_started.set()
+            allow_shutdown.wait(2)
+
+        def _close():
+            ordering.append(("close", None))
+
+        old_agent.shutdown_memory_provider.side_effect = _blocking_memory_shutdown
+        old_agent.close.side_effect = _close
+        retirement_state = []
+        detach_order = []
+        real_retire = cli_mod._retire_cli_agent
+        real_setattr = type(cli_obj).__setattr__
+
+        def _observe_setattr(instance, name, value):
+            if (
+                instance is cli_obj
+                and name == "agent"
+                and value is None
+                and getattr(instance, "agent", None) is old_agent
+            ):
+                detach_order.append(cli_mod._active_agent_ref is None)
+            return real_setattr(instance, name, value)
+
+        def _observe_retirement(agent_arg, **kwargs):
+            retirement_state.append(
+                (
+                    cli_obj.agent is None,
+                    cli_mod._active_agent_ref is None,
+                )
+            )
+            return real_retire(agent_arg, **kwargs)
+
+        monkeypatch.setattr(cli_mod, "_active_agent_ref", old_agent)
+        monkeypatch.setattr(cli_mod, "_retire_cli_agent", _observe_retirement)
+        monkeypatch.setattr(type(cli_obj), "__setattr__", _observe_setattr)
+
+        with (
+            patch(
+                "hermes_cli.main._resolve_session_by_name_or_id",
+                return_value="target-session",
+            ),
+            patch("cli._cprint"),
+        ):
+            command_thread = threading.Thread(
+                target=lambda: (
+                    cli_obj._handle_resume_command("/resume target-session"),
+                    command_done.set(),
+                ),
+                daemon=True,
+            )
+            command_thread.start()
+            try:
+                assert shutdown_started.wait(1)
+                assert command_done.wait(0.5), "/resume waited for memory shutdown"
+            finally:
+                allow_shutdown.set()
+                command_thread.join(timeout=1)
+
+        assert cli_mod._drain_retired_cli_agents(timeout=1) is True
+        assert detach_order == [True]
+        assert retirement_state == [(True, True)]
+        old_agent.shutdown_memory_provider.assert_called_once_with([])
+        old_agent.release_clients.assert_not_called()
+        old_agent.close.assert_called_once_with()
+        assert ordering == [("memory", []), ("close", None)]
 
     def test_handle_resume_by_index_out_of_range(self):
         cli_obj = _make_cli()

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Optional
+from urllib.parse import urlparse
 
 
 # ─── Public types ───────────────────────────────────────────────────────
@@ -122,6 +123,7 @@ def build_models_payload(
     probe_custom_providers: bool = True,
     probe_current_custom_provider: bool = False,
     max_models: int | None = None,
+    discovery_provenance: bool = False,
 ) -> dict:
     """Build the ``{providers, model, provider}`` shape every consumer
     needs from a single substrate call.
@@ -165,10 +167,12 @@ def build_models_payload(
       false, still live-probe the current custom endpoint. This keeps normal
       GUI/TUI picker opens fast while making the active custom provider's model
       list match the classic CLI picker.
+    - ``discovery_provenance``: opt in to one immutable non-secret discovery
+      record per provider/access row. The default byte shape is unchanged.
     """
     from hades_cli.model_switch import list_authenticated_providers
 
-    rows = list_authenticated_providers(
+    provider_kwargs = dict(
         current_provider=ctx.current_provider,
         current_base_url=ctx.current_base_url,
         current_model=ctx.current_model,
@@ -180,6 +184,9 @@ def build_models_payload(
         probe_custom_providers=probe_custom_providers,
         probe_current_custom_provider=probe_current_custom_provider,
     )
+    if discovery_provenance:
+        provider_kwargs["discovery_provenance"] = True
+    rows = list_authenticated_providers(**provider_kwargs)
 
     moa_row = _moa_provider_row(ctx.current_provider)
     if moa_row is not None:
@@ -251,6 +258,8 @@ def build_models_payload(
         _apply_pricing(rows, force_fresh_nous_tier=force_fresh_nous_tier)
     if capabilities:
         _apply_capabilities(rows)
+    if discovery_provenance:
+        _apply_local_runtime_evidence(rows)
 
     return {
         "providers": rows,
@@ -277,7 +286,16 @@ def _apply_capabilities(rows: list[dict]) -> None:
 
     for row in rows:
         slug = row.get("slug") or ""
-        caps: dict[str, dict[str, bool]] = {}
+        caps: dict[str, dict] = {}
+        discovery = row.get("discovery")
+        if not isinstance(discovery, dict):
+            discovery = {}
+        provenance = discovery.get("model_provenance")
+        if not isinstance(provenance, dict):
+            provenance = {}
+        provenance_details = discovery.get("provenance_details")
+        if not isinstance(provenance_details, dict):
+            provenance_details = {}
 
         for model in row.get("models") or []:
             reasoning = True
@@ -289,12 +307,119 @@ def _apply_capabilities(rows: list[dict]) -> None:
                 except Exception:
                     reasoning = True
 
-            caps[model] = {
+            model_capabilities: dict = {
                 "fast": bool(model_supports_fast_mode(model)),
                 "reasoning": reasoning,
             }
+            details = provenance_details.get(model)
+            if not isinstance(details, dict):
+                details = {}
+            authenticated_options = details.get("reasoning_options")
+            if (
+                provenance.get(model) == "authenticated_live"
+                and details.get("reasoning_options_authenticated") is True
+                and isinstance(authenticated_options, list)
+            ):
+                model_capabilities["reasoning_options"] = list(
+                    dict.fromkeys(
+                        str(option).strip().lower()
+                        for option in authenticated_options
+                        if str(option).strip()
+                    )
+                )
+                model_capabilities["reasoning_options_authenticated"] = True
+            caps[model] = model_capabilities
 
         row["capabilities"] = caps
+
+
+_LOCAL_PROVIDER_SLUGS = frozenset(
+    {"llama.cpp", "llamacpp", "lmstudio", "ollama", "vllm"}
+)
+
+
+def _is_loopback_endpoint(value: object) -> bool:
+    try:
+        hostname = (urlparse(str(value or "")).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return hostname in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _optional_non_negative_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _loopback_available_ram_bytes(api_url: object) -> int | None:
+    if not _is_loopback_endpoint(api_url):
+        return None
+    try:
+        import psutil
+
+        return _optional_non_negative_int(psutil.virtual_memory().available)
+    except Exception:
+        return None
+
+
+def _apply_local_runtime_evidence(rows: list[dict]) -> None:
+    """Project only explicit per-model local facts into the opt-in payload."""
+    for row in rows:
+        slug = str(row.get("slug") or "").strip().lower()
+        if slug not in _LOCAL_PROVIDER_SLUGS and not _is_loopback_endpoint(
+            row.get("api_url")
+        ):
+            continue
+        discovery = row.get("discovery")
+        if not isinstance(discovery, dict):
+            continue
+        details_by_model = discovery.get("provenance_details")
+        if not isinstance(details_by_model, dict):
+            details_by_model = {}
+        endpoint_identity = str(discovery.get("endpoint_identity") or "unknown")
+        loopback_ram = _loopback_available_ram_bytes(row.get("api_url"))
+        local_runtime: dict[str, dict] = {}
+        for model in row.get("models") or []:
+            details = details_by_model.get(model)
+            if not isinstance(details, dict):
+                details = {}
+            raw = details.get("local_runtime")
+            if not isinstance(raw, dict):
+                raw = {}
+            backend_identity = str(
+                raw.get("backend_identity")
+                or f"{slug}:{endpoint_identity}"
+            )
+            license_id = raw.get("license_id")
+            available_ram = _optional_non_negative_int(
+                raw.get("available_ram_bytes")
+            )
+            local_runtime[str(model)] = {
+                "backend_identity": backend_identity,
+                "open_weights": raw.get("open_weights") is True,
+                "license_id": (
+                    str(license_id).strip()
+                    if str(license_id or "").strip()
+                    else None
+                ),
+                "model_size_bytes": _optional_non_negative_int(
+                    raw.get("model_size_bytes")
+                ),
+                "available_ram_bytes": (
+                    available_ram if available_ram is not None else loopback_ram
+                ),
+                "available_vram_bytes": _optional_non_negative_int(
+                    raw.get("available_vram_bytes")
+                ),
+                "loaded_healthy": raw.get("loaded_healthy") is True,
+                "hardware_compatible": (
+                    raw.get("hardware_compatible")
+                    if isinstance(raw.get("hardware_compatible"), bool)
+                    else None
+                ),
+            }
+        row["local_runtime"] = local_runtime
 
 
 # ─── Internal: row post-processing ──────────────────────────────────────
@@ -534,6 +659,7 @@ def _apply_pricing(
         _format_price_per_mtok,
         check_nous_free_tier,
         get_pricing_for_provider,
+        get_pricing_snapshot_for_provider,
         partition_nous_models_by_tier,
     )
 
@@ -545,8 +671,19 @@ def _apply_pricing(
         models = row.get("models") or []
         if not models:
             continue
+        discovery = row.get("discovery")
+        has_discovery = isinstance(discovery, dict)
+        pricing_snapshot = None
         try:
-            raw_pricing = get_pricing_for_provider(slug) or {}
+            if has_discovery:
+                pricing_snapshot = get_pricing_snapshot_for_provider(slug)
+                raw_pricing = (
+                    pricing_snapshot.price_dict()
+                    if pricing_snapshot is not None
+                    else {}
+                )
+            else:
+                raw_pricing = get_pricing_for_provider(slug) or {}
         except Exception:
             raw_pricing = {}
         if not raw_pricing:
@@ -574,6 +711,30 @@ def _apply_pricing(
 
         if formatted:
             row["pricing"] = formatted
+
+        if has_discovery and pricing_snapshot is not None:
+            raw_evidence: dict[str, dict] = {}
+            for mid in models:
+                raw = raw_pricing.get(mid)
+                if not isinstance(raw, dict):
+                    continue
+                raw_evidence[mid] = {
+                    "input_usd_per_token": str(raw.get("prompt", "")),
+                    "output_usd_per_token": str(raw.get("completion", "")),
+                    "cache_read_usd_per_token": str(
+                        raw.get("input_cache_read", "")
+                    ),
+                    "cache_write_usd_per_token": str(
+                        raw.get("input_cache_write", "")
+                    ),
+                    "observed_at": pricing_snapshot.observed_at,
+                    "source_id": pricing_snapshot.source_id,
+                    "cache_key": pricing_snapshot.cache_key,
+                    "ttl_seconds": pricing_snapshot.ttl_seconds,
+                    "fresh": pricing_snapshot.fresh,
+                }
+            if raw_evidence:
+                discovery["pricing"] = raw_evidence
 
         if slug == "nous":
             try:

@@ -133,6 +133,28 @@ class TestPlatformForwardedAtBoundary:
         assert kwargs.get("boundary_reason") == "compression"
 
 
+def test_rotation_records_runtime_continuation_after_child_is_durable(
+    tmp_path: Path,
+):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    parent = "PARENT_RUNTIME_ROUTE"
+    db.create_session(parent, source="cli")
+    agent = _build_agent_with_db(db, parent, platform="cli")
+    recorded = []
+
+    with patch(
+        "agent.runtime_routing.record_runtime_session_continuation",
+        side_effect=lambda _agent, **kwargs: recorded.append(
+            (kwargs["parent_session_id"], kwargs["child_session_id"])
+        ),
+    ):
+        agent._compress_context(_msgs(), "sys", approx_tokens=120_000)
+
+    assert agent.session_id != parent
+    assert db.get_session(agent.session_id)["parent_session_id"] == parent
+    assert recorded == [(parent, agent.session_id)]
+
+
 class TestFallbackStreakFollowsRotation:
     def test_fallback_boundary_persists_on_child_session(self, tmp_path: Path):
         db = SessionDB(db_path=tmp_path / "state.db")

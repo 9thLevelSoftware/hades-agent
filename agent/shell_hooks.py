@@ -13,9 +13,10 @@ Design notes
   :func:`hades_cli.plugins.invoke_hook` and its aggregators.  Python
   plugins are registered first (via ``discover_and_load()``) so their
   block decisions win ties over shell-hook blocks.
-* Subprocess execution uses ``shlex.split(os.path.expanduser(command))``
-  with ``shell=False`` — no shell injection footguns.  Users that need
-  pipes/redirection wrap their logic in a script.
+* Subprocess execution tokenizes commands with platform-appropriate
+  ``shlex`` rules and uses ``shell=False`` — no shell injection footguns.
+  On Windows, bare ``.sh`` / ``.bash`` hooks run through Git Bash.  Users
+  that need pipes/redirection wrap their logic in a script.
 * First-use consent is gated by the allowlist under
   ``~/.hades/shell-hooks-allowlist.json``.  Non-TTY callers must pass
   ``accept_hooks=True`` (resolved from ``--accept-hooks``,
@@ -296,6 +297,7 @@ def reset_for_tests() -> None:
     """Clear the idempotence set.  Test-only helper."""
     with _registered_lock:
         _registered.clear()
+    _windows_git_bash_probe_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +431,170 @@ def _parse_single_entry(
 _TOP_LEVEL_PAYLOAD_KEYS = {"tool_name", "args", "session_id", "parent_session_id"}
 
 
+def _split_windows_command_line(command: str) -> List[str]:
+    """Parse a Windows command line using ``CommandLineToArgvW`` rules.
+
+    Python exposes the inverse operation (:func:`subprocess.list2cmdline`)
+    but not the parser.  In particular, ``shlex.split(..., posix=False)``
+    splits mixed quoted/unquoted segments and mishandles backslashes before a
+    quote.  This implementation follows the Windows CRT rule: an even run of
+    backslashes before ``\"`` toggles quoting, while an odd run emits a literal
+    quote after preserving half the backslashes.
+    """
+    argv: List[str] = []
+    length = len(command)
+    index = 0
+
+    while index < length:
+        while index < length and command[index].isspace():
+            index += 1
+        if index >= length:
+            break
+
+        arg: List[str] = []
+        in_quotes = False
+        while index < length:
+            char = command[index]
+            if char.isspace() and not in_quotes:
+                break
+            if char == "\\":
+                slash_start = index
+                while index < length and command[index] == "\\":
+                    index += 1
+                slash_count = index - slash_start
+                if index < length and command[index] == '"':
+                    arg.extend("\\" * (slash_count // 2))
+                    if slash_count % 2:
+                        arg.append('"')
+                    elif in_quotes and index + 1 < length and command[index + 1] == '"':
+                        arg.append('"')
+                        index += 1
+                    else:
+                        in_quotes = not in_quotes
+                    index += 1
+                    continue
+                arg.extend("\\" * slash_count)
+                continue
+            if char == '"':
+                if in_quotes and index + 1 < length and command[index + 1] == '"':
+                    arg.append('"')
+                    index += 2
+                    continue
+                in_quotes = not in_quotes
+                index += 1
+                continue
+            arg.append(char)
+            index += 1
+
+        argv.append("".join(arg))
+        while index < length and command[index].isspace():
+            index += 1
+
+    return argv
+
+
+def _split_command(command: str) -> List[str]:
+    """Tokenize a configured hook command without corrupting native paths.
+
+    POSIX ``shlex`` treats backslashes as escapes, which turns a native path
+    such as ``C:\\Users\\me\\hook.sh`` into ``C:Usersmehook.sh``.  Windows
+    uses its own backslash-and-quote parsing rules, implemented by
+    :func:`_split_windows_command_line`.
+    """
+    if IS_WINDOWS:
+        return _split_windows_command_line(command)
+    return shlex.split(command)
+
+
+def _windows_git_bash_candidates() -> List[str]:
+    """Return known native Git-for-Windows Bash locations, in preference order."""
+    candidates: List[str] = []
+
+    def add_if_file(path: str) -> None:
+        if path and os.path.isfile(path) and path not in candidates:
+            candidates.append(path)
+
+    add_if_file(os.environ.get("HERMES_GIT_BASH_PATH", ""))
+
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    if local_appdata:
+        portable_root = os.path.join(local_appdata, "hermes", "git")
+        add_if_file(os.path.join(portable_root, "bin", "bash.exe"))
+        add_if_file(os.path.join(portable_root, "usr", "bin", "bash.exe"))
+
+    for root in (
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git"),
+        os.path.join(local_appdata, "Programs", "Git") if local_appdata else "",
+    ):
+        if root:
+            add_if_file(os.path.join(root, "bin", "bash.exe"))
+
+    return candidates
+
+
+_windows_git_bash_probe_cache: Dict[str, bool] = {}
+
+
+def _is_working_native_git_bash(candidate: str) -> bool:
+    """Return whether *candidate* is a runnable Git-for-Windows Bash.
+
+    We deliberately do not inspect ``PATH``: on Windows it can resolve to the
+    WSL launcher, which accepts ``bash`` but cannot run a native ``C:\\...``
+    hook path.  The known locations above identify Git for Windows; the probe
+    additionally requires its MSYS runtime and rejects a stale installation.
+    """
+    normalized = candidate.replace("/", "\\").lower()
+    if not normalized.endswith("\\bash.exe"):
+        return False
+    if "\\windows\\system32\\" in normalized:
+        return False
+    if "\\git" not in normalized and "portablegit" not in normalized:
+        return False
+
+    cached = _windows_git_bash_probe_cache.get(candidate)
+    if cached is not None:
+        return cached
+
+    try:
+        probe = subprocess.run(
+            [
+                candidate,
+                "--noprofile",
+                "--norc",
+                "-c",
+                'test "$(uname -o 2>/dev/null)" = "Msys"',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            shell=False,
+            **({"creationflags": windows_hide_flags()} if IS_WINDOWS else {}),
+        )
+        working = probe.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        working = False
+
+    _windows_git_bash_probe_cache[candidate] = working
+    return working
+
+
+def _resolve_windows_bash() -> str:
+    """Resolve a working Git-for-Windows Bash, never a WSL fallback."""
+    for candidate in _windows_git_bash_candidates():
+        if _is_working_native_git_bash(candidate):
+            return candidate
+    raise RuntimeError(
+        "Git for Windows Bash not found or unusable for shell hooks. "
+        "Install Git for Windows or set HERMES_GIT_BASH_PATH to its bash.exe.",
+    )
+
+
+def _is_bare_bash_script(argv: List[str]) -> bool:
+    """Return whether argv directly invokes a shell script on Windows."""
+    return bool(argv) and argv[0].lower().endswith((".sh", ".bash"))
+
+
 def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
     """Run ``spec.command`` as a subprocess with ``stdin_json`` on stdin.
 
@@ -448,13 +614,19 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
         "error": None,
     }
     try:
-        argv = shlex.split(os.path.expanduser(spec.command))
+        argv = _split_command(os.path.expanduser(spec.command))
     except ValueError as exc:
         result["error"] = f"command {spec.command!r} cannot be parsed: {exc}"
         return result
     if not argv:
         result["error"] = "empty command"
         return result
+    if IS_WINDOWS and _is_bare_bash_script(argv):
+        try:
+            argv = [_resolve_windows_bash(), *argv]
+        except (OSError, RuntimeError) as exc:
+            result["error"] = str(exc)
+            return result
 
     t0 = time.monotonic()
     _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
@@ -813,7 +985,7 @@ def _command_script_path(command: str) -> str:
     common bare-path form.
     """
     try:
-        parts = shlex.split(command)
+        parts = _split_command(command)
     except ValueError:
         return command
     if not parts:
@@ -888,11 +1060,12 @@ def script_mtime_iso(command: str) -> Optional[str]:
 def script_is_executable(command: str) -> bool:
     """Return ``True`` iff ``command`` is runnable as configured.
 
-    For a bare invocation (``/path/hook.sh``) the script itself must be
-    executable.  For interpreter-prefixed commands (``python3
-    /path/hook.py``, ``/usr/bin/env bash hook.sh``) the script just has
-    to be readable — the interpreter doesn't care about the ``X_OK``
-    bit.  Mirrors what ``_spawn`` would actually do at runtime."""
+    For a bare invocation (``/path/hook.sh``), POSIX requires the script's
+    executable bit.  Windows instead requires a readable ``.sh`` / ``.bash``
+    file and a working Git Bash, matching the interpreter argv built by
+    :func:`_spawn`.  Explicit interpreter commands (``python3 hook.py``,
+    ``/usr/bin/env bash hook.sh``) only require a readable script.
+    """
     path = _command_script_path(command)
     if not path:
         return False
@@ -900,10 +1073,16 @@ def script_is_executable(command: str) -> bool:
     if not os.path.isfile(expanded):
         return False
     try:
-        argv = shlex.split(command)
+        argv = _split_command(command)
     except ValueError:
         return False
     is_bare_invocation = bool(argv) and argv[0] == path
+    if IS_WINDOWS and is_bare_invocation and _is_bare_bash_script(argv):
+        try:
+            _resolve_windows_bash()
+        except (OSError, RuntimeError):
+            return False
+        return os.access(expanded, os.R_OK)
     required = os.X_OK if is_bare_invocation else os.R_OK
     return os.access(expanded, required)
 

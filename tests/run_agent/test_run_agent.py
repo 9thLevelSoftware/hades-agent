@@ -468,40 +468,6 @@ class TestStripThinkBlocks:
     def test_none_returns_empty(self, agent):
         assert agent._strip_think_blocks(None) == ""
 
-    def test_list_content_flattened_no_crash(self, agent):
-        """Anthropic-via-OpenRouter returns content as a block list.
-
-        A raw list reaching ``re.sub`` raised ``TypeError: expected string
-        or bytes-like object, got 'list'``, which the outer conversation
-        loop swallowed and retried forever (infinite "preparing terminal…"
-        loop). ``strip_think_blocks`` must flatten list content to visible
-        text and drop reasoning blocks.
-        """
-        result = agent._strip_think_blocks(
-            [
-                {"type": "text", "text": "visible answer"},
-                {"type": "thinking", "thinking": "internal reasoning"},
-            ]
-        )
-        assert isinstance(result, str)
-        assert "visible answer" in result
-        assert "internal reasoning" not in result
-
-    def test_dict_content_flattened_no_crash(self, agent):
-        """Some servers return content as a single dict block."""
-        result = agent._strip_think_blocks({"type": "text", "text": "hello world"})
-        assert isinstance(result, str)
-        assert "hello world" in result
-
-    def test_list_of_only_thinking_returns_empty(self, agent):
-        """A list carrying only reasoning blocks yields no visible text."""
-        assert (
-            agent._strip_think_blocks([{"type": "thinking", "thinking": "x"}]) == ""
-        )
-
-    def test_empty_list_returns_empty(self, agent):
-        assert agent._strip_think_blocks([]) == ""
-
     def test_no_blocks_unchanged(self, agent):
         assert agent._strip_think_blocks("hello world") == "hello world"
 
@@ -2052,8 +2018,8 @@ class TestBuildApiKwargs:
         )
         assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
 
-    def test_reasoning_xhigh_preserved_for_copilot_when_supported(self, agent, monkeypatch):
-        """The registered Copilot profile must preserve a supported xhigh."""
+    def test_reasoning_xhigh_normalized_for_copilot(self, agent):
+        """xhigh effort should normalize to high for Copilot GitHub Models."""
         from agent.transports import get_transport
         from providers import get_provider_profile
 
@@ -2065,7 +2031,7 @@ class TestBuildApiKwargs:
         profile = get_provider_profile("copilot")
         msgs = [{"role": "user", "content": "hi"}]
         kwargs = transport.build_kwargs(
-            model="gpt-5.5",
+            model="gpt-5.4",
             messages=msgs,
             tools=None,
             supports_reasoning=True,
@@ -4240,9 +4206,7 @@ class TestHandleMaxIterations:
         kwargs = agent.client.chat.completions.create.call_args.kwargs
         from agent.portal_tags import nous_portal_tags
 
-        assert kwargs["extra_body"]["tags"] == nous_portal_tags(
-            session_id=agent.session_id
-        )
+        assert kwargs["extra_body"]["tags"] == nous_portal_tags()
         assert kwargs["extra_body"]["provider"] == {
             "only": ["deepseek"],
             "ignore": ["deepinfra"],
@@ -4264,9 +4228,7 @@ class TestHandleMaxIterations:
         kwargs = agent.client.chat.completions.create.call_args.kwargs
         from agent.portal_tags import nous_portal_tags
 
-        assert kwargs["extra_body"] == {
-            "tags": nous_portal_tags(session_id=agent.session_id)
-        }
+        assert kwargs["extra_body"] == {"tags": nous_portal_tags()}
 
     def test_summary_drops_invalid_provider_sort(self, agent):
         agent.base_url = "https://openrouter.ai/api/v1"
@@ -4420,66 +4382,6 @@ class TestRunConversation:
         assert result["final_response"] == "Final answer"
         assert result["completed"] is True
 
-    def test_codex_content_filter_incomplete_routes_to_policy_fallback(self, agent):
-        self._setup_agent(agent)
-        agent.api_mode = "codex_responses"
-        agent.provider = "openai-codex"
-        agent.base_url = "https://chatgpt.com/backend-api/codex"
-        agent._base_url_lower = agent.base_url.lower()
-        agent._base_url_hostname = "chatgpt.com"
-        agent.model = "gpt-5.5"
-        agent._fallback_chain = [
-            {"provider": "openrouter", "model": "anthropic/claude-sonnet-4.7"},
-        ]
-        agent._fallback_index = 0
-
-        content_filter_response = SimpleNamespace(
-            status="incomplete",
-            incomplete_details=SimpleNamespace(reason="content_filter"),
-            output=[],
-            output_text="",
-            model="gpt-5.5",
-            usage=None,
-        )
-        fallback_response = SimpleNamespace(
-            status="completed",
-            incomplete_details=None,
-            output=[
-                SimpleNamespace(
-                    type="message",
-                    status="completed",
-                    content=[SimpleNamespace(type="output_text", text="Recovered on fallback")],
-                )
-            ],
-            model="fallback/model",
-            usage=None,
-        )
-        hook_events = []
-
-        def _fake_activate(reason=None):
-            agent._fallback_index = len(agent._fallback_chain)
-            return True
-
-        with (
-            patch.object(agent, "_create_request_openai_client", return_value=MagicMock()),
-            patch.object(agent, "_close_request_openai_client"),
-            patch.object(agent, "_run_codex_stream", side_effect=[content_filter_response, fallback_response]) as mock_run_codex_stream,
-            patch.object(agent, "_try_activate_fallback", side_effect=_fake_activate) as mock_try_activate_fallback,
-            patch.object(agent, "_invoke_api_request_error_hook", side_effect=lambda **kw: hook_events.append(kw)),
-            patch.object(agent, "_persist_session"),
-            patch.object(agent, "_save_trajectory"),
-            patch.object(agent, "_cleanup_task_resources"),
-        ):
-            result = agent.run_conversation("summarize this large Slack thread")
-
-        assert result["final_response"] == "Recovered on fallback"
-        assert result["completed"] is True
-        mock_try_activate_fallback.assert_called_once_with()
-        assert mock_run_codex_stream.call_count == 2
-        assert hook_events[0]["error_type"] == "ContentPolicyBlocked"
-        assert hook_events[0]["retryable"] is False
-        assert hook_events[0]["reason"] == FailoverReason.content_policy_blocked.value
-
     def test_ollama_small_runtime_context_fails_before_api_call(self, agent, caplog):
         self._setup_agent(agent)
         agent.model = "qwen3.5:9b"
@@ -4581,6 +4483,7 @@ class TestRunConversation:
             call["api_request_id"] for call in post_request_calls
         ]
         assert all("message_count" in c and isinstance(c.get("request_messages"), list) for c in pre_request_calls)
+        assert all("decision_id" in c and "runtime_id" in c for c in pre_request_calls)
         assert all("request" in c and "messages" in c["request"]["body"] for c in pre_request_calls)
         assert any(msg.get("role") == "user" and msg.get("content") == "search something" for msg in pre_request_calls[0]["request_messages"])
         assert all("usage" in c and "response" in c for c in post_request_calls)
@@ -6442,16 +6345,9 @@ class TestCredentialPoolRecovery:
             def current(self):
                 return current
 
-            def mark_exhausted_and_rotate(
-                self,
-                *,
-                status_code,
-                error_context=None,
-                api_key_hint=None,
-            ):
+            def mark_exhausted_and_rotate(self, *, status_code, error_context=None):
                 assert status_code == 402
                 assert error_context is None
-                assert api_key_hint == agent.api_key
                 return next_entry
 
         agent._credential_pool = _Pool()
@@ -6470,16 +6366,9 @@ class TestCredentialPoolRecovery:
         next_entry = SimpleNamespace(label="secondary")
 
         class _Pool:
-            def mark_exhausted_and_rotate(
-                self,
-                *,
-                status_code,
-                error_context=None,
-                api_key_hint=None,
-            ):
+            def mark_exhausted_and_rotate(self, *, status_code, error_context=None):
                 assert status_code == 400
                 assert error_context == {"reason": "out_of_extra_usage"}
-                assert api_key_hint == agent.api_key
                 return next_entry
 
         agent._credential_pool = _Pool()

@@ -73,8 +73,17 @@ def test_long_running_script_refreshes_owned_claim_in_profile_store(
     real_heartbeat = jobs.heartbeat_run_claim
     second_scheduler_scan = {}
 
-    def _observed_heartbeat(job_id: str, *, expected_owner: str) -> bool:
-        updated = real_heartbeat(job_id, expected_owner=expected_owner)
+    def _observed_heartbeat(
+        job_id: str,
+        *,
+        expected_owner: str,
+        expected_job_revision_sha256: str,
+    ) -> bool:
+        updated = real_heartbeat(
+            job_id,
+            expected_owner=expected_owner,
+            expected_job_revision_sha256=expected_job_revision_sha256,
+        )
         # A different scheduler scans after the ORIGINAL claim's TTL while the
         # script is still blocked. The refreshed claim must keep the job out of
         # the due set and preserve its durable record.
@@ -141,8 +150,17 @@ def test_script_heartbeat_uses_captured_claim_owner(tmp_path, monkeypatch):
     heartbeat_seen = threading.Event()
     real_heartbeat = jobs.heartbeat_run_claim
 
-    def _observed_heartbeat(job_id: str, *, expected_owner: str) -> bool:
-        updated = real_heartbeat(job_id, expected_owner=expected_owner)
+    def _observed_heartbeat(
+        job_id: str,
+        *,
+        expected_owner: str,
+        expected_job_revision_sha256: str,
+    ) -> bool:
+        updated = real_heartbeat(
+            job_id,
+            expected_owner=expected_owner,
+            expected_job_revision_sha256=expected_job_revision_sha256,
+        )
         heartbeat_seen.set()
         return updated
 

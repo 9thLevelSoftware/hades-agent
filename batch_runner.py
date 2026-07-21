@@ -31,6 +31,7 @@ except ModuleNotFoundError:
     # means UTF-8 stdio setup is skipped on Windows; POSIX is unaffected.
     pass
 
+import hashlib
 import json
 import logging
 import os
@@ -47,6 +48,11 @@ logger = logging.getLogger(__name__)
 import fire
 
 from run_agent import AIAgent
+from agent.runtime_routing import (
+    AgentRuntimeContext,
+    RuntimeRoutingDeferred,
+    runtime_resolver_requires_initial_task,
+)
 from toolset_distributions import (
     list_distributions, 
     sample_toolsets_from_distribution,
@@ -66,6 +72,12 @@ ALL_POSSIBLE_TOOLS = set(TOOL_TO_TOOLSET_MAP.keys())
 
 # Default stats for tools that weren't used
 DEFAULT_TOOL_STATS = {'count': 0, 'success': 0, 'failure': 0}
+
+
+def _batch_session_id(run_name: str, prompt_index: int) -> str:
+    """Return a stable, non-content-derived identity for one batch prompt."""
+    run_digest = hashlib.sha256(str(run_name).encode("utf-8")).hexdigest()[:16]
+    return f"batch-{run_digest}-{prompt_index}"
 
 
 def _normalize_tool_stats(tool_stats: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
@@ -261,6 +273,7 @@ def _process_single_prompt(
     """
     prompt = prompt_data["prompt"]
     task_id = f"task_{prompt_index}"
+    session_id = _batch_session_id(config.get("run_name") or "batch", prompt_index)
     
     # Per-prompt container image override: if the dataset row has an 'image' field,
     # register it for this task's sandbox. Works with Docker, Modal, Singularity, and Daytona.
@@ -322,6 +335,15 @@ def _process_single_prompt(
         
         # Initialize agent with sampled toolsets and log prefix for identification
         log_prefix = f"[B{batch_num}:P{prompt_index}]"
+        runtime_routing_context = None
+        if runtime_resolver_requires_initial_task("fresh_session"):
+            runtime_routing_context = AgentRuntimeContext(
+                scope="fresh_session",
+                task=prompt,
+                session_id=session_id,
+                task_id=task_id,
+                metadata={"platform": "batch"},
+            )
         agent = AIAgent(
             base_url=config.get("base_url"),
             api_key=config.get("api_key"),
@@ -343,6 +365,8 @@ def _process_single_prompt(
             prefill_messages=config.get("prefill_messages"),
             skip_context_files=True,  # Don't pollute trajectories with SOUL.md/AGENTS.md
             skip_memory=True,  # Don't use persistent memory in batch runs
+            session_id=session_id,
+            runtime_routing_context=runtime_routing_context,
         )
 
         # Run the agent with task_id to ensure each task gets its own isolated VM
@@ -378,6 +402,21 @@ def _process_single_prompt(
             }
         }
     
+    except RuntimeRoutingDeferred as e:
+        return {
+            "success": False,
+            "prompt_index": prompt_index,
+            "error": "Agent runtime routing is busy; retry this prompt",
+            "retryable": True,
+            "retry_after_seconds": e.retry_after_seconds,
+            "trajectory": None,
+            "tool_stats": {},
+            "toolsets_used": [],
+            "metadata": {
+                "batch_num": batch_num,
+                "timestamp": datetime.now().isoformat(),
+            },
+        }
     except Exception as e:
         print(f"❌ Error processing prompt {prompt_index}: {e}")
         if config.get("verbose"):
@@ -884,6 +923,7 @@ class BatchRunner:
 
         config = {
             "distribution": self.distribution,
+            "run_name": self.run_name,
             "model": self.model,
             "max_iterations": self.max_iterations,
             "base_url": self.base_url,

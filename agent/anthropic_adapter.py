@@ -271,6 +271,25 @@ def _supports_xhigh_effort(model: str) -> bool:
     return not any(v in m for v in _NO_XHIGH_CLAUDE_SUBSTRINGS)
 
 
+def translate_anthropic_reasoning_effort(
+    model: str,
+    requested_effort: Any,
+) -> tuple[str, str | int]:
+    """Return the thinking mode and provider value emitted for an effort.
+
+    Adaptive Claude models receive ``output_config.effort``.  Legacy/manual
+    models receive a numeric ``thinking.budget_tokens``; unrecognized generic
+    strengths intentionally retain the request path's 8K medium budget.
+    """
+    effort = str(requested_effort or "medium").lower()
+    if _supports_adaptive_thinking(model):
+        adaptive_effort = ADAPTIVE_EFFORT_MAP.get(effort, "medium")
+        if adaptive_effort == "xhigh" and not _supports_xhigh_effort(model):
+            adaptive_effort = "max"
+        return ("adaptive", adaptive_effort)
+    return ("manual", THINKING_BUDGET.get(effort, 8000))
+
+
 def _forbids_sampling_params(model: str) -> bool:
     """Return True for models that 400 on any non-default temperature/top_p/top_k.
 
@@ -534,9 +553,8 @@ def _requires_bearer_auth(base_url: str | None) -> bool:
 
     Some third-party /anthropic endpoints implement Anthropic's Messages API but
     require Authorization: Bearer instead of Anthropic's native x-api-key header.
-    MiniMax's global and China Anthropic-compatible endpoints, Azure AI
-    Foundry's Anthropic-style endpoint, and Palantir Foundry's LLM proxy
-    follow this pattern.
+    MiniMax's global and China Anthropic-compatible endpoints, and Azure AI
+    Foundry's Anthropic-style endpoint follow this pattern.
     """
     normalized = _normalize_base_url_text(base_url)
     if not normalized:
@@ -545,11 +563,6 @@ def _requires_bearer_auth(base_url: str | None) -> bool:
     return (
         normalized.startswith(("https://api.minimax.io/anthropic", "https://api.minimaxi.com/anthropic"))
         or "azure.com" in normalized
-        # Palantir Foundry LLM proxy (<org>.palantirfoundry.com/api/v2/llm/proxy/anthropic)
-        # rejects x-api-key with 401 and requires Authorization: Bearer.
-        # Hostname match (not substring) so e.g. evil.com/palantirfoundry
-        # paths don't trigger Bearer auth.
-        or base_url_host_matches(normalized, "palantirfoundry.com")
     )
 
 
@@ -2648,21 +2661,20 @@ def build_anthropic_kwargs(
     if reasoning_config and isinstance(reasoning_config, dict) and not _is_kimi_coding:
         if reasoning_config.get("enabled") is not False and "haiku" not in model.lower():
             effort = str(reasoning_config.get("effort", "medium")).lower()
-            budget = THINKING_BUDGET.get(effort, 8000)
-            if _supports_adaptive_thinking(model):
+            thinking_mode, wire_effort = translate_anthropic_reasoning_effort(
+                model,
+                effort,
+            )
+            if thinking_mode == "adaptive":
                 kwargs["thinking"] = {
                     "type": "adaptive",
                     "display": "summarized",
                 }
-                adaptive_effort = ADAPTIVE_EFFORT_MAP.get(effort, "medium")
-                # Downgrade xhigh→max on models that don't list xhigh as a
-                # supported level (Opus/Sonnet 4.6). Opus 4.7+ keeps xhigh.
-                if adaptive_effort == "xhigh" and not _supports_xhigh_effort(model):
-                    adaptive_effort = "max"
                 kwargs["output_config"] = {
-                    "effort": adaptive_effort,
+                    "effort": wire_effort,
                 }
             else:
+                budget = int(wire_effort)
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
                 # Anthropic requires temperature=1 when thinking is enabled on older models
                 kwargs["temperature"] = 1

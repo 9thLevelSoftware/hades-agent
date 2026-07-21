@@ -358,9 +358,9 @@ class TestCallbackSubprocess:
         calls = tmp_path / "calls.log"
         script = _write_script(
             tmp_path, "log.sh",
-            f"#!/usr/bin/env bash\n"
-            f"echo \"$(cat -)\" >> {calls}\n"
-            f"printf '{{}}\\n'\n",
+            "#!/usr/bin/env bash\n"
+            'echo "$(cat -)" >> "$(dirname "$0")/calls.log"\n'
+            "printf '{}\\n'\n",
         )
         spec = shell_hooks.ShellHookSpec(
             event="pre_tool_call",
@@ -379,7 +379,9 @@ class TestCallbackSubprocess:
         capture = tmp_path / "payload.json"
         script = _write_script(
             tmp_path, "capture.sh",
-            f"#!/usr/bin/env bash\ncat - > {capture}\nprintf '{{}}\\n'\n",
+            "#!/usr/bin/env bash\n"
+            'cat - > "$(dirname "$0")/payload.json"\n'
+            "printf '{}\\n'\n",
         )
         spec = shell_hooks.ShellHookSpec(
             event="pre_tool_call", command=str(script),
@@ -451,6 +453,155 @@ class TestCallbackSubprocess:
         cb = shell_hooks._make_callback(spec)
         assert cb(session_id="s") is None
 
+
+class TestWindowsCommandHandling:
+    def test_tokenizer_preserves_native_paths_and_quoted_arguments(self, monkeypatch):
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+
+        assert shell_hooks._split_command(
+            '"C:\\Program Files\\Hermes Hooks\\audit.sh" --label "two words"',
+        ) == [
+            "C:\\Program Files\\Hermes Hooks\\audit.sh",
+            "--label",
+            "two words",
+        ]
+
+    def test_tokenizer_preserves_escaped_embedded_quotes(self, monkeypatch):
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+
+        assert shell_hooks._split_command(
+            r'"C:\Hooks\say\"hi\".sh" --name "Ada"',
+        ) == [
+            'C:\\Hooks\\say"hi".sh',
+            "--name",
+            "Ada",
+        ]
+
+    def test_tokenizer_concatenates_mixed_quoted_segments(self, monkeypatch):
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+
+        assert shell_hooks._split_command(
+            r'"C:\Program Files"\Hermes\hook.sh --flag pre"joined value"post',
+        ) == [
+            "C:\\Program Files\\Hermes\\hook.sh",
+            "--flag",
+            "prejoined valuepost",
+        ]
+
+    def test_resolver_rejects_wsl_and_broken_bash_candidates(self, monkeypatch):
+        wsl = r"C:\Windows\System32\bash.exe"
+        broken = r"C:\Program Files\Git\bin\broken-bash.exe"
+        native_git_bash = r"C:\Program Files\Git\bin\bash.exe"
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+        monkeypatch.setattr(
+            shell_hooks,
+            "_windows_git_bash_candidates",
+            lambda: [wsl, broken, native_git_bash],
+            raising=False,
+        )
+        monkeypatch.setattr(
+            shell_hooks,
+            "_is_working_native_git_bash",
+            lambda path: path == native_git_bash,
+            raising=False,
+        )
+
+        assert shell_hooks._resolve_windows_bash() == native_git_bash
+
+    def test_native_git_bash_probe_rejects_wsl_and_broken_install(self, monkeypatch):
+        wsl = r"C:\Windows\System32\bash.exe"
+        broken = r"C:\Program Files\Git\bin\bash.exe"
+        native = r"C:\PortableGit\bin\bash.exe"
+        calls = []
+
+        def fake_run(argv, **_kwargs):
+            calls.append(argv)
+            return type("Result", (), {
+                "returncode": 1 if argv[0] == broken else 0,
+            })()
+
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+        monkeypatch.setattr(shell_hooks.subprocess, "run", fake_run)
+
+        assert not shell_hooks._is_working_native_git_bash(wsl)
+        assert not shell_hooks._is_working_native_git_bash(broken)
+        assert shell_hooks._is_working_native_git_bash(native)
+        assert [call[0] for call in calls] == [broken, native]
+
+    def test_resolver_refuses_when_only_wsl_or_broken_candidates_exist(self, monkeypatch):
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+        monkeypatch.setattr(
+            shell_hooks,
+            "_windows_git_bash_candidates",
+            lambda: [r"C:\Windows\System32\bash.exe", r"C:\broken\bash.exe"],
+            raising=False,
+        )
+        monkeypatch.setattr(
+            shell_hooks,
+            "_is_working_native_git_bash",
+            lambda _path: False,
+            raising=False,
+        )
+
+        with pytest.raises(RuntimeError, match="Git for Windows"):
+            shell_hooks._resolve_windows_bash()
+
+    def test_script_path_preserves_quoted_native_windows_path(self, monkeypatch):
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+
+        assert shell_hooks._command_script_path(
+            '"C:\\Program Files\\Hermes Hooks\\audit.sh" --verbose',
+        ) == "C:\\Program Files\\Hermes Hooks\\audit.sh"
+
+    def test_explicit_bash_command_is_not_wrapped_again(self, monkeypatch):
+        captured = []
+
+        def fake_run(argv, **kwargs):
+            captured.append((argv, kwargs))
+            return type("Result", (), {"returncode": 0, "stdout": "{}", "stderr": ""})()
+
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+        monkeypatch.setattr(shell_hooks, "windows_hide_flags", lambda: 0)
+        monkeypatch.setattr(shell_hooks, "_resolve_windows_bash", lambda: pytest.fail(
+            "explicit interpreter must not trigger Git Bash resolution",
+        ))
+        monkeypatch.setattr(shell_hooks.subprocess, "run", fake_run)
+
+        result = shell_hooks._spawn(
+            shell_hooks.ShellHookSpec(
+                event="post_tool_call",
+                command='bash "C:\\Program Files\\Hermes Hooks\\audit.sh"',
+            ),
+            "{}",
+        )
+
+        assert result["returncode"] == 0
+        assert captured[0][0] == [
+            "bash",
+            "C:\\Program Files\\Hermes Hooks\\audit.sh",
+        ]
+
+    def test_bare_shell_script_is_runnable_through_git_bash(self, tmp_path, monkeypatch):
+        script = tmp_path / "audit.sh"
+        script.write_text("printf '{}\\n'\n")
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+        monkeypatch.setattr(
+            shell_hooks, "_resolve_windows_bash", lambda: r"C:\Program Files\Git\bin\bash.exe",
+        )
+
+        assert shell_hooks.script_is_executable(f'"{script}"')
+
+    def test_bare_shell_script_is_not_runnable_without_git_bash(self, tmp_path, monkeypatch):
+        script = tmp_path / "audit.sh"
+        script.write_text("printf '{}\\n'\n")
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", True)
+
+        def missing_bash():
+            raise RuntimeError("Git Bash not found")
+
+        monkeypatch.setattr(shell_hooks, "_resolve_windows_bash", missing_bash)
+
+        assert not shell_hooks.script_is_executable(f'"{script}"')
 
 # ── config parsing ────────────────────────────────────────────────────────
 
@@ -679,23 +830,33 @@ class TestAllowlistConcurrency:
         assert "No space" in msg
         assert "re-prompt" in msg
 
-    def test_script_is_executable_handles_interpreter_prefix(self, tmp_path):
+    def test_script_is_executable_handles_interpreter_prefix(self, tmp_path, monkeypatch):
         """For ``python3 hook.py`` and similar the interpreter reads
         the script, so X_OK on the script itself is not required —
         only R_OK.  Bare invocations still require X_OK."""
         script = tmp_path / "hook.py"
         script.write_text("print()\n")  # readable, NOT executable
+        executable = False
+
+        def fake_access(_path, mode):
+            return mode == shell_hooks.os.R_OK or executable
+
+        # Exercise the POSIX permission contract deterministically even when
+        # this suite itself runs on Windows, where X_OK is not meaningful.
+        monkeypatch.setattr(shell_hooks, "IS_WINDOWS", False)
+        monkeypatch.setattr(shell_hooks.os, "access", fake_access)
+        posix_script = script.as_posix()
 
         # Interpreter prefix: R_OK is enough.
-        assert shell_hooks.script_is_executable(f"python3 {script}")
-        assert shell_hooks.script_is_executable(f"/usr/bin/env python3 {script}")
+        assert shell_hooks.script_is_executable(f"python3 {posix_script}")
+        assert shell_hooks.script_is_executable(f"/usr/bin/env python3 {posix_script}")
 
         # Bare invocation on the same non-X_OK file: not runnable.
-        assert not shell_hooks.script_is_executable(str(script))
+        assert not shell_hooks.script_is_executable(posix_script)
 
         # Flip +x; bare invocation is now runnable too.
-        script.chmod(0o755)
-        assert shell_hooks.script_is_executable(str(script))
+        executable = True
+        assert shell_hooks.script_is_executable(posix_script)
 
     def test_command_script_path_resolution(self):
         """Regression: ``_command_script_path`` used to return the first
@@ -722,8 +883,12 @@ class TestAllowlistConcurrency:
             # no path-like tokens → fallback to first token
             ("my-binary --verbose", "my-binary"),
             ("python3 -c 'print(1)'", "python3"),
-            # unparseable (unbalanced quotes) → return command as-is
-            ("python3 'unterminated", "python3 'unterminated"),
+            # POSIX treats an unmatched single quote as invalid; Windows
+            # command lines treat it as a literal character.
+            (
+                "python3 'unterminated",
+                "python3" if shell_hooks.IS_WINDOWS else "python3 'unterminated",
+            ),
             # empty
             ("", ""),
         ]

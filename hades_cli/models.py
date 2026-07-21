@@ -10,12 +10,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
 import urllib.parse
 import urllib.request
 import urllib.error
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from difflib import get_close_matches
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NamedTuple, Optional
 
 from hades_cli import __version__ as _HERMES_VERSION
@@ -69,7 +74,8 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("qwen/qwen3.7-plus",                      ""),
     ("qwen/qwen3.6-35b-a3b",                   ""),
     # MoonshotAI
-    ("moonshotai/kimi-k3",                     "recommended"),
+    ("moonshotai/kimi-k2.6",                   "recommended"),
+    ("moonshotai/kimi-k2.7-code",              ""),
     # MiniMax
     ("minimax/minimax-m3",                     ""),
     # Z-AI
@@ -219,7 +225,8 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "qwen/qwen3.7-plus",
         "qwen/qwen3.6-35b-a3b",
         # MoonshotAI
-        "moonshotai/kimi-k3",
+        "moonshotai/kimi-k2.6",
+        "moonshotai/kimi-k2.7-code",
         # MiniMax
         "minimax/minimax-m3",
         # Z-AI
@@ -322,7 +329,6 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "kimi-k2.6",
         "kimi-k2.5",
         "kimi-for-coding",
-        "kimi-for-coding-highspeed",
         "kimi-k2-thinking",
         "kimi-k2-thinking-turbo",
         "kimi-k2-turbo-preview",
@@ -1051,7 +1057,6 @@ class ProviderEntry(NamedTuple):
 
 CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("nous",           "Nous Portal",              "Nous Portal (Everything your agent needs, 300+ models with bundled tool use)"),
-    ProviderEntry("fireworks",      "Fireworks AI",             "Fireworks AI (OpenAI-compatible direct model API)"),
     ProviderEntry("openrouter",     "OpenRouter",               "OpenRouter (Pay-per-use API aggregator)"),
     ProviderEntry("moa",            "Mixture of Agents",        "Mixture of Agents (named presets; aggregator acts after reference models)"),
     ProviderEntry("novita",         "NovitaAI",                 "NovitaAI (Cloud: Model API, Agent Sandbox, GPU Cloud)"),
@@ -1081,6 +1086,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("ollama-cloud",   "Ollama Cloud",             "Ollama Cloud (Cloud-hosted open models, ollama.com)"),
     ProviderEntry("arcee",          "Arcee AI",                 "Arcee AI (Trinity models, direct API)"),
     ProviderEntry("gmi",            "GMI Cloud",                "GMI Cloud (Multi-model direct API)"),
+    ProviderEntry("fireworks",      "Fireworks AI",             "Fireworks AI (OpenAI-compatible direct model API)"),
     ProviderEntry("kilocode",       "Kilo Code",                "Kilo Code (Kilo Gateway API)"),
     ProviderEntry("opencode-zen",   "OpenCode Zen",             "OpenCode Zen (Curated models, pay-as-you-go)"),
     ProviderEntry("opencode-go",    "OpenCode Go",              "OpenCode Go (Open models subscription)"),
@@ -1531,8 +1537,83 @@ def get_curated_nous_model_ids() -> list[str]:
 # Pricing helpers — fetch live pricing from OpenRouter-compatible /v1/models
 # ---------------------------------------------------------------------------
 
-# Cache: maps model_id → {"prompt": str, "completion": str} per endpoint
+# Compatibility cache consumed by a few local, no-network callers.
 _pricing_cache: dict[str, dict[str, dict[str, str]]] = {}
+PRICING_SNAPSHOT_TTL_SECONDS = 60 * 60
+
+
+@dataclass(frozen=True)
+class PricingSnapshot:
+    """Immutable raw pricing evidence from one successful endpoint fetch."""
+
+    prices: Mapping[str, Mapping[str, str]]
+    observed_at: str
+    source_id: str
+    cache_key: str
+    ttl_seconds: int
+    fresh: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "prices",
+            MappingProxyType(
+                {
+                    model: MappingProxyType(dict(price))
+                    for model, price in self.prices.items()
+                }
+            ),
+        )
+
+    def price_dict(self) -> dict[str, dict[str, str]]:
+        return {
+            model: dict(price)
+            for model, price in self.prices.items()
+        }
+
+
+_pricing_snapshot_cache: dict[str, PricingSnapshot] = {}
+
+
+def _pricing_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _pricing_timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _pricing_snapshot_is_fresh(
+    snapshot: PricingSnapshot,
+    now: datetime,
+) -> bool:
+    try:
+        observed_at = datetime.fromisoformat(
+            snapshot.observed_at.replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return False
+    observed_at = observed_at.replace(
+        tzinfo=observed_at.tzinfo or UTC
+    ).astimezone(UTC)
+    return now - observed_at <= timedelta(seconds=snapshot.ttl_seconds)
+
+
+def _snapshot_view(
+    snapshot: PricingSnapshot,
+    *,
+    fresh: bool,
+) -> PricingSnapshot:
+    if snapshot.fresh is fresh:
+        return snapshot
+    return PricingSnapshot(
+        prices=snapshot.prices,
+        observed_at=snapshot.observed_at,
+        source_id=snapshot.source_id,
+        cache_key=snapshot.cache_key,
+        ttl_seconds=snapshot.ttl_seconds,
+        fresh=fresh,
+    )
 
 
 def _format_price_per_mtok(per_token_str: str) -> str:
@@ -1571,9 +1652,31 @@ def fetch_models_with_pricing(
     Results are cached per *base_url* so repeated calls are free.
     Works with any OpenRouter-compatible endpoint (OpenRouter, Nous Portal).
     """
+    return _fetch_models_with_pricing_snapshot(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=timeout,
+        force_refresh=force_refresh,
+    ).price_dict()
+
+
+def _fetch_models_with_pricing_snapshot(
+    api_key: str | None = None,
+    base_url: str = "https://openrouter.ai/api",
+    timeout: float = 8.0,
+    *,
+    force_refresh: bool = False,
+) -> PricingSnapshot:
+    """Fetch raw pricing while retaining its real observation timestamp."""
     cache_key = (base_url or "").rstrip("/")
-    if not force_refresh and cache_key in _pricing_cache:
-        return _pricing_cache[cache_key]
+    cached = _pricing_snapshot_cache.get(cache_key)
+    now = _pricing_now()
+    if (
+        not force_refresh
+        and cached is not None
+        and _pricing_snapshot_is_fresh(cached, now)
+    ):
+        return _snapshot_view(cached, fresh=True)
 
     url = cache_key.rstrip("/") + "/v1/models"
     headers: dict[str, str] = {
@@ -1588,8 +1691,17 @@ def fetch_models_with_pricing(
         with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode())
     except Exception:
+        if cached is not None:
+            return _snapshot_view(cached, fresh=False)
         _pricing_cache[cache_key] = {}
-        return {}
+        return PricingSnapshot(
+            prices={},
+            observed_at=_pricing_timestamp(now),
+            source_id=f"openrouter-compatible:{cache_key}",
+            cache_key=cache_key,
+            ttl_seconds=PRICING_SNAPSHOT_TTL_SECONDS,
+            fresh=False,
+        )
 
     result: dict[str, dict[str, str]] = {}
     for item in payload.get("data", []):
@@ -1606,8 +1718,17 @@ def fetch_models_with_pricing(
                 entry["input_cache_write"] = str(pricing["input_cache_write"])
             result[mid] = entry
 
-    _pricing_cache[cache_key] = result
-    return result
+    snapshot = PricingSnapshot(
+        prices=result,
+        observed_at=_pricing_timestamp(now),
+        source_id=f"openrouter-compatible:{cache_key}",
+        cache_key=cache_key,
+        ttl_seconds=PRICING_SNAPSHOT_TTL_SECONDS,
+        fresh=True,
+    )
+    _pricing_cache[cache_key] = snapshot.price_dict()
+    _pricing_snapshot_cache[cache_key] = snapshot
+    return snapshot
 
 
 def _resolve_openrouter_api_key() -> str:
@@ -1640,21 +1761,21 @@ def _resolve_nous_pricing_credentials() -> tuple[str, str]:
     return ("", _DEFAULT_NOUS_INFERENCE_BASE)
 
 
-def get_pricing_for_provider(provider: str, *, force_refresh: bool = False) -> dict[str, dict[str, str]]:
-    """Return live pricing for providers that support it (openrouter, nous, novita)."""
+def get_pricing_snapshot_for_provider(
+    provider: str,
+    *,
+    force_refresh: bool = False,
+) -> PricingSnapshot | None:
+    """Return timestamped raw pricing evidence for a supported provider."""
     normalized = normalize_provider(provider)
     if normalized == "openrouter":
-        return fetch_models_with_pricing(
+        return _fetch_models_with_pricing_snapshot(
             api_key=_resolve_openrouter_api_key(),
             base_url="https://openrouter.ai/api",
             force_refresh=force_refresh,
         )
     if normalized == "novita":
-        return _fetch_novita_pricing(force_refresh=force_refresh)
-    if normalized == "deepinfra":
-        return _fetch_deepinfra_pricing(force_refresh=force_refresh)
-    if normalized == "fireworks":
-        return _fireworks_pricing_from_models_dev(force_refresh=force_refresh)
+        return _fetch_novita_pricing_snapshot(force_refresh=force_refresh)
     if normalized == "nous":
         api_key, base_url = _resolve_nous_pricing_credentials()
         if base_url:
@@ -1663,61 +1784,50 @@ def get_pricing_for_provider(provider: str, *, force_refresh: bool = False) -> d
             stripped = base_url.rstrip("/")
             if stripped.endswith("/v1"):
                 stripped = stripped[:-3]
-            return fetch_models_with_pricing(
+            return _fetch_models_with_pricing_snapshot(
                 api_key=api_key,
                 base_url=stripped,
                 force_refresh=force_refresh,
             )
-    return {}
+    if normalized == "deepinfra":
+        cache_key, _url = _deepinfra_catalog_url()
+        snapshot_key = f"deepinfra:{cache_key}"
+        cached = _pricing_snapshot_cache.get(snapshot_key)
+        now = _pricing_now()
+        if (
+            not force_refresh
+            and cached is not None
+            and _pricing_snapshot_is_fresh(cached, now)
+        ):
+            return _snapshot_view(cached, fresh=True)
+        prices = _fetch_deepinfra_pricing(force_refresh=True)
+        if not prices and cached is not None:
+            return _snapshot_view(cached, fresh=False)
+        snapshot = PricingSnapshot(
+            prices=prices,
+            observed_at=_pricing_timestamp(now),
+            source_id="deepinfra-tagged-catalog",
+            cache_key=snapshot_key,
+            ttl_seconds=PRICING_SNAPSHOT_TTL_SECONDS,
+            fresh=True,
+        )
+        _pricing_cache[snapshot_key] = snapshot.price_dict()
+        _pricing_snapshot_cache[snapshot_key] = snapshot
+        return snapshot
+    return None
 
 
-def _fireworks_pricing_from_models_dev(
+def get_pricing_for_provider(
+    provider: str,
     *,
     force_refresh: bool = False,
 ) -> dict[str, dict[str, str]]:
-    """Derive Fireworks picker pricing from the models.dev registry cache.
-
-    No dedicated network fetch: ``fetch_models_dev()`` already maintains an
-    in-memory + disk cache (1h TTL) that every picker surface shares, so this
-    is a pure dict transform on the picker path — no added latency and no
-    per-render network call. Results are additionally memoized in
-    ``_pricing_cache`` so repeated menu renders within a process are free.
-
-    models.dev publishes Fireworks costs in USD per 1M tokens; the shared
-    pricing formatter expects per-token strings, so divide by 1M.
-    """
-    cache_key = "models.dev/fireworks"
-    if not force_refresh and cache_key in _pricing_cache:
-        return _pricing_cache[cache_key]
-
-    result: dict[str, dict[str, str]] = {}
-    try:
-        from agent.models_dev import _get_provider_models
-
-        models = _get_provider_models("fireworks") or {}
-        for mid, entry in models.items():
-            if not isinstance(entry, dict):
-                continue
-            cost = entry.get("cost")
-            if not isinstance(cost, dict):
-                continue
-            inp = cost.get("input")
-            out = cost.get("output")
-            if inp is None and out is None:
-                continue
-            row: dict[str, str] = {
-                "prompt": str(float(inp or 0) / 1_000_000),
-                "completion": str(float(out or 0) / 1_000_000),
-            }
-            cache_read = cost.get("cache_read")
-            if cache_read:
-                row["input_cache_read"] = str(float(cache_read) / 1_000_000)
-            result[str(mid)] = row
-    except Exception:
-        result = {}
-
-    _pricing_cache[cache_key] = result
-    return result
+    """Compatibility wrapper returning raw price dictionaries only."""
+    snapshot = get_pricing_snapshot_for_provider(
+        provider,
+        force_refresh=force_refresh,
+    )
+    return {} if snapshot is None else snapshot.price_dict()
 
 
 def _fetch_novita_pricing(
@@ -1734,14 +1844,40 @@ def _fetch_novita_pricing(
     Results are cached in ``_pricing_cache`` keyed on the resolved base URL —
     without this, every menu render or pricing lookup re-hits the network.
     """
+    return _fetch_novita_pricing_snapshot(
+        timeout=timeout,
+        force_refresh=force_refresh,
+    ).price_dict()
+
+
+def _fetch_novita_pricing_snapshot(
+    timeout: float = 8.0,
+    *,
+    force_refresh: bool = False,
+) -> PricingSnapshot:
     api_key = os.getenv("NOVITA_API_KEY", "").strip()
-    if not api_key:
-        return {}
 
     base_url = os.getenv("NOVITA_BASE_URL", "").strip() or "https://api.novita.ai/openai/v1"
     cache_key = base_url.rstrip("/")
-    if not force_refresh and cache_key in _pricing_cache:
-        return _pricing_cache[cache_key]
+    cached = _pricing_snapshot_cache.get(cache_key)
+    now = _pricing_now()
+    if (
+        not force_refresh
+        and cached is not None
+        and _pricing_snapshot_is_fresh(cached, now)
+    ):
+        return _snapshot_view(cached, fresh=True)
+    if not api_key:
+        if cached is not None:
+            return _snapshot_view(cached, fresh=False)
+        return PricingSnapshot(
+            prices={},
+            observed_at=_pricing_timestamp(now),
+            source_id="novita-model-catalog",
+            cache_key=cache_key,
+            ttl_seconds=PRICING_SNAPSHOT_TTL_SECONDS,
+            fresh=False,
+        )
 
     url = cache_key + "/models"
     headers = {
@@ -1755,8 +1891,17 @@ def _fetch_novita_pricing(
         with _urlopen_model_catalog_request(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode())
     except Exception:
+        if cached is not None:
+            return _snapshot_view(cached, fresh=False)
         _pricing_cache[cache_key] = {}
-        return {}
+        return PricingSnapshot(
+            prices={},
+            observed_at=_pricing_timestamp(now),
+            source_id="novita-model-catalog",
+            cache_key=cache_key,
+            ttl_seconds=PRICING_SNAPSHOT_TTL_SECONDS,
+            fresh=False,
+        )
 
     result: dict[str, dict[str, str]] = {}
     for item in payload.get("data", []):
@@ -1774,8 +1919,17 @@ def _fetch_novita_pricing(
             "completion": str(float(out or 0) / 10_000 / 1_000_000),
         }
 
-    _pricing_cache[cache_key] = result
-    return result
+    snapshot = PricingSnapshot(
+        prices=result,
+        observed_at=_pricing_timestamp(now),
+        source_id="novita-model-catalog",
+        cache_key=cache_key,
+        ttl_seconds=PRICING_SNAPSHOT_TTL_SECONDS,
+        fresh=True,
+    )
+    _pricing_cache[cache_key] = snapshot.price_dict()
+    _pricing_snapshot_cache[cache_key] = snapshot
+    return snapshot
 
 
 # All provider IDs and aliases that are valid for the provider:model syntax.
@@ -2408,7 +2562,99 @@ def _merge_with_models_dev(provider: str, curated: list[str]) -> list[str]:
     return merged
 
 
-def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) -> list[str]:
+PROVIDER_MODEL_DISCOVERY_CONTRACT_VERSION = 1
+PROVIDER_MODEL_PROVENANCE_VALUES = (
+    "authenticated_live",
+    "validated_contract",
+    "stale_live_cache",
+    "static_curated",
+    "configured_declared",
+    "current_offline_fallback",
+)
+PROVIDER_MODEL_LIVE_ATTEMPT_STATUSES = (
+    "not_attempted",
+    "succeeded",
+    "failed",
+    "probe_disabled",
+)
+
+
+@dataclass(frozen=True)
+class ProviderModelDiscovery:
+    """Non-secret, immutable evidence for one provider access path."""
+
+    provider: str
+    resolver_name: str
+    models: tuple[str, ...]
+    model_provenance: Mapping[str, str]
+    provenance_details: Mapping[str, Mapping[str, Any]]
+    live_attempt_status: str
+    observed_at: str
+    credential_fingerprint: str
+    endpoint_identity: str
+    auth_identity: str
+    credential_pool_identity: str = ""
+    api_mode: str = "chat_completions"
+    source: str = "provider-discovery"
+
+    def __post_init__(self) -> None:
+        if self.live_attempt_status not in PROVIDER_MODEL_LIVE_ATTEMPT_STATUSES:
+            raise ValueError(
+                f"invalid live attempt status: {self.live_attempt_status}"
+            )
+        if set(self.model_provenance) != set(self.models):
+            raise ValueError("model provenance must cover every discovered model")
+        if set(self.provenance_details) != set(self.models):
+            raise ValueError("provenance details must cover every discovered model")
+        invalid = set(self.model_provenance.values()).difference(
+            PROVIDER_MODEL_PROVENANCE_VALUES
+        )
+        if invalid:
+            raise ValueError(f"invalid model provenance: {sorted(invalid)!r}")
+        object.__setattr__(
+            self,
+            "model_provenance",
+            MappingProxyType(dict(self.model_provenance)),
+        )
+        object.__setattr__(
+            self,
+            "provenance_details",
+            MappingProxyType(
+                {
+                    model: MappingProxyType(dict(details))
+                    for model, details in self.provenance_details.items()
+                }
+            ),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return the opt-in JSON-safe payload used by inventory callers."""
+        return {
+            "contract_version": PROVIDER_MODEL_DISCOVERY_CONTRACT_VERSION,
+            "provider": self.provider,
+            "resolver_name": self.resolver_name,
+            "models": list(self.models),
+            "model_provenance": dict(self.model_provenance),
+            "provenance_details": {
+                model: dict(details)
+                for model, details in self.provenance_details.items()
+            },
+            "live_attempt_status": self.live_attempt_status,
+            "observed_at": self.observed_at,
+            "credential_fingerprint": self.credential_fingerprint,
+            "endpoint_identity": self.endpoint_identity,
+            "auth_identity": self.auth_identity,
+            "credential_pool_identity": self.credential_pool_identity,
+            "api_mode": self.api_mode,
+            "source": self.source,
+        }
+
+
+def _legacy_provider_model_ids(
+    provider: Optional[str],
+    *,
+    force_refresh: bool = False,
+) -> list[str]:
     """Return the best known model catalog for a provider.
 
     Tries live API endpoints for providers that support them (Codex, Nous),
@@ -2655,6 +2901,717 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
     return curated_static
 
 
+def _discovery_timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _hashed_identity(prefix: str, value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+    return f"{prefix}:{digest[:24]}"
+
+
+def _endpoint_discovery_identity(provider: str, base_url: str) -> str:
+    normalized = str(base_url or "").strip().rstrip("/").lower()
+    if not normalized:
+        normalized = f"provider:{provider}"
+    return _hashed_identity("endpoint", normalized)
+
+
+def _credential_discovery_fingerprint(
+    *,
+    provider: str,
+    resolver_name: str,
+    api_key: Any,
+    endpoint_identity: str,
+    credential_pool_identity: str,
+) -> str:
+    if callable(api_key):
+        secret_identity = f"callable:{type(api_key).__module__}.{type(api_key).__qualname__}"
+    else:
+        secret_identity = str(api_key or "")
+    payload = "|".join(
+        (
+            provider,
+            resolver_name,
+            endpoint_identity,
+            credential_pool_identity,
+            secret_identity,
+        )
+    )
+    return _hashed_identity("credential", payload)
+
+
+def _deduplicated_merge(
+    primary: list[str],
+    secondary: list[str],
+) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for model in (*primary, *secondary):
+        normalized = str(model).lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        merged.append(str(model))
+    return merged
+
+
+def _provider_discovery_result(
+    *,
+    provider: str,
+    resolver_name: str,
+    visible_models: list[str],
+    live_models: list[str],
+    live_attempt_status: str,
+    endpoint_identity: str,
+    auth_identity: str,
+    credential_fingerprint: str,
+    credential_pool_identity: str = "",
+    api_mode: str = "chat_completions",
+    observed_at: str | None = None,
+    configured_models: set[str] | None = None,
+    authenticated_reasoning_options: Mapping[str, list[str]] | None = None,
+    authenticated_local_runtime: Mapping[str, Mapping[str, Any]] | None = None,
+    source: str = "provider-discovery",
+) -> ProviderModelDiscovery:
+    timestamp = observed_at or _discovery_timestamp()
+    live_by_lower = {model.lower() for model in live_models}
+    configured_by_lower = {
+        model.lower() for model in (configured_models or set())
+    }
+    provenance: dict[str, str] = {}
+    details: dict[str, dict[str, Any]] = {}
+    for model in visible_models:
+        normalized = model.lower()
+        if live_attempt_status == "succeeded" and normalized in live_by_lower:
+            provenance[model] = "authenticated_live"
+            details[model] = {
+                "endpoint_identity": endpoint_identity,
+                "auth_identity": auth_identity,
+                "observed_at": timestamp,
+            }
+            if credential_pool_identity:
+                details[model]["credential_pool_identity"] = (
+                    credential_pool_identity
+                )
+            reasoning_options = (authenticated_reasoning_options or {}).get(model)
+            if reasoning_options:
+                details[model]["reasoning_options"] = list(reasoning_options)
+                details[model]["reasoning_options_authenticated"] = True
+            if model in (authenticated_local_runtime or {}):
+                details[model]["local_runtime"] = dict(
+                    (authenticated_local_runtime or {})[model]
+                )
+        elif normalized in configured_by_lower:
+            provenance[model] = "configured_declared"
+            details[model] = {"source": "configured"}
+        else:
+            provenance[model] = "static_curated"
+            details[model] = {"source": "curated"}
+    return ProviderModelDiscovery(
+        provider=provider,
+        resolver_name=resolver_name,
+        models=tuple(visible_models),
+        model_provenance=provenance,
+        provenance_details=details,
+        live_attempt_status=live_attempt_status,
+        observed_at=timestamp,
+        credential_fingerprint=credential_fingerprint,
+        endpoint_identity=endpoint_identity,
+        auth_identity=auth_identity,
+        credential_pool_identity=credential_pool_identity,
+        api_mode=api_mode,
+        source=source,
+    )
+
+
+def _runtime_discovery_identity(
+    provider: str,
+    resolver_name: str,
+    runtime: Mapping[str, Any],
+) -> tuple[str, str, str, str, str]:
+    base_url = str(runtime.get("base_url") or "")
+    endpoint_identity = str(runtime.get("endpoint_identity") or "")
+    if not endpoint_identity:
+        endpoint_identity = _endpoint_discovery_identity(provider, base_url)
+    pool_identity = str(runtime.get("credential_pool_identity") or "")
+    pool = runtime.get("credential_pool")
+    if not pool_identity and pool is not None:
+        pool_provider = str(getattr(pool, "provider", "") or "").strip()
+        if pool_provider:
+            pool_identity = f"pool:{pool_provider}"
+    auth_identity = str(runtime.get("auth_identity") or "")
+    if not auth_identity:
+        if pool_identity:
+            auth_identity = pool_identity
+        elif provider in {"openai-codex", "xai-oauth", "copilot"}:
+            auth_identity = f"subscription:{resolver_name}"
+        elif runtime.get("api_key"):
+            auth_identity = f"api-key:{resolver_name}"
+        else:
+            auth_identity = f"local:{resolver_name}"
+    fingerprint = _credential_discovery_fingerprint(
+        provider=provider,
+        resolver_name=resolver_name,
+        api_key=runtime.get("api_key"),
+        endpoint_identity=endpoint_identity,
+        credential_pool_identity=pool_identity,
+    )
+    api_mode = str(runtime.get("api_mode") or "chat_completions")
+    return endpoint_identity, auth_identity, fingerprint, pool_identity, api_mode
+
+
+def _lmstudio_local_runtime_facts(raw_model: Mapping[str, Any]) -> dict[str, Any]:
+    """Return only local compatibility facts explicitly reported by LM Studio."""
+    facts: dict[str, Any] = {}
+    open_weights = raw_model.get("open_weights")
+    if isinstance(open_weights, bool):
+        facts["open_weights"] = open_weights
+    license_id = raw_model.get("license_id") or raw_model.get("license")
+    if isinstance(license_id, str) and license_id.strip():
+        facts["license_id"] = license_id.strip()
+    for key in ("model_size_bytes", "size_bytes"):
+        size = raw_model.get(key)
+        if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+            facts["model_size_bytes"] = size
+            break
+    loaded_healthy = raw_model.get("loaded_healthy")
+    if isinstance(loaded_healthy, bool):
+        facts["loaded_healthy"] = loaded_healthy
+    else:
+        instances = raw_model.get("loaded_instances")
+        if isinstance(instances, list):
+            healthy_states = {"healthy", "loaded", "ready", "running"}
+            if any(
+                isinstance(instance, Mapping)
+                and str(
+                    instance.get("status") or instance.get("state") or ""
+                ).strip().lower()
+                in healthy_states
+                for instance in instances
+            ):
+                facts["loaded_healthy"] = True
+    hardware_compatible = raw_model.get("hardware_compatible")
+    if isinstance(hardware_compatible, bool):
+        facts["hardware_compatible"] = hardware_compatible
+    return facts
+
+
+def _ollama_server_root(base_url: str) -> str:
+    parsed = urllib.parse.urlparse(str(base_url or "").strip())
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme not in {"http", "https"} or hostname not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",
+    }:
+        raise ValueError("Ollama native inventory requires a loopback endpoint")
+    path = parsed.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    return urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, path.rstrip("/"), "", "", "")
+    )
+
+
+def _ollama_json_request(
+    url: str,
+    *,
+    timeout: float,
+    payload: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any]:
+    body = None
+    method = "GET"
+    headers = {"Accept": "application/json", "User-Agent": _HERMES_USER_AGENT}
+    if payload is not None:
+        body = json.dumps(dict(payload), separators=(",", ":")).encode("utf-8")
+        method = "POST"
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        decoded = json.loads(response.read().decode("utf-8"))
+    if not isinstance(decoded, Mapping):
+        raise ValueError("Ollama native inventory returned a non-object payload")
+    return decoded
+
+
+def _ollama_license_id(value: Any) -> str | None:
+    if isinstance(value, list):
+        value = next((item for item in value if isinstance(item, str)), None)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    normalized = text.casefold()
+    if "apache license" in normalized and "2.0" in normalized:
+        return "apache-2.0"
+    if normalized in {"apache-2.0", "apache 2.0"}:
+        return "apache-2.0"
+    if "mit license" in normalized or normalized == "mit":
+        return "mit"
+    if "llama" in normalized and "community license" in normalized:
+        return "llama-community"
+    if "\n" not in text and len(text) <= 128 and re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._+ -]*",
+        text,
+    ):
+        return re.sub(r"[ _]+", "-", normalized)
+    return None
+
+
+def _ollama_fetch_native_models(
+    *,
+    base_url: str,
+    timeout: float = 5.0,
+) -> list[dict[str, Any]]:
+    """Return conservative installed-model facts from Ollama's native API."""
+    root = _ollama_server_root(base_url)
+    tags = _ollama_json_request(root + "/api/tags", timeout=timeout)
+    running = _ollama_json_request(root + "/api/ps", timeout=timeout)
+    running_by_name = {
+        str(item.get("name") or item.get("model") or "").strip(): item
+        for item in running.get("models", [])
+        if isinstance(item, Mapping)
+        and str(item.get("name") or item.get("model") or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    for tagged in tags.get("models", []):
+        if not isinstance(tagged, Mapping):
+            continue
+        model = str(tagged.get("name") or tagged.get("model") or "").strip()
+        digest = str(tagged.get("digest") or "").strip()
+        size = tagged.get("size")
+        details = tagged.get("details")
+        if (
+            not model
+            or not digest
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size <= 0
+            or not isinstance(details, Mapping)
+        ):
+            continue
+        shown = _ollama_json_request(
+            root + "/api/show",
+            timeout=timeout,
+            payload={"model": model},
+        )
+        shown_details = shown.get("details")
+        if not isinstance(shown_details, Mapping):
+            shown_details = details
+        model_format = str(shown_details.get("format") or "").strip().casefold()
+        license_id = _ollama_license_id(shown.get("license"))
+        loaded = running_by_name.get(model)
+        loaded_digest = (
+            str(loaded.get("digest") or "").strip()
+            if isinstance(loaded, Mapping)
+            else ""
+        )
+        available_vram = (
+            loaded.get("size_vram") if isinstance(loaded, Mapping) else None
+        )
+        capabilities = shown.get("capabilities")
+        rows.append(
+            {
+                "model": model,
+                "digest": digest,
+                "model_size_bytes": size,
+                "format": model_format,
+                "license_id": license_id,
+                "open_weights": bool(model_format == "gguf" and license_id),
+                "loaded_healthy": bool(loaded is not None and loaded_digest == digest),
+                "available_vram_bytes": (
+                    available_vram
+                    if isinstance(available_vram, int)
+                    and not isinstance(available_vram, bool)
+                    and available_vram >= 0
+                    else None
+                ),
+                "supports_tools": bool(
+                    isinstance(capabilities, list) and "tools" in capabilities
+                ),
+            }
+        )
+    return rows
+
+
+def _discover_exact_resolver(
+    provider: str,
+    resolver_name: str,
+    *,
+    force_refresh: bool,
+    probe_live: bool = True,
+    configured_models: tuple[str, ...] = (),
+) -> ProviderModelDiscovery:
+    del force_refresh
+    from hades_cli.runtime_provider import resolve_runtime_provider
+
+    observed_at = _discovery_timestamp()
+    curated = list(_PROVIDER_MODELS.get(provider, []))
+    configured = list(configured_models)
+    fallback_visible = _deduplicated_merge(configured, curated)
+    try:
+        runtime = resolve_runtime_provider(
+            requested=resolver_name,
+            target_model="",
+        )
+    except Exception:
+        endpoint = _endpoint_discovery_identity(provider, resolver_name)
+        return _provider_discovery_result(
+            provider=provider,
+            resolver_name=resolver_name,
+            visible_models=fallback_visible,
+            live_models=[],
+            live_attempt_status=("failed" if probe_live else "probe_disabled"),
+            endpoint_identity=endpoint,
+            auth_identity=f"unresolved:{resolver_name}",
+            credential_fingerprint=_hashed_identity(
+                "credential", f"{provider}|{resolver_name}|unresolved"
+            ),
+            observed_at=observed_at,
+            configured_models=set(configured),
+        )
+
+    canonical_provider = str(runtime.get("provider") or provider).strip()
+    (
+        endpoint_identity,
+        auth_identity,
+        fingerprint,
+        pool_identity,
+        api_mode,
+    ) = _runtime_discovery_identity(canonical_provider, resolver_name, runtime)
+    api_key = runtime.get("api_key")
+    base_url = str(runtime.get("base_url") or "")
+    live: list[str] = []
+    authenticated_reasoning_options: dict[str, list[str]] = {}
+    authenticated_local_runtime: dict[str, dict[str, Any]] = {}
+    status = (
+        "probe_disabled"
+        if not probe_live or callable(api_key)
+        else "failed"
+    )
+    if probe_live and not callable(api_key) and base_url:
+        try:
+            if canonical_provider == "lmstudio":
+                raw_models = _lmstudio_fetch_raw_models(
+                    api_key=str(api_key or ""),
+                    base_url=base_url,
+                )
+                for raw_model in raw_models or []:
+                    if not isinstance(raw_model, dict):
+                        continue
+                    if str(raw_model.get("type") or "").strip().lower() == "embedding":
+                        continue
+                    model_id = str(
+                        raw_model.get("key") or raw_model.get("id") or ""
+                    ).strip()
+                    if not model_id:
+                        continue
+                    live.append(model_id)
+                    authenticated_local_runtime[model_id] = (
+                        _lmstudio_local_runtime_facts(raw_model)
+                    )
+            elif canonical_provider == "ollama":
+                native_models = _ollama_fetch_native_models(base_url=base_url)
+                for native_model in native_models:
+                    model_id = str(native_model.get("model") or "").strip()
+                    if not model_id:
+                        continue
+                    live.append(model_id)
+                    authenticated_local_runtime[model_id] = {
+                        "backend_identity": f"ollama:{endpoint_identity}",
+                        "evidence_backend": "ollama",
+                        "evidence_supported": True,
+                        "open_weights": native_model.get("open_weights") is True,
+                        "license_id": native_model.get("license_id"),
+                        "model_size_bytes": native_model.get("model_size_bytes"),
+                        "available_vram_bytes": native_model.get(
+                            "available_vram_bytes"
+                        ),
+                        "loaded_healthy": native_model.get("loaded_healthy") is True,
+                        "hardware_compatible": (
+                            True
+                            if native_model.get("loaded_healthy") is True
+                            else None
+                        ),
+                    }
+            elif canonical_provider == "openai-codex":
+                from hades_cli.codex_models import _fetch_models_from_api
+
+                live = list(_fetch_models_from_api(str(api_key or "")) or [])
+            elif canonical_provider in {"copilot", "copilot-acp"}:
+                catalog = fetch_github_model_catalog(
+                    str(api_key or ""),
+                    authenticated_only=True,
+                )
+                live = [
+                    str(item.get("id") or "").strip()
+                    for item in (catalog or [])
+                    if str(item.get("id") or "").strip()
+                ]
+                authenticated_reasoning_options = {
+                    model: github_model_reasoning_efforts(
+                        model,
+                        catalog=catalog,
+                    )
+                    for model in live
+                }
+            else:
+                live = list(
+                    fetch_api_models(
+                        str(api_key or ""),
+                        base_url,
+                        headers=(runtime.get("extra_headers") or None),
+                        api_mode=api_mode,
+                    )
+                    or []
+                )
+            status = "succeeded" if live else "failed"
+        except Exception:
+            status = "failed"
+
+    if live:
+        if (
+            canonical_provider in _LIVE_FIRST_PICKER_PROVIDERS
+            or canonical_provider.startswith("custom")
+        ):
+            visible = _deduplicated_merge(live, fallback_visible)
+        else:
+            visible = _deduplicated_merge(fallback_visible, live)
+    else:
+        visible = fallback_visible
+    return _provider_discovery_result(
+        provider=canonical_provider,
+        resolver_name=resolver_name,
+        visible_models=visible,
+        live_models=live,
+        live_attempt_status=status,
+        endpoint_identity=endpoint_identity,
+        auth_identity=auth_identity,
+        credential_fingerprint=fingerprint,
+        credential_pool_identity=pool_identity,
+        api_mode=api_mode,
+        observed_at=observed_at,
+        configured_models=set(configured),
+        authenticated_reasoning_options=authenticated_reasoning_options,
+        authenticated_local_runtime=authenticated_local_runtime,
+        source=str(runtime.get("source") or "resolved-runtime"),
+    )
+
+
+def _discover_profile_provider(
+    provider: str,
+    resolver_name: str,
+) -> ProviderModelDiscovery | None:
+    try:
+        from providers import get_provider_profile
+        from hades_cli.auth import resolve_api_key_provider_credentials
+
+        profile = get_provider_profile(provider)
+    except Exception:
+        return None
+    if not profile or profile.auth_type != "api_key" or not profile.base_url:
+        return None
+    try:
+        credentials = resolve_api_key_provider_credentials(provider)
+    except Exception:
+        credentials = {}
+    api_key = str(credentials.get("api_key") or "").strip()
+    base_url = str(credentials.get("base_url") or profile.base_url).strip()
+    endpoint_identity = _endpoint_discovery_identity(provider, base_url)
+    auth_identity = f"api-key:{resolver_name}" if api_key else f"unconfigured:{resolver_name}"
+    fingerprint = _credential_discovery_fingerprint(
+        provider=provider,
+        resolver_name=resolver_name,
+        api_key=api_key,
+        endpoint_identity=endpoint_identity,
+        credential_pool_identity=f"pool:{resolver_name}",
+    )
+    curated = list(_PROVIDER_MODELS.get(provider, [])) or list(
+        profile.fallback_models or ()
+    )
+    live: list[str] = []
+    status = "probe_disabled"
+    if api_key:
+        try:
+            live = list(
+                profile.fetch_models(api_key=api_key, base_url=base_url or None)
+                or []
+            )
+            status = "succeeded" if live else "failed"
+        except Exception:
+            status = "failed"
+    if live:
+        if provider in _LIVE_FIRST_PICKER_PROVIDERS:
+            visible = _deduplicated_merge(live, curated)
+        else:
+            visible = _deduplicated_merge(curated, live)
+    else:
+        visible = curated
+    return _provider_discovery_result(
+        provider=provider,
+        resolver_name=resolver_name,
+        visible_models=visible,
+        live_models=live,
+        live_attempt_status=status,
+        endpoint_identity=endpoint_identity,
+        auth_identity=auth_identity,
+        credential_fingerprint=fingerprint,
+        credential_pool_identity=f"pool:{resolver_name}",
+        observed_at=_discovery_timestamp(),
+        source="provider-profile",
+    )
+
+
+def provider_model_discovery(
+    provider: Optional[str],
+    *,
+    force_refresh: bool = False,
+    resolver_name: Optional[str] = None,
+) -> ProviderModelDiscovery:
+    """Discover visible models while preserving exact access provenance."""
+    normalized = normalize_provider(provider) or str(provider or "").strip().lower()
+    resolver = str(resolver_name or normalized).strip()
+    if not normalized:
+        return ProviderModelDiscovery(
+            provider="",
+            resolver_name=resolver,
+            models=(),
+            model_provenance={},
+            provenance_details={},
+            live_attempt_status="not_attempted",
+            observed_at=_discovery_timestamp(),
+            credential_fingerprint="credential:none",
+            endpoint_identity="endpoint:none",
+            auth_identity="unconfigured:none",
+        )
+
+    if resolver_name is not None:
+        return _discover_exact_resolver(
+            normalized,
+            resolver,
+            force_refresh=force_refresh,
+        )
+
+    if normalized == "openai-codex":
+        from hades_cli.codex_models import (
+            _fetch_models_from_api,
+            get_codex_model_ids,
+        )
+
+        access_token = ""
+        base_url = "https://chatgpt.com/backend-api/codex"
+        try:
+            from hades_cli.auth import resolve_codex_runtime_credentials
+
+            credentials = resolve_codex_runtime_credentials(
+                refresh_if_expiring=True
+            )
+            access_token = str(credentials.get("api_key") or "")
+            base_url = str(credentials.get("base_url") or base_url)
+        except Exception:
+            pass
+        live = _fetch_models_from_api(access_token) if access_token else []
+        visible = live or get_codex_model_ids(access_token=None)
+        endpoint_identity = _endpoint_discovery_identity(normalized, base_url)
+        auth_identity = f"subscription:{resolver}"
+        return _provider_discovery_result(
+            provider=normalized,
+            resolver_name=resolver,
+            visible_models=list(visible),
+            live_models=list(live),
+            live_attempt_status=(
+                "succeeded" if live else ("failed" if access_token else "probe_disabled")
+            ),
+            endpoint_identity=endpoint_identity,
+            auth_identity=auth_identity,
+            credential_fingerprint=_credential_discovery_fingerprint(
+                provider=normalized,
+                resolver_name=resolver,
+                api_key=access_token,
+                endpoint_identity=endpoint_identity,
+                credential_pool_identity=f"pool:{resolver}",
+            ),
+            credential_pool_identity=f"pool:{resolver}",
+            api_mode="codex_responses",
+            observed_at=_discovery_timestamp(),
+            source="codex-models",
+        )
+
+    if normalized == "deepinfra":
+        # DeepInfra's generic provider-profile endpoint mixes chat, image,
+        # video, speech, and embedding models.  Preserve the compatibility
+        # wrapper's chat-only contract by using the tagged catalog directly,
+        # including its authoritative empty/failure result.
+        visible = list(
+            _fetch_deepinfra_models(force_refresh=force_refresh) or []
+        )
+        api_key = os.getenv("DEEPINFRA_API_KEY", "").strip()
+        endpoint_identity = _endpoint_discovery_identity(
+            normalized,
+            deepinfra_base_url(),
+        )
+        return _provider_discovery_result(
+            provider=normalized,
+            resolver_name=resolver,
+            visible_models=visible,
+            live_models=(visible if api_key else []),
+            live_attempt_status=("succeeded" if visible else "failed"),
+            endpoint_identity=endpoint_identity,
+            auth_identity=(
+                f"api-key:{resolver}" if api_key else f"unconfigured:{resolver}"
+            ),
+            credential_fingerprint=_credential_discovery_fingerprint(
+                provider=normalized,
+                resolver_name=resolver,
+                api_key=api_key,
+                endpoint_identity=endpoint_identity,
+                credential_pool_identity=f"pool:{resolver}",
+            ),
+            credential_pool_identity=f"pool:{resolver}",
+            observed_at=_discovery_timestamp(),
+            source="deepinfra-tagged-catalog",
+        )
+
+    profile_result = _discover_profile_provider(normalized, resolver)
+    if profile_result is not None:
+        return profile_result
+
+    visible = _legacy_provider_model_ids(
+        normalized,
+        force_refresh=force_refresh,
+    )
+    endpoint_identity = _endpoint_discovery_identity(normalized, "")
+    fingerprint = _credential_fingerprint(normalized)
+    return _provider_discovery_result(
+        provider=normalized,
+        resolver_name=resolver,
+        visible_models=list(visible),
+        live_models=[],
+        live_attempt_status="probe_disabled",
+        endpoint_identity=endpoint_identity,
+        auth_identity=f"configured:{resolver}",
+        credential_fingerprint=fingerprint,
+        credential_pool_identity=f"pool:{resolver}",
+        observed_at=_discovery_timestamp(),
+        source="legacy-compatible-fallback",
+    )
+
+
+def provider_model_ids(
+    provider: Optional[str],
+    *,
+    force_refresh: bool = False,
+) -> list[str]:
+    """Compatibility list wrapper over provenance-bearing discovery."""
+    return list(
+        provider_model_discovery(
+            provider,
+            force_refresh=force_refresh,
+        ).models
+    )
+
+
 # ---------------------------------------------------------------------------
 # Generic disk cache for provider_model_ids() — keeps /model picker fast.
 # ---------------------------------------------------------------------------
@@ -2779,58 +3736,257 @@ def _save_provider_models_cache(data: dict) -> None:
         pass
 
 
-def cached_provider_model_ids(
+def _provider_discovery_from_payload(payload: Mapping[str, Any]) -> ProviderModelDiscovery:
+    return ProviderModelDiscovery(
+        provider=str(payload.get("provider") or ""),
+        resolver_name=str(payload.get("resolver_name") or ""),
+        models=tuple(str(model) for model in (payload.get("models") or [])),
+        model_provenance=dict(payload.get("model_provenance") or {}),
+        provenance_details=dict(payload.get("provenance_details") or {}),
+        live_attempt_status=str(
+            payload.get("live_attempt_status") or "not_attempted"
+        ),
+        observed_at=str(payload.get("observed_at") or _discovery_timestamp()),
+        credential_fingerprint=str(
+            payload.get("credential_fingerprint") or "credential:unknown"
+        ),
+        endpoint_identity=str(
+            payload.get("endpoint_identity") or "endpoint:unknown"
+        ),
+        auth_identity=str(payload.get("auth_identity") or "configured:unknown"),
+        credential_pool_identity=str(
+            payload.get("credential_pool_identity") or ""
+        ),
+        api_mode=str(payload.get("api_mode") or "chat_completions"),
+        source=str(payload.get("source") or "provider-cache"),
+    )
+
+
+def _discovery_cache_scope(
+    provider: str,
+    resolver_name: str,
+    *,
+    resolve_exact: bool,
+) -> tuple[str, str, str]:
+    if resolve_exact:
+        try:
+            from hades_cli.runtime_provider import resolve_runtime_provider
+
+            runtime = resolve_runtime_provider(
+                requested=resolver_name,
+                target_model="",
+            )
+            endpoint, _auth, fingerprint, _pool, _mode = (
+                _runtime_discovery_identity(provider, resolver_name, runtime)
+            )
+            return endpoint, fingerprint, _hashed_identity(
+                "scope", f"{provider}|{resolver_name}|{endpoint}|{fingerprint}"
+            )
+        except Exception:
+            pass
+    try:
+        from providers import get_provider_profile
+        from hades_cli.auth import resolve_api_key_provider_credentials
+
+        profile = get_provider_profile(provider)
+        if profile and profile.auth_type == "api_key" and profile.base_url:
+            credentials = resolve_api_key_provider_credentials(provider)
+            api_key = str(credentials.get("api_key") or "").strip()
+            base_url = str(
+                credentials.get("base_url") or profile.base_url
+            ).strip()
+            endpoint = _endpoint_discovery_identity(provider, base_url)
+            fingerprint = _credential_discovery_fingerprint(
+                provider=provider,
+                resolver_name=resolver_name,
+                api_key=api_key,
+                endpoint_identity=endpoint,
+                credential_pool_identity=f"pool:{resolver_name}",
+            )
+            return endpoint, fingerprint, _hashed_identity(
+                "scope",
+                f"{provider}|{resolver_name}|{endpoint}|{fingerprint}",
+            )
+    except Exception:
+        pass
+    endpoint = _endpoint_discovery_identity(provider, "")
+    fingerprint = _credential_fingerprint(provider)
+    return endpoint, fingerprint, _hashed_identity(
+        "scope", f"{provider}|{resolver_name}|{endpoint}|{fingerprint}"
+    )
+
+
+def cached_provider_model_discovery(
     provider: Optional[str],
     *,
     force_refresh: bool = False,
     ttl_seconds: int = _PROVIDER_MODELS_CACHE_TTL,
-) -> list[str]:
-    """Disk-cached wrapper around :func:`provider_model_ids`.
+    resolver_name: Optional[str] = None,
+) -> ProviderModelDiscovery:
+    """Credential/access-scoped cache for provenance-bearing discovery.
 
-    Hits the cache when fresh; otherwise calls the live function and
-    persists a non-empty result. Always returns a list (never None).
+    Successful live evidence is reusable only under the exact provider,
+    endpoint, resolver, and credential fingerprint that produced it.
     """
     normalized = normalize_provider(provider) or (provider or "")
+    exact_resolver = resolver_name is not None
+    resolver = str(resolver_name or normalized).strip()
     if not normalized:
-        return []
+        return provider_model_discovery(
+            provider,
+            resolver_name=resolver if exact_resolver else None,
+        )
 
     cache = _load_provider_models_cache()
-    fp = _credential_fingerprint(normalized)
-    entry = cache.get(normalized)
+    endpoint_scope, fingerprint_scope, cache_key = _discovery_cache_scope(
+        normalized,
+        resolver,
+        resolve_exact=exact_resolver,
+    )
+    entry = cache.get(cache_key)
     now = time.time()
 
     if (
         not force_refresh
         and isinstance(entry, dict)
-        and entry.get("fp") == fp
-        and isinstance(entry.get("models"), list)
-        and entry["models"]
+        and entry.get("credential_fingerprint") == fingerprint_scope
+        and entry.get("endpoint_identity") == endpoint_scope
+        and entry.get("resolver_name") == resolver
+        and isinstance(entry.get("discovery"), dict)
         and (now - float(entry.get("at", 0))) < ttl_seconds
     ):
-        return list(entry["models"])
+        return _provider_discovery_from_payload(entry["discovery"])
 
-    # Cache miss / stale / forced refresh — call the live path.
-    live = provider_model_ids(normalized, force_refresh=force_refresh)
-    if live:
-        cache[normalized] = {
-            "fp": fp,
+    current = provider_model_discovery(
+        normalized,
+        force_refresh=force_refresh,
+        resolver_name=resolver if exact_resolver else None,
+    )
+    if current.live_attempt_status == "succeeded" and current.models:
+        actual_key = _hashed_identity(
+            "scope",
+            "|".join(
+                (
+                    normalized,
+                    resolver,
+                    current.endpoint_identity,
+                    current.credential_fingerprint,
+                )
+            ),
+        )
+        cache[actual_key] = {
+            "provider": normalized,
+            "resolver_name": resolver,
+            "endpoint_identity": current.endpoint_identity,
+            "credential_fingerprint": current.credential_fingerprint,
             "at": now,
-            "models": list(live),
+            "discovery": current.to_payload(),
         }
         _save_provider_models_cache(cache)
-        return list(live)
+        return current
 
-    # Live fetch returned nothing. If we have a stale entry with the
-    # SAME fingerprint, prefer it over an empty result — stale data
-    # beats no data when the network is flaky.
+    # A stale successful entry may remain visible under the exact same access
+    # identity, but it is explicitly downgraded and cannot prove current access.
     if (
         isinstance(entry, dict)
-        and entry.get("fp") == fp
-        and isinstance(entry.get("models"), list)
-        and entry["models"]
+        and entry.get("credential_fingerprint") == fingerprint_scope
+        and entry.get("endpoint_identity") == endpoint_scope
+        and entry.get("resolver_name") == resolver
+        and isinstance(entry.get("discovery"), dict)
     ):
-        return list(entry["models"])
-    return list(live or [])
+        stale = _provider_discovery_from_payload(entry["discovery"])
+        visible = _deduplicated_merge(list(current.models), list(stale.models))
+        stale_models = {model.lower() for model in stale.models}
+        provenance: dict[str, str] = {}
+        details: dict[str, dict[str, Any]] = {}
+        for model in visible:
+            if model.lower() in stale_models:
+                provenance[model] = "stale_live_cache"
+                details[model] = {
+                    "source": "stale-live-cache",
+                    "observed_at": stale.observed_at,
+                }
+            else:
+                provenance[model] = current.model_provenance[model]
+                details[model] = dict(current.provenance_details[model])
+        return ProviderModelDiscovery(
+            provider=current.provider,
+            resolver_name=current.resolver_name,
+            models=tuple(visible),
+            model_provenance=provenance,
+            provenance_details=details,
+            live_attempt_status=current.live_attempt_status,
+            observed_at=current.observed_at,
+            credential_fingerprint=current.credential_fingerprint,
+            endpoint_identity=current.endpoint_identity,
+            auth_identity=current.auth_identity,
+            credential_pool_identity=current.credential_pool_identity,
+            api_mode=current.api_mode,
+            source="stale-provider-cache",
+        )
+
+    # Legacy cache rows remain picker hints only. They never acquire strong
+    # provenance because the old shape did not record the successful path.
+    legacy = cache.get(normalized)
+    if (
+        isinstance(legacy, dict)
+        and legacy.get("fp") == fingerprint_scope
+        and isinstance(legacy.get("models"), list)
+        and legacy["models"]
+    ):
+        visible = _deduplicated_merge(
+            list(current.models),
+            [str(model) for model in legacy["models"]],
+        )
+        legacy_models = {str(model).lower() for model in legacy["models"]}
+        return ProviderModelDiscovery(
+            provider=current.provider,
+            resolver_name=current.resolver_name,
+            models=tuple(visible),
+            model_provenance={
+                model: (
+                    "stale_live_cache"
+                    if model.lower() in legacy_models
+                    else current.model_provenance[model]
+                )
+                for model in visible
+            },
+            provenance_details={
+                model: (
+                    {"source": "legacy-stale-cache"}
+                    if model.lower() in legacy_models
+                    else dict(current.provenance_details[model])
+                )
+                for model in visible
+            },
+            live_attempt_status=current.live_attempt_status,
+            observed_at=current.observed_at,
+            credential_fingerprint=current.credential_fingerprint,
+            endpoint_identity=current.endpoint_identity,
+            auth_identity=current.auth_identity,
+            credential_pool_identity=current.credential_pool_identity,
+            api_mode=current.api_mode,
+            source="legacy-stale-provider-cache",
+        )
+    return current
+
+
+def cached_provider_model_ids(
+    provider: Optional[str],
+    *,
+    force_refresh: bool = False,
+    ttl_seconds: int = _PROVIDER_MODELS_CACHE_TTL,
+    resolver_name: Optional[str] = None,
+) -> list[str]:
+    """Compatibility list wrapper over cached provider discovery."""
+    return list(
+        cached_provider_model_discovery(
+            provider,
+            force_refresh=force_refresh,
+            ttl_seconds=ttl_seconds,
+            resolver_name=resolver_name,
+        ).models
+    )
 
 
 def clear_provider_models_cache(provider: Optional[str] = None) -> None:
@@ -2848,8 +4004,13 @@ def clear_provider_models_cache(provider: Optional[str] = None) -> None:
             return
         cache = _load_provider_models_cache()
         normalized = normalize_provider(provider) or provider or ""
-        if normalized in cache:
-            del cache[normalized]
+        for key, entry in tuple(cache.items()):
+            if key == normalized or (
+                isinstance(entry, dict)
+                and entry.get("provider") == normalized
+            ):
+                del cache[key]
+        if cache != _load_provider_models_cache():
             _save_provider_models_cache(cache)
     except Exception:
         pass
@@ -2991,7 +4152,10 @@ def _copilot_catalog_item_is_text_model(item: dict[str, Any]) -> bool:
 
 
 def fetch_github_model_catalog(
-    api_key: Optional[str] = None, timeout: float = 5.0
+    api_key: Optional[str] = None,
+    timeout: float = 5.0,
+    *,
+    authenticated_only: bool = False,
 ) -> Optional[list[dict[str, Any]]]:
     """Fetch the live GitHub Copilot model catalog for this account."""
     attempts: list[dict[str, str]] = []
@@ -3000,7 +4164,8 @@ def fetch_github_model_catalog(
             **copilot_default_headers(),
             "Authorization": f"Bearer {api_key}",
         })
-    attempts.append(copilot_default_headers())
+    if not authenticated_only:
+        attempts.append(copilot_default_headers())
 
     for headers in attempts:
         req = urllib.request.Request(COPILOT_MODELS_URL, headers=headers)
@@ -3303,54 +4468,6 @@ def lmstudio_model_reasoning_options(
             return [str(o).strip().lower() for o in opts if isinstance(o, str)]
         return []
     return []
-
-
-def ollama_model_supports_thinking(
-    model: str,
-    base_url: Optional[str],
-    api_key: Optional[str] = None,
-    timeout: float = 5.0,
-) -> Optional[bool]:
-    """Return True if an Ollama (Cloud or local) model advertises ``thinking``.
-
-    Probes the native ``/api/show`` endpoint and checks the ``capabilities``
-    list, which Ollama populates from the model's metadata (e.g.
-    ``deepseek-v4-pro`` → ``["completion", "tools", "thinking"]`` while
-    ``gemma3:27b`` → ``["completion", "vision"]``). This is the authoritative
-    capability source — the OpenAI-compat ``/v1/models`` endpoint omits it.
-
-    Returns:
-        True  — the model declares the ``thinking`` capability.
-        False — ``/api/show`` succeeded but the model has no ``thinking`` cap.
-        None  — the probe failed (unreachable / non-Ollama / error); the caller
-                decides the fallback (we treat None as "don't emit").
-    """
-    import httpx
-
-    server_url = (base_url or "").strip().rstrip("/")
-    if server_url.endswith("/v1"):
-        server_url = server_url[:-3]
-    if not server_url:
-        return None
-
-    bare_model = _strip_ollama_cloud_suffix((model or "").strip())
-    if not bare_model:
-        return None
-
-    token = str(api_key or "").strip()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-
-    try:
-        with httpx.Client(timeout=timeout, headers=headers) as client:
-            resp = client.post(f"{server_url}/api/show", json={"name": bare_model})
-            if resp.status_code != 200:
-                return None
-            caps = resp.json().get("capabilities")
-            if isinstance(caps, list):
-                return "thinking" in caps
-    except Exception:
-        return None
-    return None
 
 
 def _fetch_github_models(api_key: Optional[str] = None, timeout: float = 5.0) -> Optional[list[str]]:

@@ -1251,6 +1251,40 @@ class TestGetDueJobs:
             "by": "new-owner",
         }
 
+    def test_heartbeat_run_claim_rejects_same_owner_rescheduled_job(
+        self,
+        tmp_cron_dir,
+    ):
+        """A stale worker cannot refresh a replacement that retained its owner."""
+        from cron.jobs import _script_launch_job_revision
+
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        original_at = datetime.now(timezone.utc).isoformat()
+        job = create_job(
+            prompt="x",
+            schedule=future,
+            name="R",
+            repeat=1,
+        )
+        jobs = load_jobs()
+        jobs[0]["run_claim"] = {"at": original_at, "by": "same-owner"}
+        save_jobs(jobs)
+        dispatched_revision = _script_launch_job_revision(get_job(job["id"]))
+
+        replacement = update_job(
+            job["id"],
+            {"next_run_at": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()},
+        )
+        assert replacement is not None
+        replacement_claim = replacement["run_claim"]
+
+        assert heartbeat_run_claim(
+            job["id"],
+            expected_owner="same-owner",
+            expected_job_revision_sha256=dispatched_revision,
+        ) is False
+        assert get_job(job["id"])["run_claim"] == replacement_claim
+
     def test_heartbeat_run_claim_rejects_non_oneshot(self, tmp_cron_dir):
         """Heartbeat ownership applies only to one-shot dispatch claims."""
         original_at = datetime.now(timezone.utc).isoformat()
@@ -1870,6 +1904,19 @@ class TestClaimDispatch:
         # direct caller) can't be claimed — proceed rather than suppress it.
         save_jobs([])
         assert claim_dispatch("ghost") is True
+
+    def test_missing_job_with_expected_revision_revokes_stale_dispatch(
+        self,
+        tmp_cron_dir,
+    ):
+        # A scheduler-owned snapshot carries an immutable launch revision. If
+        # the job was removed after that snapshot was read, absence revokes the
+        # queued dispatch instead of authorizing an unpersisted side effect.
+        save_jobs([])
+        assert claim_dispatch(
+            "ghost",
+            expected_job_revision_sha256="0" * 64,
+        ) is False
 
     def test_mark_job_run_does_not_double_count_preclaimed_oneshot(self, tmp_cron_dir):
         # Full lifecycle: claim bumps completed to times, then mark_job_run must

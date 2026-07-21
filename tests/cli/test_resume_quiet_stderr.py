@@ -10,6 +10,7 @@ The fix in cli._init_agent routes three messages to stderr when
 Interactive mode (tool_progress_mode == "full") still uses ChatConsole.
 """
 
+import json
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -42,6 +43,60 @@ def _make_cli(quiet=False, session_id="20260524_111111_xyz", db=None):
 
 
 class TestResumeQuietStderr:
+    def test_runtime_is_restored_before_credential_resolution(self, monkeypatch):
+        db = MagicMock()
+        db.get_session.return_value = {
+            "id": "20260524_111111_xyz",
+            "model": "target-model",
+            "model_config": json.dumps(
+                {
+                    "provider": "custom:target",
+                    "base_url": "https://target.invalid/v1",
+                    "api_mode": "anthropic_messages",
+                    "reasoning_config": {"effort": "high"},
+                }
+            ),
+        }
+        cli = _make_cli(db=db)
+        cli.model = "old-model"
+        cli.provider = "old-provider"
+        cli.requested_provider = "old-provider"
+        cli.api_key = "old-secret"
+        cli._explicit_api_key = "old-secret"
+        cli.base_url = "https://old.invalid/v1"
+        cli._explicit_base_url = "https://old.invalid/v1"
+        cli.api_mode = "chat_completions"
+        cli.reasoning_config = {"effort": "low"}
+        cli._credential_pool = object()
+        observed = {}
+
+        def _resolve_credentials():
+            observed.update(
+                model=cli.model,
+                provider=cli.requested_provider,
+                base_url=cli._explicit_base_url,
+                api_key=cli._explicit_api_key,
+                reasoning=cli.reasoning_config,
+            )
+            return False
+
+        cli._ensure_runtime_credentials = _resolve_credentials
+        monkeypatch.setattr(
+            "agent.runtime_routing.runtime_resolver_requires_initial_task",
+            lambda _scope: False,
+        )
+
+        with patch("cli._prepare_deferred_agent_startup"):
+            assert cli._init_agent() is False
+
+        assert observed == {
+            "model": "target-model",
+            "provider": "custom:target",
+            "base_url": "https://target.invalid/v1",
+            "api_key": None,
+            "reasoning": {"effort": "high"},
+        }
+
     def test_session_not_found_goes_to_stderr_in_quiet_mode(self, capsys):
         db = MagicMock()
         db.get_session.return_value = None

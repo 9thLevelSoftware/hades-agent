@@ -267,12 +267,10 @@ def _resolve_inference_base_url(
 ) -> str:
     """Best-effort base URL for the active inference provider."""
     try:
-        from agent.auxiliary_client import _runtime_main_value
+        from agent.auxiliary_client import _RUNTIME_MAIN_BASE_URL
 
-        runtime = str(_runtime_main_value("base_url") or "").strip()
-        runtime_provider = str(_runtime_main_value("provider") or "").strip().lower()
-        requested_provider = str(provider or "").strip().lower()
-        if runtime and (not requested_provider or requested_provider == runtime_provider):
+        runtime = str(_RUNTIME_MAIN_BASE_URL or "").strip()
+        if runtime:
             return runtime
     except Exception:
         pass
@@ -612,6 +610,93 @@ def _guess_mime(path: Path, raw: Optional[bytes] = None) -> str:
     }.get(suffix, "image/jpeg")
 
 
+def build_runtime_routing_task(
+    user_message: Any,
+    image_paths: Optional[List[Path | str]] = None,
+    image_urls: Optional[List[str]] = None,
+    *,
+    max_image_count: int = 4,
+    max_image_bytes: int = 20_000_000,
+) -> Any:
+    """Build a bounded, ephemeral multimodal task for runtime selection.
+
+    This representation is intentionally separate from the provider message:
+    it contains clean user text plus bounded image bytes, never filesystem
+    paths or provider-specific path hints.  If every attachment cannot be
+    represented completely inside the bound, a content-free image reference
+    preserves the deterministic modality while forcing classifiers that need
+    pixels to take their safe-default path.
+
+    With no attachments the original object is returned unchanged, preserving
+    the ordinary no-routing/no-image call path byte-for-byte.
+    """
+    paths = list(image_paths or ())
+    urls = [str(url).strip() for url in (image_urls or ()) if str(url).strip()]
+    if not paths and not urls:
+        return user_message
+    if (
+        not isinstance(max_image_count, int)
+        or isinstance(max_image_count, bool)
+        or max_image_count <= 0
+        or not isinstance(max_image_bytes, int)
+        or isinstance(max_image_bytes, bool)
+        or max_image_bytes <= 0
+    ):
+        raise ValueError("runtime routing image bounds must be positive integers")
+
+    if isinstance(user_message, str):
+        text_blocks: List[Dict[str, Any]] = [
+            {"type": "text", "text": user_message}
+        ]
+    elif isinstance(user_message, (list, tuple)):
+        text_blocks = []
+        for block in user_message:
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "").strip().casefold()
+            text = block.get("text")
+            if block_type in {"text", "input_text"} and isinstance(text, str):
+                text_blocks.append({"type": "text", "text": text})
+    else:
+        return user_message
+
+    unavailable = {
+        "type": "image",
+        "file_id": "bounded-attachment-unavailable",
+    }
+    if urls or len(paths) > max_image_count:
+        # Remote response size is not trusted before the selected provider
+        # handles it. Preserve image modality without fetching or persisting it.
+        return [*text_blocks, unavailable]
+
+    image_blocks: List[Dict[str, Any]] = []
+    remaining = max_image_bytes
+    for raw_path in paths:
+        path = Path(raw_path)
+        try:
+            from agent.file_safety import raise_if_read_blocked
+
+            raise_if_read_blocked(str(path))
+            size = path.stat().st_size
+            if size < 0 or size > remaining:
+                return [*text_blocks, unavailable]
+            with path.open("rb") as handle:
+                payload = handle.read(remaining + 1)
+            if len(payload) > remaining or len(payload) != size:
+                return [*text_blocks, unavailable]
+        except Exception:
+            return [*text_blocks, unavailable]
+        remaining -= len(payload)
+        image_blocks.append(
+            {
+                "type": "image",
+                "data": payload,
+                "mime_type": _guess_mime(path, raw=payload),
+            }
+        )
+    return [*text_blocks, *image_blocks]
+
+
 def _file_to_data_url(path: Path) -> Optional[str]:
     """Encode a local image as a base64 data URL at its native size.
 
@@ -763,5 +848,6 @@ def build_native_content_parts(
 __all__ = [
     "decide_image_input_mode",
     "build_native_content_parts",
+    "build_runtime_routing_task",
     "extract_image_refs",
 ]

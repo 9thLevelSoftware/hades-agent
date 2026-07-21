@@ -356,6 +356,8 @@ def init_agent(
     pass_session_id: bool = False,
     suppress_status_output: bool = False,
     owns_session_db: bool = False,
+    runtime_routing_context: "AgentRuntimeContext" = None,
+    prepared_agent_runtime: "PreparedAgentRuntime" = None,
 ):
     """
     Initialize the AI Agent.
@@ -407,6 +409,122 @@ def init_agent(
             remain skipped.
     """
     _install_safe_stdio()
+
+    # Runtime routing is a pre-construction operation.  Keep this immediately
+    # after safe stdio installation and before assigning any runtime attribute
+    # or constructing/resolving a provider client.  The helper returns new
+    # immutable values; it never mutates caller-owned constructor inputs.
+    _runtime_constructor_args = {
+        "model": model,
+        "provider": provider,
+        "base_url": base_url,
+        "api_key": api_key,
+        "api_mode": api_mode,
+        "acp_command": acp_command,
+        "acp_args": acp_args,
+        "command": command,
+        "args": args,
+        "credential_pool": credential_pool,
+        "reasoning_config": reasoning_config,
+        "fallback_model": fallback_model,
+    }
+    _runtime_initial_fallback_index = None
+    if runtime_routing_context is None and prepared_agent_runtime is None:
+        # Preserve the historical constructor path byte-for-byte for ordinary
+        # callers: no routing module import, plugin discovery, validation, or
+        # normalization occurs without an explicit routing handoff.
+        _prepared_runtime = None
+        _runtime_binding = None
+    else:
+        from agent.runtime_routing import (
+            AgentRuntimeRequest,
+            RUNTIME_ROUTING_CONTRACT_VERSION,
+            apply_runtime_plan_to_constructor_arguments,
+            constructor_runtime_spec,
+            finalize_prepared_agent_runtime,
+            prepare_constructor_runtime,
+            resolve_ordinary_hermes_runtime,
+            validate_prepared_agent_runtime,
+        )
+
+        _constructor_runtime = constructor_runtime_spec(
+            model=model,
+            provider=provider,
+            base_url=base_url,
+            api_key=api_key,
+            api_mode=api_mode,
+            acp_command=acp_command or command,
+            acp_args=acp_args or args,
+            credential_pool=credential_pool,
+            reasoning_config=reasoning_config,
+            fallback_model=fallback_model,
+        )
+        (
+            _prepared_runtime,
+            _runtime_binding,
+            _effective_runtime,
+        ) = prepare_constructor_runtime(
+            context=runtime_routing_context,
+            prepared=prepared_agent_runtime,
+            effective_constructor_runtime=_constructor_runtime,
+            session_store=session_db,
+        )
+        if _runtime_binding is None:
+            # Context-only inherit/shadow is a two-phase handoff: policy runs
+            # first, then the canonical Hermes credential/endpoint resolver,
+            # then the exact result is sealed before any runtime attribute or
+            # provider client consumes it.
+            _runtime_resolution = resolve_ordinary_hermes_runtime(
+                _constructor_runtime,
+                owns_fallbacks=_prepared_runtime.plan.owns_fallbacks,
+            )
+            _effective_runtime = _runtime_resolution.runtime
+            _runtime_initial_fallback_index = (
+                _runtime_resolution.activated_fallback_index
+            )
+            _runtime_request = AgentRuntimeRequest(
+                contract_version=RUNTIME_ROUTING_CONTRACT_VERSION,
+                context=runtime_routing_context,
+                baseline=_constructor_runtime,
+            )
+            _prepared_runtime = finalize_prepared_agent_runtime(
+                _prepared_runtime,
+                _runtime_request,
+                _effective_runtime,
+            )
+            _runtime_binding = validate_prepared_agent_runtime(
+                _prepared_runtime,
+                context=runtime_routing_context,
+                effective_runtime=_effective_runtime,
+            )
+        _runtime_constructor_args = apply_runtime_plan_to_constructor_arguments(
+            _runtime_constructor_args,
+            binding=_runtime_binding,
+            effective_runtime=_effective_runtime,
+        )
+    # Replace every local that the existing initializer reads later.  In
+    # particular, changing only agent attributes would leak the old URL, key,
+    # or fallback chain through one of the two fallback/client seams.
+    model = _runtime_constructor_args["model"]
+    provider = _runtime_constructor_args["provider"]
+    base_url = _runtime_constructor_args["base_url"]
+    api_key = _runtime_constructor_args["api_key"]
+    api_mode = _runtime_constructor_args["api_mode"]
+    acp_command = _runtime_constructor_args["acp_command"]
+    acp_args = _runtime_constructor_args["acp_args"]
+    command = _runtime_constructor_args["command"]
+    args = _runtime_constructor_args["args"]
+    credential_pool = _runtime_constructor_args["credential_pool"]
+    reasoning_config = _runtime_constructor_args["reasoning_config"]
+    fallback_model = _runtime_constructor_args["fallback_model"]
+
+    agent._prepared_agent_runtime = _prepared_runtime
+    agent._runtime_routing_binding = _runtime_binding
+    agent._runtime_fallback_authority = (
+        "plugin"
+        if _runtime_binding is not None and _runtime_binding.owns_fallbacks
+        else "host"
+    )
 
     agent.model = model
     agent.max_iterations = max_iterations
@@ -494,8 +612,18 @@ def init_agent(
                 agent.provider,
                 base_url=agent.base_url,
             ):
+                if _runtime_binding is not None:
+                    from agent.runtime_routing import InvalidPreparedAgentRuntime
+
+                    raise InvalidPreparedAgentRuntime()
                 agent._credential_pool = None
-        except Exception:
+        except Exception as exc:
+            if _runtime_binding is not None:
+                from agent.runtime_routing import InvalidPreparedAgentRuntime
+
+                if isinstance(exc, InvalidPreparedAgentRuntime):
+                    raise
+                raise InvalidPreparedAgentRuntime() from None
             agent._credential_pool = None
 
     # Eagerly warm the transport cache so import errors surface at init,
@@ -754,25 +882,6 @@ def init_agent(
     # commentary when the provider later returns it as a completed interim
     # assistant message.
     agent._current_streamed_assistant_text = ""
-    # Completed interim messages delivered during the current user turn.
-    # Unlike token-stream tracking, this spans Codex continuation/tool calls so
-    # repeated commentary is not re-sent before normalization can deduplicate it.
-    agent._delivered_interim_texts: set[str] = set()
-
-    # Single-writer guard for the streaming delta sink (#65991). A stale/
-    # superseded stream (e.g. one the stale-stream detector reconnected past,
-    # whose socket abort raced and never actually stopped the old worker) must
-    # NOT keep writing tokens into the turn alongside the retry's stream —
-    # otherwise two coherent responses interleave token-by-token into one
-    # transcript. Every streaming attempt claims a monotonic writer token; the
-    # delta sink drops chunks whose calling thread holds a stale token. The
-    # threading.local means threads that never claimed (non-streaming callers)
-    # are never fenced, so the guard can only ever drop a superseded stream,
-    # never the single legitimate writer.
-    agent._stream_writer_lock = threading.Lock()
-    agent._stream_writer_token = 0
-    agent._stream_writer_tls = threading.local()
-    agent._stream_writer_dropped = 0
 
     # Optional current-turn user-message override used when the API-facing
     # user message intentionally differs from the persisted transcript
@@ -930,6 +1039,10 @@ def init_agent(
             print(f"🤖 AI Agent initialized with MoA preset: {agent.model}")
     elif agent.api_mode == "bedrock_converse":
         # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
+        # Keep the live runtime fields byte-for-byte aligned with the sealed
+        # handoff even though boto3 consumes its own credential chain.
+        agent.api_key = api_key
+        agent.base_url = base_url
         # Region is extracted from the base_url or defaults to us-east-1.
         _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
         agent._bedrock_region = _region_match.group(1) if _region_match else "us-east-1"
@@ -1163,7 +1276,13 @@ def init_agent(
             logger.debug("custom-provider TLS resolution skipped", exc_info=True)
 
         agent.api_key = client_kwargs.get("api_key", "")
-        agent.base_url = client_kwargs.get("base_url", agent.base_url)
+        if _runtime_binding is not None:
+            # Query parameters are split into ``default_query`` for the SDK,
+            # but the live runtime identity must remain identical to the
+            # authenticated handoff (not the queryless transport URL).
+            agent.base_url = base_url
+        else:
+            agent.base_url = client_kwargs.get("base_url", agent.base_url)
         try:
             from agent.ssl_guard import verify_ca_bundle_with_fallback
 
@@ -1202,8 +1321,15 @@ def init_agent(
         agent._fallback_chain = [fallback_model]
     else:
         agent._fallback_chain = []
-    agent._fallback_index = 0
-    agent._fallback_activated = getattr(agent, "_fallback_activated", False)
+    if _runtime_initial_fallback_index is not None:
+        agent._fallback_index = min(
+            _runtime_initial_fallback_index + 1,
+            len(agent._fallback_chain),
+        )
+        agent._fallback_activated = True
+    else:
+        agent._fallback_index = 0
+        agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)
     agent._fallback_model = agent._fallback_chain[0] if agent._fallback_chain else None
     if agent._fallback_chain and not agent.quiet_mode:
@@ -1395,6 +1521,18 @@ def init_agent(
         "reasoning_config": reasoning_config,
         "max_tokens": max_tokens,
     }
+    if _runtime_binding is not None:
+        # Routed sessions must be reconstructable without persisting provider
+        # credentials. The generic projector admits only bounded public
+        # identity fields and a credential-free endpoint URL.
+        from agent.runtime_routing import session_runtime_metadata
+
+        agent._session_init_model_config.update(
+            session_runtime_metadata(
+                _runtime_binding.runtime,
+                manual_pin_source=_runtime_binding.manual_pin_source,
+            )
+        )
     
     # In-memory todo list for task planning (one per agent/session)
     from tools.todo_tool import TodoStore
@@ -1406,40 +1544,6 @@ def init_agent(
         _agent_cfg = _load_agent_config()
     except Exception:
         _agent_cfg = {}
-
-    # Codex commentary visibility (display.show_commentary, default true).
-    # When true, completed Codex phase=commentary messages are delivered as
-    # visible mid-turn updates through the interim message path. When false,
-    # commentary falls back to the reasoning channel (visible only with
-    # show_reasoning enabled).
-    agent.show_commentary = True
-    try:
-        _display_section = _agent_cfg.get("display", {})
-        if isinstance(_display_section, dict):
-            agent.show_commentary = bool(_display_section.get("show_commentary", True))
-    except Exception:
-        agent.show_commentary = True
-
-    # LM Studio can either be explicitly preloaded through LM Studio's
-    # management API (the historical Hermes behavior) or left to LM Studio's
-    # just-in-time / Auto-Evict chat-completions path.  Keep the default
-    # explicit for backward compatibility; users with LM Studio Auto-Evict can
-    # opt into JIT via ``model.lmstudio_load_mode: jit``.
-    agent.lmstudio_load_mode = "explicit"
-    try:
-        _model_section = _agent_cfg.get("model", {})
-        if isinstance(_model_section, dict):
-            _load_mode = str(_model_section.get("lmstudio_load_mode", "explicit") or "explicit").strip().lower()
-            if _load_mode in {"explicit", "jit"}:
-                agent.lmstudio_load_mode = _load_mode
-            else:
-                logger.warning(
-                    "Invalid model.lmstudio_load_mode=%r; expected 'explicit' or 'jit'. Using explicit.",
-                    _model_section.get("lmstudio_load_mode"),
-                )
-    except Exception:
-        agent.lmstudio_load_mode = "explicit"
-
     try:
         agent._tool_guardrails = ToolCallGuardrailController(
             ToolCallGuardrailConfig.from_mapping(
@@ -2228,6 +2332,11 @@ def init_agent(
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
         })
+
+    if agent._runtime_routing_binding is not None:
+        from agent.runtime_routing import log_runtime_routing_event
+
+        log_runtime_routing_event(agent._runtime_routing_binding)
 
 
 

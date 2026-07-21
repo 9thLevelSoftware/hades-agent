@@ -80,6 +80,69 @@ class TestHooksList:
 
 
 class TestHooksTest:
+    def test_post_turn_outcome_synthetic_payload_is_content_free(self):
+        captured = []
+        cfg = {
+            "hooks": {
+                "post_turn_outcome": [
+                    {"command": "synthetic-observer"},
+                ]
+            }
+        }
+
+        with (
+            patch("hermes_cli.config.load_config", return_value=cfg),
+            patch(
+                "agent.shell_hooks.run_once",
+                side_effect=lambda _spec, payload: (
+                    captured.append(payload)
+                    or {
+                        "returncode": 0,
+                        "elapsed_seconds": 0,
+                        "stdout": "",
+                        "stderr": "",
+                        "parsed": None,
+                    }
+                ),
+            ),
+        ):
+            _run(
+                SimpleNamespace(
+                    hooks_action="test",
+                    event="post_turn_outcome",
+                    for_tool=None,
+                    payload_file=None,
+                )
+            )
+
+        assert len(captured) == 1
+        assert set(captured[0]) == {
+            "telemetry_schema_version",
+            "session_id",
+            "turn_id",
+            "task_id",
+            "observed_at_unix",
+            "outcome",
+            "api_calls",
+            "tool_iterations",
+            "retry_count",
+            "cost_usd",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "reasoning_effort",
+            "runtime_binding",
+        }
+        assert set(captured[0]["runtime_binding"]) == {
+            "scope",
+            "session_id",
+            "task_id",
+            "action",
+            "model",
+            "provider",
+            "decision_id",
+        }
+
     def test_synthetic_payload_matches_production_shape(self, tmp_path):
         """`hermes hooks test` must feed the script stdin in the same
         shape invoke_hook() would at runtime.  Prior to this fix,
@@ -89,7 +152,9 @@ class TestHooksTest:
         capture = tmp_path / "captured.json"
         script = _hook_script(
             tmp_path,
-            f"#!/usr/bin/env bash\ncat - > {capture}\nprintf '{{}}\\n'\n",
+            "#!/usr/bin/env bash\n"
+            'cat - > "$(dirname "$0")/captured.json"\n'
+            "printf '{}\\n'\n",
         )
         cfg = {"hooks": {"subagent_stop": [{"command": str(script)}]}}
         with patch("hades_cli.config.load_config", return_value=cfg):
@@ -185,14 +250,18 @@ class TestHooksRevoke:
 
 
 class TestHooksDoctor:
-    def test_flags_missing_exec_bit(self, tmp_path):
+    def test_exec_requirement_matches_platform(self, tmp_path):
         script = tmp_path / "hook.sh"
         script.write_text("#!/usr/bin/env bash\nprintf '{}\\n'\n")
-        # No chmod — intentionally not executable
+        # No chmod: POSIX requires X_OK for a bare script.  Windows launches
+        # shell scripts through Git Bash, where readable is the real contract.
         cfg = {"hooks": {"on_session_start": [{"command": str(script)}]}}
         with patch("hades_cli.config.load_config", return_value=cfg):
             out = _run(SimpleNamespace(hooks_action="doctor"))
-        assert "not executable" in out.lower()
+        if shell_hooks.IS_WINDOWS:
+            assert "not executable" not in out.lower()
+        else:
+            assert "not executable" in out.lower()
 
     def test_flags_unallowlisted(self, tmp_path):
         script = _hook_script(tmp_path, "#!/usr/bin/env bash\nprintf '{}\\n'\n")

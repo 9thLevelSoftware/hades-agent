@@ -939,6 +939,27 @@ def compress_context(
                         agent._session_db_created = True
                         raise
                     agent._session_db_created = True
+                    # The SessionDB child is durable at this point.  Alias the
+                    # active runtime binding onto it without classifying again.
+                    # If resolver persistence is temporarily unavailable, the
+                    # durable parent_session_id edge is replayed on resume.
+                    try:
+                        from agent.runtime_routing import (
+                            record_runtime_session_continuation,
+                        )
+
+                        record_runtime_session_continuation(
+                            agent,
+                            parent_session_id=old_session_id,
+                            child_session_id=agent.session_id,
+                            reason="compression",
+                        )
+                    except Exception as _routing_continuation_err:
+                        logger.warning(
+                            "Could not record runtime routing compression "
+                            "continuation; resume repair will retry: %s",
+                            _routing_continuation_err,
+                        )
                     # Carry a persistent /goal onto the continuation session.
                     # Compression mints a fresh child id; load_goal does a flat
                     # per-session lookup with no parent walk, so without this an

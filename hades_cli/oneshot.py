@@ -24,12 +24,18 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from gateway.session_context import declare_stateless_channel
 from hades_cli.fallback_config import get_fallback_chain
+
+
+# EX_TEMPFAIL from sysexits.h. Non-interactive callers can distinguish a
+# transient routing lease from an ordinary failed run and retry safely.
+ONESHOT_RETRYABLE_EXIT_CODE = 75
 
 
 def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
@@ -221,15 +227,6 @@ def run_oneshot(
     os.environ["HADES_YOLO_MODE"] = "1"
     os.environ["HADES_ACCEPT_HOOKS"] = "1"
 
-    # One-shot prints a single final response and exits: there is no later turn
-    # for a detached subagent's completion to re-enter, and nothing here drains
-    # process_registry.completion_queue (only cli.py's interactive process_loop
-    # and the gateway watchers do). Left unbound, async_delivery_supported()
-    # defaults True, delegate_task is forced background, and every subagent
-    # result is discarded. Declaring the channel stateless routes delegate_task
-    # to its inline/synchronous path. See declare_stateless_channel().
-    declare_stateless_channel()
-
     # Redirect stderr AND stdout to devnull for the entire call tree.
     # We'll print the final response to the real stdout at the end.
     real_stdout = sys.stdout
@@ -270,6 +267,19 @@ def run_oneshot(
         if isinstance(failure, (KeyboardInterrupt, SystemExit)):
             _write_usage_file(usage_file, result, failure=repr(failure))
             raise failure
+        from agent.runtime_routing import RuntimeRoutingDeferred
+
+        if isinstance(failure, RuntimeRoutingDeferred):
+            retry_hint = (
+                f" after {failure.retry_after_seconds:g} seconds"
+                if failure.retry_after_seconds is not None
+                else " shortly"
+            )
+            message = f"Runtime routing is busy; retry{retry_hint}."
+            _write_usage_file(usage_file, result, failure=message)
+            real_stderr.write(f"hermes -z: {message}\n")
+            real_stderr.flush()
+            return ONESHOT_RETRYABLE_EXIT_CODE
         _write_usage_file(usage_file, result, failure=str(failure))
         real_stderr.write(f"hermes -z: agent failed: {failure}\n")
         real_stderr.flush()
@@ -382,11 +392,70 @@ def _run_agent(
                 if detected:
                     effective_provider, effective_model = detected
 
-    runtime = resolve_runtime_provider(
-        requested=effective_provider,
-        target_model=effective_model or None,
-        explicit_base_url=explicit_base_url_from_alias,
+    from agent.runtime_routing import (
+        AgentRuntimeContext,
+        runtime_resolver_requires_initial_task,
     )
+
+    routing_enabled = runtime_resolver_requires_initial_task("fresh_session")
+    manual_runtime_pin = bool(
+        (isinstance(model, str) and model.strip())
+        or (isinstance(provider, str) and provider.strip())
+    )
+    session_id = None
+    routing_context = None
+    if routing_enabled:
+        # Keep this as a requested baseline.  AIAgent's routing preflight runs
+        # before ordinary Hermes credential resolution, so an active projected
+        # route is not vetoed by an unavailable configured provider.
+        cfg_provider = ""
+        cfg_base_url = ""
+        if isinstance(model_cfg, dict):
+            cfg_provider = str(model_cfg.get("provider") or "").strip()
+            cfg_base_url = str(model_cfg.get("base_url") or "").strip()
+        if effective_provider is None:
+            effective_provider = (
+                cfg_provider
+                or os.getenv("HERMES_INFERENCE_PROVIDER", "").strip()
+                or "auto"
+            )
+            requested_base_url = (
+                explicit_base_url_from_alias or cfg_base_url or None
+            )
+        else:
+            # An explicit/detected provider resolves its own endpoint.  Only a
+            # direct alias carries a caller-selected base URL across.
+            requested_base_url = explicit_base_url_from_alias
+        requested_api_key = None
+        requested_api_mode = None
+        requested_credential_pool = None
+        session_id = (
+            f"oneshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+            f"{uuid.uuid4().hex[:6]}"
+        )
+        routing_context = AgentRuntimeContext(
+            scope="fresh_session",
+            task=prompt,
+            session_id=session_id,
+            task_id=session_id,
+            manual_runtime_pin=manual_runtime_pin,
+            manual_pin_source=(
+                "oneshot_explicit_runtime" if manual_runtime_pin else None
+            ),
+            metadata={"platform": "cli"},
+        )
+    else:
+        # No resolver: retain the historical one-shot construction path.
+        runtime = resolve_runtime_provider(
+            requested=effective_provider,
+            target_model=effective_model or None,
+            explicit_base_url=explicit_base_url_from_alias,
+        )
+        requested_api_key = runtime.get("api_key")
+        requested_base_url = runtime.get("base_url")
+        effective_provider = runtime.get("provider")
+        requested_api_mode = runtime.get("api_mode")
+        requested_credential_pool = runtime.get("credential_pool")
 
     # Pull in explicit toolsets when provided; otherwise use whatever the user
     # has enabled for "cli". sorted() gives stable ordering for config-derived
@@ -401,17 +470,19 @@ def _run_agent(
     _fb = get_fallback_chain(cfg)
 
     agent = AIAgent(
-        api_key=runtime.get("api_key"),
-        base_url=runtime.get("base_url"),
-        provider=runtime.get("provider"),
-        api_mode=runtime.get("api_mode"),
+        api_key=requested_api_key,
+        base_url=requested_base_url,
+        provider=effective_provider,
+        api_mode=requested_api_mode,
         model=effective_model,
         enabled_toolsets=toolsets_list,
         quiet_mode=True,
         platform="cli",
+        session_id=session_id,
         session_db=session_db,
-        credential_pool=runtime.get("credential_pool"),
+        credential_pool=requested_credential_pool,
         fallback_model=_fb or None,
+        runtime_routing_context=routing_context,
         # Interactive callbacks are intentionally NOT wired beyond this
         # one.  In oneshot mode there's no user sitting at a terminal:
         #   - clarify  → returns a synthetic "pick a default" instruction
@@ -426,13 +497,51 @@ def _run_agent(
         clarify_callback=_oneshot_clarify_callback,
     )
 
+    if routing_enabled and manual_runtime_pin:
+        # The context suppresses policy selection for this construction; this
+        # transition makes the explicit intent durable for the session and
+        # restores ordinary Hermes fallback authority on the live agent.
+        try:
+            from agent.runtime_routing import (
+                apply_manual_runtime_transition,
+                constructor_runtime_spec,
+            )
+
+            runtime = constructor_runtime_spec(
+                model=getattr(agent, "model", effective_model) or "",
+                provider=getattr(agent, "provider", effective_provider),
+                base_url=getattr(agent, "base_url", requested_base_url),
+                api_key=getattr(agent, "api_key", None),
+                api_mode=getattr(agent, "api_mode", None),
+                acp_command=getattr(agent, "acp_command", None),
+                acp_args=getattr(agent, "acp_args", None),
+                credential_pool=getattr(agent, "_credential_pool", None),
+                reasoning_config=getattr(agent, "reasoning_config", None),
+                fallback_model=_fb,
+            )
+            apply_manual_runtime_transition(
+                agent,
+                session_id=session_id,
+                source="oneshot_explicit_runtime",
+                runtime=runtime,
+                fallback_model=_fb,
+            )
+        except Exception:
+            logging.warning(
+                "Could not persist explicit oneshot runtime pin",
+                exc_info=True,
+            )
+
     # Belt-and-braces: make sure AIAgent doesn't invoke any streaming
     # display callbacks that would bypass our stdout capture.
     agent.suppress_status_output = True
     agent.stream_delta_callback = None
     agent.tool_gen_callback = None
 
-    result = agent.run_conversation(prompt)
+    if routing_enabled:
+        result = agent.run_conversation(prompt, task_id=session_id)
+    else:
+        result = agent.run_conversation(prompt)
     return (result.get("final_response") or "", result)
 
 

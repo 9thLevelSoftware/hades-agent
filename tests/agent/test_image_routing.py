@@ -6,6 +6,7 @@ import base64
 from pathlib import Path
 from unittest.mock import patch
 
+import agent.image_routing as image_routing
 
 from agent.image_routing import (
     _coerce_capability_bool,
@@ -17,6 +18,66 @@ from agent.image_routing import (
     decide_image_input_mode,
     extract_image_refs,
 )
+
+
+def test_runtime_routing_task_contains_bounded_image_bytes_and_mime(tmp_path):
+    image_path = tmp_path / "routing.png"
+    payload = b"\x89PNG\r\n\x1a\nsmall-routing-image"
+    image_path.write_bytes(payload)
+
+    builder = getattr(image_routing, "build_runtime_routing_task", None)
+    assert callable(builder), "runtime image task builder is missing"
+
+    task = builder("inspect this image", [image_path])
+
+    assert task == [
+        {"type": "text", "text": "inspect this image"},
+        {"type": "image", "data": payload, "mime_type": "image/png"},
+    ]
+    assert str(image_path) not in repr(task)
+
+
+def test_runtime_routing_task_fails_closed_without_reading_oversized_image(
+    tmp_path,
+):
+    image_path = tmp_path / "oversized.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+
+    builder = getattr(image_routing, "build_runtime_routing_task", None)
+    assert callable(builder), "runtime image task builder is missing"
+
+    task = builder(
+        "inspect this image",
+        [image_path],
+        max_image_bytes=8,
+    )
+
+    assert task == [
+        {"type": "text", "text": "inspect this image"},
+        {"type": "image", "file_id": "bounded-attachment-unavailable"},
+    ]
+    assert str(image_path) not in repr(task)
+
+
+def test_runtime_routing_task_strips_provider_specific_attachment_hints(tmp_path):
+    image_path = tmp_path / "routing.png"
+    payload = b"\x89PNG\r\n\x1a\nsafe-image"
+    image_path.write_bytes(payload)
+    leaked_path = "C:/private/provider-path.png"
+
+    task = image_routing.build_runtime_routing_task(
+        [
+            {"type": "text", "text": "inspect this image"},
+            {"type": "image_url", "image_url": {"url": leaked_path}},
+        ],
+        [image_path],
+    )
+
+    assert task == [
+        {"type": "text", "text": "inspect this image"},
+        {"type": "image", "data": payload, "mime_type": "image/png"},
+    ]
+    assert leaked_path not in repr(task)
 
 
 # ─── _coerce_mode ────────────────────────────────────────────────────────────

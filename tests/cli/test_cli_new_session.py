@@ -5,11 +5,13 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import threading
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hades_cli.model_switch import ModelSwitchResult
 from hades_state import SessionDB
 from tools.todo_tool import TodoStore
 
@@ -37,6 +39,7 @@ class _FakeAgent:
         )
         self.commit_memory_session = MagicMock()
         self._invalidate_system_prompt = MagicMock()
+        self.release_clients = MagicMock()
 
         # Token counters (non-zero to verify reset)
         self.session_total_tokens = 1000
@@ -149,8 +152,9 @@ def _reset_session_id_context():
     _VAR_MAP["HERMES_SESSION_ID"].set(_UNSET)
 
 
-def test_new_command_creates_real_fresh_session_and_resets_agent_state(tmp_path):
+def test_new_command_creates_fresh_session_and_discards_parent_agent(tmp_path):
     cli = _prepare_cli_with_active_session(tmp_path)
+    old_agent = cli.agent
     old_session_id = cli.session_id
     old_session_start = cli.session_start
 
@@ -165,14 +169,217 @@ def test_new_command_creates_real_fresh_session_and_resets_agent_state(tmp_path)
     new_session = cli._session_db.get_session(cli.session_id)
     assert new_session is not None
 
-    cli._session_db.append_message(cli.session_id, role="user", content="next turn")
-
-    assert cli.agent.session_id == cli.session_id
-    assert cli.agent._last_flushed_db_idx == 0
-    assert cli.agent._todo_store.read() == []
+    assert cli.agent is None
+    assert old_agent.session_id == old_session_id
+    assert old_agent.session_start == old_session_start
+    old_agent.release_clients.assert_not_called()
+    old_agent._invalidate_system_prompt.assert_not_called()
+    assert cli._active_agent_route_signature is None
+    assert cli._runtime_routing_is_resume() is False
     assert cli.session_start > old_session_start
-    assert cli.agent.session_start == cli.session_start
-    cli.agent._invalidate_system_prompt.assert_called_once()
+
+
+def test_new_after_session_model_switch_discards_agent_and_restores_invocation_runtime(
+    tmp_path,
+):
+    """A session-only /model pin must not become the next session's baseline."""
+    cli = _prepare_cli_with_active_session(tmp_path)
+    old_agent = cli.agent
+    old_agent.release_clients = MagicMock()
+    cli._active_agent_route_signature = ("parent-model", "parent-provider")
+
+    invocation_runtime = {
+        "model": cli.model,
+        "provider": cli.provider,
+        "requested_provider": cli.requested_provider,
+        "api_key": cli.api_key,
+        "base_url": cli.base_url,
+        "api_mode": cli.api_mode,
+    }
+
+    # State written by a successful session-scoped /model switch.
+    cli.model = "session-only/model"
+    cli.provider = "session-provider"
+    cli.requested_provider = "session-provider"
+    cli.api_key = "session-secret"
+    cli.base_url = "https://session.invalid/v1"
+    cli.api_mode = "session_responses"
+    cli._runtime_manual_pin = True
+    cli._runtime_manual_pin_source = "cli_model_command"
+    cli._pending_model_switch_note = "[Note: parent session model switch]"
+
+    cli.new_session(silent=True)
+
+    old_agent.release_clients.assert_not_called()
+    assert cli.agent is None
+    assert cli._active_agent_route_signature is None
+    assert cli._runtime_manual_pin is False
+    assert cli._runtime_manual_pin_source is None
+    assert cli._pending_model_switch_note is None
+    assert cli._runtime_routing_is_resume() is False
+    for field, expected in invocation_runtime.items():
+        assert getattr(cli, field) == expected
+
+    persisted = cli._session_db.get_session(cli.session_id)
+    assert persisted["model"] == invocation_runtime["model"]
+
+
+def _global_switch_result() -> ModelSwitchResult:
+    return ModelSwitchResult(
+        success=True,
+        new_model="persisted/model-b",
+        target_provider="persisted-provider",
+        provider_changed=True,
+        api_key="persisted-secret",
+        base_url="https://persisted.invalid/v1",
+        api_mode="chat_completions",
+        provider_label="Persisted Provider",
+    )
+
+
+def test_picker_global_model_switch_becomes_next_session_configured_baseline(
+    tmp_path, monkeypatch
+):
+    """A globally saved picker choice is the next session's unpinned default."""
+    import cli as cli_mod
+
+    cli = _prepare_cli_with_active_session(tmp_path)
+    old_agent = cli.agent
+    # Apply through the picker result path without an in-place agent swap.
+    cli.agent = None
+    saved = []
+    monkeypatch.setattr(
+        cli_mod,
+        "save_config_value",
+        lambda key, value: saved.append((key, value)) or True,
+    )
+    monkeypatch.setattr(cli_mod, "_cprint", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.resolve_display_context_length",
+        lambda *_a, **_k: None,
+    )
+
+    cli._apply_model_switch_result(_global_switch_result(), True)
+
+    # The live session is manually pinned, but the persisted choice has also
+    # replaced the configured baseline used by the next fresh conversation.
+    assert cli._runtime_manual_pin is True
+    assert cli._initial_runtime_baseline["model"] == "persisted/model-b"
+    assert cli._initial_runtime_baseline["provider"] == "persisted-provider"
+    assert ("model.default", "persisted/model-b") in saved
+    assert ("model.provider", "persisted-provider") in saved
+
+    cli.agent = old_agent
+    cli.new_session(silent=True)
+
+    assert cli.model == "persisted/model-b"
+    assert cli.provider == "persisted-provider"
+    assert cli._runtime_manual_pin is False
+    assert cli._runtime_manual_pin_source is None
+    assert cli._session_db.get_session(cli.session_id)["model"] == "persisted/model-b"
+
+
+def test_typed_global_model_switch_promotes_the_same_configured_baseline(
+    tmp_path, monkeypatch
+):
+    """Typed /model and picker selection must share persisted-baseline semantics."""
+    import cli as cli_mod
+
+    cli = _prepare_cli_with_active_session(tmp_path)
+    cli.agent = None
+
+    class _PickerContext:
+        user_providers = None
+        custom_providers = None
+
+        def with_overrides(self, **_kwargs):
+            return self
+
+    monkeypatch.setattr(
+        "hermes_cli.inventory.load_picker_context", lambda: _PickerContext()
+    )
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.switch_model",
+        lambda **_kwargs: _global_switch_result(),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.resolve_display_context_length",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(cli_mod, "save_config_value", lambda *_a, **_k: True)
+    monkeypatch.setattr(cli_mod, "_cprint", lambda *_a, **_k: None)
+    cli._confirm_expensive_model_switch = lambda _result: True
+
+    cli._handle_model_switch("/model persisted/model-b --global")
+
+    assert cli._initial_runtime_baseline["model"] == "persisted/model-b"
+    assert cli._initial_runtime_baseline["provider"] == "persisted-provider"
+
+
+def test_global_model_switch_does_not_replace_an_explicit_launch_pin(
+    monkeypatch,
+):
+    """Explicit --model/--provider intent remains authoritative per invocation."""
+    import cli as cli_mod
+
+    cli = _make_cli(model="launch/model-a", provider="launch-provider")
+    launch_baseline = dict(cli._initial_runtime_baseline)
+    monkeypatch.setattr(cli_mod, "save_config_value", lambda *_a, **_k: True)
+    monkeypatch.setattr(cli_mod, "_cprint", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.resolve_display_context_length",
+        lambda *_a, **_k: None,
+    )
+
+    cli._apply_model_switch_result(_global_switch_result(), True)
+    cli._restore_invocation_runtime_baseline()
+
+    assert cli._initial_runtime_baseline == launch_baseline
+    assert cli.model == "launch/model-a"
+    assert cli.provider == "launch-provider"
+    assert cli._runtime_manual_pin is True
+    assert cli._runtime_manual_pin_source == "cli_explicit_runtime"
+
+
+def test_new_session_does_not_block_on_parent_client_retirement(tmp_path):
+    """Neither release_clients nor agent.close may block /new rotation."""
+    import cli as cli_mod
+
+    cli = _prepare_cli_with_active_session(tmp_path)
+    old_agent = cli.agent
+    release_called = threading.Event()
+    allow_release = threading.Event()
+    close_started = threading.Event()
+    allow_close = threading.Event()
+    command_done = threading.Event()
+
+    def _blocking_release():
+        release_called.set()
+        allow_release.wait(2)
+
+    def _blocking_close():
+        close_started.set()
+        allow_close.wait(2)
+
+    old_agent.release_clients.side_effect = _blocking_release
+    old_agent.close = MagicMock(side_effect=_blocking_close)
+    command_thread = threading.Thread(
+        target=lambda: (cli.new_session(silent=True), command_done.set()),
+        daemon=True,
+    )
+    command_thread.start()
+    try:
+        assert command_done.wait(0.5), "/new waited for detached client teardown"
+        assert release_called.is_set() is False
+        assert close_started.wait(1)
+    finally:
+        allow_release.set()
+        allow_close.set()
+        command_thread.join(timeout=1)
+
+    assert cli_mod._drain_retired_cli_agents(timeout=1) is True
+    old_agent.release_clients.assert_not_called()
+    old_agent.close.assert_called_once_with()
 
 
 def test_new_session_queues_boundary_commit_with_snapshot(tmp_path):
@@ -194,6 +401,115 @@ def test_new_session_queues_boundary_commit_with_snapshot(tmp_path):
     assert kwargs["reason"] == "new_session"
     # The queued path replaces the inline switch — not both.
     mm.on_session_switch.assert_not_called()
+
+
+def test_new_session_retires_parent_without_blocking_or_duplicate_end(
+    tmp_path, monkeypatch
+):
+    """Retirement waits for the queued boundary, then tears providers down.
+
+    The boundary task owns ``on_session_end``.  Retirement must only drain it
+    and shut resources down; calling ``on_session_end`` again would extract the
+    same transcript twice.
+    """
+    cli = _prepare_cli_with_active_session(tmp_path)
+    old_agent = cli.agent
+    old_agent.close = MagicMock()
+    manager = MagicMock()
+    flush_started = threading.Event()
+    allow_flush = threading.Event()
+
+    def _flush_pending(*, timeout):
+        flush_started.set()
+        return allow_flush.wait(timeout)
+
+    manager.flush_pending.side_effect = _flush_pending
+    old_agent._memory_manager = manager
+    import cli as cli_mod
+
+    retirement_state = []
+    detach_order = []
+    real_retire = cli_mod._retire_cli_agent
+    real_setattr = type(cli).__setattr__
+
+    def _observe_setattr(instance, name, value):
+        if (
+            instance is cli
+            and name == "agent"
+            and value is None
+            and getattr(instance, "agent", None) is old_agent
+        ):
+            detach_order.append(cli_mod._active_agent_ref is None)
+        return real_setattr(instance, name, value)
+
+    def _observe_retirement(agent_arg, **kwargs):
+        retirement_state.append(
+            (
+                cli.agent is None,
+                cli_mod._active_agent_ref is None,
+            )
+        )
+        return real_retire(agent_arg, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "_active_agent_ref", old_agent)
+    monkeypatch.setattr(cli_mod, "_retire_cli_agent", _observe_retirement)
+    monkeypatch.setattr(type(cli), "__setattr__", _observe_setattr)
+
+    cli.new_session(silent=True)
+
+    # /new returned while the old manager was still draining.
+    assert flush_started.wait(1)
+    assert cli.agent is None
+    old_agent.close.assert_not_called()
+
+    allow_flush.set()
+
+    assert cli_mod._drain_retired_cli_agents(timeout=1) is True
+    assert detach_order == [True]
+    assert retirement_state == [(True, True)]
+    manager.shutdown_all.assert_called_once_with()
+    manager.on_session_end.assert_not_called()
+    old_agent.close.assert_called_once_with()
+
+
+def test_run_cleanup_waits_for_new_session_retirement(tmp_path):
+    """A `/new` followed immediately by process exit drains its boundary."""
+    import cli as cli_mod
+
+    cli = _prepare_cli_with_active_session(tmp_path)
+    old_agent = cli.agent
+    old_agent.close = MagicMock()
+    manager = MagicMock()
+    flush_started = threading.Event()
+    allow_flush = threading.Event()
+
+    def _flush_pending(*, timeout):
+        flush_started.set()
+        return allow_flush.wait(timeout)
+
+    manager.flush_pending.side_effect = _flush_pending
+    old_agent._memory_manager = manager
+    previous_active = cli_mod._active_agent_ref
+    cli_mod._active_agent_ref = old_agent
+    cli.new_session(silent=True)
+    assert flush_started.wait(1)
+
+    timer = threading.Timer(0.05, allow_flush.set)
+    timer.daemon = True
+    timer.start()
+    previous_done = cli_mod._cleanup_done
+    cli_mod._cleanup_done = False
+    try:
+        assert cli_mod._active_agent_ref is None
+        cli_mod._run_cleanup(notify_session_finalize=False)
+    finally:
+        allow_flush.set()
+        timer.join(timeout=1)
+        cli_mod._cleanup_done = previous_done
+        cli_mod._active_agent_ref = previous_active
+
+    manager.shutdown_all.assert_called_once_with()
+    old_agent.close.assert_called_once_with()
 
 
 def test_new_session_without_history_switches_inline(tmp_path):
@@ -298,8 +614,8 @@ def test_clear_command_starts_new_session_before_redrawing(tmp_path):
     assert cli.conversation_history == []
 
 
-def test_new_session_resets_token_counters(tmp_path):
-    """Regression test for #2099: /new must zero all token counters."""
+def test_new_session_does_not_relabel_parent_agent_or_its_usage(tmp_path):
+    """The replacement agent starts clean; the parent remains an audit record."""
     cli = _prepare_cli_with_active_session(tmp_path)
 
     # Verify counters are non-zero before reset
@@ -310,27 +626,27 @@ def test_new_session_resets_token_counters(tmp_path):
 
     cli.process_command("/new")
 
-    # All agent token counters must be zero
-    assert agent.session_total_tokens == 0
-    assert agent.session_input_tokens == 0
-    assert agent.session_output_tokens == 0
-    assert agent.session_prompt_tokens == 0
-    assert agent.session_completion_tokens == 0
-    assert agent.session_cache_read_tokens == 0
-    assert agent.session_cache_write_tokens == 0
-    assert agent.session_reasoning_tokens == 0
-    assert agent.session_api_calls == 0
-    assert agent.session_estimated_cost_usd == 0.0
-    assert agent.session_cost_status == "unknown"
-    assert agent.session_cost_source == "none"
+    assert cli.agent is None
+    assert agent.session_total_tokens == 1000
+    assert agent.session_input_tokens == 600
+    assert agent.session_output_tokens == 400
+    assert agent.session_prompt_tokens == 550
+    assert agent.session_completion_tokens == 350
+    assert agent.session_cache_read_tokens == 100
+    assert agent.session_cache_write_tokens == 50
+    assert agent.session_reasoning_tokens == 80
+    assert agent.session_api_calls == 5
+    assert agent.session_estimated_cost_usd == 0.42
+    assert agent.session_cost_status == "estimated"
+    assert agent.session_cost_source == "openrouter"
 
-    # Context compressor counters must also be zero
     comp = agent.context_compressor
-    assert comp.last_prompt_tokens == 0
-    assert comp.last_completion_tokens == 0
-    assert comp.last_total_tokens == 0
-    assert comp.compression_count == 0
-    assert comp._context_probed is False
+    assert comp.last_prompt_tokens == 500
+    assert comp.last_completion_tokens == 200
+    assert comp.last_total_tokens == 700
+    assert comp.compression_count == 3
+    assert comp._context_probed is True
+    agent.release_clients.assert_not_called()
 
 
 def test_new_session_with_title(capsys):

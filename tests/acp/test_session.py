@@ -35,7 +35,7 @@ class TestCreateSession:
         assert state.cwd == "/tmp/work"
         assert state.session_id
         assert state.history == []
-        assert state.agent is not None
+        assert state.agent is None
 
     def test_create_session_registers_task_cwd(self, manager, monkeypatch):
         calls = []
@@ -117,7 +117,9 @@ class TestCreateSession:
         )
         monkeypatch.setattr("acp_adapter.session._register_task_cwd", lambda task_id, cwd: None)
 
-        state = SessionManager(db=None).create_session(cwd="/tmp/project")
+        manager = SessionManager(db=None)
+        state = manager.create_session(cwd="/tmp/project")
+        manager.ensure_agent(state, task="first task")
 
         assert state.agent.session_cwd == "/tmp/project"
 
@@ -436,7 +438,8 @@ class TestPersistence:
 
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             manager = SessionManager(db=db)
-            manager.create_session(cwd="/work")
+            state = manager.create_session(cwd="/work")
+            manager.ensure_agent(state, task="first task")
 
         assert captured["enabled_toolsets"] == ["hades-acp", "mcp-olympus", "mcp-exa"]
 
@@ -472,8 +475,9 @@ class TestPersistence:
         assert len(restored.history) == 2
         assert restored.history[0]["content"] == "hello"
         assert restored.history[1]["content"] == "hi there"
-        # Agent should have been recreated.
-        assert restored.agent is not None
+        # Provider construction remains deferred until the next prompt.
+        assert restored.agent is None
+        assert restored.is_resume is True
 
     def test_save_session_updates_db(self, manager):
         state = manager.create_session()
@@ -715,6 +719,7 @@ class TestPersistence:
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             manager = SessionManager(db=db)
             state = manager.create_session(cwd="/work")
+            manager.ensure_agent(state, task="first task")
             manager.save_session(state.session_id)
 
             with manager._lock:
@@ -722,6 +727,9 @@ class TestPersistence:
 
             runtime_choice["provider"] = "openrouter"
             restored = manager.get_session(state.session_id)
+            assert restored is not None
+            assert restored.agent is None
+            manager.ensure_agent(restored, task="continue")
 
         assert restored is not None
         assert restored.agent.provider == "anthropic"
@@ -755,6 +763,7 @@ class TestPersistence:
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             manager = SessionManager(db=db)
             state = manager.create_session(cwd="/work")
+            manager.ensure_agent(state, task="first task")
 
         stdout_buf = io.StringIO()
         stderr_buf = io.StringIO()

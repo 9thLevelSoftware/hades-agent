@@ -155,17 +155,7 @@ def build_turn_context(
     # null; rebuilding from scratch" warning and a needless first-turn prefix
     # cache miss. (Issue #45499.)
 
-    # Tag log records on this thread with the session ID for ``hermes logs``.
-    set_session_context(agent.session_id)
-
-    # Bind the skill write-origin ContextVar for this thread.
-    set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
-
-    # Restore the primary runtime if the previous turn activated fallback.
-    agent._restore_primary_runtime()
-
-    # Tell auxiliary_client what the live main provider/model are for this turn
-    # after primary restoration has settled the runtime.
+    # Tell auxiliary_client what the live main provider/model are for this turn.
     try:
         from agent.auxiliary_client import set_runtime_main
         set_runtime_main(
@@ -174,10 +164,18 @@ def build_turn_context(
             base_url=getattr(agent, "base_url", "") or "",
             api_key=getattr(agent, "api_key", "") or "",
             api_mode=getattr(agent, "api_mode", "") or "",
-            auth_mode=getattr(agent, "auth_mode", "") or "",
         )
     except Exception:
         pass
+
+    # Tag log records on this thread with the session ID for ``hermes logs``.
+    set_session_context(agent.session_id)
+
+    # Bind the skill write-origin ContextVar for this thread.
+    set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
+
+    # Restore the primary runtime if the previous turn activated fallback.
+    agent._restore_primary_runtime()
 
     # Between-turns MCP refresh: an MCP server that finished connecting since
     # the previous turn (slow HTTP/OAuth servers routinely take 2-6s on a cold
@@ -224,11 +222,6 @@ def build_turn_context(
     turn_id = f"{agent.session_id or 'session'}:{effective_task_id}:{uuid.uuid4().hex[:8]}"
     agent._current_turn_id = turn_id
     agent._current_api_request_id = ""
-    # Tripwire: warn (with both turn ids) when this turn starts before the
-    # previous turn's turn-end persist — concurrent turns on one session
-    # interleave transcript writes. Cleared in _persist_session.
-    from agent.agent_runtime_helpers import note_turn_start
-    note_turn_start(agent, turn_id)
 
     # Capture the per-turn token/cost baseline so ``build_turn_outcome_record``
     # can compute end-minus-start deltas. Without this snapshot, every turn

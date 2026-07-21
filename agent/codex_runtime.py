@@ -1050,6 +1050,7 @@ def _consume_codex_event_stream(
     terminal_status: str = "completed"
     terminal_usage: Any = None
     terminal_response_id: str = None
+    terminal_provider_model: str | None = None
     terminal_incomplete_details: Any = None
     terminal_error: Any = None
     saw_terminal = False
@@ -1184,6 +1185,11 @@ def _consume_codex_event_stream(
                 if rid is None and isinstance(resp_obj, dict):
                     rid = resp_obj.get("id")
                 terminal_response_id = rid
+                provider_model = getattr(resp_obj, "model", None)
+                if provider_model is None and isinstance(resp_obj, dict):
+                    provider_model = resp_obj.get("model")
+                if isinstance(provider_model, str) and provider_model.strip():
+                    terminal_provider_model = provider_model.strip()
                 rstatus = getattr(resp_obj, "status", None)
                 if rstatus is None and isinstance(resp_obj, dict):
                     rstatus = resp_obj.get("status")
@@ -1242,6 +1248,7 @@ def _consume_codex_event_stream(
         status=terminal_status,
         id=terminal_response_id,
         model=model,
+        provider_model=terminal_provider_model,
         incomplete_details=terminal_incomplete_details,
         error=terminal_error,
     )

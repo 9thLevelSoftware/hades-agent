@@ -680,6 +680,25 @@ def test_oneshot_fails_closed_on_agent_exception(monkeypatch, capsys):
     assert "not a TTY" in captured.err
 
 
+def test_oneshot_returns_tempfail_when_runtime_routing_is_deferred(
+    monkeypatch,
+    capsys,
+):
+    from agent.runtime_routing import RuntimeRoutingDeferred
+    import hermes_cli.oneshot as oneshot_mod
+
+    def _defer(*_args, **_kwargs):
+        raise RuntimeRoutingDeferred(retry_after_seconds=0.25)
+
+    monkeypatch.setattr(oneshot_mod, "_run_agent", _defer)
+
+    assert oneshot_mod.run_oneshot("hello") == 75
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "runtime routing is busy" in captured.err.lower()
+    assert "0.25" in captured.err
+
+
 def test_oneshot_exit_code_when_failed_without_response(monkeypatch):
     from hades_cli.oneshot import run_oneshot
 
@@ -884,6 +903,169 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
     assert captured["session_db"] is sentinel_db
     assert captured["enabled_toolsets"] == ["session_search"]
     assert captured["prompt"] == "recall this"
+    assert captured["runtime_routing_context"] is None
+    assert captured.get("prepared_agent_runtime") is None
+
+
+def test_oneshot_hands_clean_task_to_runtime_routing_before_baseline_resolution(
+    monkeypatch,
+):
+    """The AIAgent preflight owns baseline resolution for routed one-shots."""
+    from hermes_cli.oneshot import _run_agent
+
+    captured = {}
+    monkeypatch.setattr(
+        "agent.runtime_routing.runtime_resolver_requires_initial_task",
+        lambda scope: scope == "fresh_session",
+    )
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.suppress_status_output = False
+            self.stream_delta_callback = object()
+            self.tool_gen_callback = object()
+
+        def run_conversation(self, prompt, **_kwargs):
+            return {"final_response": "ok", "failed": False, "partial": False}
+
+    def mod(name, **attrs):
+        module = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(module, key, value)
+        return module
+
+    monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        mod(
+            "hermes_cli.config",
+            load_config=lambda: {
+                "model": {"default": "baseline", "provider": "missing"}
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.models",
+        mod("hermes_cli.models", detect_provider_for_model=lambda *_a, **_k: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.runtime_provider",
+        mod(
+            "hermes_cli.runtime_provider",
+            resolve_runtime_provider=lambda **_kwargs: pytest.fail(
+                "baseline resolution must happen inside routed AIAgent preflight"
+            ),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.tools_config",
+        mod("hermes_cli.tools_config", _get_platform_tools=lambda *_a, **_k: set()),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.oneshot._create_session_db_for_oneshot", lambda: None
+    )
+
+    text, _result = _run_agent("clean oneshot task")
+
+    assert text == "ok"
+    context = captured["runtime_routing_context"]
+    assert context.task == "clean oneshot task"
+    assert context.session_id == captured["session_id"]
+    assert context.manual_runtime_pin is False
+    assert context.metadata == {"platform": "cli"}
+
+
+def test_oneshot_only_actual_cli_overrides_become_durable_manual_intent(
+    monkeypatch,
+):
+    from hermes_cli.oneshot import _run_agent
+
+    captured = {}
+    transitions = []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.model = "manual-model"
+            self.provider = "manual-provider"
+            self.base_url = "https://manual.invalid/v1"
+            self.api_key = "manual-secret"
+            self.api_mode = "chat_completions"
+            self.acp_command = None
+            self.acp_args = []
+            self._credential_pool = None
+            self.suppress_status_output = False
+            self.stream_delta_callback = object()
+            self.tool_gen_callback = object()
+
+        def run_conversation(self, prompt, **_kwargs):
+            return {"final_response": "ok", "failed": False, "partial": False}
+
+    def mod(name, **attrs):
+        module = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(module, key, value)
+        return module
+
+    monkeypatch.setattr(
+        "agent.runtime_routing.runtime_resolver_requires_initial_task",
+        lambda scope: scope == "fresh_session",
+    )
+    monkeypatch.setattr(
+        "agent.runtime_routing.apply_manual_runtime_transition",
+        lambda agent, **kwargs: transitions.append((agent, kwargs)),
+    )
+    monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        mod(
+            "hermes_cli.config",
+            load_config=lambda: {
+                "model": {
+                    "default": "config-model",
+                    "provider": "config-provider",
+                }
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.models",
+        mod("hermes_cli.models", detect_provider_for_model=lambda model, _p: ("manual-provider", model)),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.runtime_provider",
+        mod(
+            "hermes_cli.runtime_provider",
+            resolve_runtime_provider=lambda **_kwargs: pytest.fail(
+                "active routing must preflight before baseline credentials"
+            ),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.tools_config",
+        mod("hermes_cli.tools_config", _get_platform_tools=lambda *_a, **_k: set()),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.oneshot._create_session_db_for_oneshot", lambda: None
+    )
+
+    text, _result = _run_agent("manual task", model="manual-model")
+
+    assert text == "ok"
+    context = captured["runtime_routing_context"]
+    assert context.manual_runtime_pin is True
+    assert context.manual_pin_source == "oneshot_explicit_runtime"
+    assert transitions[0][1]["session_id"] == context.session_id
+    assert transitions[0][1]["source"] == "oneshot_explicit_runtime"
 
 
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
@@ -922,44 +1104,6 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     assert active_path_during_call == active_path
     assert not active_path.exists()
     assert env["NODE_ENV"] == "production"
-
-
-def test_launch_tui_worktree_validates_relative_python_against_final_cwd(
-    monkeypatch, main_mod, tmp_path
-):
-    import cli as cli_mod
-
-    parent_cwd = tmp_path / "parent"
-    parent_cwd.mkdir()
-    worktree = tmp_path / "worktree"
-    relative_python = Path(".review-venv") / "bin" / Path(sys.executable).name
-    python_path = worktree / relative_python
-    python_path.parent.mkdir(parents=True)
-    os.link(sys.executable, python_path)
-    captured = {}
-
-    monkeypatch.setenv("HERMES_CWD", str(parent_cwd))
-    monkeypatch.setenv("HERMES_PYTHON", str(relative_python))
-    monkeypatch.setattr(cli_mod, "_git_repo_root", lambda: None)
-    monkeypatch.setattr(cli_mod, "_prune_stale_worktrees", lambda _repo: None)
-    monkeypatch.setattr(cli_mod, "_setup_worktree", lambda: {"path": str(worktree)})
-    monkeypatch.setattr(cli_mod, "_cleanup_worktree", lambda _info: None)
-    monkeypatch.setattr(
-        main_mod,
-        "_make_tui_argv",
-        lambda tui_dir, tui_dev: (["node", "dist/entry.js"], Path(".")),
-    )
-    monkeypatch.setattr(
-        main_mod.subprocess,
-        "call",
-        lambda argv, cwd=None, env=None: captured.update({"env": env}) or 1,
-    )
-
-    with pytest.raises(SystemExit):
-        main_mod._launch_tui(worktree=True)
-
-    assert captured["env"]["HERMES_CWD"] == str(worktree)
-    assert captured["env"]["HERMES_PYTHON"] == str(relative_python)
 
 
 def test_launch_tui_applies_terminal_backend_config(

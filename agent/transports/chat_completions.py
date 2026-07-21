@@ -14,6 +14,7 @@ from typing import Any, Dict
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
+from agent.reasoning_translators import translate_kimi_reasoning_effort
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
 
@@ -389,17 +390,8 @@ class ChatCompletionsTransport(ProviderTransport):
 
         # Kimi: top-level reasoning_effort (unless thinking disabled)
         if is_kimi:
-            _kimi_thinking_off = bool(
-                reasoning_config
-                and isinstance(reasoning_config, dict)
-                and reasoning_config.get("enabled") is False
-            )
-            if not _kimi_thinking_off:
-                _kimi_effort = "medium"
-                if reasoning_config and isinstance(reasoning_config, dict):
-                    _e = (reasoning_config.get("effort") or "").strip().lower()
-                    if _e in {"low", "medium", "high"}:
-                        _kimi_effort = _e
+            _kimi_effort = translate_kimi_reasoning_effort(reasoning_config)
+            if _kimi_effort is not None:
                 api_kwargs["reasoning_effort"] = _kimi_effort
 
         # Tencent TokenHub: top-level reasoning_effort (unless thinking disabled)
@@ -776,18 +768,15 @@ class ChatCompletionsTransport(ProviderTransport):
         return True
 
     def extract_cache_stats(self, response: Any) -> dict[str, int] | None:
-        """Extract cache stats from prompt_tokens_details (OpenRouter/OpenAI)
-        or DeepSeek's native top-level prompt_cache_hit_tokens field."""
+        """Extract OpenRouter/OpenAI cache stats from prompt_tokens_details."""
         usage = getattr(response, "usage", None)
         if usage is None:
             return None
         details = getattr(usage, "prompt_tokens_details", None)
-        cached = getattr(details, "cached_tokens", 0) or 0 if details else 0
-        written = getattr(details, "cache_write_tokens", 0) or 0 if details else 0
-        if not cached:
-            # DeepSeek native API shape (api.deepseek.com): top-level
-            # prompt_cache_hit_tokens / prompt_cache_miss_tokens (#61871).
-            cached = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
+        if details is None:
+            return None
+        cached = getattr(details, "cached_tokens", 0) or 0
+        written = getattr(details, "cache_write_tokens", 0) or 0
         if cached or written:
             return {"cached_tokens": cached, "creation_tokens": written}
         return None

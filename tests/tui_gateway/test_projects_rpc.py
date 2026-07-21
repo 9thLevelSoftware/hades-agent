@@ -7,7 +7,25 @@ import subprocess
 
 import pytest
 
+from hermes_state import SessionDB
 import tui_gateway.server as server
+
+
+@pytest.fixture(autouse=True)
+def _isolated_server_db(tmp_path):
+    """Keep project RPC tests independent of the process-global DB cache."""
+    from tui_gateway import git_probe
+
+    previous_db = server._db
+    db = SessionDB(db_path=tmp_path / "state.db")
+    server._db = db
+    git_probe.invalidate()
+    try:
+        yield db
+    finally:
+        git_probe.invalidate()
+        db.close()
+        server._db = previous_db
 
 
 def _call(method, params=None):

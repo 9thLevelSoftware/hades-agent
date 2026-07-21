@@ -56,12 +56,16 @@ class NoopDb:
     def update_session(self, *_args, **_kwargs):
         return None
 
+    def replace_messages(self, *_args, **_kwargs):
+        return None
+
 
 def make_agent_and_state():
     fake = FakeAgent()
     manager = SessionManager(agent_factory=lambda **kwargs: fake, db=NoopDb())
     acp_agent = HermesACPAgent(session_manager=manager)
     state = manager.create_session(cwd=".")
+    state.agent = fake
     conn = CaptureConn()
     acp_agent.on_connect(conn)
     return acp_agent, state, fake, conn

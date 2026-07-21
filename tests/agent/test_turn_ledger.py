@@ -17,6 +17,7 @@ contract and the SQL round-trip.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -28,6 +29,7 @@ import pytest
 from agent.turn_ledger import (
     TurnOutcomeRecord,
     fetch_turn_outcome,
+    persist_turn_outcome,
     record_turn_outcome_safely,
 )
 from agent.turn_outcome import TURN_OUTCOMES, classify_turn_outcome
@@ -557,6 +559,242 @@ def _finalizer_agent(verification_status="passed"):
         _sync_external_memory_for_turn=lambda **kwargs: None,
     )
     return agent
+
+
+def test_persist_turn_outcome_emits_one_content_free_observer(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda name, **kw: calls.append((name, kw)),
+    )
+    ledger_agent = _finalizer_agent()
+    ledger_agent._current_task_id = "task-a"
+    ledger_agent.reasoning_config = {"enabled": True, "effort": "high"}
+
+    record = persist_turn_outcome(
+        ledger_agent,
+        outcome="verified",
+        outcome_reason="RAW_REASON_SENTINEL",
+        turn_exit_reason="RAW_EXIT_SENTINEL",
+        api_calls=2,
+        tool_iterations=1,
+        messages=[{"role": "user", "content": "RAW_PROMPT_SENTINEL"}],
+    )
+
+    assert record.outcome == "verified"
+    assert [name for name, _payload in calls] == ["post_turn_outcome"]
+    payload = calls[0][1]
+    assert set(payload) == {
+        "session_id",
+        "turn_id",
+        "task_id",
+        "observed_at_unix",
+        "outcome",
+        "api_calls",
+        "tool_iterations",
+        "retry_count",
+        "cost_usd",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "reasoning_effort",
+        "runtime_binding",
+    }
+    rendered = json.dumps(payload, sort_keys=True)
+    for forbidden in (
+        "RAW_REASON_SENTINEL",
+        "RAW_EXIT_SENTINEL",
+        "RAW_PROMPT_SENTINEL",
+        "outcome_reason",
+        "turn_exit_reason",
+        "guardrail_halt",
+        "skills_loaded",
+    ):
+        assert forbidden not in rendered
+    assert payload["turn_id"] == hashlib.sha256(
+        f"turn\0{record.turn_id}".encode()
+    ).hexdigest()
+
+
+def test_post_turn_observer_failure_never_breaks_persistence(monkeypatch):
+    ledger_agent = _finalizer_agent()
+    ledger_agent._current_task_id = "task-a"
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("observer down")
+        ),
+    )
+
+    record = persist_turn_outcome(
+        ledger_agent,
+        outcome="failed",
+        outcome_reason="turn failed",
+        turn_exit_reason="provider_failure",
+        api_calls=1,
+        tool_iterations=0,
+    )
+
+    assert record.outcome == "failed"
+
+
+def test_post_turn_observer_rejects_hostile_task_identity(monkeypatch):
+    class HostileTask:
+        def __str__(self):
+            raise RuntimeError("hostile task")
+
+    calls = []
+    ledger_agent = _finalizer_agent()
+    ledger_agent._current_task_id = HostileTask()
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda name, **kw: calls.append((name, kw)),
+    )
+
+    record = persist_turn_outcome(
+        ledger_agent,
+        outcome="failed",
+        outcome_reason="turn failed",
+        turn_exit_reason="provider_failure",
+        api_calls=1,
+        tool_iterations=0,
+    )
+
+    assert record.outcome == "failed"
+    assert calls == []
+
+
+def test_post_turn_observer_hashes_unvalidated_identifiers(monkeypatch):
+    calls = []
+    ledger_agent = _finalizer_agent()
+    ledger_agent.session_id = "https://user:SECRET@example.invalid/raw/path"
+    ledger_agent._current_task_id = "C:\\Users\\secret\\prompt.txt"
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda name, **kw: calls.append((name, kw)),
+    )
+
+    persist_turn_outcome(
+        ledger_agent,
+        outcome="verified",
+        outcome_reason="ok",
+        turn_exit_reason="text_response",
+        api_calls=1,
+        tool_iterations=0,
+    )
+
+    payload = calls[0][1]
+    assert payload["session_id"] == hashlib.sha256(
+        f"session\0{ledger_agent.session_id}".encode()
+    ).hexdigest()
+    assert payload["task_id"] == hashlib.sha256(
+        f"task\0{ledger_agent._current_task_id}".encode()
+    ).hexdigest()
+    assert payload["runtime_binding"] is None
+
+
+def test_post_turn_observer_emits_only_exact_public_binding_allowlist(monkeypatch):
+    from agent.runtime_routing import AgentRuntimeSpec, RuntimeRoutingBinding
+
+    calls = []
+    ledger_agent = _finalizer_agent()
+    ledger_agent._current_task_id = "task-a"
+    ledger_agent.reasoning_config = {"enabled": True, "effort": "high"}
+    ledger_agent._runtime_routing_binding = RuntimeRoutingBinding(
+        scope="fresh_session",
+        session_id=ledger_agent.session_id,
+        task_id="task-a",
+        operation_id=None,
+        action="project",
+        runtime=AgentRuntimeSpec(
+            model="selected-model",
+            provider="openrouter",
+            base_url="https://secret-endpoint.invalid/v1",
+            api_key="RAW_SECRET_KEY",
+            resolution_state="resolved",
+            api_mode="chat_completions",
+            reasoning_config={"enabled": True, "effort": "high"},
+        ),
+        decision_id="decision-a",
+        bound_route_identity="semantic-checksum-not-for-observer",
+        owns_fallbacks=True,
+        reason_code="active_projected",
+        event={"runtime_id": "a" * 64},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda name, **kw: calls.append((name, kw)),
+    )
+
+    persist_turn_outcome(
+        ledger_agent,
+        outcome="verified",
+        outcome_reason="ok",
+        turn_exit_reason="text_response",
+        api_calls=1,
+        tool_iterations=0,
+    )
+
+    payload = calls[0][1]
+    assert payload["session_id"] == ledger_agent.session_id
+    assert payload["task_id"] == "task-a"
+    assert payload["runtime_binding"] == {
+        "scope": "fresh_session",
+        "session_id": ledger_agent.session_id,
+        "task_id": "task-a",
+        "action": "project",
+        "model": "selected-model",
+        "provider": "openrouter",
+        "decision_id": "decision-a",
+    }
+    rendered = json.dumps(payload, sort_keys=True)
+    assert "RAW_SECRET_KEY" not in rendered
+    assert "secret-endpoint" not in rendered
+    assert "bound_route_identity" not in rendered
+
+
+def test_post_turn_observer_hashes_task_when_public_construction_task_changed(
+    monkeypatch,
+):
+    from agent.runtime_routing import AgentRuntimeSpec, RuntimeRoutingBinding
+
+    calls = []
+    ledger_agent = _finalizer_agent()
+    ledger_agent._current_task_id = "changed-task"
+    ledger_agent._runtime_routing_binding = RuntimeRoutingBinding(
+        scope="fresh_session",
+        session_id=ledger_agent.session_id,
+        task_id="construction-task",
+        operation_id=None,
+        action="project",
+        runtime=AgentRuntimeSpec(
+            model="selected-model",
+            provider="openrouter",
+            resolution_state="resolved",
+            api_mode="chat_completions",
+        ),
+        decision_id="decision-a",
+        owns_fallbacks=True,
+        reason_code="active_projected",
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook",
+        lambda name, **kw: calls.append((name, kw)),
+    )
+
+    persist_turn_outcome(
+        ledger_agent,
+        outcome="verified",
+        outcome_reason="ok",
+        turn_exit_reason="text_response",
+        api_calls=1,
+        tool_iterations=0,
+    )
+
+    payload = calls[0][1]
+    assert payload["runtime_binding"] is None
+    assert payload["session_id"] != ledger_agent.session_id
+    assert payload["task_id"] != "changed-task"
 
 
 # ---------------------------------------------------------------------------
@@ -1748,6 +1986,7 @@ def test_codex_runtime_invokes_sidecar_bump_with_recorded_skills(monkeypatch):
     assert any(skill == "web" for skill, _outcome, _cost in bumps), (
         f"expected bump for 'web' from projected messages, got {bumps}"
     )
+
 
 # ---------------------------------------------------------------------------
 # Read-back seam for receipt ingestion (Task 4) — fetch_turn_outcome.

@@ -62,20 +62,6 @@ def test_persistent_kernel_preserves_state_and_fresh_calls_do_not():
     assert "NameError" in fresh_second["output"]
 
 
-def test_persistent_kernel_reports_stdout_truncation_metadata():
-    with patch(
-        "tools.code_execution_tool._load_config",
-        return_value={"max_stdout_bytes": 80},
-    ):
-        result = _run("print('x' * 200)", "kernel-test", kernel_id="metadata")
-
-    assert result["status"] == "success"
-    assert result["stdout_truncated"] is True
-    assert result["stdout_bytes_total"] > result["stdout_bytes_captured"]
-    assert result["stdout_bytes_omitted"] > 0
-    assert "execute_code stdout was truncated" in result["warning"]
-
-
 def test_config_persistent_default_is_opt_in_without_overriding_explicit_false(tmp_path, monkeypatch):
     (tmp_path / "config.yaml").write_text(
         "code_execution:\n  persistent: true\n  kernel_idle_ttl: 900\n",

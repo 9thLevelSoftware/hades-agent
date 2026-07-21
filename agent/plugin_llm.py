@@ -60,6 +60,7 @@ supports.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import logging
 import re
@@ -67,6 +68,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
+
+PLUGIN_LLM_REASONING_CONTRACT_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +629,7 @@ class PluginLlm:
         provider: Optional[str] = None,
         model: Optional[str] = None,
         temperature: Optional[float] = None,
+        reasoning_config: Optional[Dict[str, Any]] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         agent_id: Optional[str] = None,
@@ -655,6 +659,7 @@ class PluginLlm:
             model_override=eff_model,
             profile_override=eff_profile,
             temperature=temperature,
+            reasoning_config=copy.deepcopy(reasoning_config),
             max_tokens=max_tokens,
             timeout=timeout,
         )
@@ -692,6 +697,7 @@ class PluginLlm:
         provider: Optional[str] = None,
         model: Optional[str] = None,
         temperature: Optional[float] = None,
+        reasoning_config: Optional[Dict[str, Any]] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         agent_id: Optional[str] = None,
@@ -740,6 +746,7 @@ class PluginLlm:
             model_override=eff_model,
             profile_override=eff_profile,
             temperature=temperature,
+            reasoning_config=copy.deepcopy(reasoning_config),
             max_tokens=max_tokens,
             timeout=timeout,
             extra_body=extra_body,
@@ -781,6 +788,7 @@ class PluginLlm:
         provider: Optional[str] = None,
         model: Optional[str] = None,
         temperature: Optional[float] = None,
+        reasoning_config: Optional[Dict[str, Any]] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         agent_id: Optional[str] = None,
@@ -802,6 +810,7 @@ class PluginLlm:
             model_override=eff_model,
             profile_override=eff_profile,
             temperature=temperature,
+            reasoning_config=copy.deepcopy(reasoning_config),
             max_tokens=max_tokens,
             timeout=timeout,
         )
@@ -832,6 +841,7 @@ class PluginLlm:
         provider: Optional[str] = None,
         model: Optional[str] = None,
         temperature: Optional[float] = None,
+        reasoning_config: Optional[Dict[str, Any]] = None,
         max_tokens: Optional[int] = None,
         timeout: Optional[float] = None,
         agent_id: Optional[str] = None,
@@ -867,6 +877,7 @@ class PluginLlm:
             model_override=eff_model,
             profile_override=eff_profile,
             temperature=temperature,
+            reasoning_config=copy.deepcopy(reasoning_config),
             max_tokens=max_tokens,
             timeout=timeout,
             extra_body=extra_body,
@@ -924,6 +935,7 @@ class PluginLlm:
         model_override: Optional[str],
         profile_override: Optional[str],
         temperature: Optional[float],
+        reasoning_config: Optional[Dict[str, Any]] = None,
         max_tokens: Optional[int],
         timeout: Optional[float],
         extra_body: Optional[Dict[str, Any]] = None,
@@ -938,6 +950,7 @@ class PluginLlm:
                 model_override=model_override,
                 profile_override=profile_override,
                 temperature=temperature,
+                reasoning_config=copy.deepcopy(reasoning_config),
                 max_tokens=max_tokens,
                 timeout=timeout,
                 extra_body=extra_body,
@@ -952,6 +965,7 @@ class PluginLlm:
             model=model_override,
             messages=messages,
             temperature=temperature,
+            reasoning_config=copy.deepcopy(reasoning_config),
             max_tokens=max_tokens,
             timeout=timeout,
             extra_body=merged_extra or None,
@@ -971,6 +985,7 @@ class PluginLlm:
         model_override: Optional[str],
         profile_override: Optional[str],
         temperature: Optional[float],
+        reasoning_config: Optional[Dict[str, Any]] = None,
         max_tokens: Optional[int],
         timeout: Optional[float],
         extra_body: Optional[Dict[str, Any]] = None,
@@ -982,6 +997,7 @@ class PluginLlm:
                 model_override=model_override,
                 profile_override=profile_override,
                 temperature=temperature,
+                reasoning_config=copy.deepcopy(reasoning_config),
                 max_tokens=max_tokens,
                 timeout=timeout,
                 extra_body=extra_body,
@@ -996,6 +1012,7 @@ class PluginLlm:
             model=model_override,
             messages=messages,
             temperature=temperature,
+            reasoning_config=copy.deepcopy(reasoning_config),
             max_tokens=max_tokens,
             timeout=timeout,
             extra_body=merged_extra or None,
@@ -1034,6 +1051,7 @@ def make_plugin_llm_for_test(
 
 
 __all__ = [
+    "PLUGIN_LLM_REASONING_CONTRACT_VERSION",
     "PluginLlm",
     "PluginLlmTextInput",
     "PluginLlmImageInput",

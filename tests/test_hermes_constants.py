@@ -30,6 +30,87 @@ from hades_constants import (
 )
 
 
+def test_requested_reasoning_effort_sits_between_model_override_and_global() -> None:
+    """Plugin requests are generic and never displace a model override."""
+    helper = getattr(hermes_constants, "effective_generic_reasoning_effort", None)
+    assert callable(helper), "generic reasoning extraction helper is not implemented"
+
+    cfg = {
+        "agent": {
+            "reasoning_effort": "high",
+            "reasoning_overrides": {"gpt-5.4": "low"},
+        }
+    }
+    overridden = hermes_constants.resolve_reasoning_config(
+        cfg,
+        "gpt-5.4",
+        requested_effort="medium",
+    )
+    requested = hermes_constants.resolve_reasoning_config(
+        {"agent": {"reasoning_effort": "high"}},
+        "gpt-5.4",
+        requested_effort="medium",
+    )
+
+    assert helper(overridden) == "low"
+    assert helper(requested) == "medium"
+
+
+def test_requested_none_disables_reasoning_and_invalid_request_uses_global() -> None:
+    helper = hermes_constants.effective_generic_reasoning_effort
+    disabled = hermes_constants.resolve_reasoning_config(
+        {"agent": {"reasoning_effort": "high"}},
+        "gpt-5.4",
+        requested_effort="none",
+    )
+    invalid = hermes_constants.resolve_reasoning_config(
+        {"agent": {"reasoning_effort": "high"}},
+        "gpt-5.4",
+        requested_effort="not-an-effort",
+    )
+    assert disabled == {"enabled": False}
+    assert helper(disabled) == "none"
+    assert invalid == {"enabled": True, "effort": "high"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, {}, {"enabled": "yes"}, {"enabled": True}, {"effort": "high"}],
+)
+def test_effective_generic_reasoning_effort_fails_closed_on_malformed_config(
+    value,
+) -> None:
+    assert hermes_constants.effective_generic_reasoning_effort(value) is None
+
+
+@pytest.mark.parametrize(
+    ("cfg", "model", "expected"),
+    [
+        ({}, "gpt-5.4", None),
+        ({"agent": {"reasoning_effort": False}}, "gpt-5.4", {"enabled": False}),
+        (
+            {"agent": {"reasoning_effort": "high"}},
+            "gpt-5.4",
+            {"enabled": True, "effort": "high"},
+        ),
+        (
+            {
+                "agent": {
+                    "reasoning_effort": "high",
+                    "reasoning_overrides": {"gpt-5.4": "low"},
+                }
+            },
+            "gpt-5.4",
+            {"enabled": True, "effort": "low"},
+        ),
+    ],
+)
+def test_omitting_requested_effort_preserves_existing_reasoning_contract(
+    cfg, model, expected
+) -> None:
+    assert hermes_constants.resolve_reasoning_config(cfg, model) == expected
+
+
 class TestGetDefaultHermesRoot:
     """Tests for get_default_hades_root() — Docker/custom deployment awareness."""
 
