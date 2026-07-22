@@ -2333,11 +2333,16 @@ def _read_main_api_key_if_same_host(aux_base_url: str) -> str:
 
 # Process-local override set by AIAgent at session/turn start. Single-threaded
 # per turn — no lock needed. Cleared by ``clear_runtime_main()``.
+# (Upstream also keeps a ContextVar for concurrent gateway sessions; this fork
+# still uses module globals for the live override. ``scoped_runtime_main``
+# saves/restores those globals so each turn starts clean and callers regain
+# their prior binding.)
 _RUNTIME_MAIN_PROVIDER: str = ""
 _RUNTIME_MAIN_MODEL: str = ""
 _RUNTIME_MAIN_BASE_URL: str = ""
-_RUNTIME_MAIN_API_KEY: str = ""
+_RUNTIME_MAIN_API_KEY: Any = ""
 _RUNTIME_MAIN_API_MODE: str = ""
+_RUNTIME_MAIN_AUTH_MODE: str = ""
 
 
 def set_runtime_main(
@@ -2345,8 +2350,9 @@ def set_runtime_main(
     model: str,
     *,
     base_url: str = "",
-    api_key: str = "",
+    api_key: Any = "",
     api_mode: str = "",
+    auth_mode: str = "",
 ) -> None:
     """Record the live runtime provider/model/credentials for the current AIAgent.
 
@@ -2358,25 +2364,83 @@ def set_runtime_main(
     For ``custom:`` providers, ``base_url`` and ``api_key`` must also be
     recorded so that ``_resolve_auto`` can construct a valid client in
     Step 1 instead of falling through to the aggregator chain.
+
+    ``api_key`` may be a zero-arg callable (Azure Foundry Entra ID token
+    provider); preserve callables so auxiliary clients inherit the same
+    auth surface as the main agent.
     """
     global _RUNTIME_MAIN_PROVIDER, _RUNTIME_MAIN_MODEL
     global _RUNTIME_MAIN_BASE_URL, _RUNTIME_MAIN_API_KEY, _RUNTIME_MAIN_API_MODE
+    global _RUNTIME_MAIN_AUTH_MODE
     _RUNTIME_MAIN_PROVIDER = (provider or "").strip().lower()
     _RUNTIME_MAIN_MODEL = (model or "").strip()
     _RUNTIME_MAIN_BASE_URL = (base_url or "").strip()
-    _RUNTIME_MAIN_API_KEY = api_key.strip() if isinstance(api_key, str) else ""
+    if callable(api_key) and not isinstance(api_key, str):
+        _RUNTIME_MAIN_API_KEY = api_key
+    else:
+        _RUNTIME_MAIN_API_KEY = api_key.strip() if isinstance(api_key, str) else ""
     _RUNTIME_MAIN_API_MODE = (api_mode or "").strip()
+    _RUNTIME_MAIN_AUTH_MODE = (auth_mode or "").strip().lower()
 
 
 def clear_runtime_main() -> None:
     """Clear the runtime override (e.g. on session end)."""
     global _RUNTIME_MAIN_PROVIDER, _RUNTIME_MAIN_MODEL
     global _RUNTIME_MAIN_BASE_URL, _RUNTIME_MAIN_API_KEY, _RUNTIME_MAIN_API_MODE
+    global _RUNTIME_MAIN_AUTH_MODE
     _RUNTIME_MAIN_PROVIDER = ""
     _RUNTIME_MAIN_MODEL = ""
     _RUNTIME_MAIN_BASE_URL = ""
     _RUNTIME_MAIN_API_KEY = ""
     _RUNTIME_MAIN_API_MODE = ""
+    _RUNTIME_MAIN_AUTH_MODE = ""
+
+
+@contextlib.contextmanager
+def scoped_runtime_main(main_runtime: Optional[Dict[str, Any]] = None):
+    """Temporarily bind (or clear) the main runtime for one turn.
+
+    ``run_agent.AIAgent.run_conversation`` wraps each turn in
+    ``with scoped_runtime_main({}):`` so auxiliary routing starts from a
+    clean slate; turn setup then calls ``set_runtime_main`` with the live
+    agent credentials. On exit, the caller's prior binding is restored.
+    """
+    global _RUNTIME_MAIN_PROVIDER, _RUNTIME_MAIN_MODEL
+    global _RUNTIME_MAIN_BASE_URL, _RUNTIME_MAIN_API_KEY, _RUNTIME_MAIN_API_MODE
+    global _RUNTIME_MAIN_AUTH_MODE
+    prev = (
+        _RUNTIME_MAIN_PROVIDER,
+        _RUNTIME_MAIN_MODEL,
+        _RUNTIME_MAIN_BASE_URL,
+        _RUNTIME_MAIN_API_KEY,
+        _RUNTIME_MAIN_API_MODE,
+        _RUNTIME_MAIN_AUTH_MODE,
+    )
+    # ``_normalize_main_runtime`` is defined later in this module; call at
+    # runtime so the forward reference is resolved.
+    runtime = _normalize_main_runtime(main_runtime)
+    try:
+        if runtime:
+            set_runtime_main(
+                runtime.get("provider", ""),
+                runtime.get("model", ""),
+                base_url=runtime.get("base_url", "") or "",
+                api_key=runtime.get("api_key", "") or "",
+                api_mode=runtime.get("api_mode", "") or "",
+                auth_mode=runtime.get("auth_mode", "") or "",
+            )
+        else:
+            clear_runtime_main()
+        yield runtime
+    finally:
+        (
+            _RUNTIME_MAIN_PROVIDER,
+            _RUNTIME_MAIN_MODEL,
+            _RUNTIME_MAIN_BASE_URL,
+            _RUNTIME_MAIN_API_KEY,
+            _RUNTIME_MAIN_API_MODE,
+            _RUNTIME_MAIN_AUTH_MODE,
+        ) = prev
 
 
 def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[str]]:

@@ -252,6 +252,25 @@ def _is_ephemeral_scaffolding(msg: Any) -> bool:
     )
 
 
+def _turn_has_tool_activity(messages: Optional[List[Dict[str, Any]]]) -> bool:
+    """Conservatively detect tool calls/effects in the current user turn."""
+    if not messages:
+        return True
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "user":
+            return False
+        if (
+            message.get("role") in {"tool", "function"}
+            or message.get("tool_calls")
+            or message.get("function_call")
+            or message.get("tool_call_id")
+        ):
+            return True
+    return True
+
+
 _MAX_TOOL_WORKERS = 8
 
 # Intrinsic marker stamped on a message dict once it has been written to the
@@ -495,6 +514,11 @@ class AIAgent:
         checkpoint_max_total_size_mb: int = 500,
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
+        suppress_status_output: bool = False,
+        owns_session_db: bool = False,
+        runtime_routing_context: Any = None,
+        prepared_agent_runtime: Any = None,
+        **kwargs,
     ):
         """Forwarder — see ``agent.agent_init.init_agent``."""
         from agent.agent_init import init_agent
@@ -571,6 +595,11 @@ class AIAgent:
             checkpoint_max_total_size_mb=checkpoint_max_total_size_mb,
             checkpoint_max_file_size_mb=checkpoint_max_file_size_mb,
             pass_session_id=pass_session_id,
+            suppress_status_output=suppress_status_output,
+            owns_session_db=owns_session_db,
+            runtime_routing_context=runtime_routing_context,
+            prepared_agent_runtime=prepared_agent_runtime,
+            **kwargs,
         )
 
     def _get_session_db_for_recall(self):
@@ -3521,6 +3550,8 @@ class AIAgent:
         final_response: Any,
         interrupted: bool,
         messages: list | None = None,
+        turn_outcome: str | None = None,
+        turn_had_tool_activity: Optional[bool] = None,
     ) -> None:
         """Mirror a completed turn into external memory providers.
 
@@ -3543,12 +3574,22 @@ class AIAgent:
         the same intent, and a prefetch keyed on the interrupted turn
         would fire against stale context.
 
-        Normal completed turns still sync as before.  The whole body is
+        Only ``verified`` always permits durable sync.  The explicit
+        ``completed_unverified`` exception is limited to a conversational turn
+        with no tool calls/effects; response text never supplies verification.
+        Background review remains a separate verified-only gate.  External
+        memory providers remain best-effort.
+
+        Verified turns still sync as before.  The whole body is
         wrapped in ``try/except Exception`` because external memory
         providers are strictly best-effort — a misconfigured or offline
         backend must not block the user from seeing their response.
         """
-        if interrupted:
+        if interrupted or turn_outcome not in {"verified", "completed_unverified"}:
+            return
+        if turn_outcome == "completed_unverified" and (
+            turn_had_tool_activity or _turn_has_tool_activity(messages)
+        ):
             return
         if not (self._memory_manager and final_response and original_user_message):
             return

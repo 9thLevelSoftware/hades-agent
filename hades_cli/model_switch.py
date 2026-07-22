@@ -52,6 +52,46 @@ _UNCAPPED_PICKER_PROVIDERS: frozenset[str] = frozenset({"opencode-zen", "opencod
 logger = logging.getLogger(__name__)
 
 
+# Opaque internal model-ID display
+# ---------------------------------------------------------------------------
+# Some proxies (notably Palantir Foundry's LLM-proxy) identify models by
+# resource-instance IDs that are deeply nested, verbose, and pure noise to
+# read in CLI status output, e.g.:
+#
+#   ri.language-model-service..language-model.anthropic-claude-4-7-opus
+#
+# The provider_label already carries the routing context, so the only useful
+# information left in the opaque ID is the trailing slug. Strip the boilerplate
+# prefix for *display* — never for wire-side comparison, persistence, config
+# writes, alias lookup, or anything that round-trips back into the API.
+
+_OPAQUE_MODEL_PREFIXES: tuple[str, ...] = (
+    "ri.language-model-service..language-model.",
+)
+
+
+def format_model_for_display(model_name: str) -> str:
+    """Return a human-friendly form of *model_name* for CLI status output.
+
+    Strips known opaque proxy prefixes (Palantir Foundry's
+    ``ri.language-model-service..language-model.*``) and returns the
+    trailing slug. Falls through to the original string for everything
+    else, so real model IDs are untouched.
+
+    This is a DISPLAY-ONLY helper. Do NOT use the return value for any
+    wire-side operation — the proxy expects the full opaque ID, and
+    callers that compare or persist must keep the original.
+    """
+    if not model_name:
+        return model_name
+    for prefix in _OPAQUE_MODEL_PREFIXES:
+        if model_name.startswith(prefix):
+            tail = model_name[len(prefix):]
+            return tail if tail else model_name
+    return model_name
+
+
+
 def _declared_model_ids(value: Any) -> list[str]:
     """Return configured model IDs from supported config shapes.
 
@@ -352,52 +392,47 @@ class ModelSwitchResult:
 # Flag parsing
 # ---------------------------------------------------------------------------
 
-def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool, bool]:
-    """Parse --provider, --global, --session, and --refresh flags from /model command args.
+@dataclass
+class ParsedModelFlags:
+    model_input: str = ""
+    explicit_provider: str = ""
+    is_global: bool = False
+    force_refresh: bool = False
+    is_session: bool = False
+    is_once: bool = False
 
-    Returns ``(model_input, explicit_provider, is_global, force_refresh, is_session)``.
 
-    ``is_global`` and ``is_session`` are independent flag presences; the
-    *effective* persistence decision is resolved by
-    :func:`resolve_persist_behavior` so the config-gated default
-    (``model.persist_switch_by_default``) is applied in one place.
+def parse_model_flags_detailed(raw_args: str) -> ParsedModelFlags:
+    """Parse --provider, --global, --session, --once, and --refresh flags from /model command args.
 
-    Examples::
-
-        "sonnet"                         -> ("sonnet", "", False, False, False)
-        "sonnet --global"                -> ("sonnet", "", True, False, False)
-        "sonnet --session"               -> ("sonnet", "", False, False, True)
-        "sonnet --provider anthropic"    -> ("sonnet", "anthropic", False, False, False)
-        "--provider my-ollama"           -> ("", "my-ollama", False, False, False)
-        "--refresh"                      -> ("", "", False, True, False)
-        "sonnet --provider anthropic --global" -> ("sonnet", "anthropic", True, False, False)
+    Returns a ``ParsedModelFlags`` instance.
     """
     is_global = False
     explicit_provider = ""
     force_refresh = False
     is_session = False
+    is_once = False
 
     # Normalize Unicode dashes (Telegram/iOS auto-converts -- to em/en dash)
-    # A single Unicode dash before a flag keyword becomes "--"
     import re as _re
-    raw_args = _re.sub(r'[\u2012\u2013\u2014\u2015](provider|global|session|refresh)', r'--\1', raw_args)
+    raw_args = _re.sub(r'[\u2012\u2013\u2014\u2015](provider|global|session|refresh|once)', r'--\1', raw_args)
 
-    # Extract --global
     if "--global" in raw_args:
         is_global = True
         raw_args = raw_args.replace("--global", "").strip()
 
-    # Extract --session (explicit session-only; overrides the persist default)
     if "--session" in raw_args:
         is_session = True
         raw_args = raw_args.replace("--session", "").strip()
 
-    # Extract --refresh (bust the model picker disk cache before listing)
+    if "--once" in raw_args:
+        is_once = True
+        raw_args = raw_args.replace("--once", "").strip()
+
     if "--refresh" in raw_args:
         force_refresh = True
         raw_args = raw_args.replace("--refresh", "").strip()
 
-    # Extract --provider <name>
     parts = raw_args.split()
     i = 0
     filtered: list[str] = []
@@ -410,25 +445,48 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool, bool]:
             i += 1
 
     model_input = " ".join(filtered).strip()
-    return (model_input, explicit_provider, is_global, force_refresh, is_session)
+    return ParsedModelFlags(
+        model_input=model_input,
+        explicit_provider=explicit_provider,
+        is_global=is_global,
+        force_refresh=force_refresh,
+        is_session=is_session,
+        is_once=is_once,
+    )
 
 
-def resolve_persist_behavior(is_global: bool, is_session: bool) -> bool:
+def parse_model_flags(raw_args: str) -> tuple[str, str, bool, bool, bool]:
+    """Parse --provider, --global, --session, and --refresh flags from /model command args.
+
+    Returns ``(model_input, explicit_provider, is_global, force_refresh, is_session)``.
+    """
+    detailed = parse_model_flags_detailed(raw_args)
+    return (
+        detailed.model_input,
+        detailed.explicit_provider,
+        detailed.is_global,
+        detailed.force_refresh,
+        detailed.is_session,
+    )
+
+
+def resolve_persist_behavior(
+    is_global: bool,
+    is_session: bool,
+    is_once: bool = False,
+    explicit_provider: str = "",
+) -> bool:
     """Decide whether a ``/model`` switch should persist to ``config.yaml``.
 
     Resolution order:
 
-    1. ``--session`` explicitly opts out → ``False`` (this session only).
+    1. ``--session`` or ``--once`` explicitly opts out → ``False`` (this session only).
     2. ``--global`` explicitly opts in → ``True``.
     3. Otherwise defer to ``model.persist_switch_by_default`` in
        ``config.yaml`` (defaults to ``True``, so a plain ``/model <name>``
        survives across sessions — the behavior users expect).
-
-    The config read is defensive: on a fresh install ``model`` may be a
-    flat string rather than a dict, in which case the built-in default
-    (``True``) applies.
     """
-    if is_session:
+    if is_session or is_once:
         return False
     if is_global:
         return True

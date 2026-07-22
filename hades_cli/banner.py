@@ -636,7 +636,11 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
             disabled_tools.update(tools_in_ts)
 
     layout_table = Table.grid(padding=(0, 2))
-    layout_table.add_column("left", justify="center")
+    # Left-justify the hero column. Center-justify re-centers *each line*
+    # independently, which crooks freeform ASCII art (lines have different
+    # natural widths). Built-in caduceus art is already a fixed-width block,
+    # so left alignment keeps both default and custom heroes straight.
+    layout_table.add_column("left", justify="left", no_wrap=True)
     layout_table.add_column("right", justify="left")
 
     # Resolve skin colors once for the entire banner
