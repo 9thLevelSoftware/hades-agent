@@ -116,19 +116,29 @@ class AutoRoutingRuntimeResolver:
 
     def _release_thread_services(self, thread_ref: _ThreadRef) -> None:
         """Close every profile service owned by one collected worker thread."""
-        with self._lock:
-            keys = tuple(key for key in self._services if key[1] is thread_ref)
-            services = tuple(
-                {
-                    id(self._services[key]): self._services[key]
-                    for key in keys
-                }.values()
-            )
-            for key in keys:
-                self._services.pop(key, None)
-                self._backends.pop(key, None)
-        for service in services:
-            _close_service(service)
+        # This is a weakref callback — it may fire during interpreter
+        # shutdown when module-level names are already cleared.  Trap
+        # every exception so a half-collected environment never leaks a
+        # noisy "Exception ignored" trace.
+        try:
+            with self._lock:
+                keys = tuple(key for key in self._services if key[1] is thread_ref)
+                services = tuple(
+                    {
+                        id(self._services[key]): self._services[key]
+                        for key in keys
+                    }.values()
+                )
+                for key in keys:
+                    self._services.pop(key, None)
+                    self._backends.pop(key, None)
+            for service in services:
+                try:
+                    _close_service(service)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _service_for_key(self, key: _ServiceCacheKey) -> Any:
         home = key[0]
