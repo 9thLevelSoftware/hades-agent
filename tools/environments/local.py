@@ -1533,3 +1533,6 @@ class LocalEnvironment(BaseEnvironment):
                     pass
         except Exception:
             pass
+
+# Dual-name alias (Hades-first callers)
+hades_subprocess_env = hermes_subprocess_env

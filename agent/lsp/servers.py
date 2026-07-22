@@ -1186,3 +1186,6 @@ __all__ = [
     "language_id_for",
     "LANGUAGE_BY_EXT",
 ]
+
+# Dual-name alias (Hades-first callers)
+hades_lsp_session_dir = hermes_lsp_session_dir

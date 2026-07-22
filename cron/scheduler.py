@@ -2670,8 +2670,8 @@ def _resolve_cron_canonical_runtime(requested_runtime):
 
 def _resolve_cron_baseline_runtime(job: dict, cfg: dict) -> dict:
     """Preserve the historical cron primary/global-fallback resolution path."""
-    from hermes_cli.auth import AuthError
-    from hermes_cli.runtime_provider import (
+    from hades_cli.auth import AuthError
+    from hades_cli.runtime_provider import (
         format_runtime_provider_error,
         resolve_runtime_provider,
     )

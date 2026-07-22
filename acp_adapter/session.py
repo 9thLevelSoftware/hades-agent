@@ -416,8 +416,8 @@ class SessionManager:
             )
         fallback_model: list[dict[str, Any]] = []
         if route_first_prompt or state.manual_runtime_pin:
-            from hermes_cli.config import load_config
-            from hermes_cli.fallback_config import get_fallback_chain
+            from hades_cli.config import load_config
+            from hades_cli.fallback_config import get_fallback_chain
 
             fallback_model = get_fallback_chain(load_config())
         agent = self._make_agent(

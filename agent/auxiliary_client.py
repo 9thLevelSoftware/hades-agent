@@ -107,7 +107,7 @@ from agent.credential_pool import load_pool
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
 from agent.process_bootstrap import build_keepalive_http_client
 from hades_constants import get_hades_home, OPENROUTER_BASE_URL, env_get
-get_hermes_home = get_hades_home
+get_hades_home = get_hades_home
 from utils import base_url_host_matches, base_url_hostname, env_float, model_forces_max_completion_tokens, normalize_proxy_env_vars
 
 logger = logging.getLogger(__name__)
@@ -4374,7 +4374,7 @@ def _resolve_auto(
         elif main_provider.startswith("custom:"):
             _has_named_entry = False
             try:
-                from hermes_cli.runtime_provider import _get_named_custom_provider
+                from hades_cli.runtime_provider import _get_named_custom_provider
                 _has_named_entry = _get_named_custom_provider(main_provider) is not None
             except ImportError:
                 pass

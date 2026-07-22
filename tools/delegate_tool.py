@@ -1297,7 +1297,7 @@ def _build_child_agent(
     runtime_resolver_present = False
     if operation_id and child_session_id and not fixed_delegation_runtime:
         try:
-            from hermes_cli.plugins import get_agent_runtime_resolver
+            from hades_cli.plugins import get_agent_runtime_resolver
 
             runtime_resolver_present = get_agent_runtime_resolver() is not None
         except Exception:
