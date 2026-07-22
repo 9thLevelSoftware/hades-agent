@@ -703,13 +703,16 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     )
     for candidate in candidates:
         clean = candidate.replace("\\", "/").rstrip("/")
-        if clean.endswith("/.hermes/approval_requests.json"):
+        # Dual-accept host layouts under either home basename.
+        if clean.endswith("/.hades/approval_requests.json") or clean.endswith(
+            "/.hermes/approval_requests.json"
+        ):
             is_approval_state = True
-        marker = "/.hermes/profiles/"
-        if marker in clean:
-            profile_tail = clean.split(marker, 1)[1].split("/")
-            if len(profile_tail) == 2 and profile_tail[1] == "approval_requests.json":
-                is_approval_state = True
+        for marker in ("/.hades/profiles/", "/.hermes/profiles/"):
+            if marker in clean:
+                profile_tail = clean.split(marker, 1)[1].split("/")
+                if len(profile_tail) == 2 and profile_tail[1] == "approval_requests.json":
+                    is_approval_state = True
     if is_approval_state:
         return (
             f"Refusing to write to Hades approval state: {filepath}\n"
@@ -719,8 +722,9 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
 
 
 def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | None:
-    """Return the container-side Hermes mirror prefix for Docker file tools."""
+    """Return the container-side Hades/Hermes mirror prefix for Docker file tools."""
     try:
+        from hades_constants import default_container_home
         from tools.terminal_tool import (
             _active_environments,
             _env_lock,
@@ -740,7 +744,7 @@ def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | Non
             if env.__class__.__name__ == "DockerEnvironment" and bool(
                 getattr(env, "_persistent", False)
             ):
-                return "/root/.hermes"
+                return default_container_home()
             return None
 
         config = _get_env_config()
@@ -748,7 +752,7 @@ def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | Non
         return None
 
     if config.get("env_type") == "docker" and config.get("container_persistent", True):
-        return "/root/.hermes"
+        return default_container_home()
     return None
 
 

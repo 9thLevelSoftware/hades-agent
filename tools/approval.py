@@ -16,7 +16,14 @@ import hashlib
 import json
 import logging
 import os
-from hades_constants import env_get, env_is_set, env_pop, env_set
+from hades_constants import (
+    SERVICE_LABEL_PATTERN,
+    env_get,
+    env_is_set,
+    env_pop,
+    env_set,
+    home_dir_prefix_regex,
+)
 import re
 import shlex
 import sys
@@ -256,11 +263,15 @@ def _is_gateway_approval_context() -> bool:
 # these static patterns stay free of any import-time path snapshot (which would
 # go stale when HADES_HOME is set after this module is imported, e.g. under the
 # hermetic test conftest or any deferred-profile-resolution path).
+#
+# Patterns dual-accept `.hades` and `.hermes` (and $HADES_HOME / $HERMES_HOME /
+# $hades_home / $hermes_home). Absolute homes fold to ~/.hades (canonical).
 _SSH_SENSITIVE_PATH = r'(?:~|\$home|\$\{home\})/\.ssh(?:/|$)'
+_HADES_HOME_DIR_PREFIX = home_dir_prefix_regex()
+# Alias kept for older tests / callers that still import the Hermes name.
+_HERMES_HOME_DIR_PREFIX = _HADES_HOME_DIR_PREFIX
 _HERMES_ENV_PATH = (
-    r'(?:~\/\.hermes/|'
-    r'(?:\$home|\$\{home\})/\.hermes/|'
-    r'(?:\$hermes_home|\$\{hermes_home\})/)'
+    rf'{_HADES_HOME_DIR_PREFIX}'
     r'\.env\b'
 )
 # ~/.hades/config.yaml IS the security policy: approvals.mode, yolo, and the
@@ -269,18 +280,13 @@ _HERMES_ENV_PATH = (
 # and immediately bypass the gate). Pair the write_file/patch deny (file_tools
 # _check_sensitive_path) with terminal-side coverage so `sed -i`, `tee`, `>`,
 # `cp`, etc. targeting it are gated too — otherwise the deny is unpaired
-# theater. Mirrors _HERMES_ENV_PATH; matches the HADES_HOME override form as
-# well as ~/.hades/.
+# theater. Dual-accepts `.hades`/`.hermes` and both env spellings.
 _HERMES_CONFIG_PATH = (
-    r'(?:~\/\.hermes/|'
-    r'(?:\$home|\$\{home\})/\.hermes/|'
-    r'(?:\$hermes_home|\$\{hermes_home\})/)'
+    rf'{_HADES_HOME_DIR_PREFIX}'
     r'config\.yaml\b'
 )
 _HERMES_APPROVAL_STATE_PATH = (
-    r'(?:~\/\.hermes/|'
-    r'(?:\$home|\$\{home\})/\.hermes/|'
-    r'(?:\$hermes_home|\$\{hermes_home\})/)'
+    rf'{_HADES_HOME_DIR_PREFIX}'
     r'(?:[^/\s"\'`]+/)*approval_requests\.json\b'
 )
 _PROJECT_ENV_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*\.env(?:\.[^/\s"\'`]+)*)'
@@ -707,9 +713,9 @@ DANGEROUS_PATTERNS = [
     (r'\bkill\b.*`\s*(pgrep|pidof)\b', "kill process via backtick pgrep/pidof expansion (self-termination)"),
     # launchctl-driven gateway stop/restart on macOS. The agent can bypass
     # the `hermes gateway stop|restart` pattern above by driving launchd
-    # directly against the service label (commonly `ai.hermes.gateway`).
-    # Catch the operations that stop, restart, or unload it.
-    (r'\blaunchctl\s+(stop|kickstart|bootout|unload|kill|disable|remove)\b.*\b(hermes|ai\.hermes)\b', "stop/restart hermes launchd service (kills running agents)"),
+    # directly against the service label (`ai.hermes.gateway`, `ai.hades.gateway`,
+    # `hades-gateway`, …). Catch the operations that stop, restart, or unload it.
+    (rf'\blaunchctl\s+(stop|kickstart|bootout|unload|kill|disable|remove)\b.*\b{SERVICE_LABEL_PATTERN}\b', "stop/restart hermes launchd service (kills running agents)"),
     # File copy/move/edit into sensitive system paths (/etc/ and macOS
     # /private/etc/ mirror).
     (rf'\b(cp|mv|install)\b.*\s{_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),
@@ -754,8 +760,9 @@ DANGEROUS_PATTERNS = [
     # anywhere in the args, not just the first token — `perl -e '...'` (code
     # eval, no -i) does not trip because it has no `-...i` flag token.
     (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH}|{_HERMES_APPROVAL_STATE_PATH})', "in-place edit of Hades security state (perl/ruby)"),
-    # Interpreter heredocs are handled by _execution_flag_findings() alongside
-    # inline-exec flags; keep only shell heredocs regex-based here.
+    # Interpreter + shell heredocs — `python <<'EOF' …` / `bash <<'EOF' …`
+    # feed arbitrary code via stdin without -c/-e flags. Gate the shape itself.
+    (r'\b(python[23]?|perl|ruby|node)\s+<<', "script execution via heredoc"),
     # Shell execution via heredoc — `bash <<'EOF' ... EOF` runs arbitrary
     # shell commands without triggering the `bash -c` pattern above. The
     # inner commands may not individually match any dangerous pattern (e.g.
@@ -1444,7 +1451,15 @@ def _command_detection_variants(command: str):
 
 
 def _is_verification_artifact_cleanup(command: str) -> bool:
-    """Return whether *command* only removes one Hermes ad-hoc temp script."""
+    """Return whether *command* only removes one agent ad-hoc temp script.
+
+    Accepts both ``hermes-verify-*`` / ``hermes-ad-hoc-*`` and the Hades
+    spellings ``hades-verify-*`` / ``hades-ad-hoc-*``.
+
+    The operand must be the **exact** ``join(realpath(gettempdir()), basename)``
+    string (no ``..``, ``.``, double-slash, or symlink spelling). That keeps
+    the exemption narrow so path tricks cannot smuggle a broader delete.
+    """
     try:
         argv = shlex.split(command, posix=True)
     except ValueError:
@@ -1461,7 +1476,13 @@ def _is_verification_artifact_cleanup(command: str) -> bool:
     target = os.path.realpath(operand)
     if os.path.dirname(target) != temp_dir:
         return False
-    return re.fullmatch(r"hermes-(?:verify|ad-hoc)-[A-Za-z0-9_.-]+", basename) is not None
+    return (
+        re.fullmatch(
+            r"(?:hermes|hades)-(?:verify|ad-hoc)-[A-Za-z0-9_.-]+",
+            basename,
+        )
+        is not None
+    )
 
 
 def detect_dangerous_command(command: str) -> tuple:
