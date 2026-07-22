@@ -8,7 +8,7 @@ import socket
 def _reload_constants():
     """Reload hermes_constants to get a fresh apply_ipv4_preference."""
     import hades_constants
-    importlib.reload(hermes_constants)
+    importlib.reload(hades_constants)
     return hermes_constants
 
 

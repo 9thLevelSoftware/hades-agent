@@ -160,7 +160,7 @@ def isolated_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HADES_HOME", str(home))
     import hades_constants
-    importlib.reload(hermes_constants)
+    importlib.reload(hades_constants)
     import cron.jobs as jobs
     importlib.reload(jobs)
     return jobs

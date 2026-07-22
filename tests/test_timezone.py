@@ -1,5 +1,5 @@
 """
-Tests for timezone support (hermes_time module + integration points).
+Tests for timezone support (hades_time module + integration points).
 
 Covers:
   - Valid timezone applies correctly
@@ -21,7 +21,7 @@ import hades_time
 
 
 def _reset_hermes_time_cache():
-    """Reset the hermes_time module cache (replacement for removed reset_cache)."""
+    """Reset the hades_time module cache (replacement for removed reset_cache)."""
     hades_time._cached_tz = None
     hades_time._cached_tz_name = None
     hades_time._cache_resolved = False
@@ -68,7 +68,7 @@ class TestHermesTimeNow:
     def test_invalid_timezone_falls_back(self, caplog):
         """Invalid timezone logs warning and falls back to server-local."""
         os.environ["HADES_TIMEZONE"] = "Mars/Olympus_Mons"
-        with caplog.at_level(logging.WARNING, logger="hermes_time"):
+        with caplog.at_level(logging.WARNING, logger="hades_time"):
             result = hades_time.now()
         assert result.tzinfo is not None  # Still tz-aware (server-local)
         assert "Invalid timezone" in caplog.text

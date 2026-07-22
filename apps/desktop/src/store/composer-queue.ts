@@ -209,6 +209,39 @@ export const clearQueuedPrompts = (key: string | null | undefined) => {
   writeSession(sid, [])
 }
 
+/** Session keys whose queue is parked (halted; auto-drain must not fire). */
+export const $parkedSessions = atom<Record<string, true>>({})
+
+export const isQueueParked = (key: string | null | undefined): boolean => {
+  const sid = sidOf(key)
+
+  return Boolean(sid && $parkedSessions.get()[sid])
+}
+
+/** Halt auto-drain for this session's queue until unpark/resume. */
+export const parkQueuedPrompts = (key: string | null | undefined) => {
+  const sid = sidOf(key)
+
+  if (!sid) {
+    return
+  }
+
+  $parkedSessions.set({ ...$parkedSessions.get(), [sid]: true })
+}
+
+/** Resume auto-drain for a parked session queue. */
+export const unparkQueuedPrompts = (key: string | null | undefined) => {
+  const sid = sidOf(key)
+
+  if (!sid || !($parkedSessions.get()[sid])) {
+    return
+  }
+
+  const next = { ...$parkedSessions.get() }
+  delete next[sid]
+  $parkedSessions.set(next)
+}
+
 /**
  * Move pending entries from a dead session key onto a live one, preserving FIFO
  * (existing target entries first, migrated entries appended). A backend bounce /

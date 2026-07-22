@@ -21,7 +21,7 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setenv("HADES_HOME", str(home))
     # Reload so module-level CRON_DIR/SUGGESTIONS_FILE pick up the temp home.
     import hades_constants
-    importlib.reload(hermes_constants)
+    importlib.reload(hades_constants)
     import cron.suggestions as s
     importlib.reload(s)
     return s

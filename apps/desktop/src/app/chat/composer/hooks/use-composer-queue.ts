@@ -1,3 +1,4 @@
+import { useStore } from '@nanostores/react'
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 
 import { useI18n } from '@/i18n'
@@ -6,9 +7,11 @@ import { useSessionSlice } from '@/lib/use-session-slice'
 import { type ComposerAttachment } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
 import {
+  $parkedSessions,
   $queuedPromptsBySession,
   enqueueQueuedPrompt,
   getQueuedPrompts,
+  isQueueParked,
   MAX_AUTO_DRAIN_ATTEMPTS,
   migrateQueuedPrompts,
   promoteQueuedPrompt,
@@ -267,8 +270,12 @@ export function useComposerQueue({
   // the queue is non-empty, bounding retries so a thrown/rejected onSubmit (e.g.
   // a stale-session 404) can't strand the entry permanently nor spin-loop. The
   // drain lock serializes sends; a remount/reconnect resets the failure counts.
+  // Subscribe so park/unpark re-renders the panel + re-evaluates auto-drain.
+  useStore($parkedSessions)
+  const queueParked = isQueueParked(activeQueueSessionKey)
+
   const autoDrainNext = useCallback(() => {
-    if (busy || drainingQueueRef.current || !activeQueueSessionKey) {
+    if (busy || drainingQueueRef.current || !activeQueueSessionKey || isQueueParked(activeQueueSessionKey)) {
       return
     }
 
@@ -318,12 +325,16 @@ export function useComposerQueue({
 
   // Queued turns flow whenever the session is idle — on the busy→false settle
   // edge, on mount/reconnect, and after a re-key — so a swallowed edge can't
-  // strand them. To cancel queued turns, the user deletes them from the panel.
+  // strand them. Parked queues (explicit halt) stay put until resume.
   useEffect(() => {
+    if (queueParked) {
+      return
+    }
+
     if (shouldAutoDrain({ isBusy: busy, queueLength: queuedPrompts.length })) {
       autoDrainNext()
     }
-  }, [autoDrainNext, busy, queuedPrompts.length])
+  }, [autoDrainNext, busy, queueParked, queuedPrompts.length])
 
   // Queue-edit cleanup: on session swap the scope effect already stashed the
   // edit snapshot; only restore into the composer when still on the same scope.
@@ -353,6 +364,7 @@ export function useComposerQueue({
     exitQueuedEdit,
     queueCurrentDraft,
     queueEdit,
+    queueParked,
     queuedPrompts,
     sendQueuedNow,
     stepQueuedEdit
