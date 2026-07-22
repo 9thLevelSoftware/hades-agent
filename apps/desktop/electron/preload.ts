@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
-contextBridge.exposeInMainWorld('hermesDesktop', {
+const hermesDesktopApi = {
   getConnection: profile => ipcRenderer.invoke('hermes:connection', profile),
   revalidateConnection: () => ipcRenderer.invoke('hermes:connection:revalidate'),
   touchBackend: profile => ipcRenderer.invoke('hermes:backend:touch', profile),
@@ -266,4 +266,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     fetchMarketplace: id => ipcRenderer.invoke('hermes:vscode-theme:fetch', id),
     searchMarketplace: query => ipcRenderer.invoke('hermes:vscode-theme:search', query)
   }
-})
+}
+
+contextBridge.exposeInMainWorld('hermesDesktop', hermesDesktopApi)
+contextBridge.exposeInMainWorld('hadesDesktop', hermesDesktopApi)
