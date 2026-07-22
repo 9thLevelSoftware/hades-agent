@@ -518,6 +518,7 @@ class AIAgent:
         pass_session_id: bool = False,
         suppress_status_output: bool = False,
         owns_session_db: bool = False,
+        **kwargs,
     ):
         """Forwarder — see ``agent.agent_init.init_agent``."""
         from agent.agent_init import init_agent
