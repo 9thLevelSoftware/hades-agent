@@ -720,7 +720,7 @@ async def test_post_connect_initialization_skips_sync_when_policy_off(monkeypatc
 @pytest.mark.asyncio
 async def test_post_connect_initialization_skips_same_fingerprint_after_success(tmp_path, monkeypatch):
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
-    monkeypatch.setattr("hades_constants.get_hades_home", lambda: tmp_path)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
 
     class _DesiredCommand:
         def to_dict(self, tree):
@@ -757,7 +757,7 @@ async def test_post_connect_initialization_skips_same_fingerprint_after_success(
 @pytest.mark.asyncio
 async def test_post_connect_initialization_respects_discord_retry_after(tmp_path, monkeypatch):
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
-    monkeypatch.setattr("hades_constants.get_hades_home", lambda: tmp_path)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
 
     class _DesiredCommand:
         def to_dict(self, tree):
@@ -798,7 +798,7 @@ async def test_post_connect_initialization_respects_discord_retry_after(tmp_path
 async def test_post_connect_initialization_reraises_non_rate_limit_exceptions(tmp_path, monkeypatch):
     """Arbitrary failures during sync must surface, not be swallowed as rate-limits."""
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
-    monkeypatch.setattr("hades_constants.get_hades_home", lambda: tmp_path)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
 
     class _DesiredCommand:
         def to_dict(self, tree):
@@ -1076,3 +1076,37 @@ async def test_safe_sync_detects_contexts_drift():
     fake_http.edit_global_command.assert_not_awaited()
     fake_http.delete_global_command.assert_awaited_once_with(999, 77)
     fake_http.upsert_global_command.assert_awaited_once_with(999, desired)
+
+
+# ============================================================================
+# #31049: unconfigured platform skips reconnection (non-retryable fatal error)
+# ============================================================================
+
+class TestDiscordUnconfiguredNonRetryable:
+    """Verify that missing dependency/token sets a non-retryable fatal error
+    so the gateway does not queue the platform for background reconnection."""
+
+    @pytest.mark.asyncio
+    async def test_no_discord_lib_sets_non_retryable_fatal(self, monkeypatch):
+        """connect() with discord.py unavailable → non-retryable fatal error."""
+        _ensure_discord_mock()
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token="fake"))
+        # Simulate discord.py not installed
+        monkeypatch.setattr(discord_platform, "DISCORD_AVAILABLE", False)
+        result = await adapter.connect()
+        assert result is False
+        assert adapter.has_fatal_error is True
+        assert adapter.fatal_error_retryable is False
+        assert adapter.fatal_error_code == "missing_dependency"
+
+    @pytest.mark.asyncio
+    async def test_no_bot_token_sets_non_retryable_fatal(self, monkeypatch):
+        """connect() with empty token → non-retryable fatal error."""
+        _ensure_discord_mock()
+        monkeypatch.setattr(discord_platform, "DISCORD_AVAILABLE", True)
+        adapter = DiscordAdapter(PlatformConfig(enabled=True, token=""))
+        result = await adapter.connect()
+        assert result is False
+        assert adapter.has_fatal_error is True
+        assert adapter.fatal_error_retryable is False
+        assert adapter.fatal_error_code == "missing_credentials"

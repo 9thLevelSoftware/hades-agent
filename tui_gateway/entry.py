@@ -1,21 +1,22 @@
 import os
-from hades_constants import env_get
 import sys
 
 # Stop a ``utils/`` (or ``proxy/``, ``ui/``) package in the launch directory
-# from shadowing Hades's own top-level modules.  ``hermes_bootstrap`` lives at
+# from shadowing Hermes's own top-level modules.  ``hermes_bootstrap`` lives at
 # the repo root next to this package, so importing it is safe before the guard
 # runs (its name won't collide with a user package), and it owns the canonical
 # path-hardening logic shared with the other entry points.
-import hades_bootstrap
+import hermes_bootstrap
 
-hades_bootstrap.harden_import_path()
+hermes_bootstrap.harden_import_path()
 
 import json
 import logging
 import signal
 import time
 import traceback
+
+from tui_gateway._stdin_recovery import handle_spurious_eof
 
 from tui_gateway import server
 from tui_gateway.server import _CRASH_LOG, dispatch, resolve_skin, write_json
@@ -28,6 +29,17 @@ logger = logging.getLogger(__name__)
 # the agent snapshots its tool list (see wait_for_mcp_discovery).
 _mcp_discovery_thread = None
 
+# True once main() decided this TUI process has MCP servers configured and
+# spawned discovery through the shared owner. Lets wait_for_mcp_discovery
+# re-invoke the (idempotent) spawn on later agent builds so the
+# retry-after-zero-connected allowance in
+# hermes_cli.mcp_startup.start_background_mcp_discovery can actually fire for
+# the stdio TUI — without this, main()'s single spawn is the only call and a
+# first run that connected nothing latches the process MCP-less. Kept as a
+# flag (rather than re-probing config) so non-MCP sessions never pay the
+# tools.mcp_tool import on the per-agent-build wait path.
+_mcp_discovery_enabled = False
+
 
 def _install_sidecar_publisher() -> None:
     """Mirror every dispatcher emit to the dashboard sidebar via WS.
@@ -36,7 +48,7 @@ def _install_sidecar_publisher() -> None:
     ``/api/pty`` endpoint when a chat tab passes a ``channel`` query param.
     Best-effort: connect failure or runtime drop falls back to stdio-only.
     """
-    url = env_get("HADES_TUI_SIDECAR_URL")
+    url = os.environ.get("HERMES_TUI_SIDECAR_URL")
 
     if not url:
         return
@@ -60,7 +72,7 @@ _DEFAULT_SHUTDOWN_GRACE_S = 1.0
 
 
 def _shutdown_grace_seconds() -> float:
-    raw = (env_get("HADES_TUI_GATEWAY_SHUTDOWN_GRACE_S") or "").strip()
+    raw = (os.environ.get("HERMES_TUI_GATEWAY_SHUTDOWN_GRACE_S") or "").strip()
     if not raw:
         return _DEFAULT_SHUTDOWN_GRACE_S
     try:
@@ -219,18 +231,49 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
     waited on beyond the bound.  No-op when no discovery thread was started.
 
     The bound comes from ``mcp_discovery_timeout`` in config (shared with the
-    CLI path via ``hades_cli.mcp_startup``); ``timeout`` overrides it.
+    CLI path via ``hermes_cli.mcp_startup``); ``timeout`` overrides it.
     """
     thread = _mcp_discovery_thread
-    if thread is None or not thread.is_alive():
+    if thread is not None and thread.is_alive():
+        try:
+            from hermes_cli.mcp_startup import _resolve_discovery_timeout
+
+            bound = _resolve_discovery_timeout(timeout)
+        except Exception:
+            bound = timeout if timeout is not None else 0.75
+        thread.join(timeout=bound)
+        return
+    # The stdio TUI spawns discovery via the shared owner (see main()); wait
+    # on it so the first agent build still catches fast servers. Re-invoke
+    # the idempotent spawn first: if the previous run finished with zero
+    # connected servers, start_background_mcp_discovery's
+    # retry-after-zero-connected allowance kicks off a fresh discovery run
+    # here instead of leaving the TUI latched MCP-less for the session.
+    # Only the stdio TUI (which spawned discovery through the shared owner)
+    # should delegate to the startup wait here — for every other surface
+    # (dashboard /api/ws) _make_agent already calls
+    # hermes_cli.mcp_startup.wait_for_mcp_discovery directly, and delegating
+    # unconditionally would make that bounded wait run twice per agent build.
+    if not _mcp_discovery_enabled:
         return
     try:
-        from hades_cli.mcp_startup import _resolve_discovery_timeout
+        from hermes_cli.mcp_startup import start_background_mcp_discovery
 
-        bound = _resolve_discovery_timeout(timeout)
+        start_background_mcp_discovery(
+            logger=logger, thread_name="tui-mcp-discovery"
+        )
     except Exception:
-        bound = timeout if timeout is not None else 0.75
-    thread.join(timeout=bound)
+        logger.debug(
+            "TUI MCP discovery retry-spawn failed", exc_info=True
+        )
+    try:
+        from hermes_cli.mcp_startup import (
+            wait_for_mcp_discovery as _startup_wait,
+        )
+
+        _startup_wait(timeout)
+    except Exception:
+        pass
 
 
 def mcp_discovery_in_flight() -> bool:
@@ -245,7 +288,7 @@ def mcp_discovery_in_flight() -> bool:
     ``hermes --tui`` path spawns ITS thread here (``_mcp_discovery_thread``),
     while the desktop app + dashboard WebSocket sidecar (``tui_gateway/ws.py``)
     and ``hermes dashboard`` spawn theirs via
-    ``hades_cli.mcp_startup.start_background_mcp_discovery``. The late-refresh
+    ``hermes_cli.mcp_startup.start_background_mcp_discovery``. The late-refresh
     scheduler imports this function regardless of surface, so it MUST consult
     both — checking only the entry thread left the desktop/dashboard surfaces
     with no late refresh, so a slow MCP server's tools never surfaced for the
@@ -255,7 +298,7 @@ def mcp_discovery_in_flight() -> bool:
     if thread is not None and thread.is_alive():
         return True
     try:
-        from hades_cli.mcp_startup import (
+        from hermes_cli.mcp_startup import (
             mcp_discovery_in_flight as _startup_in_flight,
         )
 
@@ -273,7 +316,7 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
     the outcome, for the off-critical-path late-refresh waiter.
 
     Joins both discovery-thread owners (see ``mcp_discovery_in_flight``): the
-    entry thread first, then the ``hades_cli.mcp_startup`` thread used by the
+    entry thread first, then the ``hermes_cli.mcp_startup`` thread used by the
     desktop/dashboard surfaces. ``timeout`` bounds EACH join, mirroring the
     pre-#51587 single-owner behavior for the entry thread.
     """
@@ -283,12 +326,16 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
         thread.join(timeout=timeout)
         entry_done = not thread.is_alive()
     try:
-        from hades_cli.mcp_startup import join_mcp_discovery as _startup_join
+        from hermes_cli.mcp_startup import join_mcp_discovery as _startup_join
 
         startup_done = _startup_join(timeout=timeout)
     except Exception:
         startup_done = True
     return entry_done and startup_done
+
+
+# Spurious stdin-EOF recovery tracker (shared open-file-description O_NONBLOCK flip).
+_recovery_times: list[float] = []
 
 
 def main():
@@ -315,7 +362,7 @@ def main():
     # thread when there's actually MCP work to do, so the import cost stays
     # off the path entirely for the common case.
     try:
-        from hades_cli.config import read_raw_config
+        from hermes_cli.config import read_raw_config
         _mcp_servers = (read_raw_config() or {}).get("mcp_servers")
         _has_mcp_servers = isinstance(_mcp_servers, dict) and len(_mcp_servers) > 0
     except Exception:
@@ -323,29 +370,25 @@ def main():
         # discovery (still backgrounded, so it can't block startup).
         _has_mcp_servers = True
     if _has_mcp_servers:
-        def _discover_mcp_background() -> None:
-            try:
-                from hades_cli.mcp_startup import (
-                    _discover_mcp_tools_without_interactive_oauth,
-                )
+        # Spawn via the shared owner in hermes_cli.mcp_startup instead of
+        # a hand-rolled thread, so the stdio TUI gets the same restart
+        # semantics as every other surface: a discovery run that completed
+        # with zero connected servers may be retried by a later spawn call
+        # instead of latching the process into a no-MCP-tools state.
+        # wait_for_mcp_discovery/mcp_discovery_in_flight/
+        # join_mcp_discovery below already consult that owner.
+        global _mcp_discovery_enabled
+        _mcp_discovery_enabled = True
+        try:
+            from hermes_cli.mcp_startup import start_background_mcp_discovery
 
-                _discover_mcp_tools_without_interactive_oauth()
-            except Exception:
-                logger.warning(
-                    "Background MCP tool discovery failed", exc_info=True
-                )
-
-        import threading as _mcp_threading
-        _mcp_thread = _mcp_threading.Thread(
-            target=_discover_mcp_background,
-            name="tui-mcp-discovery",
-            daemon=True,
-        )
-        _mcp_thread.start()
-        # Publish the handle so the first agent build can briefly wait for
-        # already-spawning fast servers to land (see wait_for_mcp_discovery).
-        global _mcp_discovery_thread
-        _mcp_discovery_thread = _mcp_thread
+            start_background_mcp_discovery(
+                logger=logger, thread_name="tui-mcp-discovery"
+            )
+        except Exception:
+            logger.warning(
+                "Background MCP tool discovery failed to start", exc_info=True
+            )
 
     if not write_json({
         "jsonrpc": "2.0",
@@ -355,7 +398,18 @@ def main():
         _log_exit("startup write failed (broken stdout pipe before first event)")
         sys.exit(0)
 
-    for raw in sys.stdin:
+    # Live-apply skins Hermes activates mid-conversation.
+    server._ensure_skin_watcher()
+
+    while True:
+        raw = sys.stdin.readline()
+        if not raw:
+            # Stdin fell through — check if spurious (O_NONBLOCK flip by a
+            # child on the shared open file description) or genuine EOF.
+            if not handle_spurious_eof(_recovery_times, _log_exit):
+                break
+            continue
+
         line = raw.strip()
         if not line:
             continue
@@ -374,8 +428,6 @@ def main():
             if not write_json(resp):
                 _log_exit(f"response write failed for method={method!r} (broken stdout pipe)")
                 sys.exit(0)
-
-    _log_exit("stdin EOF (TUI closed the command pipe)")
 
 
 if __name__ == "__main__":

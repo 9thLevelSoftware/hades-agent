@@ -1,4 +1,4 @@
-# Hades Agent - Development Guide
+# Hermes Agent - Development Guide
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
@@ -84,7 +84,7 @@ conservative at the waist.
 - **E2E validation, not just green unit mocks.** For anything touching
   resolution chains, config propagation, security boundaries, remote
   backends, or file/network I/O, exercise the real path with real imports
-  against a temp `HADES_HOME`. Mocks hide integration bugs.
+  against a temp `HERMES_HOME`. Mocks hide integration bugs.
 - **Cache-, alternation-, and invariant-safe.** Preserve prompt caching, strict
   message role alternation (never two same-role messages in a row; never a
   synthetic user message injected mid-loop), and a system prompt that is
@@ -104,11 +104,7 @@ conservative at the waist.
   thresholds, feature flags, display prefs — go in `config.yaml`. Bridge to an
   internal env var if the mechanism needs one, but user-facing docs point to
   `config.yaml`. Reject PRs that tell users to "set X in your .env" unless X
-  is a credential. Any `HADES_*`/`HERMES_*`-prefixed knob is read via
-  `hades_constants.env_get` and written via `env_set` (both accept either
-  spelling and keep the two prefixes in sync); never single-spelling
-  `os.getenv`/`os.environ` access for these names —
-  `tests/test_env_alias_guard.py` enforces this.
+  is a credential.
 - **A new core tool when terminal + file already do the job, or when a skill
   would.** If the only barrier is file visibility on a remote backend, fix the
   mount, not the toolset.
@@ -132,7 +128,7 @@ conservative at the waist.
   and similar "someone else's product" plugins do NOT land under `plugins/` in
   this repo. They place an ongoing maintenance burden on us to keep them working
   against a fast-moving core, for a backend we don't own. Ship them as a
-  **standalone plugin repo** users install into `~/.hades/plugins/` (or via a
+  **standalone plugin repo** users install into `~/.hermes/plugins/` (or via a
   pip entry point), and promote them in the Nous Research Discord
   (`#plugins-skills-and-skins`). This is a coupling-and-maintenance decision, not
   a quality bar — the plugin can be excellent and still be a close. PRs that add
@@ -198,7 +194,7 @@ Each rung adds more permanent surface than the one above. Choose the highest
    only appears when a prerequisite is configured. Zero footprint otherwise.
    Examples: Home Assistant tools (gated on token), memory-provider tools.
 4. **Plugin** — third-party/niche/user-specific capability that doesn't ship in
-   core. Lives in `~/.hades/plugins/` or a pip package, discovered at runtime.
+   core. Lives in `~/.hermes/plugins/` or a pip package, discovered at runtime.
 5. **MCP server (in the catalog)** — if the capability genuinely needs to be a
    tool (structured I/O the agent invokes) but isn't core-fundamental, prefer
    building it as an MCP server and adding it to the MCP catalog over growing
@@ -235,11 +231,11 @@ entry points you'll actually edit.
 hermes-agent/
 ├── run_agent.py          # AIAgent class — core conversation loop (~12k LOC)
 ├── model_tools.py        # Tool orchestration, discover_builtin_tools(), handle_function_call()
-├── toolsets.py           # Toolset definitions, _HADES_CORE_TOOLS list
+├── toolsets.py           # Toolset definitions, _HERMES_CORE_TOOLS list
 ├── cli.py                # HermesCLI class — interactive CLI orchestrator (~11k LOC)
-├── hades_state.py       # SessionDB — SQLite session store (FTS5 search)
-├── hades_constants.py   # get_hades_home(), display_hades_home() — profile-aware paths
-├── hades_logging.py     # setup_logging() — agent.log / errors.log / gateway.log (profile-aware)
+├── hermes_state.py       # SessionDB — SQLite session store (FTS5 search)
+├── hermes_constants.py   # get_hermes_home(), display_hermes_home() — profile-aware paths
+├── hermes_logging.py     # setup_logging() — agent.log / errors.log / gateway.log (profile-aware)
 ├── batch_runner.py       # Parallel batch processing
 ├── agent/                # Agent internals (provider adapters, memory, caching, compression, etc.)
 ├── hermes_cli/           # CLI subcommands, setup wizard, plugins loader, skin engine
@@ -273,9 +269,9 @@ hermes-agent/
 └── tests/                # Pytest suite (~17k tests across ~900 files as of May 2026)
 ```
 
-**User config:** `~/.hades/config.yaml` (settings), `~/.hades/.env` (API keys only).
-**Logs:** `~/.hades/logs/` — `agent.log` (INFO+), `errors.log` (WARNING+),
-`gateway.log` when running the gateway. Profile-aware via `get_hades_home()`.
+**User config:** `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys only).
+**Logs:** `~/.hermes/logs/` — `agent.log` (INFO+), `errors.log` (WARNING+),
+`gateway.log` when running the gateway. Profile-aware via `get_hermes_home()`.
 Browse with `hermes logs [--follow] [--level ...] [--session ...]`.
 
 ## TypeScript Style
@@ -382,7 +378,7 @@ Reasoning content is stored in `assistant_msg["reasoning"]`.
 - `load_cli_config()` in cli.py merges hardcoded defaults + user config YAML
 - **Skin engine** (`hermes_cli/skin_engine.py`) — data-driven CLI theming; initialized from `display.skin` config key at startup; skins customize banner colors, spinner faces/verbs/wings, tool prefix, response box, branding text
 - `process_command()` is a method on `HermesCLI` — dispatches on canonical command name resolved via `resolve_command()` from the central registry
-- Skill slash commands: `agent/skill_commands.py` scans `~/.hades/skills/`, injects as **user message** (not system prompt) to preserve prompt caching
+- Skill slash commands: `agent/skill_commands.py` scans `~/.hermes/skills/`, injects as **user message** (not system prompt) to preserve prompt caching
 
 ### Slash Command Registry (`hermes_cli/commands.py`)
 
@@ -515,8 +511,8 @@ A **separate** chat surface from both the classic CLI and the dashboard's embedd
 Before adding any tool, settle the footprint question first (see "The
 Footprint Ladder" in the Contribution Rubric): most capabilities should NOT
 be core tools. For custom or local-only tools, do **not** edit Hermes core.
-Use the plugin route instead: create `~/.hades/plugins/<name>/plugin.yaml`
-and `~/.hades/plugins/<name>/__init__.py`, then register tools with
+Use the plugin route instead: create `~/.hermes/plugins/<name>/plugin.yaml`
+and `~/.hermes/plugins/<name>/__init__.py`, then register tools with
 `ctx.register_tool(...)`. Plugin toolsets are discovered automatically and can be
 enabled or disabled without touching `tools/` or `toolsets.py`.
 
@@ -546,15 +542,15 @@ registry.register(
 )
 ```
 
-**2. Add to `toolsets.py`** — either `_HADES_CORE_TOOLS` (all platforms) or a new toolset. **This step is required:** auto-discovery imports the tool and registers its schema, but the tool is only *exposed to an agent* if its name appears in a toolset. `_HADES_CORE_TOOLS` is not dead code — it's the default bundle every platform's base toolset inherits from.
+**2. Add to `toolsets.py`** — either `_HERMES_CORE_TOOLS` (all platforms) or a new toolset. **This step is required:** auto-discovery imports the tool and registers its schema, but the tool is only *exposed to an agent* if its name appears in a toolset. `_HERMES_CORE_TOOLS` is not dead code — it's the default bundle every platform's base toolset inherits from.
 
 Auto-discovery: any `tools/*.py` file with a top-level `registry.register()` call is imported automatically — no manual import list to maintain. Wiring into a toolset is still a deliberate, manual step.
 
 The registry handles schema collection, dispatch, availability checking, and error wrapping. All handlers MUST return a JSON string.
 
-**Path references in tool schemas**: If the schema description mentions file paths (e.g. default output directories), use `display_hades_home()` to make them profile-aware. The schema is generated at import time, which is after `_apply_profile_override()` sets `HADES_HOME`.
+**Path references in tool schemas**: If the schema description mentions file paths (e.g. default output directories), use `display_hermes_home()` to make them profile-aware. The schema is generated at import time, which is after `_apply_profile_override()` sets `HERMES_HOME`.
 
-**State files**: If a tool stores persistent state (caches, logs, checkpoints), use `get_hades_home()` for the base directory — never `Path.home() / ".hades"`. This ensures each profile gets its own state.
+**State files**: If a tool stores persistent state (caches, logs, checkpoints), use `get_hermes_home()` for the base directory — never `Path.home() / ".hermes"`. This ensures each profile gets its own state.
 
 **Agent-level tools** (todo, memory): intercepted by `run_agent.py` before `handle_function_call()`. See `tools/todo_tool.py` for the pattern.
 
@@ -626,15 +622,6 @@ preferences) belong in `config.yaml`, not `.env`. If internal code needs an
 env var mirror for backward compatibility, bridge it from `config.yaml` to
 the env var in code (see `gateway_timeout`, `terminal.cwd` → `TERMINAL_CWD`).
 
-`HADES_*`/`HERMES_*`-prefixed env vars are dual-spelled: read them with
-`hades_constants.env_get` (either spelling works; `HADES_` wins) and set them
-with `hades_constants.env_set` (writes BOTH spellings; pass `env=` for
-subprocess env dicts). `env_pop`/`env_is_set` cover removal and presence
-checks. Never use single-spelling `os.getenv`/`os.environ` reads or writes
-for these names — the ratchet guard `tests/test_env_alias_guard.py` fails on
-any new direct access. (`utils.py`'s `env_var_enabled`/`env_int`/`env_float`/
-`env_bool` already dual-read internally.)
-
 ### Config loaders (three paths — know which one you're in):
 
 | Loader | Used by | Location |
@@ -664,7 +651,7 @@ The skin engine (`hermes_cli/skin_engine.py`) provides data-driven CLI visual cu
 
 ```
 hermes_cli/skin_engine.py    # SkinConfig dataclass, built-in skins, YAML loader
-~/.hades/skins/*.yaml       # User-installed custom skins (drop-in)
+~/.hermes/skins/*.yaml       # User-installed custom skins (drop-in)
 ```
 
 - `init_skin_from_config()` — called at CLI startup, reads `display.skin` from config
@@ -718,7 +705,7 @@ Add to `_BUILTIN_SKINS` dict in `hermes_cli/skin_engine.py`:
 
 ### User skins (YAML)
 
-Users create `~/.hades/skins/<name>.yaml`:
+Users create `~/.hermes/skins/<name>.yaml`:
 
 ```yaml
 name: cyberpunk
@@ -749,11 +736,11 @@ Activate with `/skin cyberpunk` or `display.skin: cyberpunk` in config.yaml.
 
 Hermes has two plugin surfaces. Both live under `plugins/` in the repo so
 repo-shipped plugins can be discovered alongside user-installed ones in
-`~/.hades/plugins/` and pip-installed entry points.
+`~/.hermes/plugins/` and pip-installed entry points.
 
 ### General plugins (`hermes_cli/plugins.py` + `plugins/<name>/`)
 
-`PluginManager` discovers plugins from `~/.hades/plugins/`, `./.hermes/plugins/`,
+`PluginManager` discovers plugins from `~/.hermes/plugins/`, `./.hermes/plugins/`,
 and pip entry points. Each plugin exposes a `register(ctx)` function that
 can:
 
@@ -799,7 +786,7 @@ honcho argparse from `main.py` for exactly this reason.
 **No new in-tree memory providers (policy, May 2026):** the set of
 built-in memory providers under `plugins/memory/` is closed. New memory
 backends must ship as **standalone plugin repos** that users install
-into `~/.hades/plugins/` (or via pip entry points) — they implement
+into `~/.hermes/plugins/` (or via pip entry points) — they implement
 the same `MemoryProvider` ABC, register through the same discovery
 path, and integrate via `hermes memory setup` / `post_setup()` without
 landing in this tree. PRs that add a new directory under
@@ -812,7 +799,7 @@ same rule applies beyond memory providers. Plugins that integrate
 someone else's product or project — observability/metrics backends,
 vendor SaaS connectors, analytics dashboards, paid-service tie-ins —
 must ship as **standalone plugin repos** that users install into
-`~/.hades/plugins/` (or via pip entry points). They register through
+`~/.hermes/plugins/` (or via pip entry points). They register through
 the existing plugin discovery path and use the ABCs/hooks/ctx surface
 we expose; nothing special is needed in core. The reason is
 maintenance load: every product we absorb into the tree becomes our
@@ -836,7 +823,7 @@ discovery system** — scanned on first `get_provider_profile()` or
 
 Scan order:
 1. Bundled: `<repo>/plugins/model-providers/<name>/`
-2. User: `$HADES_HOME/plugins/model-providers/<name>/`
+2. User: `$HERMES_HOME/plugins/model-providers/<name>/`
 3. Legacy: `<repo>/providers/<name>.py` (back-compat)
 
 User plugins of the same name override bundled ones — `register_provider()`
@@ -938,8 +925,8 @@ violate them.
 
 4. **`author` credits the human contributor first.** For external
    contributions, the contributor's real name + GitHub handle goes
-   first; "Hades Agent" is the secondary collaborator. If the
-   contributor's commit shows "Hades Agent" as author (because they
+   first; "Hermes Agent" is the secondary collaborator. If the
+   contributor's commit shows "Hermes Agent" as author (because they
    used Hermes to draft the skill), replace it with their actual name
    — credit the human, not the tool.
 
@@ -978,7 +965,7 @@ contributor skill PRs.
 
 All toolsets are defined in `toolsets.py` as a single `TOOLSETS` dict.
 Each platform's adapter picks a base toolset (e.g. Telegram uses
-`"messaging"`); `_HADES_CORE_TOOLS` is the default bundle most
+`"messaging"`); `_HERMES_CORE_TOOLS` is the default bundle most
 platforms inherit from.
 
 Current toolset keys: `browser`, `clarify`, `code_execution`, `cronjob`,
@@ -1011,7 +998,8 @@ Two shapes:
 Roles:
 
 - `role="leaf"` (default) — focused worker. Cannot call `delegate_task`,
-  `clarify`, `memory`, `send_message`, `execute_code`.
+  `clarify`, `memory`, `send_message`, `cronjob`. Retains `execute_code`
+  (programmatic tool calling).
 - `role="orchestrator"` — retains `delegate_task` so it can spawn its
   own workers. Gated by `delegation.orchestrator_enabled` (default true)
   and bounded by `delegation.max_spawn_depth` (default 2).
@@ -1031,7 +1019,7 @@ turn but still process-local. For work that must survive process restart, use
 
 Background skill-maintenance system that tracks usage on agent-created
 skills and auto-archives stale ones. Users never lose skills; archives
-go to `~/.hades/skills/.archive/` and are restorable.
+go to `~/.hermes/skills/.archive/` and are restorable.
 
 - **Core:** `agent/curator.py` (review loop, auto-transitions, LLM review
   prompt) + `agent/curator_backup.py` (pre-run tar.gz snapshots).
@@ -1039,7 +1027,7 @@ go to `~/.hades/skills/.archive/` and are restorable.
   verbs are: `status`, `run`, `pause`, `resume`, `pin`, `unpin`,
   `archive`, `restore`, `prune`, `backup`, `rollback`.
 - **Telemetry:** `tools/skill_usage.py` owns the sidecar
-  `~/.hades/skills/.usage.json` — per-skill `use_count`, `view_count`,
+  `~/.hermes/skills/.usage.json` — per-skill `use_count`, `view_count`,
   `patch_count`, `last_activity_at`, `state` (active / stale /
   archived), `pinned`.
 
@@ -1086,7 +1074,7 @@ Hardening invariants:
   cannot monopolize the scheduler.
 - Catchup window: half the job's period, clamped to 120s–2h.
 - Grace window: 120s for one-shot jobs whose fire time was missed.
-- File lock at `~/.hades/cron/.tick.lock` prevents duplicate ticks
+- File lock at `~/.hermes/cron/.tick.lock` prevents duplicate ticks
   across processes.
 - Cron sessions pass `skip_memory=True` by default; memory providers
   intentionally do not run during cron.
@@ -1122,7 +1110,7 @@ kanban task.
   assigned profiles. Runs **inside the gateway** by default via
   `kanban.dispatch_in_gateway: true`.
 - **Plugin assets:** `plugins/kanban/dashboard/` (web UI) +
-  `plugins/kanban/systemd/` (`hades-kanban-dispatcher.service` for
+  `plugins/kanban/systemd/` (`hermes-kanban-dispatcher.service` for
   standalone dispatcher deployment).
 
 Isolation model:
@@ -1173,45 +1161,45 @@ in config.yaml (or `HERMES_BACKGROUND_NOTIFICATIONS` env var):
 ## Profiles: Multi-Instance Support
 
 Hermes supports **profiles** — multiple fully isolated instances, each with its own
-`HADES_HOME` directory (config, API keys, memory, sessions, skills, gateway, etc.).
+`HERMES_HOME` directory (config, API keys, memory, sessions, skills, gateway, etc.).
 
 The core mechanism: `_apply_profile_override()` in `hermes_cli/main.py` sets
-`HADES_HOME` before any module imports. All `get_hades_home()` references
+`HERMES_HOME` before any module imports. All `get_hermes_home()` references
 automatically scope to the active profile.
 
 ### Rules for profile-safe code
 
-1. **Use `get_hades_home()` for all HADES_HOME paths.** Import from `hermes_constants`.
-   NEVER hardcode `~/.hades` or `Path.home() / ".hades"` in code that reads/writes state.
+1. **Use `get_hermes_home()` for all HERMES_HOME paths.** Import from `hermes_constants`.
+   NEVER hardcode `~/.hermes` or `Path.home() / ".hermes"` in code that reads/writes state.
    ```python
    # GOOD
-   from hades_constants import get_hades_home
-   config_path = get_hades_home() / "config.yaml"
+   from hermes_constants import get_hermes_home
+   config_path = get_hermes_home() / "config.yaml"
 
    # BAD — breaks profiles
-   config_path = Path.home() / ".hades" / "config.yaml"
+   config_path = Path.home() / ".hermes" / "config.yaml"
    ```
 
-2. **Use `display_hades_home()` for user-facing messages.** Import from `hermes_constants`.
-   This returns `~/.hades` for default or `~/.hades/profiles/<name>` for profiles.
+2. **Use `display_hermes_home()` for user-facing messages.** Import from `hermes_constants`.
+   This returns `~/.hermes` for default or `~/.hermes/profiles/<name>` for profiles.
    ```python
    # GOOD
-   from hades_constants import display_hades_home
-   print(f"Config saved to {display_hades_home()}/config.yaml")
+   from hermes_constants import display_hermes_home
+   print(f"Config saved to {display_hermes_home()}/config.yaml")
 
    # BAD — shows wrong path for profiles
-   print("Config saved to ~/.hades/config.yaml")
+   print("Config saved to ~/.hermes/config.yaml")
    ```
 
-3. **Module-level constants are fine** — they cache `get_hades_home()` at import time,
-   which is AFTER `_apply_profile_override()` sets the env var. Just use `get_hades_home()`,
-   not `Path.home() / ".hades"`.
+3. **Module-level constants are fine** — they cache `get_hermes_home()` at import time,
+   which is AFTER `_apply_profile_override()` sets the env var. Just use `get_hermes_home()`,
+   not `Path.home() / ".hermes"`.
 
-4. **Tests that mock `Path.home()` must also set `HADES_HOME`** — since code now uses
-   `get_hades_home()` (reads env var), not `Path.home() / ".hades"`:
+4. **Tests that mock `Path.home()` must also set `HERMES_HOME`** — since code now uses
+   `get_hermes_home()` (reads env var), not `Path.home() / ".hermes"`:
    ```python
    with patch.object(Path, "home", return_value=tmp_path), \
-        patch.dict(os.environ, {"HADES_HOME": str(tmp_path / ".hades")}):
+        patch.dict(os.environ, {"HERMES_HOME": str(tmp_path / ".hermes")}):
        ...
    ```
 
@@ -1221,17 +1209,17 @@ automatically scope to the active profile.
    `disconnect()`/`stop()`. This prevents two profiles from using the same credential.
    See `plugins/platforms/irc/adapter.py` for the canonical pattern.
 
-6. **Profile operations are HOME-anchored, not HADES_HOME-anchored** — `_get_profiles_root()`
-   returns `Path.home() / ".hades" / "profiles"`, NOT `get_hades_home() / "profiles"`.
+6. **Profile operations are HOME-anchored, not HERMES_HOME-anchored** — `_get_profiles_root()`
+   returns `Path.home() / ".hermes" / "profiles"`, NOT `get_hermes_home() / "profiles"`.
    This is intentional — it lets `hermes -p coder profile list` see all profiles regardless
    of which one is active.
 
 ## Known Pitfalls
 
-### DO NOT hardcode `~/.hades` paths
-Use `get_hades_home()` from `hermes_constants` for code paths. Use `display_hades_home()`
-for user-facing print/log messages. Hardcoding `~/.hades` breaks profiles — each profile
-has its own `HADES_HOME` directory. This was the source of 5 bugs fixed in PR #3575.
+### DO NOT hardcode `~/.hermes` paths
+Use `get_hermes_home()` from `hermes_constants` for code paths. Use `display_hermes_home()`
+for user-facing print/log messages. Hardcoding `~/.hermes` breaks profiles — each profile
+has its own `HERMES_HOME` directory. This was the source of 5 bugs fixed in PR #3575.
 
 ### DO NOT introduce new `simple_term_menu` usage
 Existing call sites in `hermes_cli/main.py` remain for legacy fallback only;
@@ -1271,10 +1259,10 @@ red flag.
 ### Don't wire in dead code without E2E validation
 Unused code that was never shipped was dead for a reason. Before wiring an
 unused module into a live code path, E2E test the real resolution chain
-with actual imports (not mocks) against a temp `HADES_HOME`.
+with actual imports (not mocks) against a temp `HERMES_HOME`.
 
-### Tests must not write to `~/.hades/`
-The `_isolate_hermes_home` autouse fixture in `tests/conftest.py` redirects `HADES_HOME` to a temp dir. Never hardcode `~/.hades/` paths in tests.
+### Tests must not write to `~/.hermes/`
+The `_isolate_hermes_home` autouse fixture in `tests/conftest.py` redirects `HERMES_HOME` to a temp dir. Never hardcode `~/.hermes/` paths in tests.
 
 **Profile tests**: When testing profile features, also mock `Path.home()` so that
 `_get_profiles_root()` and `_get_default_hermes_home()` resolve within the temp dir.
@@ -1282,10 +1270,10 @@ Use the pattern from `tests/hermes_cli/test_profiles.py`:
 ```python
 @pytest.fixture
 def profile_env(tmp_path, monkeypatch):
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
     return home
 ```
 
@@ -1325,7 +1313,7 @@ ContextVars from one test file cannot leak into the next.
 |                     | Without wrapper                             | With wrapper                              |
 | ------------------- | ------------------------------------------- | ----------------------------------------- |
 | Provider API keys   | Whatever is in your env (auto-detects pool) | All env vars except a specific few unset. |
-| HOME / `~/.hades/` | Your real config+auth.json                  | Temp dir per test                         |
+| HOME / `~/.hermes/` | Your real config+auth.json                  | Temp dir per test                         |
 | Timezone            | Local TZ (PDT etc.)                         | UTC                                       |
 | Locale              | Whatever is set                             | C.UTF-8                                   |
 

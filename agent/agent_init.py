@@ -28,7 +28,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import urlparse, parse_qs, urlunparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 from agent.context_compressor import ContextCompressor
 from agent.iteration_budget import IterationBudget
@@ -47,9 +47,10 @@ from agent.tool_guardrails import (
     ToolCallGuardrailController,
     ToolGuardrailDecision,
 )
-from hades_cli.config import cfg_get
-from hades_cli.timeouts import get_provider_request_timeout
-from hades_constants import env_get, get_hades_home
+from hermes_cli.config import cfg_get
+from hermes_cli.route_identity import normalize_route_base_url
+from hermes_cli.timeouts import get_provider_request_timeout
+from hermes_constants import get_hermes_home
 from utils import base_url_host_matches, is_truthy_value
 
 # Use the same logger name as run_agent so tests patching ``run_agent.logger``
@@ -76,18 +77,151 @@ def _ra():
     return run_agent
 
 
-def _build_codex_gpt5_autoraise_notice(autoraise: Dict[str, Any]) -> str:
+def _normalize_route_base_url(base_url: Any) -> str:
+    """Canonicalize an endpoint URL for model-route identity comparisons."""
+    return normalize_route_base_url(base_url)
+
+
+def _provider_default_routes(provider: str) -> set[str]:
+    """Return known exact default routes for a canonical provider id."""
+    routes: set[str] = set()
+    try:
+        from hermes_cli.providers import HERMES_OVERLAYS, get_provider
+
+        overlay = HERMES_OVERLAYS.get(provider)
+        provider_def = get_provider(provider)
+        for value in (
+            getattr(overlay, "base_url_override", ""),
+            getattr(provider_def, "base_url", ""),
+        ):
+            route = _normalize_route_base_url(value)
+            if route:
+                routes.add(route)
+    except Exception:
+        pass
+
+    try:
+        from providers import get_provider_profile
+
+        profile = get_provider_profile(provider)
+        route = _normalize_route_base_url(
+            getattr(profile, "base_url", "")
+        )
+        if route:
+            routes.add(route)
+    except Exception:
+        pass
+
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        from hermes_cli.models import normalize_provider as normalize_model_provider
+        from hermes_cli.providers import normalize_provider as normalize_registry_provider
+
+        for provider_id, config in PROVIDER_REGISTRY.items():
+            canonical_id = normalize_registry_provider(
+                normalize_model_provider(provider_id)
+            )
+            if canonical_id != provider:
+                continue
+            route = _normalize_route_base_url(
+                getattr(config, "inference_base_url", "")
+            )
+            if route:
+                routes.add(route)
+    except Exception:
+        pass
+
+    if provider == "gemini":
+        routes.update(
+            f"{route.rstrip('/')}/openai"
+            for route in list(routes)
+        )
+    return routes
+
+
+def _context_route_mismatch(
+    configured_base_url: Any,
+    active_base_url: Any,
+    configured_provider: Any,
+    active_provider: Any,
+    *,
+    already_normalized: bool = False,
+) -> bool:
+    """Return whether a context pin's configured route differs from runtime."""
+    if already_normalized:
+        configured_route = str(configured_base_url or "")
+        active_route = str(active_base_url or "")
+    else:
+        configured_route = _normalize_route_base_url(configured_base_url)
+        active_route = _normalize_route_base_url(active_base_url)
+    if configured_route:
+        return configured_route != active_route
+
+    configured_provider = str(configured_provider or "").strip()
+    active_provider = str(active_provider or "").strip()
+    if not configured_provider:
+        return False
+    try:
+        from hermes_cli.models import normalize_provider as normalize_model_provider
+
+        configured_provider = normalize_model_provider(configured_provider)
+        active_provider = normalize_model_provider(active_provider)
+    except Exception:
+        configured_provider = configured_provider.lower()
+        active_provider = active_provider.lower()
+    try:
+        from hermes_cli.providers import normalize_provider as normalize_registry_provider
+
+        configured_provider = normalize_registry_provider(configured_provider)
+        active_provider = normalize_registry_provider(active_provider)
+    except Exception:
+        pass
+
+    if active_route:
+        configured_routes = _provider_default_routes(configured_provider)
+        return not configured_routes or active_route not in configured_routes
+    return bool(
+        configured_provider
+        and active_provider
+        and configured_provider != active_provider
+    )
+
+
+def _normalize_custom_provider_name(value: Any) -> str:
+    """Mirror runtime normalization for a requested custom-provider identity."""
+    return str(value or "").strip().lower().replace(" ", "-")
+
+
+def _custom_provider_runtime_ids(value: Any) -> set[str]:
+    """Return raw/menu identities that runtime accepts for a configured name."""
+    normalized = _normalize_custom_provider_name(value)
+    if not normalized:
+        return set()
+    return {normalized, f"custom:{normalized}"}
+
+
+def _build_codex_gpt5_autoraise_notice(
+    autoraise: Dict[str, Any], context_length: Optional[int] = None
+) -> str:
     """Build the one-time notice shown when Codex gpt-5.x raises compaction.
 
     ``autoraise`` is ``{"model": <slug>, "from": <old_ratio>, "to": <new_ratio>}``.
-    The same text is printed inline for CLI users and replayed via
+    ``context_length`` is the live-resolved window from the context compressor
+    (Codex's /models catalog is authoritative and can change server-side, e.g.
+    the gpt-5.6 family's 272K → 372K → 272K shifts in July 2026), so the banner
+    reports what this session actually got rather than a hardcoded cap. The
+    same text is printed inline for CLI users and replayed via
     ``status_callback`` for gateway users, so it must be self-contained and
     include the exact opt-back-out command.
     """
     model = str(autoraise.get("model") or "gpt-5.4/5.5").strip().lower().rsplit("/", 1)[-1]
-    # gpt-5.3-codex-spark has a native 128K window; the gpt-5.4/5.5/5.6 family
-    # is capped at 272K by the Codex OAuth backend.
-    cap = "128K" if model.startswith("gpt-5.3-codex-spark") else "272K"
+    if isinstance(context_length, int) and context_length > 0:
+        cap = f"{round(context_length / 1000)}K"
+    else:
+        # Static fallback when the resolved window isn't available:
+        # gpt-5.3-codex-spark has a native 128K window; the gpt-5.4/5.5/5.6
+        # family is capped at 272K by the Codex OAuth backend.
+        cap = "128K" if model.startswith("gpt-5.3-codex-spark") else "272K"
     from_pct = int(round(autoraise["from"] * 100))
     to_pct = int(round(autoraise["to"] * 100))
     return (
@@ -136,11 +270,11 @@ def _resolve_compression_threshold(
 def _codex_gpt55_autoraise_notice_marker():
     """Path to the per-profile marker recording that the autoraise notice ran.
 
-    Lives under ``$HADES_HOME`` (which is profile-scoped) alongside the other
+    Lives under ``$HERMES_HOME`` (which is profile-scoped) alongside the other
     internal markers like ``.container-mode`` — so it is not a user-facing config
     key, and every profile tracks its own notice state independently.
     """
-    return get_hades_home() / ".codex_gpt55_autoraise_notice"
+    return get_hermes_home() / ".codex_gpt55_autoraise_notice"
 
 
 def _codex_gpt55_autoraise_notice_state(autoraise: Dict[str, Any]) -> str:
@@ -175,7 +309,7 @@ def _codex_gpt55_autoraise_notice_seen(autoraise: Dict[str, Any]) -> bool:
 def _record_codex_gpt55_autoraise_notice(autoraise: Dict[str, Any]) -> None:
     """Persist that the autoraise notice was shown for this profile/config state.
 
-    Best-effort: a read-only or missing ``$HADES_HOME`` just means the notice
+    Best-effort: a read-only or missing ``$HERMES_HOME`` just means the notice
     may show again next init, which is preferable to breaking agent init.
     """
     try:
@@ -356,8 +490,6 @@ def init_agent(
     pass_session_id: bool = False,
     suppress_status_output: bool = False,
     owns_session_db: bool = False,
-    runtime_routing_context: "AgentRuntimeContext" = None,
-    prepared_agent_runtime: "PreparedAgentRuntime" = None,
 ):
     """
     Initialize the AI Agent.
@@ -401,130 +533,14 @@ def init_agent(
         platform (str): The interface platform the user is on (e.g. "cli", "telegram", "discord", "whatsapp").
             Used to inject platform-specific formatting hints into the system prompt.
         skip_context_files (bool): If True, skip auto-injection of project context files
-            (SOUL.md, .hermes.md, AGENTS.md, CLAUDE.md, .cursorrules) from the cwd / HADES_HOME
+            (SOUL.md, .hermes.md, AGENTS.md, CLAUDE.md, .cursorrules) from the cwd / HERMES_HOME
             into the system prompt. Use this for batch processing and data generation to avoid
             polluting trajectories with user-specific persona or project instructions.
-        load_soul_identity (bool): If True, still use ~/.hades/SOUL.md as the primary
+        load_soul_identity (bool): If True, still use ~/.hermes/SOUL.md as the primary
             identity even when skip_context_files=True. Project context files from the cwd
             remain skipped.
     """
     _install_safe_stdio()
-
-    # Runtime routing is a pre-construction operation.  Keep this immediately
-    # after safe stdio installation and before assigning any runtime attribute
-    # or constructing/resolving a provider client.  The helper returns new
-    # immutable values; it never mutates caller-owned constructor inputs.
-    _runtime_constructor_args = {
-        "model": model,
-        "provider": provider,
-        "base_url": base_url,
-        "api_key": api_key,
-        "api_mode": api_mode,
-        "acp_command": acp_command,
-        "acp_args": acp_args,
-        "command": command,
-        "args": args,
-        "credential_pool": credential_pool,
-        "reasoning_config": reasoning_config,
-        "fallback_model": fallback_model,
-    }
-    _runtime_initial_fallback_index = None
-    if runtime_routing_context is None and prepared_agent_runtime is None:
-        # Preserve the historical constructor path byte-for-byte for ordinary
-        # callers: no routing module import, plugin discovery, validation, or
-        # normalization occurs without an explicit routing handoff.
-        _prepared_runtime = None
-        _runtime_binding = None
-    else:
-        from agent.runtime_routing import (
-            AgentRuntimeRequest,
-            RUNTIME_ROUTING_CONTRACT_VERSION,
-            apply_runtime_plan_to_constructor_arguments,
-            constructor_runtime_spec,
-            finalize_prepared_agent_runtime,
-            prepare_constructor_runtime,
-            resolve_ordinary_hermes_runtime,
-            validate_prepared_agent_runtime,
-        )
-
-        _constructor_runtime = constructor_runtime_spec(
-            model=model,
-            provider=provider,
-            base_url=base_url,
-            api_key=api_key,
-            api_mode=api_mode,
-            acp_command=acp_command or command,
-            acp_args=acp_args or args,
-            credential_pool=credential_pool,
-            reasoning_config=reasoning_config,
-            fallback_model=fallback_model,
-        )
-        (
-            _prepared_runtime,
-            _runtime_binding,
-            _effective_runtime,
-        ) = prepare_constructor_runtime(
-            context=runtime_routing_context,
-            prepared=prepared_agent_runtime,
-            effective_constructor_runtime=_constructor_runtime,
-            session_store=session_db,
-        )
-        if _runtime_binding is None:
-            # Context-only inherit/shadow is a two-phase handoff: policy runs
-            # first, then the canonical Hermes credential/endpoint resolver,
-            # then the exact result is sealed before any runtime attribute or
-            # provider client consumes it.
-            _runtime_resolution = resolve_ordinary_hermes_runtime(
-                _constructor_runtime,
-                owns_fallbacks=_prepared_runtime.plan.owns_fallbacks,
-            )
-            _effective_runtime = _runtime_resolution.runtime
-            _runtime_initial_fallback_index = (
-                _runtime_resolution.activated_fallback_index
-            )
-            _runtime_request = AgentRuntimeRequest(
-                contract_version=RUNTIME_ROUTING_CONTRACT_VERSION,
-                context=runtime_routing_context,
-                baseline=_constructor_runtime,
-            )
-            _prepared_runtime = finalize_prepared_agent_runtime(
-                _prepared_runtime,
-                _runtime_request,
-                _effective_runtime,
-            )
-            _runtime_binding = validate_prepared_agent_runtime(
-                _prepared_runtime,
-                context=runtime_routing_context,
-                effective_runtime=_effective_runtime,
-            )
-        _runtime_constructor_args = apply_runtime_plan_to_constructor_arguments(
-            _runtime_constructor_args,
-            binding=_runtime_binding,
-            effective_runtime=_effective_runtime,
-        )
-    # Replace every local that the existing initializer reads later.  In
-    # particular, changing only agent attributes would leak the old URL, key,
-    # or fallback chain through one of the two fallback/client seams.
-    model = _runtime_constructor_args["model"]
-    provider = _runtime_constructor_args["provider"]
-    base_url = _runtime_constructor_args["base_url"]
-    api_key = _runtime_constructor_args["api_key"]
-    api_mode = _runtime_constructor_args["api_mode"]
-    acp_command = _runtime_constructor_args["acp_command"]
-    acp_args = _runtime_constructor_args["acp_args"]
-    command = _runtime_constructor_args["command"]
-    args = _runtime_constructor_args["args"]
-    credential_pool = _runtime_constructor_args["credential_pool"]
-    reasoning_config = _runtime_constructor_args["reasoning_config"]
-    fallback_model = _runtime_constructor_args["fallback_model"]
-
-    agent._prepared_agent_runtime = _prepared_runtime
-    agent._runtime_routing_binding = _runtime_binding
-    agent._runtime_fallback_authority = (
-        "plugin"
-        if _runtime_binding is not None and _runtime_binding.owns_fallbacks
-        else "host"
-    )
 
     agent.model = model
     agent.max_iterations = max_iterations
@@ -612,18 +628,8 @@ def init_agent(
                 agent.provider,
                 base_url=agent.base_url,
             ):
-                if _runtime_binding is not None:
-                    from agent.runtime_routing import InvalidPreparedAgentRuntime
-
-                    raise InvalidPreparedAgentRuntime()
                 agent._credential_pool = None
-        except Exception as exc:
-            if _runtime_binding is not None:
-                from agent.runtime_routing import InvalidPreparedAgentRuntime
-
-                if isinstance(exc, InvalidPreparedAgentRuntime):
-                    raise
-                raise InvalidPreparedAgentRuntime() from None
+        except Exception:
             agent._credential_pool = None
 
     # Eagerly warm the transport cache so import errors surface at init,
@@ -634,7 +640,7 @@ def init_agent(
         pass  # Non-fatal — transport may not exist for all modes yet
 
     try:
-        from hades_cli.model_normalize import (
+        from hermes_cli.model_normalize import (
             _AGGREGATOR_PROVIDERS,
             normalize_model_for_provider,
         )
@@ -787,7 +793,7 @@ def init_agent(
     # sessions with >5-minute pauses between turns (#14971).
     agent._cache_ttl = "5m"
     try:
-        from hades_cli.config import load_config as _load_pc_cfg
+        from hermes_cli.config import load_config as _load_pc_cfg
 
         _pc_cfg = _load_pc_cfg().get("prompt_caching", {}) or {}
         _ttl = _pc_cfg.get("cache_ttl", "5m")
@@ -839,9 +845,9 @@ def init_agent(
     agent._or_cache_hits: int = 0
 
     # Centralized logging — agent.log (INFO+) and errors.log (WARNING+)
-    # both live under ~/.hades/logs/.  Idempotent, so gateway mode
+    # both live under ~/.hermes/logs/.  Idempotent, so gateway mode
     # (which creates a new AIAgent per message) won't duplicate handlers.
-    from hades_logging import setup_logging, setup_verbose_logging
+    from hermes_logging import setup_logging, setup_verbose_logging
     setup_logging(hermes_home=_ra()._hermes_home)
 
     if agent.verbose_logging:
@@ -853,11 +859,11 @@ def init_agent(
         # root logger's file handlers (agent.log, errors.log) from
         # ever seeing the records, because Python checks
         # logger.isEnabledFor() before handler propagation. We rely
-        # on the fact that hades_logging.setup_logging() does not
+        # on the fact that hermes_logging.setup_logging() does not
         # install a console StreamHandler in quiet mode — so INFO
         # records flow to the file handlers but never reach a
         # console. Any future noise reduction belongs at the
-        # handler level inside hades_logging.py, not here.
+        # handler level inside hermes_logging.py, not here.
         pass
     
     # Internal stream callback (set during streaming TTS).
@@ -882,6 +888,25 @@ def init_agent(
     # commentary when the provider later returns it as a completed interim
     # assistant message.
     agent._current_streamed_assistant_text = ""
+    # Completed interim messages delivered during the current user turn.
+    # Unlike token-stream tracking, this spans Codex continuation/tool calls so
+    # repeated commentary is not re-sent before normalization can deduplicate it.
+    agent._delivered_interim_texts: set[str] = set()
+
+    # Single-writer guard for the streaming delta sink (#65991). A stale/
+    # superseded stream (e.g. one the stale-stream detector reconnected past,
+    # whose socket abort raced and never actually stopped the old worker) must
+    # NOT keep writing tokens into the turn alongside the retry's stream —
+    # otherwise two coherent responses interleave token-by-token into one
+    # transcript. Every streaming attempt claims a monotonic writer token; the
+    # delta sink drops chunks whose calling thread holds a stale token. The
+    # threading.local means threads that never claimed (non-streaming callers)
+    # are never fenced, so the guard can only ever drop a superseded stream,
+    # never the single legitimate writer.
+    agent._stream_writer_lock = threading.Lock()
+    agent._stream_writer_token = 0
+    agent._stream_writer_tls = threading.local()
+    agent._stream_writer_dropped = 0
 
     # Optional current-turn user-message override used when the API-facing
     # user message intentionally differs from the persisted transcript
@@ -949,7 +974,7 @@ def init_agent(
             # state cost is one file read + one timestamp compare per request.
             if agent.provider == "minimax-oauth" and isinstance(effective_key, str) and effective_key:
                 try:
-                    from hades_cli.auth import build_minimax_oauth_token_provider
+                    from hermes_cli.auth import build_minimax_oauth_token_provider
                     effective_key = build_minimax_oauth_token_provider()
                 except Exception as _mm_exc:  # noqa: BLE001 — never block startup on this
                     import logging as _logging
@@ -1039,17 +1064,13 @@ def init_agent(
             print(f"🤖 AI Agent initialized with MoA preset: {agent.model}")
     elif agent.api_mode == "bedrock_converse":
         # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
-        # Keep the live runtime fields byte-for-byte aligned with the sealed
-        # handoff even though boto3 consumes its own credential chain.
-        agent.api_key = api_key
-        agent.base_url = base_url
         # Region is extracted from the base_url or defaults to us-east-1.
         _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
         agent._bedrock_region = _region_match.group(1) if _region_match else "us-east-1"
         # Guardrail config — read from config.yaml at init time.
         agent._bedrock_guardrail_config = None
         try:
-            from hades_cli.config import load_config as _load_br_cfg
+            from hermes_cli.config import load_config as _load_br_cfg
             _gr = _load_br_cfg().get("bedrock", {}).get("guardrail", {})
             if _gr.get("guardrail_identifier") and _gr.get("guardrail_version"):
                 agent._bedrock_guardrail_config = {
@@ -1102,7 +1123,7 @@ def init_agent(
             elif base_url_host_matches(effective_base, "api.routermint.com"):
                 client_kwargs["default_headers"] = _ra()._routermint_headers()
             elif base_url_host_matches(effective_base, "githubcopilot.com"):
-                from hades_cli.models import copilot_default_headers
+                from hermes_cli.models import copilot_default_headers
 
                 client_kwargs["default_headers"] = copilot_default_headers()
             elif base_url_host_matches(effective_base, "api.kimi.com"):
@@ -1159,7 +1180,7 @@ def init_agent(
                     # (e.g. alibaba → DASHSCOPE_API_KEY, not ALIBABA_API_KEY).
                     _env_hint = f"{_explicit.upper()}_API_KEY"
                     try:
-                        from hades_cli.auth import PROVIDER_REGISTRY
+                        from hermes_cli.auth import PROVIDER_REGISTRY
                         _pcfg = PROVIDER_REGISTRY.get(_explicit)
                         if _pcfg and _pcfg.api_key_env_vars:
                             _env_hint = _pcfg.api_key_env_vars[0]
@@ -1248,7 +1269,7 @@ def init_agent(
         agent._apply_user_default_headers()
 
         try:
-            from hades_cli.config import (
+            from hermes_cli.config import (
                 apply_custom_provider_extra_headers_to_client_kwargs,
                 apply_custom_provider_tls_to_client_kwargs,
                 get_compatible_custom_providers,
@@ -1276,13 +1297,7 @@ def init_agent(
             logger.debug("custom-provider TLS resolution skipped", exc_info=True)
 
         agent.api_key = client_kwargs.get("api_key", "")
-        if _runtime_binding is not None:
-            # Query parameters are split into ``default_query`` for the SDK,
-            # but the live runtime identity must remain identical to the
-            # authenticated handoff (not the queryless transport URL).
-            agent.base_url = base_url
-        else:
-            agent.base_url = client_kwargs.get("base_url", agent.base_url)
+        agent.base_url = client_kwargs.get("base_url", agent.base_url)
         try:
             from agent.ssl_guard import verify_ca_bundle_with_fallback
 
@@ -1321,15 +1336,8 @@ def init_agent(
         agent._fallback_chain = [fallback_model]
     else:
         agent._fallback_chain = []
-    if _runtime_initial_fallback_index is not None:
-        agent._fallback_index = min(
-            _runtime_initial_fallback_index + 1,
-            len(agent._fallback_chain),
-        )
-        agent._fallback_activated = True
-    else:
-        agent._fallback_index = 0
-        agent._fallback_activated = getattr(agent, "_fallback_activated", False)
+    agent._fallback_index = 0
+    agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)
     agent._fallback_model = agent._fallback_chain[0] if agent._fallback_chain else None
     if agent._fallback_chain and not agent.quiet_mode:
@@ -1387,7 +1395,7 @@ def init_agent(
     # worker-only instructions like "call kanban_show() with no args",
     # which error out when no task is assigned.
     from agent.prompt_builder import KANBAN_GUIDANCE, KANBAN_ORCHESTRATOR_GUIDANCE
-    if env_get("HADES_KANBAN_TASK"):
+    if os.environ.get("HERMES_KANBAN_TASK"):
         agent._kanban_worker_guidance = KANBAN_GUIDANCE
     elif "kanban_show" in agent.valid_tool_names:
         agent._kanban_worker_guidance = KANBAN_ORCHESTRATOR_GUIDANCE
@@ -1440,21 +1448,19 @@ def init_agent(
 
         set_current_session_id(agent.session_id)
     except Exception:
-        from hades_constants import env_set
+        os.environ["HERMES_SESSION_ID"] = agent.session_id
 
-        env_set("HADES_SESSION_ID", agent.session_id)
-
-    # Session logs go into ~/.hades/sessions/ alongside gateway sessions
-    hermes_home = get_hades_home()
+    # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
+    hermes_home = get_hermes_home()
     agent.logs_dir = hermes_home / "sessions"
     agent.logs_dir.mkdir(parents=True, exist_ok=True)
-    # Per-session JSON snapshot writer (~/.hades/sessions/session_{sid}.json)
+    # Per-session JSON snapshot writer (~/.hermes/sessions/session_{sid}.json)
     # is opt-in via sessions.write_json_snapshots (default False).  state.db
     # is canonical — the snapshot is only useful for external tooling that
     # reads the JSON files directly.  See run_agent._save_session_log.
     agent._session_json_enabled = False
     try:
-        from hades_cli.config import load_config as _load_sess_cfg
+        from hermes_cli.config import load_config as _load_sess_cfg
         _sess_cfg = (_load_sess_cfg().get("sessions") or {})
         agent._session_json_enabled = bool(_sess_cfg.get("write_json_snapshots", False))
     except Exception:
@@ -1523,18 +1529,6 @@ def init_agent(
         "reasoning_config": reasoning_config,
         "max_tokens": max_tokens,
     }
-    if _runtime_binding is not None:
-        # Routed sessions must be reconstructable without persisting provider
-        # credentials. The generic projector admits only bounded public
-        # identity fields and a credential-free endpoint URL.
-        from agent.runtime_routing import session_runtime_metadata
-
-        agent._session_init_model_config.update(
-            session_runtime_metadata(
-                _runtime_binding.runtime,
-                manual_pin_source=_runtime_binding.manual_pin_source,
-            )
-        )
     
     # In-memory todo list for task planning (one per agent/session)
     from tools.todo_tool import TodoStore
@@ -1542,10 +1536,44 @@ def init_agent(
     
     # Load config once for memory, skills, and compression sections
     try:
-        from hades_cli.config import load_config as _load_agent_config
+        from hermes_cli.config import load_config as _load_agent_config
         _agent_cfg = _load_agent_config()
     except Exception:
         _agent_cfg = {}
+
+    # Codex commentary visibility (display.show_commentary, default true).
+    # When true, completed Codex phase=commentary messages are delivered as
+    # visible mid-turn updates through the interim message path. When false,
+    # commentary falls back to the reasoning channel (visible only with
+    # show_reasoning enabled).
+    agent.show_commentary = True
+    try:
+        _display_section = _agent_cfg.get("display", {})
+        if isinstance(_display_section, dict):
+            agent.show_commentary = bool(_display_section.get("show_commentary", True))
+    except Exception:
+        agent.show_commentary = True
+
+    # LM Studio can either be explicitly preloaded through LM Studio's
+    # management API (the historical Hermes behavior) or left to LM Studio's
+    # just-in-time / Auto-Evict chat-completions path.  Keep the default
+    # explicit for backward compatibility; users with LM Studio Auto-Evict can
+    # opt into JIT via ``model.lmstudio_load_mode: jit``.
+    agent.lmstudio_load_mode = "explicit"
+    try:
+        _model_section = _agent_cfg.get("model", {})
+        if isinstance(_model_section, dict):
+            _load_mode = str(_model_section.get("lmstudio_load_mode", "explicit") or "explicit").strip().lower()
+            if _load_mode in {"explicit", "jit"}:
+                agent.lmstudio_load_mode = _load_mode
+            else:
+                logger.warning(
+                    "Invalid model.lmstudio_load_mode=%r; expected 'explicit' or 'jit'. Using explicit.",
+                    _model_section.get("lmstudio_load_mode"),
+                )
+    except Exception:
+        agent.lmstudio_load_mode = "explicit"
+
     try:
         agent._tool_guardrails = ToolCallGuardrailController(
             ToolCallGuardrailConfig.from_mapping(
@@ -1566,7 +1594,14 @@ def init_agent(
     agent._memory_nudge_interval = 10
     agent._turns_since_memory = 0
     agent._iters_since_skill = 0
-    if not skip_memory:
+    # A flush/background agent may pass skip_memory=True to avoid spinning up an
+    # external memory *provider*, but if the caller also explicitly enables the
+    # "memory" toolset it still needs the built-in file-backed store — otherwise
+    # the memory tool dispatches with store=None and every call fails (#65429).
+    # So the built-in store is created unless memory is globally disabled, while
+    # the external-provider block below stays gated on skip_memory.
+    _memory_toolset_requested = "memory" in (agent.enabled_toolsets or [])
+    if not skip_memory or _memory_toolset_requested:
         try:
             mem_config = _agent_cfg.get("memory", {})
             agent._memory_enabled = mem_config.get("memory_enabled", False)
@@ -1603,7 +1638,7 @@ def init_agent(
                     _init_kwargs = {
                         "session_id": agent.session_id,
                         "platform": platform or "cli",
-                        "hermes_home": str(get_hades_home()),
+                        "hermes_home": str(get_hermes_home()),
                         "agent_context": "primary",
                     }
                     if _init_kwargs["platform"] == "cli":
@@ -1638,7 +1673,7 @@ def init_agent(
                         _init_kwargs["gateway_session_key"] = agent._gateway_session_key
                     # Profile identity for per-profile provider scoping
                     try:
-                        from hades_cli.profiles import get_active_profile_name
+                        from hermes_cli.profiles import get_active_profile_name
                         _profile = get_active_profile_name()
                         _init_kwargs["agent_identity"] = _profile
                         _init_kwargs["agent_workspace"] = "hermes"
@@ -1707,7 +1742,7 @@ def init_agent(
             pass
 
     # Per-platform prompt-hint overrides (config.yaml → platform_hints).
-    # Lets an enterprise admin append to or replace Hades' built-in
+    # Lets an enterprise admin append to or replace Hermes' built-in
     # platform hint for a single messaging platform (e.g. WhatsApp) without
     # affecting other platforms. Shape:
     #   platform_hints:
@@ -1787,6 +1822,34 @@ def init_agent(
     compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
     compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
     compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
+    # Cap on compression retry rounds before a turn gives up with "max
+    # compression attempts reached" (compression.max_attempts).  Hardcoding 3
+    # strands sessions that legitimately need more rounds — e.g. a restart
+    # history reload whose incompressible tool schemas keep the request
+    # estimate above the threshold even though the messages compress fine
+    # (the #62605 failure class).  Default 3 preserves current behavior, so
+    # an unset key is behavior-neutral; validated >= 1, hard-capped at 10,
+    # and any non-int-like value falls back to 3.  Booleans are rejected
+    # (bool subclasses int, so int(True) would silently become 1) and
+    # fractional floats are rejected rather than truncated — "4.7 attempts"
+    # is a config mistake, not a request for 4.
+    _raw_max_attempts = _compression_cfg.get("max_attempts", 3)
+    if isinstance(_raw_max_attempts, bool):
+        compression_max_attempts = 3
+    elif isinstance(_raw_max_attempts, int):
+        compression_max_attempts = _raw_max_attempts
+    elif isinstance(_raw_max_attempts, float):
+        compression_max_attempts = (
+            int(_raw_max_attempts) if _raw_max_attempts.is_integer() else 3
+        )
+    else:
+        try:
+            compression_max_attempts = int(str(_raw_max_attempts).strip())
+        except (TypeError, ValueError):
+            compression_max_attempts = 3
+    if compression_max_attempts < 1:
+        compression_max_attempts = 3
+    compression_max_attempts = min(compression_max_attempts, 10)
     # protect_first_n is the number of non-system messages to protect at
     # the head, in addition to the system prompt (which is always
     # implicitly protected by the compressor).  Floor at 0 — a value of
@@ -1799,6 +1862,29 @@ def init_agent(
     compression_abort_on_summary_failure = str(
         _compression_cfg.get("abort_on_summary_failure", False)
     ).lower() in {"true", "1", "yes"}
+    # Per-model threshold overrides: keys are substring-matched against the
+    # model name (longest match wins). Empty dict = use the global threshold
+    # for all models (backward compatible).
+    _raw_model_thresholds = _compression_cfg.get("model_thresholds", {})
+    if isinstance(_raw_model_thresholds, dict):
+        compression_model_thresholds = {
+            str(k): float(v) for k, v in _raw_model_thresholds.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
+    else:
+        compression_model_thresholds = {}
+    # Absolute token cap: when set, compression triggers at the lower of
+    # the ratio-based threshold and this absolute count. Clamped to the
+    # model's context length at apply-time so a cap above the window is
+    # a no-op (ratio-based threshold wins).
+    compression_threshold_tokens = _compression_cfg.get("threshold_tokens")
+    if compression_threshold_tokens is not None:
+        try:
+            compression_threshold_tokens = int(compression_threshold_tokens)
+            if compression_threshold_tokens <= 0:
+                compression_threshold_tokens = None
+        except (TypeError, ValueError):
+            compression_threshold_tokens = None
     # In-place compaction: when True, compress_context() rewrites the message
     # list + rebuilds the system prompt WITHOUT rotating the session id (no
     # parent_session_id chain, no `name #N` renumber). See #38763 and
@@ -1817,6 +1903,12 @@ def init_agent(
             codex_app_server_auto_compaction,
         )
         codex_app_server_auto_compaction = "native"
+    # Opt-in idle compaction: compact a session up front when it resumes after
+    # this many seconds of inactivity (0 = disabled). Time-based, so it
+    # complements the size-based threshold above. Consumed by build_turn_context().
+    compression_idle_compact_after_seconds = max(
+        0, int(_compression_cfg.get("idle_compact_after_seconds", 0))
+    )
 
     # Read optional explicit context_length override for the auxiliary
     # compression model. Custom endpoints often cannot report this via
@@ -1887,15 +1979,173 @@ def init_agent(
             )
             _config_context_length = None
 
-    # Resolve custom_providers list once for reuse below (startup
-    # context-length override and plugin context-engine init).
+    # Resolve custom_providers once before route-scoping a global context pin:
+    # a named custom provider may keep its base URL only in this list rather
+    # than repeating it under ``model``.
     try:
-        from hades_cli.config import get_compatible_custom_providers
+        from hermes_cli.config import get_compatible_custom_providers
         _custom_providers = get_compatible_custom_providers(_agent_cfg)
     except Exception:
         _custom_providers = _agent_cfg.get("custom_providers")
         if not isinstance(_custom_providers, list):
             _custom_providers = []
+
+    # ``model.context_length`` describes the configured default model. A
+    # process launched directly with ``--model`` / ``-m`` has already replaced
+    # ``agent.model`` before this initializer loads config, so carrying the
+    # default model's explicit window into that different runtime is stale. The
+    # live switch/fallback paths already clear this override; keep direct-start
+    # overrides consistent with them and let provider metadata resolve the
+    # active model's window instead.
+    if _config_context_length is not None and isinstance(_model_cfg, dict):
+        _configured_default_model = str(_model_cfg.get("default") or "").strip()
+        _configured_default_runtime_model = _configured_default_model
+        _active_runtime_model = agent.model
+        if _configured_default_model:
+            try:
+                from hermes_cli.model_normalize import normalize_model_for_provider
+
+                _configured_default_runtime_model = normalize_model_for_provider(
+                    _configured_default_model, agent.provider
+                )
+                _active_runtime_model = normalize_model_for_provider(
+                    agent.model, agent.provider
+                )
+            except Exception:
+                pass
+        _configured_provider = str(_model_cfg.get("provider") or "").strip()
+        _configured_base_url = _normalize_route_base_url(
+            _model_cfg.get("base_url")
+        )
+        _configured_provider_norm = _normalize_custom_provider_name(
+            _configured_provider
+        )
+        _custom_provider_candidate = bool(_configured_provider_norm)
+        _runtime_first_provider_ids = {
+            "auto",
+            "moa",
+            "vertex",
+            "google-vertex",
+            "vertex-ai",
+            "gcp-vertex",
+            "vertexai",
+        }
+        if _configured_provider_norm in _runtime_first_provider_ids:
+            _custom_provider_candidate = False
+        elif (
+            _custom_provider_candidate
+            and _configured_provider_norm != "custom"
+            and not _configured_provider_norm.startswith("custom:")
+        ):
+            try:
+                from hermes_cli.auth import resolve_provider as resolve_auth_provider
+
+                _resolved_auth_provider = resolve_auth_provider(
+                    _configured_provider_norm
+                )
+                _custom_provider_candidate = (
+                    str(_resolved_auth_provider or "").strip().lower()
+                    != _configured_provider_norm
+                )
+            except Exception:
+                pass
+        if not _configured_base_url and _custom_provider_candidate:
+            _configured_custom_provider = _normalize_custom_provider_name(
+                _configured_provider
+            )
+            _user_providers = _agent_cfg.get("providers")
+            _disabled_custom_provider_ids: set[str] = set()
+            if isinstance(_user_providers, dict):
+                from hermes_cli.config import is_provider_enabled
+
+                for _provider_key, _provider_entry in _user_providers.items():
+                    if not isinstance(_provider_entry, dict):
+                        continue
+                    _entry_name = str(
+                        _provider_entry.get("name") or ""
+                    ).strip()
+                    _entry_provider_ids = _custom_provider_runtime_ids(
+                        _provider_key
+                    ) | _custom_provider_runtime_ids(_entry_name)
+                    if not is_provider_enabled(_provider_entry):
+                        _disabled_custom_provider_ids.update(
+                            provider_id
+                            for provider_id in _entry_provider_ids
+                            if provider_id
+                        )
+                        continue
+                    if _configured_custom_provider not in _entry_provider_ids:
+                        continue
+                    _configured_base_url = _normalize_route_base_url(
+                        _provider_entry.get("api")
+                        or _provider_entry.get("url")
+                        or _provider_entry.get("base_url")
+                    )
+                    if _configured_base_url:
+                        break
+            if not _configured_base_url:
+                for _provider_entry in _custom_providers:
+                    if not isinstance(_provider_entry, dict):
+                        continue
+                    _entry_name = str(
+                        _provider_entry.get("name") or ""
+                    ).strip()
+                    _entry_provider_key = str(
+                        _provider_entry.get("provider_key") or ""
+                    ).strip().lower()
+                    _entry_provider_ids = _custom_provider_runtime_ids(
+                        _entry_name
+                    ) | _custom_provider_runtime_ids(_entry_provider_key)
+                    if (
+                        _entry_provider_key
+                        and _custom_provider_runtime_ids(_entry_provider_key)
+                        & _disabled_custom_provider_ids
+                    ):
+                        continue
+                    if _configured_custom_provider not in _entry_provider_ids:
+                        continue
+                    _configured_base_url = _normalize_route_base_url(
+                        _provider_entry.get("base_url")
+                    )
+                    if _configured_base_url:
+                        break
+        _active_route_url = str(agent.base_url or "")
+        _requested_route_url = str(base_url or "")
+        if "?" in _requested_route_url.split("#", 1)[0]:
+            try:
+                _requested_parts = urlparse(_requested_route_url)
+                _requested_without_query = urlunparse(
+                    _requested_parts._replace(query="")
+                )
+                if _normalize_route_base_url(
+                    _requested_without_query
+                ) == _normalize_route_base_url(_active_route_url):
+                    _active_route_url = _requested_route_url
+            except (TypeError, ValueError):
+                pass
+        _active_base_url = _normalize_route_base_url(_active_route_url)
+        _route_mismatch = _context_route_mismatch(
+            _configured_base_url,
+            _active_base_url,
+            _configured_provider,
+            agent.provider,
+            already_normalized=True,
+        )
+        _model_mismatch = bool(
+            _configured_default_runtime_model
+            and _configured_default_runtime_model != _active_runtime_model
+        )
+        if _model_mismatch or _route_mismatch:
+            _ra().logger.debug(
+                "Ignoring model.context_length=%s for startup runtime %s at %s "
+                "(configured default is %s at %s)",
+                _config_context_length,
+                agent.model,
+                _active_base_url or agent.provider,
+                _configured_default_model,
+                _configured_base_url or _model_cfg.get("provider"),
+            )
+            _config_context_length = None
 
     # Store for reuse by _check_compression_model_feasibility (auxiliary
     # compression model context-length detection needs the same list).
@@ -1905,7 +2155,7 @@ def init_agent(
     # Check custom_providers per-model context_length
     if _config_context_length is None and _custom_providers:
         try:
-            from hades_cli.config import get_custom_provider_context_length
+            from hermes_cli.config import get_custom_provider_context_length
             _cp_ctx_resolved = get_custom_provider_context_length(
                 model=agent.model,
                 base_url=agent.base_url,
@@ -1919,11 +2169,11 @@ def init_agent(
         # Surface a clear warning if the user set a context_length but it
         # wasn't a valid positive int — the helper silently skips those.
         if _config_context_length is None:
-            _target = agent.base_url.rstrip("/") if agent.base_url else ""
+            _target = _normalize_route_base_url(agent.base_url)
             for _cp_entry in _custom_providers:
                 if not isinstance(_cp_entry, dict):
                     continue
-                _cp_url = (_cp_entry.get("base_url") or "").rstrip("/")
+                _cp_url = _normalize_route_base_url(_cp_entry.get("base_url"))
                 if _target and _cp_url == _target:
                     _cp_models = _cp_entry.get("models", {})
                     if isinstance(_cp_models, dict):
@@ -1985,7 +2235,7 @@ def init_agent(
         if _selected_engine is None:
             _candidate = None
             try:
-                from hades_cli.plugins import get_plugin_context_engine
+                from hermes_cli.plugins import get_plugin_context_engine
                 _candidate = get_plugin_context_engine()
             except Exception:
                 _candidate = None
@@ -2036,6 +2286,16 @@ def init_agent(
             provider=agent.provider,
             custom_providers=_custom_providers,
         )
+        # Per-model threshold overrides are part of the explicit
+        # context-engine contract: assign them BEFORE the initial
+        # update_model() call so the first resolution (which derives
+        # threshold_percent/threshold_tokens for the initial model) already
+        # sees the overrides. Assigning after update_model() left the initial
+        # model on the engine's global threshold until the first /model
+        # switch. Engines that override update_model() own their own policy
+        # and may ignore the attribute.
+        if compression_model_thresholds:
+            agent.context_compressor.model_thresholds = compression_model_thresholds
         agent.context_compressor.update_model(
             model=agent.model,
             context_length=_plugin_ctx_len,
@@ -2062,6 +2322,8 @@ def init_agent(
             api_mode=agent.api_mode,
             abort_on_summary_failure=compression_abort_on_summary_failure,
             max_tokens=agent.max_tokens,
+            model_thresholds=compression_model_thresholds,
+            threshold_tokens_cap=compression_threshold_tokens,
         )
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
     if callable(_bind_session_state):
@@ -2072,6 +2334,10 @@ def init_agent(
     agent.compression_enabled = compression_enabled
     agent.compression_in_place = compression_in_place
     agent.codex_app_server_auto_compaction = codex_app_server_auto_compaction
+    agent.max_compression_attempts = compression_max_attempts
+    agent.compression_idle_compact_after_seconds = (
+        compression_idle_compact_after_seconds
+    )
 
     # Reject models whose context window is below the minimum required
     # for reliable tool-calling workflows (64K tokens).
@@ -2080,7 +2346,7 @@ def init_agent(
         raise ValueError(
             f"Model {agent.model} has a context window of {_ctx:,} tokens, "
             f"which is below the minimum {MINIMUM_CONTEXT_LENGTH:,} required "
-            f"by Hades Agent.  Choose a model with at least "
+            f"by Hermes Agent.  Choose a model with at least "
             f"{MINIMUM_CONTEXT_LENGTH // 1000}K context.  If your server "
             f"reports a window smaller than the model's true window, set "
             f"model.context_length in config.yaml to the real value "
@@ -2096,7 +2362,7 @@ def init_agent(
     # non-CLI surface to still surface the warning.)
     if not agent.quiet_mode and (agent.platform or "cli") != "cli":
         try:
-            from hades_cli.model_switch import _check_hermes_model_warning
+            from hermes_cli.model_switch import _check_hermes_model_warning
 
             _hermes_warn = _check_hermes_model_warning(agent.model or "")
             if _hermes_warn:
@@ -2170,7 +2436,7 @@ def init_agent(
         try:
             agent.context_compressor.on_session_start(
                 agent.session_id,
-                hermes_home=str(get_hades_home()),
+                hermes_home=str(get_hermes_home()),
                 platform=agent.platform or "cli",
                 model=agent.model,
                 context_length=getattr(agent.context_compressor, "context_length", 0),
@@ -2256,7 +2522,7 @@ def init_agent(
     # autoraised model) updates the marker state and re-notifies once. The
     # config display gate (compression.codex_gpt55_autoraise_notice) still
     # suppresses the banner entirely without disabling the threshold autoraise.
-    _autoraise = getattr(agent, "_compression_threshold_autoraised", None)
+    _autoraise = getattr(agent, "_compression_threshold_autoraised", None) or {}
     _show_autoraise_notice = (
         bool(_autoraise)
         and compression_enabled
@@ -2272,14 +2538,21 @@ def init_agent(
             _active_threshold_pct = getattr(
                 agent.context_compressor, "threshold_percent", compression_threshold
             )
-            print(f"📊 Context limit: {agent.context_compressor.context_length:,} tokens (compress at {int(_active_threshold_pct*100)}% = {agent.context_compressor.threshold_tokens:,})")
+            _cap_note = ""
+            _cap = getattr(agent.context_compressor, "threshold_tokens_cap", None)
+            if _cap and _cap > 0:
+                _cap_note = f" (capped at {_cap:,} tokens)"
+            print(f"📊 Context limit: {agent.context_compressor.context_length:,} tokens (compress at {int(_active_threshold_pct*100)}% = {agent.context_compressor.threshold_tokens:,}{_cap_note})")
         else:
             print(f"📊 Context limit: {agent.context_compressor.context_length:,} tokens (auto-compression disabled)")
         # Notice with the exact opt-back-out command. Printed inline at startup
         # for CLI users; gateway users get the same text replayed via
         # _compression_warning on turn 1 (set below).
         if _show_autoraise_notice:
-            print(_build_codex_gpt5_autoraise_notice(_autoraise))
+            print(_build_codex_gpt5_autoraise_notice(
+                _autoraise,
+                context_length=getattr(agent.context_compressor, "context_length", None),
+            ))
 
     # Check immediately so CLI users see the warning at startup.
     # Gateway status_callback is not yet wired, so any warning is stored
@@ -2289,7 +2562,10 @@ def init_agent(
     # above only reaches the CLI, so stash the same text here to be replayed
     # through status_callback on the first turn (Telegram/Discord/Slack/etc.).
     if _show_autoraise_notice:
-        agent._compression_warning = _build_codex_gpt5_autoraise_notice(_autoraise)
+        agent._compression_warning = _build_codex_gpt5_autoraise_notice(
+            _autoraise,
+            context_length=getattr(agent.context_compressor, "context_length", None),
+        )
 
     # Mark shown so repeated inits in this profile (e.g. every gateway message)
     # stay silent. Recorded once, whether the notice went to the CLI print or
@@ -2334,11 +2610,6 @@ def init_agent(
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
         })
-
-    if agent._runtime_routing_binding is not None:
-        from agent.runtime_routing import log_runtime_routing_event
-
-        log_runtime_routing_event(agent._runtime_routing_binding)
 
 
 

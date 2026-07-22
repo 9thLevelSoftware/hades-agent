@@ -5,10 +5,10 @@ with entity resolution, trust scoring, and HRR-based compositional retrieval.
 
 Original plugin by dusterbloom (PR #2351), adapted to the MemoryProvider ABC.
 
-Config in $HADES_HOME/config.yaml (profile-scoped):
+Config in $HERMES_HOME/config.yaml (profile-scoped):
   plugins:
     hermes-memory-store:
-      db_path: $HADES_HOME/memory_store.db   # omit to use the default
+      db_path: $HERMES_HOME/memory_store.db   # omit to use the default
       auto_extract: false
       default_trust: 0.5
       min_trust_threshold: 0.3
@@ -24,9 +24,10 @@ from typing import Any, Dict, List
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
+from utils import is_truthy_value
 from .store import MemoryStore
 from .retrieval import FactRetriever
-from hades_cli.config import cfg_get
+from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +96,8 @@ FACT_FEEDBACK_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 def _load_plugin_config() -> dict:
-    from hades_constants import get_hades_home
-    config_path = get_hades_home() / "config.yaml"
+    from hermes_constants import get_hermes_home
+    config_path = get_hermes_home() / "config.yaml"
     if not config_path.exists():
         return {}
     try:
@@ -146,8 +147,8 @@ class HolographicMemoryProvider(MemoryProvider):
             pass
 
     def get_config_schema(self):
-        from hades_constants import display_hades_home
-        _default_db = f"{display_hades_home()}/memory_store.db"
+        from hermes_constants import display_hermes_home
+        _default_db = f"{display_hermes_home()}/memory_store.db"
         return [
             {"key": "db_path", "description": "SQLite database path", "default": _default_db},
             {"key": "auto_extract", "description": "Auto-extract facts at session end", "default": "false", "choices": ["true", "false"]},
@@ -156,16 +157,16 @@ class HolographicMemoryProvider(MemoryProvider):
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        from hades_constants import get_hades_home
-        _hermes_home = str(get_hades_home())
+        from hermes_constants import get_hermes_home
+        _hermes_home = str(get_hermes_home())
         _default_db = _hermes_home + "/memory_store.db"
         db_path = self._config.get("db_path", _default_db)
-        # Expand $HADES_HOME in user-supplied paths so config values like
-        # "$HADES_HOME/memory_store.db" or "~/.hades/memory_store.db" both
+        # Expand $HERMES_HOME in user-supplied paths so config values like
+        # "$HERMES_HOME/memory_store.db" or "~/.hermes/memory_store.db" both
         # resolve to the active profile's directory.
         if isinstance(db_path, str):
-            db_path = db_path.replace("$HADES_HOME", _hermes_home)
-            db_path = db_path.replace("${HADES_HOME}", _hermes_home)
+            db_path = db_path.replace("$HERMES_HOME", _hermes_home)
+            db_path = db_path.replace("${HERMES_HOME}", _hermes_home)
         default_trust = float(self._config.get("default_trust", 0.5))
         hrr_dim = int(self._config.get("hrr_dim", 1024))
         hrr_weight = float(self._config.get("hrr_weight", 0.3))
@@ -235,7 +236,10 @@ class HolographicMemoryProvider(MemoryProvider):
         return tool_error(f"Unknown tool: {tool_name}")
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        if not self._config.get("auto_extract", False):
+        # is_truthy_value: the config schema declares auto_extract as a string
+        # enum ("false"/"true"), and a plain truthiness check treats the string
+        # "false" as enabled (#57682).
+        if not is_truthy_value(self._config.get("auto_extract", False)):
             return
         if not self._store or not messages:
             return
@@ -368,6 +372,35 @@ class HolographicMemoryProvider(MemoryProvider):
     # -- Auto-extraction (on_session_end) ------------------------------------
 
     def _auto_extract_facts(self, messages: list) -> None:
+        # Local import (pattern used in initialize()): the compressor module is
+        # heavier than this plugin and is only needed when auto_extract is on.
+        from agent.context_compressor import (
+            _MERGED_PRIOR_CONTEXT_HEADER,
+            _MERGED_SUMMARY_DELIMITER,
+            is_compaction_summary_message,
+        )
+
+        def _pre_delimiter_user_segment(msg: dict):
+            """Return the genuine user text preceding a merged-into-tail
+            compaction summary, or None when the whole message is a summary.
+
+            Merge-into-tail messages (agent/context_compressor.py ~3163-3190)
+            wrap real prior tail content BEFORE ``_MERGED_SUMMARY_DELIMITER``,
+            prefixed with ``_MERGED_PRIOR_CONTEXT_HEADER``, then append the
+            generated handoff summary AFTER the delimiter. Dropping the whole
+            row (as ``is_compaction_summary_message`` alone would suggest)
+            discards that genuine pre-delimiter content too (#57690 review).
+            Only the summary suffix must be excluded from harvesting.
+            """
+            content = msg.get("content", "")
+            if not isinstance(content, str) or _MERGED_SUMMARY_DELIMITER not in content:
+                return None
+            pre = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
+            if pre.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
+                pre = pre[len(_MERGED_PRIOR_CONTEXT_HEADER):]
+            pre = pre.strip()
+            return pre or None
+
         _PREF_PATTERNS = [
             re.compile(r'\bI\s+(?:prefer|like|love|use|want|need)\s+(.+)', re.IGNORECASE),
             re.compile(r'\bmy\s+(?:favorite|preferred|default)\s+\w+\s+is\s+(.+)', re.IGNORECASE),
@@ -382,7 +415,20 @@ class HolographicMemoryProvider(MemoryProvider):
         for msg in messages:
             if msg.get("role") != "user":
                 continue
-            content = msg.get("content", "")
+            # Compaction handoff summaries can be inserted as role="user"
+            # messages; their prose reliably matches the decision patterns, so
+            # without this guard the compactor's own output is stored as a
+            # durable "fact" on every rollover (#57682). A merge-into-tail
+            # summary also carries genuine pre-delimiter user content in the
+            # SAME row; harvest that segment instead of dropping the whole
+            # message (#57690 review).
+            pre_delimiter_segment = _pre_delimiter_user_segment(msg)
+            if pre_delimiter_segment is not None:
+                content = pre_delimiter_segment
+            elif is_compaction_summary_message(msg):
+                continue
+            else:
+                content = msg.get("content", "")
             if not isinstance(content, str) or len(content) < 10:
                 continue
 

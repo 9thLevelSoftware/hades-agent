@@ -216,6 +216,7 @@ try:
         Application,
         CommandHandler,
         CallbackQueryHandler,
+        MessageReactionHandler,
         MessageHandler as TelegramMessageHandler,
         ContextTypes,
         filters,
@@ -234,6 +235,7 @@ except ImportError:
     Application = Any
     CommandHandler = Any
     CallbackQueryHandler = Any
+    MessageReactionHandler = Any
     TelegramMessageHandler = Any
     HTTPXRequest = Any
     filters = None
@@ -375,7 +377,8 @@ def check_telegram_requirements() -> bool:
     """
     global TELEGRAM_AVAILABLE, Update, Bot, Message, InlineKeyboardButton
     global InlineKeyboardMarkup, LinkPreviewOptions, Application
-    global CommandHandler, CallbackQueryHandler, TelegramMessageHandler
+    global CommandHandler, CallbackQueryHandler, MessageReactionHandler
+    global TelegramMessageHandler
     global ContextTypes, filters, ParseMode, ChatType, HTTPXRequest
     if TELEGRAM_AVAILABLE:
         return True
@@ -394,6 +397,7 @@ def check_telegram_requirements() -> bool:
         from telegram.ext import (
             Application as _App, CommandHandler as _CH,
             CallbackQueryHandler as _CQH,
+            MessageReactionHandler as _MRH,
             MessageHandler as _MH,
             ContextTypes as _CT, filters as _filters,
         )
@@ -410,6 +414,7 @@ def check_telegram_requirements() -> bool:
     Application = _App
     CommandHandler = _CH
     CallbackQueryHandler = _CQH
+    MessageReactionHandler = _MRH
     TelegramMessageHandler = _MH
     ContextTypes = _CT
     filters = _filters
@@ -3434,10 +3439,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 "[%s] python-telegram-bot not installed. Run: pip install python-telegram-bot",
                 self.name,
             )
+            self._set_fatal_error("missing_dependency", "python-telegram-bot not installed", retryable=False)
             return False
         
         if not self.config.token:
             logger.error("[%s] No bot token configured", self.name)
+            self._set_fatal_error("missing_credentials", "No bot token configured", retryable=False)
             return False
         
         try:
@@ -3615,7 +3622,8 @@ class TelegramAdapter(BasePlatformAdapter):
             ))
             # Handle inline keyboard button callbacks (update prompts)
             self._app.add_handler(CallbackQueryHandler(self._handle_callback_query))
-            
+            self._app.add_handler(MessageReactionHandler(self._handle_message_reaction))
+
             # Start polling — retry initialize() for transient TLS resets.
             # Each attempt is capped by _init_timeout so a single unreachable
             # fallback-IP chain can't block startup indefinitely.
@@ -5900,6 +5908,37 @@ class TelegramAdapter(BasePlatformAdapter):
             )
         except Exception:
             pass
+
+    async def _handle_message_reaction(self, update: Any, context: Any) -> None:
+        event = getattr(update, "message_reaction", None)
+        actor = getattr(event, "user", None)
+        actor_id = str(getattr(actor, "id", "") or "")
+        chat = getattr(event, "chat", None)
+        if not actor_id or getattr(actor, "is_bot", False):
+            return
+        if (
+            not self._is_callback_user_authorized(
+                actor_id,
+                chat_id=str(getattr(chat, "id", "") or ""),
+                chat_type=str(getattr(chat, "type", "dm") or "dm"),
+                user_name=getattr(actor, "username", None),
+            )
+        ):
+            return
+        old = list(getattr(event, "old_reaction", None) or [])
+        new = list(getattr(event, "new_reaction", None) or [])
+        added = [item for item in new if item not in old]
+        if not added:
+            return
+        reaction = getattr(added[-1], "emoji", None) or str(added[-1])
+        self.publish_feedback(
+            self.platform,
+            getattr(chat, "id", ""),
+            getattr(event, "message_id", ""),
+            actor_id,
+            reaction,
+            getattr(update, "update_id", ""),
+        )
 
     async def _handle_callback_query(
         self, update: "Update", context: "ContextTypes.DEFAULT_TYPE"

@@ -1,28 +1,38 @@
-"""Tests for hades_cli.gateway."""
+"""Tests for hermes_cli.gateway."""
 
 import argparse
+import os
+import pty
 import signal
+import subprocess
 import sys
+import textwrap
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
-import hades_cli.gateway as gateway
+import hermes_cli.gateway as gateway
 
 
 def _install_fake_gateway_run(monkeypatch, start_gateway):
     module = ModuleType("gateway.run")
     module.start_gateway = start_gateway
+
+    def _exit_after_graceful_shutdown(code):
+        if code:
+            raise SystemExit(code)
+
+    setattr(module, "_exit_after_graceful_shutdown", _exit_after_graceful_shutdown)
     monkeypatch.setitem(sys.modules, "gateway.run", module)
     # ``run_gateway()`` calls ``refresh_systemd_unit_if_needed()`` on every
     # invocation so that restart settings stay current after exit-code-75
     # respawns. That helper writes to ``Path.home() / ".config/systemd/user
-    # /hades-gateway.service"`` and runs ``systemctl --user daemon-reload``
+    # /hermes-gateway.service"`` and runs ``systemctl --user daemon-reload``
     # — both target the *real* user environment because the conftest only
-    # sandboxes ``HADES_HOME``, not ``HOME``. Tests that drive
+    # sandboxes ``HERMES_HOME``, not ``HOME``. Tests that drive
     # ``run_gateway()`` end-to-end with a fake ``start_gateway`` MUST stub
     # the refresh call too, or every run rewrites the developer's installed
-    # unit (baking in the test's pytest-tmp ``HADES_HOME`` value, which
+    # unit (baking in the test's pytest-tmp ``HERMES_HOME`` value, which
     # systemd then uses on the next boot — silently breaking the gateway
     # for the developer).
     monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
@@ -53,6 +63,10 @@ def test_run_gateway_exits_cleanly_on_keyboard_interrupt(monkeypatch, capsys):
     _install_fake_gateway_run(monkeypatch, fake_start_gateway)
     monkeypatch.setattr(gateway.asyncio, "run", fake_asyncio_run)
 
+    # KeyboardInterrupt now uses the same hard-exit backstop as all other
+    # exit paths (instead of a bare ``return``).  The test stub's
+    # _exit_after_graceful_shutdown is a no-op for code 0, so run_gateway()
+    # returns normally — but the real implementation would call os._exit(0).
     gateway.run_gateway()
 
     out = capsys.readouterr().out
@@ -78,8 +92,90 @@ def test_run_gateway_exits_nonzero_when_start_gateway_reports_failure(monkeypatc
     assert calls == [(True, None)]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX PTY coverage")
+@pytest.mark.parametrize(
+    ("stdin_is_tty", "outcome", "expected_exit"),
+    [
+        (True, "systemexit:75", 75),
+        (False, "systemexit:75", 75),
+        (False, "systemexit:78", 78),
+        (False, "failure", 1),
+    ],
+)
+def test_gateway_run_subprocess_preserves_daemon_exit_codes(
+    tmp_path, stdin_is_tty, outcome, expected_exit
+):
+    """TTY state must not rewrite the gateway's process-level exit contract.
+
+    Exit 75 is the intentional systemd/launchd restart handoff, exit 78 is a
+    fatal configuration error, and a false startup result is a generic failure.
+    In particular, a non-TTY daemon launch must not blanket-catch SystemExit,
+    because doing so would hide genuine startup/configuration failures.
+    """
+    script = textwrap.dedent(
+        """
+        import os
+        import sys
+        import types
+
+        import hermes_cli.gateway as gateway_cli
+
+        outcome = os.environ["HERMES_TEST_GATEWAY_OUTCOME"]
+
+        async def start_gateway(*, replace, verbosity):
+            if outcome == "failure":
+                return False
+            raise SystemExit(int(outcome.split(":", 1)[1]))
+
+        fake_run = types.ModuleType("gateway.run")
+        fake_run.start_gateway = start_gateway
+        setattr(fake_run, "_exit_after_graceful_shutdown", sys.exit)
+        sys.modules["gateway.run"] = fake_run
+
+        gateway_cli._guard_official_docker_root_gateway = lambda: None
+        gateway_cli._guard_named_profile_under_multiplexer = lambda force=False: None
+        gateway_cli._guard_supervised_gateway_conflict = lambda force=False: None
+        gateway_cli._guard_existing_gateway_process_conflict = lambda replace=False: None
+        gateway_cli.supports_systemd_services = lambda: False
+        gateway_cli.run_gateway()
+        """
+    )
+    env = {
+        **os.environ,
+        "HERMES_HOME": str(tmp_path),
+        "HERMES_GATEWAY_EXIT_DIAG": "0",
+        "HERMES_TEST_GATEWAY_OUTCOME": outcome,
+        "INVOCATION_ID": "systemd-test",
+    }
+
+    master_fd = slave_fd = None
+    try:
+        if stdin_is_tty:
+            master_fd, slave_fd = pty.openpty()
+            stdin = slave_fd
+        else:
+            stdin = subprocess.DEVNULL
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            stdin=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        if slave_fd is not None:
+            os.close(slave_fd)
+        if master_fd is not None:
+            os.close(master_fd)
+
+    assert completed.returncode == expected_exit, completed.stderr
+
+
 def test_run_gateway_refuses_root_in_official_docker(monkeypatch, tmp_path, capsys):
-    project_root = tmp_path / "opt" / "hades"
+    project_root = tmp_path / "opt" / "hermes"
     (project_root / "docker").mkdir(parents=True)
     (project_root / "docker" / "entrypoint.sh").write_text("#!/bin/sh\n")
 
@@ -93,8 +189,8 @@ def test_run_gateway_refuses_root_in_official_docker(monkeypatch, tmp_path, caps
 
     assert exc_info.value.code == 1
     out = capsys.readouterr().out
-    assert "Refusing to run the Hades gateway as root" in out
-    assert "/opt/hades/docker/entrypoint.sh" in out
+    assert "Refusing to run the Hermes gateway as root" in out
+    assert "/opt/hermes/docker/entrypoint.sh" in out
 
 
 def test_run_gateway_root_guard_has_escape_hatch(monkeypatch):
@@ -265,9 +361,9 @@ def test_s6_runtime_snapshot_reports_supervised_service(monkeypatch, tmp_path):
             return True
 
     monkeypatch.setattr(gateway, "is_linux", lambda: True)
-    monkeypatch.setattr("hades_constants.is_container", lambda: True)
-    monkeypatch.setattr("hades_cli.service_manager.detect_service_manager", lambda: "s6")
-    monkeypatch.setattr("hades_cli.service_manager.get_service_manager", lambda: FakeS6Manager())
+    monkeypatch.setattr("hermes_constants.is_container", lambda: True)
+    monkeypatch.setattr("hermes_cli.service_manager.detect_service_manager", lambda: "s6")
+    monkeypatch.setattr("hermes_cli.service_manager.get_service_manager", lambda: FakeS6Manager())
     monkeypatch.setattr(gateway, "find_gateway_pids", lambda: [123])
     monkeypatch.setattr(gateway, "_profile_suffix", lambda: "")
 
@@ -297,7 +393,7 @@ def test_running_under_gateway_supervisor_markers(monkeypatch):
 
 
 def test_gateway_run_force_flag_survives_parser_extraction():
-    from hades_cli.subcommands.gateway import build_gateway_parser
+    from hermes_cli.subcommands.gateway import build_gateway_parser
 
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
@@ -509,7 +605,7 @@ def test_gateway_restart_on_windows_without_service_uses_detached_backend(monkey
     down. The Windows backend restarts via detached pythonw.exe even when no
     Scheduled Task / Startup item is installed.
     """
-    import hades_cli.gateway_windows as gateway_windows
+    import hermes_cli.gateway_windows as gateway_windows
 
     calls = []
 
@@ -537,7 +633,7 @@ def test_gateway_restart_on_windows_without_service_uses_detached_backend(monkey
 
 def test_gateway_restart_on_windows_preserves_failure_fallback(monkeypatch):
     """If the Windows backend cannot launch, keep the existing fallback."""
-    import hades_cli.gateway_windows as gateway_windows
+    import hermes_cli.gateway_windows as gateway_windows
 
     calls = []
 
@@ -561,7 +657,7 @@ def test_gateway_restart_on_windows_preserves_failure_fallback(monkeypatch):
 
 
 def test_systemd_status_warns_when_linger_disabled(monkeypatch, tmp_path, capsys):
-    unit_path = tmp_path / "hades-gateway.service"
+    unit_path = tmp_path / "hermes-gateway.service"
     unit_path.write_text("[Unit]\n")
 
     monkeypatch.setattr(gateway, "get_systemd_unit_path", lambda system=False: unit_path)
@@ -591,17 +687,17 @@ def test_systemd_status_warns_when_linger_disabled(monkeypatch, tmp_path, capsys
 
 
 def test_systemd_install_checks_linger_status(monkeypatch, tmp_path, capsys):
-    unit_path = tmp_path / "systemd" / "user" / "hades-gateway.service"
+    unit_path = tmp_path / "systemd" / "user" / "hermes-gateway.service"
 
     monkeypatch.setattr(gateway, "get_systemd_unit_path", lambda system=False: unit_path)
     # Synthetic unit with a non-temp home: the real generator bakes the
-    # hermetic test HADES_HOME (a tmp dir), which the temp-home write
+    # hermetic test HERMES_HOME (a tmp dir), which the temp-home write
     # guard correctly refuses.
     monkeypatch.setattr(
         gateway,
         "generate_systemd_unit",
         lambda system=False, run_as_user=None: (
-            '[Service]\nEnvironment="HADES_HOME=/home/alice/.hermes"\n'
+            '[Service]\nEnvironment="HERMES_HOME=/home/alice/.hermes"\n'
         ),
     )
 
@@ -628,16 +724,16 @@ def test_systemd_install_checks_linger_status(monkeypatch, tmp_path, capsys):
 
 
 def test_systemd_install_can_skip_enable_on_startup(monkeypatch, tmp_path, capsys):
-    unit_path = tmp_path / "systemd" / "user" / "hades-gateway.service"
+    unit_path = tmp_path / "systemd" / "user" / "hermes-gateway.service"
 
     monkeypatch.setattr(gateway, "get_systemd_unit_path", lambda system=False: unit_path)
     # Non-temp home so the temp-home write guard (which trips on the
-    # hermetic test HADES_HOME) stays out of the way.
+    # hermetic test HERMES_HOME) stays out of the way.
     monkeypatch.setattr(
         gateway,
         "generate_systemd_unit",
         lambda system=False, run_as_user=None: (
-            '[Service]\nEnvironment="HADES_HOME=/home/alice/.hermes"\n'
+            '[Service]\nEnvironment="HERMES_HOME=/home/alice/.hermes"\n'
         ),
     )
 
@@ -665,7 +761,7 @@ def test_systemd_install_can_skip_enable_on_startup(monkeypatch, tmp_path, capsy
 
 
 def test_systemd_install_system_scope_skips_linger_and_uses_systemctl(monkeypatch, tmp_path, capsys):
-    unit_path = tmp_path / "etc" / "systemd" / "system" / "hades-gateway.service"
+    unit_path = tmp_path / "etc" / "systemd" / "system" / "hermes-gateway.service"
 
     monkeypatch.setattr(gateway, "get_systemd_unit_path", lambda system=False: unit_path)
     monkeypatch.setattr(
@@ -700,8 +796,8 @@ def test_systemd_install_system_scope_skips_linger_and_uses_systemctl(monkeypatc
 
 
 def test_conflicting_systemd_units_warning(monkeypatch, tmp_path, capsys):
-    user_unit = tmp_path / "user" / "hades-gateway.service"
-    system_unit = tmp_path / "system" / "hades-gateway.service"
+    user_unit = tmp_path / "user" / "hermes-gateway.service"
+    system_unit = tmp_path / "system" / "hermes-gateway.service"
     user_unit.parent.mkdir(parents=True)
     system_unit.parent.mkdir(parents=True)
     user_unit.write_text("[Unit]\n", encoding="utf-8")
@@ -917,7 +1013,7 @@ def test_gateway_install_noninteractive_skips_legacy_unit_prompt(monkeypatch, tm
     monkeypatch.setattr(gateway, "remove_legacy_hermes_units", lambda interactive=False: calls.append(("remove_legacy",)))
     monkeypatch.setattr(gateway, "print_legacy_unit_warning", lambda: None)
 
-    fake_path = tmp_path / "hades-gateway.service"
+    fake_path = tmp_path / "hermes-gateway.service"
     monkeypatch.setattr(gateway, "get_systemd_unit_path", lambda system=False: fake_path)
     monkeypatch.setattr(gateway, "generate_systemd_unit", lambda system=False, run_as_user=None: "[Service]")
     monkeypatch.setattr(gateway, "_run_systemctl", lambda *a, **kw: None)
@@ -1168,4 +1264,4 @@ class TestStopProfileGateway:
 def test_module_has_logger():
     """Verify module has a logger instance (regression guard for #27154)."""
     assert hasattr(gateway, "logger")
-    assert gateway.logger.name == "hades_cli.gateway"
+    assert gateway.logger.name == "hermes_cli.gateway"

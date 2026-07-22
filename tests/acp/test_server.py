@@ -38,40 +38,13 @@ from acp.schema import (
 from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID
 from acp_adapter.server import HermesACPAgent, HERMES_VERSION
 from acp_adapter.session import SessionManager
-from hades_state import SessionDB
+from hermes_state import SessionDB
 
 
 @pytest.fixture()
 def mock_manager():
-    """SessionManager whose legacy server tests opt into a prebuilt mock agent.
-
-    Dedicated deferred-construction tests exercise the production lifecycle;
-    these older tests configure ``state.agent`` directly before submitting a
-    prompt, so the fixture supplies that test-only setup explicitly.
-    """
-    def make_mock_agent():
-        mock = MagicMock(name="MockAIAgent")
-        mock.model = "test-model"
-        mock.provider = "openrouter"
-        mock.base_url = "https://openrouter.example/v1"
-        mock.api_mode = "chat_completions"
-        mock.api_key = "test-key"
-        mock.acp_command = None
-        mock.acp_args = []
-        mock.credential_pool = None
-        mock.reasoning_config = None
-        return mock
-
-    manager = SessionManager(agent_factory=make_mock_agent)
-    create_session = manager.create_session
-
-    def create_with_mock_agent(*args, **kwargs):
-        state = create_session(*args, **kwargs)
-        state.agent = manager._make_agent(session_id=state.session_id, cwd=state.cwd)
-        return state
-
-    manager.create_session = create_with_mock_agent
-    return manager
+    """SessionManager with a mock agent factory."""
+    return SessionManager(agent_factory=lambda: MagicMock(name="MockAIAgent"))
 
 
 @pytest.fixture()
@@ -126,7 +99,7 @@ class TestInitialize:
         resp = await agent.initialize(protocol_version=1)
         assert resp.agent_info is not None
         assert isinstance(resp.agent_info, Implementation)
-        assert resp.agent_info.name == "hades-agent"
+        assert resp.agent_info.name == "hermes-agent"
         assert resp.agent_info.version == HERMES_VERSION
 
     @pytest.mark.asyncio
@@ -177,7 +150,7 @@ class TestInitialize:
             {
                 "args": ["--setup"],
                 "description": (
-                    "Open Hades' interactive model/provider setup in a terminal. "
+                    "Open Hermes' interactive model/provider setup in a terminal. "
                     "Use this when Hermes has not been configured on this machine yet."
                 ),
                 "id": TERMINAL_SETUP_AUTH_METHOD_ID,
@@ -272,9 +245,9 @@ class TestSessionOps:
         acp_agent = HermesACPAgent(session_manager=manager)
 
         with patch(
-            "hades_cli.models.curated_models_for_provider",
+            "hermes_cli.models.curated_models_for_provider",
             return_value=[("gpt-5.4", "recommended"), ("gpt-5.4-mini", "")],
-        ), patch("acp_adapter.server.detect_provider", return_value="openai-codex"):
+        ):
             resp = await acp_agent.new_session(cwd="/tmp")
 
         assert isinstance(resp.models, SessionModelState)
@@ -314,7 +287,7 @@ class TestSessionOps:
             "tools",
             "context",
             "reset",
-            "compact",
+            "compress",
             "steer",
             "queue",
             "version",
@@ -989,11 +962,11 @@ class TestSessionConfiguration:
                 api_mode=kwargs.get("api_mode"),
             )
 
-        monkeypatch.setattr("hades_cli.config.load_config", lambda: {
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
             "model": {"provider": "openrouter", "default": "openrouter/gpt-5"}
         })
         monkeypatch.setattr(
-            "hades_cli.runtime_provider.resolve_runtime_provider",
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
             fake_resolve_runtime_provider,
         )
         # Pin the parser so this test doesn't depend on live
@@ -1001,23 +974,18 @@ class TestSessionConfiguration:
         # (sibling of the same hardening on
         # ``test_model_switch_uses_requested_provider``).
         monkeypatch.setattr(
-            "hades_cli.models.parse_model_input",
+            "hermes_cli.models.parse_model_input",
             lambda raw, current: ("anthropic", "claude-sonnet-4-6"),
         )
         monkeypatch.setattr(
-            "hades_cli.models.detect_provider_for_model",
+            "hermes_cli.models.detect_provider_for_model",
             lambda model, current: None,
-        )
-        monkeypatch.setattr(
-            "agent.runtime_routing.runtime_resolver_requires_initial_task",
-            lambda _scope: False,
         )
         manager = SessionManager(db=SessionDB(tmp_path / "state.db"))
 
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             acp_agent = HermesACPAgent(session_manager=manager)
             state = manager.create_session(cwd="/tmp")
-            manager.ensure_agent(state, task="initial task")
             result = await acp_agent.set_session_model(
                 model_id="anthropic:claude-sonnet-4-6",
                 session_id=state.session_id,
@@ -1228,7 +1196,7 @@ class TestPrompt:
             # Inside the agent loop the env var must reflect the active
             # ACP session id. ``task_id`` is also the session id at this
             # boundary; assert both for symmetry.
-            captured["env"] = os.environ.get("HADES_SESSION_ID")
+            captured["env"] = os.environ.get("HERMES_SESSION_ID")
             captured["task_id"] = task_id
             return {"final_response": "ok", "messages": []}
 
@@ -1247,7 +1215,7 @@ class TestPrompt:
         )
         assert captured["task_id"] == new_resp.session_id
         # Post-condition: must be restored to the prior value (None here).
-        assert os.environ.get("HADES_SESSION_ID") is None, (
+        assert os.environ.get("HERMES_SESSION_ID") is None, (
             "HERMES_SESSION_ID must be restored after the agent call so "
             "a re-used executor thread doesn't leak the id into the next "
             "session's tools"
@@ -1266,7 +1234,7 @@ class TestPrompt:
         captured: dict[str, str | None] = {}
 
         def mock_run(*args, **kwargs):
-            captured["inner"] = os.environ.get("HADES_SESSION_ID")
+            captured["inner"] = os.environ.get("HERMES_SESSION_ID")
             return {"final_response": "ok", "messages": []}
 
         state.agent.run_conversation = mock_run
@@ -1280,7 +1248,7 @@ class TestPrompt:
 
         assert captured["inner"] == new_resp.session_id
         # Outer scope must be restored.
-        assert os.environ.get("HADES_SESSION_ID") == "outer-sess"
+        assert os.environ.get("HERMES_SESSION_ID") == "outer-sess"
 
     @pytest.mark.asyncio
     async def test_prompt_does_not_duplicate_streamed_final_message(self, agent):
@@ -1355,6 +1323,11 @@ class TestPrompt:
     async def test_prompt_auto_titles_session(self, agent):
         new_resp = await agent.new_session(cwd=".")
         state = agent.session_manager.get_session(new_resp.session_id)
+        state.agent.model = "gpt-5.6-sol"
+        state.agent.provider = "openai-codex"
+        state.agent.base_url = "https://chatgpt.example.test/backend-api/codex"
+        state.agent.api_key = object()
+        state.agent.api_mode = "codex_responses"
         state.agent.run_conversation = MagicMock(return_value={
             "final_response": "Here is the fix.",
             "messages": [
@@ -1375,6 +1348,13 @@ class TestPrompt:
         assert mock_title.call_args.args[1] == new_resp.session_id
         assert mock_title.call_args.args[2] == "fix the broken ACP history"
         assert mock_title.call_args.args[3] == "Here is the fix."
+        assert mock_title.call_args.kwargs["main_runtime"] == {
+            "model": "gpt-5.6-sol",
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.example.test/backend-api/codex",
+            "api_key": state.agent.api_key,
+            "api_mode": "codex_responses",
+        }
         assert callable(mock_title.call_args.kwargs["title_callback"])
 
     @pytest.mark.asyncio
@@ -1547,7 +1527,7 @@ class TestSlashCommands:
 
         assert "Context usage: ~25,000 / 100,000 tokens (25.0%)" in result
         assert "Compression: ~55,000 tokens until threshold (~80,000, 80%)" in result
-        assert "Tip: run /compact" in result
+        assert "Tip: run /compress" in result
 
     def test_context_says_compression_due_when_past_threshold(self, agent, mock_manager):
         state = self._make_state(mock_manager)
@@ -1564,7 +1544,7 @@ class TestSlashCommands:
             result = agent._handle_slash_command("/context", state)
 
         assert "Context usage: ~82,000 / 100,000 tokens (82.0%)" in result
-        assert "Compression: due now (threshold ~80,000, 80%). Run /compact." in result
+        assert "Compression: due now (threshold ~80,000, 80%). Run /compress." in result
 
     def test_reset_clears_history(self, agent, mock_manager):
         state = self._make_state(mock_manager)
@@ -1572,6 +1552,37 @@ class TestSlashCommands:
         result = agent._handle_slash_command("/reset", state)
         assert "cleared" in result.lower()
         assert len(state.history) == 0
+
+    def test_reset_resets_agent_session_state(self, agent, mock_manager):
+        state = self._make_state(mock_manager)
+        state.history = [{"role": "user", "content": "hello"}]
+        state.agent.reset_session_state = MagicMock()
+
+        with patch.object(agent.session_manager, "save_session") as mock_save:
+            result = agent._handle_slash_command("/reset", state)
+
+        assert "cleared" in result.lower()
+        assert state.history == []
+        state.agent.reset_session_state.assert_called_once_with()
+        mock_save.assert_called_once_with(state.session_id)
+
+    def test_reset_saves_session_when_agent_state_reset_fails(self, agent, mock_manager):
+        state = self._make_state(mock_manager)
+        state.history = [{"role": "user", "content": "hello"}]
+        state.agent.reset_session_state = MagicMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch.object(agent.session_manager, "save_session") as mock_save,
+            patch("acp_adapter.server.logger") as mock_logger,
+        ):
+            result = agent._handle_slash_command("/reset", state)
+
+        assert "cleared" in result.lower()
+        assert "state reset failed" in result.lower()
+        assert state.history == []
+        state.agent.reset_session_state.assert_called_once_with()
+        mock_save.assert_called_once_with(state.session_id)
+        mock_logger.warning.assert_called_once()
 
     def test_version(self, agent, mock_manager):
         state = self._make_state(mock_manager)
@@ -1609,7 +1620,7 @@ class TestSlashCommands:
                 side_effect=[40, 12],
             ),
         ):
-            result = agent._handle_slash_command("/compact", state)
+            result = agent._handle_slash_command("/compress", state)
 
         assert "Context compressed: 4 -> 1 messages" in result
         assert "~40 -> ~12 tokens" in result
@@ -1696,11 +1707,11 @@ class TestSlashCommands:
                 api_mode=kwargs.get("api_mode"),
             )
 
-        monkeypatch.setattr("hades_cli.config.load_config", lambda: {
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
             "model": {"provider": "openrouter", "default": "openrouter/gpt-5"}
         })
         monkeypatch.setattr(
-            "hades_cli.runtime_provider.resolve_runtime_provider",
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
             fake_resolve_runtime_provider,
         )
         # Pin the model-string parser independently of the live
@@ -1710,23 +1721,18 @@ class TestSlashCommands:
         # ``anthropic``) flakes this one — observed once in CI as
         # ``'custom' == 'anthropic'``.
         monkeypatch.setattr(
-            "hades_cli.models.parse_model_input",
+            "hermes_cli.models.parse_model_input",
             lambda raw, current: ("anthropic", "claude-sonnet-4-6"),
         )
         monkeypatch.setattr(
-            "hades_cli.models.detect_provider_for_model",
+            "hermes_cli.models.detect_provider_for_model",
             lambda model, current: None,
-        )
-        monkeypatch.setattr(
-            "agent.runtime_routing.runtime_resolver_requires_initial_task",
-            lambda _scope: False,
         )
         manager = SessionManager(db=SessionDB(tmp_path / "state.db"))
 
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             acp_agent = HermesACPAgent(session_manager=manager)
             state = manager.create_session(cwd="/tmp")
-            manager.ensure_agent(state, task="initial task")
             result = acp_agent._cmd_model("anthropic:claude-sonnet-4-6", state)
 
         assert "Provider: anthropic" in result
@@ -1765,7 +1771,7 @@ class TestRegisterSessionMcpServers:
 
         state = mock_manager.create_session(cwd="/tmp")
         # Give the mock agent the attributes _register_session_mcp_servers reads
-        state.agent.enabled_toolsets = ["hades-acp"]
+        state.agent.enabled_toolsets = ["hermes-acp"]
         state.agent.disabled_toolsets = None
         state.agent.tools = []
         state.agent.valid_tool_names = set()
@@ -1798,7 +1804,7 @@ class TestRegisterSessionMcpServers:
         from acp.schema import McpServerHttp, HttpHeader
 
         state = mock_manager.create_session(cwd="/tmp")
-        state.agent.enabled_toolsets = ["hades-acp"]
+        state.agent.enabled_toolsets = ["hermes-acp"]
         state.agent.disabled_toolsets = None
         state.agent.tools = []
         state.agent.valid_tool_names = set()
@@ -1829,7 +1835,7 @@ class TestRegisterSessionMcpServers:
         from acp.schema import McpServerStdio
 
         state = mock_manager.create_session(cwd="/tmp")
-        state.agent.enabled_toolsets = ["hades-acp"]
+        state.agent.enabled_toolsets = ["hermes-acp"]
         state.agent.disabled_toolsets = None
         state.agent.tools = []
         state.agent.valid_tool_names = set()
@@ -1858,11 +1864,11 @@ class TestRegisterSessionMcpServers:
             await agent._register_session_mcp_servers(state, [server])
 
         mock_defs.assert_called_once_with(
-            enabled_toolsets=["hades-acp", "mcp-srv"],
+            enabled_toolsets=["hermes-acp", "mcp-srv"],
             disabled_toolsets=None,
             quiet_mode=True,
         )
-        assert state.agent.enabled_toolsets == ["hades-acp", "mcp-srv"]
+        assert state.agent.enabled_toolsets == ["hermes-acp", "mcp-srv"]
         assert state.agent.tools is fake_tools
         assert state.agent.tools[-1] == {
             "type": "function",

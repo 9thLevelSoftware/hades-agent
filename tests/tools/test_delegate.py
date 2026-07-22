@@ -159,7 +159,7 @@ class TestChildSystemPrompt(unittest.TestCase):
 class TestStripBlockedTools(unittest.TestCase):
     def test_removes_blocked_toolsets(self):
         result = _strip_blocked_tools(["terminal", "file", "delegation", "clarify", "memory", "code_execution"])
-        self.assertEqual(sorted(result), ["file", "terminal"])
+        self.assertEqual(sorted(result), ["code_execution", "file", "terminal"])
 
     def test_preserves_allowed_toolsets(self):
         result = _strip_blocked_tools(["terminal", "file", "web", "browser"])
@@ -199,6 +199,98 @@ class TestStripBlockedTools(unittest.TestCase):
                     f"Toolset {name!r} (tools={tools}) is fully blocked "
                     f"but was not stripped",
                 )
+
+    def test_mixed_composite_is_subtracted_at_child_assembly(self):
+        """A mixed platform bundle must not re-expose blocked leaf tools.
+
+        ``hermes-cli`` contains both allowed tools and every sensitive
+        delegate tool, so it cannot be dropped wholesale. Child construction
+        must instead pass exact one-tool deny toolsets to AIAgent, where
+        model_tools applies them after resolving the composite.
+        """
+        import model_tools
+
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["hermes-cli"]
+        parent.disabled_toolsets = ["browser"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="Inspect safely",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+                role="leaf",
+            )
+
+        _, kwargs = MockAgent.call_args
+        disabled = kwargs["disabled_toolsets"]
+        self.assertIn("browser", disabled)
+        for toolset_name in (
+            "clarify",
+            "cronjob",
+            "delegation",
+            "memory",
+        ):
+            self.assertIn(toolset_name, disabled)
+        # code_execution is deliberately NOT denied — children keep
+        # execute_code for programmatic tool calling (Teknium, Jul 2026).
+        self.assertNotIn("code_execution", disabled)
+
+        definitions = model_tools.get_tool_definitions(
+            enabled_toolsets=kwargs["enabled_toolsets"],
+            disabled_toolsets=disabled,
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+        names = {item["function"]["name"] for item in definitions}
+        self.assertTrue(names & {"terminal", "read_file", "web_search"})
+        self.assertTrue(DELEGATE_BLOCKED_TOOLS.isdisjoint(names))
+
+    def test_orchestrator_composite_regains_only_delegate_task(self):
+        import model_tools
+
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["hermes-cli"]
+        parent.disabled_toolsets = ["delegation", "browser"]
+
+        with (
+            patch("run_agent.AIAgent") as MockAgent,
+            patch("tools.delegate_tool._get_orchestrator_enabled", return_value=True),
+            patch("tools.delegate_tool._get_max_spawn_depth", return_value=2),
+        ):
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="Coordinate safely",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+                role="orchestrator",
+            )
+
+        _, kwargs = MockAgent.call_args
+        disabled = kwargs["disabled_toolsets"]
+        self.assertNotIn("delegation", disabled)
+        definitions = model_tools.get_tool_definitions(
+            enabled_toolsets=kwargs["enabled_toolsets"],
+            disabled_toolsets=disabled,
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+        names = {item["function"]["name"] for item in definitions}
+        self.assertIn("delegate_task", names)
+        self.assertTrue(
+            (DELEGATE_BLOCKED_TOOLS - {"delegate_task"}).isdisjoint(names)
+        )
 
 
 class TestDelegateTask(unittest.TestCase):
@@ -825,7 +917,11 @@ class TestToolNamePreservation(unittest.TestCase):
             captured["acp_command"] = kwargs.get("acp_command")
             captured["acp_args"] = kwargs.get("acp_args")
 
-        mock_which.assert_called_with("copilot")
+        # any_call, not called_with: the patch is global to shutil.which, so an
+        # unrelated which("uv") from a code path reached later in the same
+        # process (order-dependent under CI test-slicing) can be the *last*
+        # call. The intent here is only that the copilot binary was probed.
+        mock_which.assert_any_call("copilot")
         self.assertNotEqual(
             captured["provider"],
             "copilot-acp",
@@ -1321,8 +1417,14 @@ class TestSubagentCostRollup(unittest.TestCase):
 
 class TestBlockedTools(unittest.TestCase):
     def test_blocked_tools_constant(self):
-        for tool in ["delegate_task", "clarify", "memory", "send_message", "execute_code"]:
+        for tool in ["delegate_task", "clarify", "memory", "send_message", "cronjob"]:
             self.assertIn(tool, DELEGATE_BLOCKED_TOOLS)
+
+    def test_execute_code_not_blocked(self):
+        """Children retain execute_code (programmatic tool calling) so they
+        can batch mechanical work instead of burning reasoning iterations
+        (Teknium, Jul 2026)."""
+        self.assertNotIn("execute_code", DELEGATE_BLOCKED_TOOLS)
 
     def test_constants(self):
         from tools.delegate_tool import (
@@ -1467,7 +1569,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["provider"], "custom")
 
 
-    @patch("hades_cli.runtime_provider.resolve_runtime_provider")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolution_failure_raises_valueerror(self, mock_resolve):
         """When provider resolution fails, ValueError is raised with helpful message."""
         mock_resolve.side_effect = RuntimeError("OPENROUTER_API_KEY not set")
@@ -1478,7 +1580,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertIn("openrouter", str(ctx.exception).lower())
         self.assertIn("Cannot resolve", str(ctx.exception))
 
-    @patch("hades_cli.runtime_provider.resolve_runtime_provider")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_resolves_but_no_api_key_raises(self, mock_resolve):
         """When provider resolves but has no API key, ValueError is raised."""
         mock_resolve.return_value = {
@@ -1501,7 +1603,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertIsNone(creds["model"])
         self.assertIsNone(creds["provider"])
 
-    @patch("hades_cli.runtime_provider.resolve_runtime_provider")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_named_custom_provider_preserves_provider_name(self, mock_resolve):
         """Named custom provider (e.g. crof.ai) resolves to 'custom' at runtime level
         but the subagent must retain the original provider identity so that
@@ -1528,7 +1630,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
             requested="crof.ai", target_model="deepseek-v4-pro-CEER"
         )
 
-    @patch("hades_cli.runtime_provider.resolve_runtime_provider")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_provider_forwards_runtime_request_overrides_and_output_cap(self, mock_resolve):
         mock_resolve.return_value = {
             "provider": "custom",
@@ -1546,7 +1648,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         self.assertEqual(creds["request_overrides"], {"extra_body": {"store": False}})
         self.assertEqual(creds["max_output_tokens"], 3072)
 
-    @patch("hades_cli.runtime_provider.resolve_runtime_provider")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_standard_provider_not_overwritten_by_configured_name(self, mock_resolve):
         """Standard (non-custom) providers must still return runtime identity,
         not the configured name, to preserve existing behaviour for openrouter,
@@ -1565,7 +1667,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         # Standard provider returns its own name, not "custom"
         self.assertEqual(creds["provider"], "openrouter")
 
-    @patch("hades_cli.runtime_provider.resolve_runtime_provider")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_custom_provider_with_empty_configured_provider_falls_back_to_runtime(self, mock_resolve):
         """When configured_provider is empty/None, the early return kicks in and
         we return provider=None regardless of what runtime resolved. The runtime
@@ -1584,7 +1686,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         # Empty provider → early return with None (child inherits parent)
         self.assertIsNone(creds["provider"])
 
-    @patch("hades_cli.runtime_provider.resolve_runtime_provider")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_runtime_missing_provider_key_returns_none(self, mock_resolve):
         """When resolve_runtime_provider returns a dict without 'provider' key,
         the result must be None regardless of configured_provider.
@@ -1602,7 +1704,7 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         creds = _resolve_delegation_credentials(cfg, parent)
         self.assertIsNone(creds["provider"])
 
-    @patch("hades_cli.runtime_provider.resolve_runtime_provider")
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
     def test_bedrock_provider_with_base_url_uses_runtime_resolver(self, mock_resolve):
         """Regression: provider=bedrock + base_url set must NOT fall through the
         direct-base_url branch (which would force provider='custom' +
@@ -2734,7 +2836,7 @@ class TestConcurrencyDefaults(unittest.TestCase):
 
         with patch.dict("sys.modules", {"cli": stale_cli}):
             with patch(
-                "hades_cli.config.load_config_readonly", return_value=active_config
+                "hermes_cli.config.load_config_readonly", return_value=active_config
             ):
                 self.assertEqual(_load_config()["max_concurrent_children"], 50)
                 self.assertEqual(_get_max_concurrent_children(), 50)
@@ -2750,7 +2852,7 @@ class TestConcurrencyDefaults(unittest.TestCase):
 
         with patch.dict("sys.modules", {"cli": fallback_cli}):
             with patch(
-                "hades_cli.config.load_config_readonly",
+                "hermes_cli.config.load_config_readonly",
                 side_effect=RuntimeError("boom"),
             ):
                 self.assertEqual(_load_config()["max_concurrent_children"], 8)
@@ -2772,7 +2874,7 @@ class TestConcurrencyDefaults(unittest.TestCase):
         with patch.dict("sys.modules", {"cli": ignoring_cli}):
             with patch.dict(os.environ, {"HERMES_IGNORE_USER_CONFIG": "1"}):
                 with patch(
-                    "hades_cli.config.load_config_readonly",
+                    "hermes_cli.config.load_config_readonly",
                     return_value=user_config,
                 ) as mock_loader:
                     self.assertEqual(_load_config()["max_concurrent_children"], 4)

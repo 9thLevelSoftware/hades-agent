@@ -22,9 +22,9 @@ def _restore_stdout():
 @pytest.fixture()
 def server():
     with patch.dict("sys.modules", {
-        "hermes_constants": MagicMock(get_hades_home=MagicMock(return_value="/tmp/hermes_test")),
-        "hades_cli.env_loader": MagicMock(),
-        "hades_cli.banner": MagicMock(),
+        "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test")),
+        "hermes_cli.env_loader": MagicMock(),
+        "hermes_cli.banner": MagicMock(),
         "hermes_state": MagicMock(),
     }):
         import importlib
@@ -346,7 +346,16 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_resume_conversations(self, session_id):
+            return (
+                self.get_messages_as_conversation(session_id, repair_alternation=True),
+                self.get_messages_as_conversation(session_id, include_ancestors=True),
+            )
+
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "yo", "reasoning": "thoughts"},
@@ -406,7 +415,16 @@ def test_session_resume_defaults_to_deferred_build(server, monkeypatch):
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_resume_conversations(self, session_id):
+            return (
+                self.get_messages_as_conversation(session_id, repair_alternation=True),
+                self.get_messages_as_conversation(session_id, include_ancestors=True),
+            )
+
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "yo"},
@@ -547,7 +565,16 @@ def test_session_resume_handles_multimodal_list_content(server, monkeypatch):
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_resume_conversations(self, session_id):
+            return (
+                self.get_messages_as_conversation(session_id, repair_alternation=True),
+                self.get_messages_as_conversation(session_id, include_ancestors=True),
+            )
+
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [multimodal_user, text_only_assistant]
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
@@ -597,7 +624,16 @@ def test_session_resume_lazy_registers_watch_session_without_agent(server, monke
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_resume_conversations(self, session_id):
+            return (
+                self.get_messages_as_conversation(session_id, repair_alternation=True),
+                self.get_messages_as_conversation(session_id, include_ancestors=True),
+            )
+
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [
                 {"role": "user", "content": "delegated goal"},
             ]
@@ -670,7 +706,16 @@ def test_session_resume_lazy_reports_running_for_inflight_child(server, monkeypa
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_resume_conversations(self, session_id):
+            return (
+                self.get_messages_as_conversation(session_id, repair_alternation=True),
+                self.get_messages_as_conversation(session_id, include_ancestors=True),
+            )
+
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [{"role": "user", "content": "delegated goal"}]
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
@@ -721,7 +766,16 @@ def test_session_resume_lazy_tolerates_missing_row_for_active_child(server, monk
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_resume_conversations(self, session_id):
+            return (
+                self.get_messages_as_conversation(session_id, repair_alternation=True),
+                self.get_messages_as_conversation(session_id, include_ancestors=True),
+            )
+
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             # No rows for an unwritten session.
             return []
 
@@ -805,7 +859,6 @@ def test_session_resume_reuses_existing_live_session(server, monkeypatch):
     target = "20260409_010101_abc123"
     created_sids: list[str] = []
     closed_sids: list[str] = []
-    disposed_sids: list[str] = []
     first_agent_started = threading.Event()
     agent_can_finish = threading.Event()
 
@@ -819,7 +872,16 @@ def test_session_resume_reuses_existing_live_session(server, monkeypatch):
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_resume_conversations(self, session_id):
+            return (
+                self.get_messages_as_conversation(session_id, repair_alternation=True),
+                self.get_messages_as_conversation(session_id, include_ancestors=True),
+            )
+
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             return [
                 {"role": "user", "content": "hello"},
                 {"role": "assistant", "content": "yo"},
@@ -837,12 +899,6 @@ def test_session_resume_reuses_existing_live_session(server, monkeypatch):
 
         def close(self):
             closed_sids.append(self.sid)
-
-        def release_clients(self):
-            disposed_sids.append(self.sid)
-
-        def shutdown_memory_provider(self, _messages):
-            pass
 
     def make_agent(sid, key, session_id=None, session_db=None, **_kwargs):
         created_sids.append(sid)
@@ -921,11 +977,9 @@ def test_session_resume_reuses_existing_live_session(server, monkeypatch):
     winner = first["result"]["session_id"]
     # The agent build happens outside the resume lock, so a racing resume may
     # build a redundant agent; double-checked locking keeps only one live
-    # session and soft-disposes any loser (no worker/poller is wired for it).
-    # A full close would end the durable row shared by the winner.
+    # session and closes any loser's agent (no worker/poller is wired for it).
     assert winner in created_sids
-    assert closed_sids == []
-    survivors = [sid for sid in created_sids if sid not in disposed_sids]
+    survivors = [sid for sid in created_sids if sid not in closed_sids]
     assert survivors == [winner]
     assert all(sid == winner for sid in server._sessions)
 
@@ -983,10 +1037,10 @@ def test_session_resume_reuses_live_agent_after_compression_rotation(server, mon
 def test_sync_session_key_after_compress_reanchors_active_session_lease(
     server, monkeypatch, tmp_path
 ):
-    home = tmp_path / ".hades"
-    monkeypatch.setenv("HADES_HOME", str(home))
+    home = tmp_path / ".hermes"
+    monkeypatch.setenv("HERMES_HOME", str(home))
 
-    from hades_cli.active_sessions import (
+    from hermes_cli.active_sessions import (
         active_session_registry_snapshot,
         try_acquire_active_session,
     )
@@ -1044,7 +1098,16 @@ def test_session_resume_live_payload_uses_current_history_with_ancestors(server,
         def reopen_session(self, _sid):
             return None
 
-        def get_messages_as_conversation(self, _sid, include_ancestors=False):
+        def get_resume_conversations(self, session_id):
+            return (
+                self.get_messages_as_conversation(session_id, repair_alternation=True),
+                self.get_messages_as_conversation(session_id, include_ancestors=True),
+            )
+
+        def get_ancestor_display_prefix(self, _sid):
+            return list(ancestor_history)
+
+        def get_messages_as_conversation(self, _sid, include_ancestors=False, repair_alternation=False):
             if include_ancestors:
                 return ancestor_history + current_history
             return list(current_history)
@@ -1203,7 +1266,6 @@ def test_session_branch_persists_branched_from_marker(server, monkeypatch):
     monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
     monkeypatch.setattr(server, "_clear_session_context", lambda *_a, **_k: None)
     monkeypatch.setattr(server, "_session_cwd", lambda _s: "/tmp/branch-cwd")
-    monkeypatch.setattr(server, "_runtime_routing_requires_initial_task", lambda: True)
 
     parent_sid = "parent01"
     parent_key = "20260101_000000_parent"
@@ -1224,10 +1286,102 @@ def test_session_branch_persists_branched_from_marker(server, monkeypatch):
     assert new_key == "20260101_000001_child0"
     assert kwargs["parent_session_id"] == parent_key
     # The marker — without it the branch is invisible in /resume and /sessions.
-    assert kwargs["model_config"] == {
-        "_branched_from": parent_key,
-        "_branch_point_message_count": 1,
+    assert kwargs["model_config"] == {"_branched_from": parent_key}
+
+
+def test_session_branch_forwards_original_timestamps(server, monkeypatch):
+    """TUI /branch must copy the parent's messages WITH their original
+    timestamps — append_message otherwise stamps time.time() at INSERT and
+    the branch's whole history silently appears authored "now" (#28841).
+    """
+    append_calls = []
+
+    class _DB:
+        def get_session_title(self, _key):
+            return "parent-title"
+
+        def get_next_title_in_lineage(self, base):
+            return f"{base} 2"
+
+        def create_session(self, new_key, **kwargs):
+            return new_key
+
+        def append_message(self, **kwargs):
+            append_calls.append(kwargs)
+            return None
+
+        def set_session_title(self, _key, _title):
+            return None
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_resolve_model", lambda: "test/model")
+    monkeypatch.setattr(server, "_new_session_key", lambda: "20260101_000001_child0")
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda _sid, key, session_id=None, session_db=None, **_kwargs: types.SimpleNamespace(
+            model="test/model", session_id=session_id or key
+        ),
+    )
+    monkeypatch.setattr(server, "_init_session", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_session_cwd", lambda _s: "/tmp/branch-cwd")
+
+    original_ts = [1_700_000_000.0, 1_700_000_020.0]
+    parent_sid = "parent02"
+    server._sessions[parent_sid] = {
+        "session_key": "20260101_000000_parent",
+        "history": [
+            {"role": "user", "content": "hello", "timestamp": original_ts[0]},
+            {"role": "assistant", "content": "hi!", "timestamp": original_ts[1]},
+        ],
+        "history_lock": threading.Lock(),
+        "cols": 80,
     }
+
+    resp = server.handle_request(
+        {"id": "b2", "method": "session.branch", "params": {"session_id": parent_sid}}
+    )
+
+    assert "error" not in resp, resp
+    assert len(append_calls) == 2
+    assert [c.get("timestamp") for c in append_calls] == original_ts
+
+
+def test_persist_branch_seed_forwards_original_timestamps(server, monkeypatch):
+    """First-turn branch seed persist must carry each copied message's
+    original timestamp through to append_message (#28841)."""
+    import contextlib
+
+    append_calls = []
+
+    class _DB:
+        def append_message(self, **kwargs):
+            append_calls.append(kwargs)
+            return None
+
+    @contextlib.contextmanager
+    def _fake_session_db(_session):
+        yield _DB()
+
+    monkeypatch.setattr(server, "_session_db", _fake_session_db)
+
+    original_ts = [100.0, 200.0]
+    session = {
+        "session_key": "20260101_000002_seed00",
+        "parent_session_id": "20260101_000000_parent",
+        "history": [
+            {"role": "user", "content": "a", "timestamp": original_ts[0]},
+            {"role": "assistant", "content": "b", "timestamp": original_ts[1]},
+        ],
+        "history_lock": threading.Lock(),
+    }
+
+    server._persist_branch_seed(session)
+
+    assert session.get("_branch_seed_persisted") is True
+    assert [c.get("timestamp") for c in append_calls] == original_ts
 
 
 def test_make_agent_accepts_list_system_prompt(server, monkeypatch):
@@ -1241,7 +1395,7 @@ def test_make_agent_accepts_list_system_prompt(server, monkeypatch):
     monkeypatch.setitem(sys.modules, "run_agent", types.SimpleNamespace(AIAgent=_Agent))
     monkeypatch.setitem(
         sys.modules,
-        "hades_cli.runtime_provider",
+        "hermes_cli.runtime_provider",
         types.SimpleNamespace(
             resolve_runtime_provider=lambda **_kwargs: {
                 "provider": "test",
@@ -1389,7 +1543,7 @@ def test_slash_exec_handles_plugin_commands_in_live_gateway(server):
     server._sessions[sid] = {"session_key": sid, "agent": None, "slash_worker": worker}
 
     with patch(
-        "hades_cli.plugins.get_plugin_command_handler",
+        "hermes_cli.plugins.get_plugin_command_handler",
         lambda name: (lambda arg: f"plugin:{arg}") if name == "plugin-cmd" else None,
     ):
         resp = server.handle_request({
@@ -1419,7 +1573,7 @@ def test_slash_exec_plugin_lookup_failure_falls_back_to_worker(server):
     server._sessions[sid] = {"session_key": sid, "agent": None, "slash_worker": worker}
 
     with patch(
-        "hades_cli.plugins.get_plugin_command_handler",
+        "hermes_cli.plugins.get_plugin_command_handler",
         side_effect=RuntimeError("discovery boom"),
     ):
         resp = server.handle_request({
@@ -1452,7 +1606,7 @@ def test_slash_exec_plugin_handler_error_returns_output(server):
     server._sessions[sid] = {"session_key": sid, "agent": None, "slash_worker": worker}
 
     with patch(
-        "hades_cli.plugins.get_plugin_command_handler",
+        "hermes_cli.plugins.get_plugin_command_handler",
         lambda name: handler if name == "plugin-cmd" else None,
     ):
         resp = server.handle_request({
@@ -1810,7 +1964,7 @@ def test_command_dispatch_awaits_async_plugin_handler(server):
         return f"async:{arg}"
 
     with patch(
-        "hades_cli.plugins.get_plugin_command_handler",
+        "hermes_cli.plugins.get_plugin_command_handler",
         lambda name: _handler if name == "async-cmd" else None,
     ):
         resp = server.handle_request({
@@ -1826,27 +1980,19 @@ def test_command_dispatch_awaits_async_plugin_handler(server):
 # ── dispatch(): pool routing for long handlers (#12546) ──────────────
 
 
-def test_dispatch_runs_short_handlers_inline(server, monkeypatch):
+def test_dispatch_runs_short_handlers_inline(server):
     """Non-long handlers return their response synchronously from dispatch()."""
-    monkeypatch.setitem(
-        server._methods,
-        "fast.ping",
-        lambda rid, params: server._ok(rid, {"pong": True}),
-    )
+    server._methods["fast.ping"] = lambda rid, params: server._ok(rid, {"pong": True})
 
     resp = server.dispatch({"id": "r1", "method": "fast.ping", "params": {}})
 
     assert resp == {"jsonrpc": "2.0", "id": "r1", "result": {"pong": True}}
 
 
-def test_dispatch_offloads_long_handlers_and_emits_via_stdout(capture, monkeypatch):
+def test_dispatch_offloads_long_handlers_and_emits_via_stdout(capture):
     """Long handlers run on the pool and write their response via write_json."""
     server, buf = capture
-    monkeypatch.setitem(
-        server._methods,
-        "slash.exec",
-        lambda rid, params: server._ok(rid, {"output": "hi"}),
-    )
+    server._methods["slash.exec"] = lambda rid, params: server._ok(rid, {"output": "hi"})
 
     resp = server.dispatch({"id": "r2", "method": "slash.exec", "params": {}})
     assert resp is None
@@ -1860,22 +2006,11 @@ def test_dispatch_offloads_long_handlers_and_emits_via_stdout(capture, monkeypat
     assert written == {"jsonrpc": "2.0", "id": "r2", "result": {"output": "hi"}}
 
 
-def test_dispatch_long_handler_does_not_block_fast_handler(server, monkeypatch):
+def test_dispatch_long_handler_does_not_block_fast_handler(server):
     """A slow long handler must not prevent a concurrent fast handler from completing."""
     released = threading.Event()
-    monkeypatch.setitem(
-        server._methods,
-        "slash.exec",
-        lambda rid, params: (
-            released.wait(timeout=5),
-            server._ok(rid, {"done": True}),
-        )[1],
-    )
-    monkeypatch.setitem(
-        server._methods,
-        "fast.ping",
-        lambda rid, params: server._ok(rid, {"pong": True}),
-    )
+    server._methods["slash.exec"] = lambda rid, params: (released.wait(timeout=5), server._ok(rid, {"done": True}))[1]
+    server._methods["fast.ping"] = lambda rid, params: server._ok(rid, {"pong": True})
 
     t0 = time.monotonic()
     assert server.dispatch({"id": "slow", "method": "slash.exec", "params": {}}) is None
@@ -1884,12 +2019,12 @@ def test_dispatch_long_handler_does_not_block_fast_handler(server, monkeypatch):
     fast_elapsed = time.monotonic() - t0
 
     assert fast_resp["result"] == {"pong": True}
-    assert fast_elapsed < 0.5, f"fast handler blocked for {fast_elapsed:.2f}s behind slow handler"
+    assert fast_elapsed < 2.0, f"fast handler blocked for {fast_elapsed:.2f}s behind slow handler"
 
     released.set()
 
 
-def test_dispatch_session_compress_does_not_block_fast_handler(server, monkeypatch):
+def test_dispatch_session_compress_does_not_block_fast_handler(server):
     """Manual TUI compaction can take minutes, so it must not block the RPC loop."""
     released = threading.Event()
 
@@ -1897,12 +2032,8 @@ def test_dispatch_session_compress_does_not_block_fast_handler(server, monkeypat
         released.wait(timeout=5)
         return server._ok(rid, {"done": True})
 
-    monkeypatch.setitem(server._methods, "session.compress", slow_compress)
-    monkeypatch.setitem(
-        server._methods,
-        "fast.ping",
-        lambda rid, params: server._ok(rid, {"pong": True}),
-    )
+    server._methods["session.compress"] = slow_compress
+    server._methods["fast.ping"] = lambda rid, params: server._ok(rid, {"pong": True})
 
     t0 = time.monotonic()
     assert server.dispatch({"id": "slow", "method": "session.compress", "params": {}}) is None
@@ -1911,21 +2042,19 @@ def test_dispatch_session_compress_does_not_block_fast_handler(server, monkeypat
     fast_elapsed = time.monotonic() - t0
 
     assert fast_resp["result"] == {"pong": True}
-    assert fast_elapsed < 0.5, f"fast handler blocked for {fast_elapsed:.2f}s behind session.compress"
+    assert fast_elapsed < 2.0, f"fast handler blocked for {fast_elapsed:.2f}s behind session.compress"
 
     released.set()
 
 
-def test_dispatch_long_handler_exception_produces_error_response(
-    capture, monkeypatch
-):
+def test_dispatch_long_handler_exception_produces_error_response(capture):
     """An exception inside a pool-dispatched handler still yields a JSON-RPC error."""
     server, buf = capture
 
     def boom(rid, params):
         raise RuntimeError("kaboom")
 
-    monkeypatch.setitem(server._methods, "slash.exec", boom)
+    server._methods["slash.exec"] = boom
 
     server.dispatch({"id": "r3", "method": "slash.exec", "params": {}})
 
@@ -1940,13 +2069,9 @@ def test_dispatch_long_handler_exception_produces_error_response(
     assert "kaboom" in written["error"]["message"]
 
 
-def test_dispatch_unknown_long_method_still_goes_inline(server, monkeypatch):
+def test_dispatch_unknown_long_method_still_goes_inline(server):
     """Method name not in _LONG_HANDLERS takes the sync path even if handler is slow."""
-    monkeypatch.setitem(
-        server._methods,
-        "some.method",
-        lambda rid, params: server._ok(rid, {"ok": True}),
-    )
+    server._methods["some.method"] = lambda rid, params: server._ok(rid, {"ok": True})
 
     resp = server.dispatch({"id": "r4", "method": "some.method", "params": {}})
 
@@ -1964,9 +2089,7 @@ def test_completion_handlers_are_pool_routed(completion_method, server):
 
 
 @pytest.mark.parametrize("completion_method", ["complete.path", "complete.slash"])
-def test_slow_completion_does_not_block_fast_handler(
-    completion_method, server, monkeypatch
-):
+def test_slow_completion_does_not_block_fast_handler(completion_method, server):
     """A slow completion RPC must not block a concurrent fast handler (#21123)."""
     released = threading.Event()
 
@@ -1974,12 +2097,8 @@ def test_slow_completion_does_not_block_fast_handler(
         released.wait(timeout=5)
         return server._ok(rid, {"items": []})
 
-    monkeypatch.setitem(server._methods, completion_method, slow_completion)
-    monkeypatch.setitem(
-        server._methods,
-        "fast.ping",
-        lambda rid, params: server._ok(rid, {"pong": True}),
-    )
+    server._methods[completion_method] = slow_completion
+    server._methods["fast.ping"] = lambda rid, params: server._ok(rid, {"pong": True})
 
     t0 = time.monotonic()
     assert server.dispatch({"id": "slow", "method": completion_method, "params": {}}) is None
@@ -1988,6 +2107,57 @@ def test_slow_completion_does_not_block_fast_handler(
     fast_elapsed = time.monotonic() - t0
 
     assert fast_resp["result"] == {"pong": True}
-    assert fast_elapsed < 0.5, f"fast handler blocked for {fast_elapsed:.2f}s behind {completion_method}"
+    assert fast_elapsed < 2.0, f"fast handler blocked for {fast_elapsed:.2f}s behind {completion_method}"
 
     released.set()
+
+
+def test_skin_live_switch_end_to_end(server, tmp_path, monkeypatch):
+    """Real config + skin files: activating a skin (as `hermes config set` does)
+    makes the per-tool reconcile broadcast skin.changed with the resolved palette.
+    Exercises _load_cfg → _skin_sig → resolve_skin → _emit with no mocks in between."""
+    import hermes_cli.skin_engine as skin_engine
+
+    (tmp_path / "skins").mkdir()
+    (tmp_path / "skins" / "midnight.yaml").write_text(
+        "name: midnight\ndescription: t\ncolors:\n  banner_title: '#00ffcc'\n  background: '#001010'\n"
+    )
+    monkeypatch.setattr(skin_engine, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(server, "_hermes_home", tmp_path)
+    monkeypatch.setattr(server, "_last_skin_sig", None, raising=False)
+    server._cfg_cache = server._cfg_mtime = server._cfg_path = None
+
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda ev, sid, payload=None: emitted.append((ev, payload)))
+
+    # Baseline (default) — seeds the signature.
+    (tmp_path / "config.yaml").write_text("display:\n  skin: default\n")
+    server._broadcast_skin_if_changed()
+    emitted.clear()
+
+    # Activate midnight, as `hermes config set display.skin midnight` would.
+    time.sleep(0.01)  # ensure the config mtime moves
+    (tmp_path / "config.yaml").write_text("display:\n  skin: midnight\n")
+    server._broadcast_skin_if_changed()
+
+    assert [ev for ev, _ in emitted] == ["skin.changed"]
+    assert emitted[0][1]["name"] == "midnight"
+    assert emitted[0][1]["colors"]["banner_title"] == "#00ffcc"
+
+
+def test_broadcast_skin_if_changed_on_any_signature_move(server, monkeypatch):
+    """A skin the agent changes mid-turn goes live once per real move: a name
+    switch (incl. switch-then-revert) OR an in-place color edit to the active skin
+    (same name, new file mtime). An unchanged signature never re-broadcasts."""
+    emitted = []
+    # switch, no-op, switch, then a color edit (same name, bumped mtime).
+    sigs = iter([("neon", 1.0), ("neon", 1.0), ("forest", 1.0), ("forest", 2.0)])
+    monkeypatch.setattr(server, "_emit", lambda ev, sid, payload=None: emitted.append((ev, payload)))
+    monkeypatch.setattr(server, "_last_skin_sig", None, raising=False)
+    monkeypatch.setattr(server, "_skin_sig", lambda: next(sigs))
+    monkeypatch.setattr(server, "resolve_skin", lambda: {"name": "x", "colors": {}})
+
+    for _ in range(4):
+        server._broadcast_skin_if_changed()
+
+    assert [ev for ev, _ in emitted] == ["skin.changed"] * 3

@@ -309,7 +309,7 @@ async def handle_ws(ws: Any) -> None:
         # to surface MCP tools is a manual /reload-mcp. Start it once per
         # process here (idempotent, config-gated) before gateway.ready so the
         # first agent build can pick up already-spawning servers. (#38945)
-        from hades_cli.mcp_startup import start_background_mcp_discovery
+        from hermes_cli.mcp_startup import start_background_mcp_discovery
 
         start_background_mcp_discovery(
             logger=_log,
@@ -326,6 +326,9 @@ async def handle_ws(ws: Any) -> None:
                 },
             }
         )
+        if ready_ok:
+            # Live-apply skins Hermes activates mid-conversation.
+            server._ensure_skin_watcher()
         if not ready_ok:
             disconnect_reason = "ready_send_failed"
             send_failures += 1

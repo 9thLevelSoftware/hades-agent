@@ -21,8 +21,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from hades_constants import env_get, env_set
-
 
 def now_ns() -> int:
     return time.perf_counter_ns()
@@ -148,7 +146,7 @@ class ComputeHost:
         self._heartbeat_secs = (
             float(heartbeat_secs)
             if heartbeat_secs is not None
-            else float(env_get("HADES_COMPUTE_HOST_HEARTBEAT_SECS") or "15")
+            else float(os.environ.get("HERMES_COMPUTE_HOST_HEARTBEAT_SECS") or "15")
         )
         if self._heartbeat_secs > 0:
             threading.Thread(target=self._heartbeat_loop, name="compute-host-heartbeat", daemon=True).start()
@@ -368,9 +366,9 @@ class ComputeHost:
             except Exception:
                 pass
             try:
-                import hades_undo
+                import hermes_undo
 
-                hades_undo.on_user_message_appended(session["session_key"])
+                hermes_undo.on_user_message_appended(session["session_key"])
             except Exception:
                 pass
             try:
@@ -438,10 +436,10 @@ class ComputeHost:
         home_token = None
         try:
             if profile_home:
-                from hades_constants import set_hades_home_override, env_get, env_set
-                from hades_state import SessionDB
+                from hermes_constants import set_hermes_home_override
+                from hermes_state import SessionDB
 
-                home_token = set_hades_home_override(profile_home)
+                home_token = set_hermes_home_override(profile_home)
                 session_db = SessionDB(db_path=Path(profile_home) / "state.db")
             agent = server._make_agent(
                 sid,
@@ -456,9 +454,9 @@ class ComputeHost:
         finally:
             if home_token is not None:
                 try:
-                    from hades_constants import reset_hades_home_override
+                    from hermes_constants import reset_hermes_home_override
 
-                    reset_hades_home_override(home_token)
+                    reset_hermes_home_override(home_token)
                 except Exception:
                     pass
         try:
@@ -569,6 +567,28 @@ class ComputeHost:
                 }
             )
         except Exception as exc:
+            if route_name in {"session.compress", "slash.compress"}:
+                # The compress mirror defers the context-engine boundary
+                # notification until the host commits. If anything raises
+                # between queueing and finalize (e.g. building the ack's
+                # session_info), discard the pending notification so it can't
+                # leak onto the agent and fire against a rejected boundary on
+                # a later compress. finalize is exactly-once, so this is a
+                # no-op when the mirror already emitted or discarded it.
+                try:
+                    from tui_gateway import server as _server
+                    from agent.conversation_compression import (
+                        finalize_context_engine_compression_notification,
+                    )
+
+                    _agent = (_server._sessions.get(sid) or {}).get("agent")
+                    if _agent is not None:
+                        finalize_context_engine_compression_notification(
+                            _agent,
+                            committed=False,
+                        )
+                except Exception:
+                    pass
             self.emit({"type": "control.error", "sid": sid, "request_id": request_id, "message": str(exc)})
 
     def _bump_progress(self) -> None:
@@ -609,13 +629,13 @@ def _rss_mb(pid: int) -> float:
 
 def _default_workers() -> int:
     try:
-        return max(2, int(env_get("HADES_TUI_RPC_POOL_WORKERS") or "8"))
+        return max(2, int(os.environ.get("HERMES_TUI_RPC_POOL_WORKERS") or "8"))
     except (TypeError, ValueError):
         return 8
 
 
 def run_host(stdin: Any = None, stdout: Any = None) -> None:
-    env_set("HADES_COMPUTE_HOST_CHILD", "1")
+    os.environ["HERMES_COMPUTE_HOST_CHILD"] = "1"
     stdin = stdin or sys.stdin
     host = ComputeHost(stdout=stdout or sys.stdout)
     shutting_down = threading.Event()
@@ -640,7 +660,7 @@ def run_host(stdin: Any = None, stdout: Any = None) -> None:
             "boot_id": host._boot_id,
             "build_sha": _build_sha(),
             "cwd": os.getcwd(),
-            "hades_home": env_get("HADES_HOME", ""),
+            "hermes_home": os.environ.get("HERMES_HOME", ""),
         }
     )
 

@@ -1,7 +1,7 @@
 """Mixture-of-Agents runtime helpers for /moa turns.
 
 The slash command is deliberately not a model tool. It marks one user turn as
-MoA-enabled; the normal Hades agent loop still owns tool calling and turn
+MoA-enabled; the normal Hermes agent loop still owns tool calling and turn
 termination, while this module gathers reference-model context before each model
 iteration.
 """
@@ -130,7 +130,7 @@ def _slot_reasoning_config(slot: dict[str, Any]) -> dict[str, Any] | None:
     """Translate optional per-MoA-slot reasoning_effort into runtime config."""
     effort = slot.get("reasoning_effort")
     try:
-        from hades_constants import parse_reasoning_effort
+        from hermes_constants import parse_reasoning_effort
 
         return parse_reasoning_effort(effort)
     except Exception:  # pragma: no cover - defensive; bad config must not break MoA
@@ -157,8 +157,8 @@ def _aggregator_reasoning_config(aggregator: dict[str, Any]) -> dict[str, Any] |
     if cfg is not None:
         return cfg
     try:
-        from hades_cli.config import load_config
-        from hades_constants import resolve_reasoning_config
+        from hermes_cli.config import load_config
+        from hermes_constants import resolve_reasoning_config
 
         return resolve_reasoning_config(
             load_config() or {}, str(aggregator.get("model") or "")
@@ -188,7 +188,7 @@ def _slot_runtime(slot: dict[str, Any]) -> dict[str, Any]:
     model = str(slot.get("model") or "").strip()
     out: dict[str, Any] = {"provider": provider, "model": model}
     try:
-        from hades_cli.runtime_provider import resolve_runtime_provider
+        from hermes_cli.runtime_provider import resolve_runtime_provider
 
         rt = resolve_runtime_provider(requested=provider, target_model=model)
         # Forward the resolved endpoint through to call_llm unconditionally.
@@ -493,7 +493,7 @@ def _reference_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     came back — not just the agent's narration. We therefore preserve the whole
     conversation flow, but flatten it into clean user/assistant *text* turns:
 
-      - system prompt: dropped (8K of Hades boilerplate, not advisory signal).
+      - system prompt: dropped (8K of Hermes boilerplate, not advisory signal).
       - assistant turns: kept; any ``tool_calls`` are rendered inline as
         ``[called tool: name(args)]`` text lines appended to the turn's text.
       - ``tool``-role results: NOT dropped. Each is folded (head+tail preview,
@@ -644,7 +644,7 @@ def _preset_temperature(preset: dict[str, Any], key: str) -> float | None:
 
     Returns None when the key is absent, empty, or explicitly null — meaning
     "don't send temperature; let the provider default apply", exactly like a
-    single-model Hades agent (which never sends temperature unless
+    single-model Hermes agent (which never sends temperature unless
     configured). The old coercion ``float(preset.get(key, 0.6) or 0.6)``
     made unset impossible: absent, null, and even 0 all collapsed to the
     hardcoded default, so MoA advisors/aggregator always ran at 0.6/0.4
@@ -702,7 +702,7 @@ def aggregate_moa_context(
     synth_prompt = (
         "You are the aggregator in a Mixture of Agents process. Synthesize the "
         "reference responses into concise, actionable guidance for the main "
-        "Hades agent. Focus on next steps, tool-use strategy, risks, and any "
+        "Hermes agent. Focus on next steps, tool-use strategy, risks, and any "
         "disagreements. Do not answer the user directly unless that is all that "
         "is needed; produce context the main agent should use in its normal loop.\n\n"
         f"Original user prompt:\n{user_prompt}\n\n"
@@ -743,7 +743,7 @@ def aggregate_moa_context(
 
     return (
         "[Mixture of Agents context — use this as private guidance for the "
-        "normal Hades agent loop. You may call tools, continue reasoning, or "
+        "normal Hermes agent loop. You may call tools, continue reasoning, or "
         "finish normally.]\n"
         f"Aggregator: {agg_label}\n"
         f"References: {', '.join(_slot_label(slot) for slot in reference_models)}\n\n"
@@ -905,9 +905,116 @@ class MoAChatCompletions:
         except Exception as exc:  # pragma: no cover - display must never break the turn
             logger.debug("MoA reference_callback failed for %s: %s", event, exc)
 
+    def prepare(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        """Run the advisor fan-out and return the exact aggregator request.
+
+        The normal agent loop needs to measure this augmented prompt before its
+        compression gate.  ``create()`` also uses this method for direct callers;
+        when the loop supplies the returned private object back to ``create()``,
+        the advisor fan-out is not repeated.
+        """
+        return self.create(messages=messages, _moa_prepare_only=True)
+
+    def rebase_prepared_request(
+        self, prepared: dict[str, Any], messages: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Apply already-generated advisor guidance to a rebuilt API transcript.
+
+        Context compression changes the persisted transcript but not the
+        ephemeral advisor result.  Reusing the guidance avoids a second costly
+        fan-out while keeping the aggregator request aligned with the compacted
+        history.
+        """
+        guidance = prepared.get("guidance")
+        agg_messages = [dict(message) for message in messages]
+        if guidance:
+            _attach_reference_guidance(agg_messages, str(guidance))
+        return {**prepared, "messages": agg_messages}
+
+    def _call_prepared_aggregator(
+        self, prepared: dict[str, Any], api_kwargs: dict[str, Any]
+    ) -> Any:
+        """Send an already prepared MoA aggregator request exactly once."""
+        agg_messages = prepared["messages"]
+        aggregator = prepared["aggregator"]
+        aggregator_temperature = prepared["aggregator_temperature"]
+        if aggregator.get("provider") == "moa":
+            raise RuntimeError("MoA aggregator cannot be another MoA preset")
+        agg_kwargs = dict(api_kwargs)
+        max_tokens: Any = agg_kwargs.get("max_tokens")
+        tools: Any = agg_kwargs.get("tools")
+        extra_body: Any = agg_kwargs.get("extra_body")
+        # Record the exact aggregator INPUT (incl. the injected reference
+        # context) into the pending trace so a trace captures what the
+        # aggregator actually saw, not a reconstruction.
+        if self._pending_trace is not None:
+            self._pending_trace["aggregator_input_messages"] = agg_messages
+            self._pending_trace["aggregator_label"] = _slot_label(aggregator)
+        # The aggregator is the acting model. Resolve its slot to the provider's
+        # real runtime (base_url/api_key/api_mode) and call it through the same
+        # request-building path any model uses — so per-model wire-format
+        # handling (anthropic_messages, max_completion_tokens, fixed/forbidden
+        # temperature) applies identically to it. MoA imposes no output cap:
+        # max_tokens is passed through from the caller (normally None → omitted
+        # → the model's real maximum). The preset's old hardcoded 4096 default
+        # is gone — it truncated long syntheses.
+        # When the agent's streaming consumer calls us with stream=True, run the
+        # references first (above) and then return the aggregator's RAW token
+        # stream so the acting model's output reaches the user live. The consumer
+        # reassembles chunks + tool_calls, runs stale-stream detection, and falls
+        # back to a non-streaming retry on error. The non-streaming path
+        # (stream=False) is unchanged — no stream/stream_options/timeout are
+        # forwarded, so its behavior is byte-for-byte identical to before.
+        stream = bool(api_kwargs.get("stream"))
+        stream_kwargs: dict[str, Any] = {}
+        if stream:
+            stream_kwargs["stream"] = True
+            stream_kwargs["stream_options"] = (
+                api_kwargs.get("stream_options") or {"include_usage": True}
+            )
+            # Forward the consumer's per-request (stream read) timeout so it
+            # actually governs the aggregator stream, not just call_llm's default.
+            if api_kwargs.get("timeout") is not None:
+                stream_kwargs["timeout"] = api_kwargs["timeout"]
+        _agg_response = call_llm(
+            task="moa_aggregator",
+            messages=agg_messages,
+            temperature=aggregator_temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            extra_body=extra_body,
+            # Prepared requests must retain the acting aggregator's reasoning
+            # policy exactly as the direct create() path does (#64187).
+            reasoning_config=_aggregator_reasoning_config(aggregator),
+            **stream_kwargs,
+            **_slot_runtime(aggregator),
+        )
+        # Non-streaming path (quiet mode / eval / subagents): the aggregator
+        # output is available inline, so capture it into the pending trace now.
+        # Streaming path: the aggregator's raw token stream is returned to the
+        # consumer live and its acting output lands as the turn's assistant
+        # message; the trace marks it streamed and points there.
+        if self._pending_trace is not None:
+            if stream:
+                self._pending_trace["aggregator_streamed"] = True
+                self._pending_trace["aggregator_output"] = None
+            else:
+                self._pending_trace["aggregator_streamed"] = False
+                try:
+                    self._pending_trace["aggregator_output"] = _extract_text(_agg_response)
+                except Exception:  # pragma: no cover - defensive
+                    self._pending_trace["aggregator_output"] = None
+        return _agg_response
+
     def create(self, **api_kwargs: Any) -> Any:
-        from hades_cli.config import load_config
-        from hades_cli.moa_config import resolve_moa_preset
+        prepared_request = api_kwargs.pop("_moa_prepared_request", None)
+        if prepared_request is not None:
+            if not isinstance(prepared_request, dict):
+                raise TypeError("_moa_prepared_request must be a dict")
+            return self._call_prepared_aggregator(prepared_request, api_kwargs)
+
+        from hermes_cli.config import load_config
+        from hermes_cli.moa_config import resolve_moa_preset
 
         preset = resolve_moa_preset(load_config().get("moa") or {}, self.preset_name)
         messages = list(api_kwargs.get("messages") or [])
@@ -1065,6 +1172,7 @@ class MoAChatCompletions:
                     ref_count=_ref_count,
                 )
 
+        guidance: str | None = None
         agg_messages = [dict(m) for m in messages]
         if reference_outputs:
             joined = "\n\n".join(
@@ -1082,69 +1190,15 @@ class MoAChatCompletions:
             )
             _attach_reference_guidance(agg_messages, guidance)
 
-        if aggregator.get("provider") == "moa":
-            raise RuntimeError("MoA aggregator cannot be another MoA preset")
-        agg_kwargs = dict(api_kwargs)
-        agg_kwargs["messages"] = agg_messages
-        # Record the exact aggregator INPUT (incl. the injected reference
-        # context) into the pending trace so a trace captures what the
-        # aggregator actually saw, not a reconstruction.
-        if self._pending_trace is not None:
-            self._pending_trace["aggregator_input_messages"] = agg_messages
-            self._pending_trace["aggregator_label"] = _slot_label(aggregator)
-        # The aggregator is the acting model. Resolve its slot to the provider's
-        # real runtime (base_url/api_key/api_mode) and call it through the same
-        # request-building path any model uses — so per-model wire-format
-        # handling (anthropic_messages, max_completion_tokens, fixed/forbidden
-        # temperature) applies identically to it. MoA imposes no output cap:
-        # max_tokens is passed through from the caller (normally None → omitted
-        # → the model's real maximum). The preset's old hardcoded 4096 default
-        # is gone — it truncated long syntheses.
-        # When the agent's streaming consumer calls us with stream=True, run the
-        # references first (above) and then return the aggregator's RAW token
-        # stream so the acting model's output reaches the user live. The consumer
-        # reassembles chunks + tool_calls, runs stale-stream detection, and falls
-        # back to a non-streaming retry on error. The non-streaming path
-        # (stream=False) is unchanged — no stream/stream_options/timeout are
-        # forwarded, so its behavior is byte-for-byte identical to before.
-        stream = bool(api_kwargs.get("stream"))
-        stream_kwargs: dict[str, Any] = {}
-        if stream:
-            stream_kwargs["stream"] = True
-            stream_kwargs["stream_options"] = (
-                api_kwargs.get("stream_options") or {"include_usage": True}
-            )
-            # Forward the consumer's per-request (stream read) timeout so it
-            # actually governs the aggregator stream, not just call_llm's default.
-            if api_kwargs.get("timeout") is not None:
-                stream_kwargs["timeout"] = api_kwargs["timeout"]
-        _agg_response = call_llm(
-            task="moa_aggregator",
-            messages=agg_messages,
-            temperature=aggregator_temperature,
-            max_tokens=agg_kwargs.get("max_tokens"),
-            tools=agg_kwargs.get("tools"),
-            extra_body=agg_kwargs.get("extra_body"),
-            reasoning_config=_aggregator_reasoning_config(aggregator),
-            **stream_kwargs,
-            **_slot_runtime(aggregator),
-        )
-        # Non-streaming path (quiet mode / eval / subagents): the aggregator
-        # output is available inline, so capture it into the pending trace now.
-        # Streaming path: the aggregator's raw token stream is returned to the
-        # consumer live and its acting output lands as the turn's assistant
-        # message; the trace marks it streamed and points there.
-        if self._pending_trace is not None:
-            if stream:
-                self._pending_trace["aggregator_streamed"] = True
-                self._pending_trace["aggregator_output"] = None
-            else:
-                self._pending_trace["aggregator_streamed"] = False
-                try:
-                    self._pending_trace["aggregator_output"] = _extract_text(_agg_response)
-                except Exception:  # pragma: no cover - defensive
-                    self._pending_trace["aggregator_output"] = None
-        return _agg_response
+        prepared_request = {
+            "messages": agg_messages,
+            "guidance": guidance,
+            "aggregator": aggregator,
+            "aggregator_temperature": aggregator_temperature,
+        }
+        if api_kwargs.pop("_moa_prepare_only", False):
+            return prepared_request
+        return self._call_prepared_aggregator(prepared_request, api_kwargs)
 
 
 class MoAClient:

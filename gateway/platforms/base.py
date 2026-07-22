@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import uuid
+import weakref
 from abc import ABC, abstractmethod
 from urllib.parse import urlsplit
 
@@ -56,7 +57,7 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
     """Build platform-aware thread metadata for adapter sends.
 
     Most platforms route threaded sends with a generic ``thread_id`` metadata
-    value. Telegram private-chat topics created through Hades' DM-topic helper
+    value. Telegram private-chat topics created through Hermes' DM-topic helper
     are exposed in updates as ``message_thread_id`` plus a reply anchor. Live
     user-message replies route with ``message_thread_id`` + ``reply_to_message_id``;
     synthetic/resumed sends that have no reply anchor fall back to Telegram's
@@ -500,12 +501,12 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
 from gateway.session import SessionSource, build_session_key
-from hades_constants import get_default_hades_root, get_hades_dir, get_hades_home, env_get
+from hermes_constants import get_default_hermes_root, get_hermes_dir, get_hermes_home
 
 
 GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE = (
     "Secure secret entry is not supported over messaging. "
-    "Load this skill in the local CLI to be prompted, or add the key to ~/.hades/.env manually."
+    "Load this skill in the local CLI to be prompted, or add the key to ~/.hermes/.env manually."
 )
 
 
@@ -573,13 +574,13 @@ async def _ssrf_redirect_guard(response):
 
 # Import-time default. Tests monkeypatch this; the get_*_cache_dir() getters
 # re-resolve per call so the active profile override is honored.
-IMAGE_CACHE_DIR = get_hades_dir("cache/images", "image_cache")
+IMAGE_CACHE_DIR = get_hermes_dir("cache/images", "image_cache")
 
 
 def _resolve_cache_dir(constant_name: str, new_subpath: str, old_name: str) -> Path:
-    """Resolve fresh via get_hades_dir (active profile), unless a test has
+    """Resolve fresh via get_hermes_dir (active profile), unless a test has
     monkeypatched the constant away from its import-time default."""
-    fresh = get_hades_dir(new_subpath, old_name)
+    fresh = get_hermes_dir(new_subpath, old_name)
     current = globals().get(constant_name)
     default = _CACHE_DIR_IMPORT_DEFAULTS.get(constant_name)
     if current is not None and default is not None and current != default:
@@ -613,7 +614,7 @@ def get_inbound_media_max_bytes() -> int:
     unreadable — falls back to the default.
     """
     try:
-        from hades_cli.config import load_config as _load_config
+        from hermes_cli.config import load_config as _load_config
         cfg = _load_config()
     except Exception:
         return DEFAULT_INBOUND_MEDIA_MAX_BYTES
@@ -766,7 +767,7 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
                     "GET",
                     url,
                     headers={
-                        "User-Agent": "Mozilla/5.0 (compatible; HadesAgent/1.0)",
+                        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
                         "Accept": "image/*,*/*;q=0.8",
                     },
                 ) as response:
@@ -821,7 +822,7 @@ def cleanup_image_cache(max_age_hours: int = 24) -> int:
 # here so the STT tool (OpenAI Whisper) can transcribe them from local files.
 # ---------------------------------------------------------------------------
 
-AUDIO_CACHE_DIR = get_hades_dir("cache/audio", "audio_cache")
+AUDIO_CACHE_DIR = get_hermes_dir("cache/audio", "audio_cache")
 
 
 def get_audio_cache_dir() -> Path:
@@ -886,7 +887,7 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
                     "GET",
                     url,
                     headers={
-                        "User-Agent": "Mozilla/5.0 (compatible; HadesAgent/1.0)",
+                        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
                         "Accept": "audio/*,*/*;q=0.8",
                     },
                 ) as response:
@@ -920,7 +921,7 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
 # here so the agent can reference them by local file path.
 # ---------------------------------------------------------------------------
 
-VIDEO_CACHE_DIR = get_hades_dir("cache/videos", "video_cache")
+VIDEO_CACHE_DIR = get_hermes_dir("cache/videos", "video_cache")
 
 SUPPORTED_VIDEO_TYPES = {
     ".mp4": "video/mp4",
@@ -955,8 +956,8 @@ def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
 # here so the agent can reference them by local file path.
 # ---------------------------------------------------------------------------
 
-DOCUMENT_CACHE_DIR = get_hades_dir("cache/documents", "document_cache")
-SCREENSHOT_CACHE_DIR = get_hades_dir("cache/screenshots", "browser_screenshots")
+DOCUMENT_CACHE_DIR = get_hermes_dir("cache/documents", "document_cache")
+SCREENSHOT_CACHE_DIR = get_hermes_dir("cache/screenshots", "browser_screenshots")
 
 # Import-time defaults; _resolve_cache_dir compares against these to tell a
 # test monkeypatch from an unmodified constant.
@@ -968,8 +969,8 @@ _CACHE_DIR_IMPORT_DEFAULTS = {
     "SCREENSHOT_CACHE_DIR": SCREENSHOT_CACHE_DIR,
 }
 
-_HADES_HOME = get_hades_home()
-_HERMES_ROOT = get_default_hades_root()
+_HERMES_HOME = get_hermes_home()
+_HERMES_ROOT = get_default_hermes_root()
 MEDIA_DELIVERY_ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
 MEDIA_DELIVERY_TRUST_RECENT_ENV = "HERMES_MEDIA_TRUST_RECENT_FILES"
 MEDIA_DELIVERY_TRUST_RECENT_SECONDS_ENV = "HERMES_MEDIA_TRUST_RECENT_SECONDS"
@@ -986,18 +987,18 @@ MEDIA_DELIVERY_SAFE_ROOTS = (
     VIDEO_CACHE_DIR,
     DOCUMENT_CACHE_DIR,
     SCREENSHOT_CACHE_DIR,
-    _HADES_HOME / "image_cache",
-    _HADES_HOME / "audio_cache",
-    _HADES_HOME / "video_cache",
-    _HADES_HOME / "document_cache",
-    _HADES_HOME / "browser_screenshots",
+    _HERMES_HOME / "image_cache",
+    _HERMES_HOME / "audio_cache",
+    _HERMES_HOME / "video_cache",
+    _HERMES_HOME / "document_cache",
+    _HERMES_HOME / "browser_screenshots",
     # Canonical cache layout — listed alongside the legacy *_cache dirs so
     # generated artifacts deliver on installs that have both (#31733).
-    _HADES_HOME / "cache" / "images",
-    _HADES_HOME / "cache" / "audio",
-    _HADES_HOME / "cache" / "videos",
-    _HADES_HOME / "cache" / "documents",
-    _HADES_HOME / "cache" / "screenshots",
+    _HERMES_HOME / "cache" / "images",
+    _HERMES_HOME / "cache" / "audio",
+    _HERMES_HOME / "cache" / "videos",
+    _HERMES_HOME / "cache" / "documents",
+    _HERMES_HOME / "cache" / "screenshots",
 )
 
 # Default recency window for trusting freshly-produced files (seconds).
@@ -1060,12 +1061,12 @@ def _profile_cache_roots() -> List[Path]:
 
     Profile gateways write generated artifacts to
     ``<root>/profiles/<name>/cache/{images,audio,...}``. The static safe-roots
-    list only covers the *active* HADES_HOME's cache, so a gateway running at
-    the root (e.g. ``HADES_HOME=/opt/data``) while the model emits a
+    list only covers the *active* HERMES_HOME's cache, so a gateway running at
+    the root (e.g. ``HERMES_HOME=/opt/data``) while the model emits a
     profile-scoped path silently fails delivery. Enumerated dynamically at
     check time so profiles created after startup are covered, and so the
     resolved profile path is allowlisted *before* the ``/root`` system denylist
-    is consulted (which otherwise wins when HADES_HOME is symlinked under a
+    is consulted (which otherwise wins when HERMES_HOME is symlinked under a
     denied prefix and $HOME is not that prefix). See issue #31733.
     """
     roots: List[Path] = []
@@ -1082,10 +1083,10 @@ def _profile_cache_roots() -> List[Path]:
 
 def _kanban_attachment_roots() -> List[Path]:
     """Return durable Kanban attachment roots without importing kanban_db."""
-    override = env_get("HADES_KANBAN_ATTACHMENTS_ROOT", "").strip()
+    override = os.environ.get("HERMES_KANBAN_ATTACHMENTS_ROOT", "").strip()
     if override:
         return [Path(override).expanduser()]
-    home_override = env_get("HADES_KANBAN_HOME", "").strip()
+    home_override = os.environ.get("HERMES_KANBAN_HOME", "").strip()
     root = Path(home_override).expanduser() if home_override else _HERMES_ROOT
     roots = [root / "kanban" / "attachments"]
     boards_root = root / "kanban" / "boards"
@@ -1164,12 +1165,12 @@ def _media_delivery_denied_paths() -> List[Path]:
     # validate_media_delivery_path, so generated media still delivers).
     #
     # These are the per-file credential / secret stores that live at the
-    # HADES_HOME root. The set mirrors the canonical read guard in
+    # HERMES_HOME root. The set mirrors the canonical read guard in
     # agent/file_safety.py (get_read_block_error / build_write_denied_*) so the
     # delivery (read/exfil) side can't trail the write side: a credential the
     # agent is forbidden to write or read must also never be auto-attached to a
     # chat reply. Enumerated explicitly per-file rather than denying the whole
-    # tree, so skills/, logs/, and ad-hoc agent-written files under ~/.hades
+    # tree, so skills/, logs/, and ad-hoc agent-written files under ~/.hermes
     # stay deliverable (see #32090, #34425).
     _ROOT_CREDENTIAL_FILES = (
         ".env",
@@ -1187,8 +1188,9 @@ def _media_delivery_denied_paths() -> List[Path]:
         os.path.join("auth", "google_oauth.json"),
         # Webhook subscription HMAC secrets.
         "webhook_subscriptions.json",
-        # Bitwarden Secrets Manager plaintext disk cache.
+        # Bitwarden Secrets Manager plaintext and encrypted disk caches.
         os.path.join("cache", "bws_cache.json"),
+        os.path.join("cache", "bws_cache.enc.json"),
     )
     # Directory trees whose every child is credential material.
     #
@@ -1203,7 +1205,7 @@ def _media_delivery_denied_paths() -> List[Path]:
         "pairing",
         "mcp-tokens",
     )
-    for hermes_root in (_HADES_HOME, _HERMES_ROOT):
+    for hermes_root in (_HERMES_HOME, _HERMES_ROOT):
         for rel in _ROOT_CREDENTIAL_FILES:
             denied.append(hermes_root / rel)
         for rel in _ROOT_CREDENTIAL_DIRS:
@@ -1220,7 +1222,7 @@ def _path_under_denied_prefix(resolved: Path) -> bool:
     on a root-run gateway ``$HOME=/root`` and the operator's own deliverables
     (``/root/work/proposal.docx``) live directly under it. The credential
     sub-directories inside home (``~/.ssh``, ``~/.aws``, ...) and Hermes
-    secrets (``~/.hades/.env``, ``auth.json``) are *separate, more-specific*
+    secrets (``~/.hermes/.env``, ``auth.json``) are *separate, more-specific*
     denied paths, so they stay blocked regardless of this exception — it can
     only un-block a plain file sitting in the running user's home tree, never a
     credential location or another user's home.
@@ -1281,7 +1283,7 @@ def validate_media_delivery_path(path: str) -> Optional[str]:
 
     Strict mode (opt-in via ``gateway.strict`` in ``config.yaml`` or
     ``HERMES_MEDIA_DELIVERY_STRICT=1``): the file MUST live under a
-    Hades-managed cache, under an operator-allowlisted root
+    Hermes-managed cache, under an operator-allowlisted root
     (``HERMES_MEDIA_ALLOW_DIRS``), or be freshly produced inside the
     configured recency window. Suitable for public-facing bots where
     prompt injection from one user shouldn't be able to exfiltrate the
@@ -1327,11 +1329,11 @@ def validate_media_delivery_path(path: str) -> Optional[str]:
 
     # Non-strict mode (default): accept anything not on the denylist.
     # The denylist still blocks /etc, /proc, ~/.ssh, ~/.aws, and the
-    # credential/secret stores under the Hades root (~/.hades/.env,
+    # credential/secret stores under the Hermes root (~/.hermes/.env,
     # auth.json, .anthropic_oauth.json, google_token.json, pairing/, ...) —
     # so the obvious prompt-injection / credential-exfil sites
     # (``MEDIA:/etc/passwd``, ``MEDIA:~/.ssh/id_rsa``,
-    # ``MEDIA:~/.hades/google_token.json``) remain rejected.
+    # ``MEDIA:~/.hermes/google_token.json``) remain rejected.
     if not _media_delivery_strict_mode():
         if _path_under_denied_prefix(resolved):
             return None
@@ -1504,12 +1506,16 @@ MEDIA_TAG_CLEANUP_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Extension-less absolute paths (e.g. Caddyfile, Dockerfile, Makefile) are
-# intentionally excluded from MEDIA_TAG_CLEANUP_RE — they are validated and
-# delivered via MEDIA_EXTENSIONLESS_TAG_RE so prompt-injection paths that do
-# not exist on disk are left visible instead of silently dropped. Paths with
-# an unknown but present extension (e.g. .weirdext) stay on the #34517
-# bare-path fallback and are not handled here.
+# Paths NOT covered by MEDIA_TAG_CLEANUP_RE's extension alternation — both
+# extension-less files (Caddyfile, Dockerfile, Makefile) and files with an
+# unknown extension (.py, .log, .weirdext, ...) — are validated and delivered
+# via MEDIA_EXTENSIONLESS_TAG_RE. Every ``MEDIA:`` path is therefore
+# deliverable regardless of file type (#36060): known extensions extract
+# unconditionally via the anchored pattern above, everything else extracts
+# only after ``validate_media_delivery_path`` accepts it (exists on disk, not
+# under the credential/system denylist, strict-mode rules honored), so
+# prompt-injection paths that do not validate are left visible instead of
+# silently dropped.
 MEDIA_EXTENSIONLESS_TAG_RE = re.compile(
     r'''[`"']?MEDIA:\s*'''
     r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
@@ -1527,8 +1533,16 @@ def _normalize_media_tag_path(raw: str) -> str:
 
 
 def _path_lacks_deliverable_extension(path: str) -> bool:
-    """True only when the basename has no extension (Caddyfile, Makefile, …)."""
-    return not Path(path).suffix
+    """True when MEDIA_TAG_CLEANUP_RE's extension alternation does not cover
+    ``path`` — either the basename has no extension at all (Caddyfile,
+    Makefile, …) or the extension is not in MEDIA_DELIVERY_EXTS (.py, .log,
+    .weirdext, …). Such paths route through the validated delivery pass
+    (``validate_media_delivery_path``) instead of the unconditional one, so
+    every file type is deliverable (#36060) while nonexistent / denylisted
+    paths stay visible in the text.
+    """
+    suffix = Path(path).suffix.lower()
+    return not suffix or suffix not in MEDIA_DELIVERY_EXTS
 
 
 def _strip_media_tag_directives(text: str) -> str:
@@ -2092,6 +2106,25 @@ class EphemeralReply(str):
         return str.__str__(self)
 
 
+def _invalidate_pending_stt_cache(event: MessageEvent) -> None:
+    """Clear gateway-side STT cache attrs when media is merged into an event.
+
+    ``merge_pending_message_event`` extends ``media_urls`` in place when two
+    media-bearing messages arrive in quick succession.  The gateway runner
+    caches STT transcripts on the event via ``setattr`` (see
+    ``_transcribe_pending_audio_event_once``); if the cached event gains new
+    media after the cache was populated, the stale transcript must be
+    discarded so the next transcription call picks up the merged attachments.
+    """
+    for attr in (
+        "_gateway_pending_stt_text",
+        "_gateway_pending_stt_transcripts",
+        "_gateway_pending_stt_echo_sent",
+    ):
+        if hasattr(event, attr):
+            delattr(event, attr)
+
+
 def merge_pending_message_event(
     pending_messages: Dict[str, MessageEvent],
     session_key: str,
@@ -2122,6 +2155,7 @@ def merge_pending_message_event(
             existing.media_types.extend(event.media_types)
             if event.text:
                 existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
+            _invalidate_pending_stt_cache(existing)
             return
 
         if existing_has_media or incoming_has_media:
@@ -2140,6 +2174,7 @@ def merge_pending_message_event(
                 and event.message_type != MessageType.TEXT
             ):
                 existing.message_type = event.message_type
+            _invalidate_pending_stt_cache(existing)
             return
 
         if (
@@ -2292,8 +2327,6 @@ class BasePlatformAdapter(ABC):
     - Handling media
     """
 
-    gateway_runner: "Optional[Any]" = None
-
     # Whether this platform renders triple-backtick fenced code blocks (i.e.
     # ``format_message`` translates/preserves markdown fences into a real code
     # block).  Capability flag for markdown-aware presentation choices.
@@ -2303,6 +2336,32 @@ class BasePlatformAdapter(ABC):
     # first code line).  Plain-text platforms fall back to the short truncated
     # preview (see gateway/run.py progress_callback).
     supports_code_blocks: bool = False
+
+    # Whether this adapter's typing indicator renders TEXT (a status line
+    # next to the bot name) rather than a native textless bubble. When True,
+    # the gateway feeds live per-tool status phrases via set_status_text()
+    # ("is running pytest…") and send_typing() renders them. Textless
+    # platforms (Telegram, Discord, Matrix, …) keep the default False and
+    # never see these calls.
+    supports_status_text: bool = False
+
+    def set_status_text(self, chat_id: str, text: Optional[str]) -> None:
+        """Set or clear (``None``) the live working-state phrase for a chat.
+
+        Cheap, in-memory only: the next typing refresh renders the new text.
+        No-op storage on adapters that never read ``_status_text``.
+        """
+        # getattr-guard: many gateway tests build bare adapters via
+        # object.__new__() without running __init__ (see AGENTS.md pitfall
+        # on new __init__ attributes breaking tests).
+        store = getattr(self, "_status_text", None)
+        if store is None:
+            store = {}
+            self._status_text = store
+        if text:
+            store[str(chat_id)] = text
+        else:
+            store.pop(str(chat_id), None)
 
     # Whether this adapter can deliver an ASYNC notification back to the agent
     # AFTER a turn ends — i.e. wake a fresh turn to surface a background
@@ -2319,16 +2378,6 @@ class BasePlatformAdapter(ABC):
     # a delivery promise they can't keep. A new stateless adapter only needs to
     # set this to False to stay correct-by-default.
     supports_async_delivery: bool = True
-
-    # Whether a transport can safely accept the same delivery identity again
-    # after a process crash.  Unknown adapters default to False: a response
-    # timeout or cancellation must never be treated as replay-safe.
-    supports_idempotent_delivery: bool = False
-
-    # Whether an adapter can query/verify a previously ambiguous delivery
-    # without sending it again.  Unknown adapters default to False, so an
-    # ambiguous post-dispatch outcome becomes an explicit unknown effect.
-    supports_delivery_reconciliation: bool = False
 
     # Whether this adapter's ``send()`` splits long content into multiple
     # messages via ``truncate_message()``.  When True, the delivery router
@@ -2365,6 +2414,29 @@ class BasePlatformAdapter(ABC):
     # generic seam; Slack is merely the first consumer).
     supports_inchannel_continuable: bool = False
 
+    # Whether a human is interactively present on this platform to answer a
+    # "session restored — what next?" prompt.  The startup auto-resume turn
+    # (``_schedule_resume_pending_sessions`` → the ``_is_resume_pending``
+    # branch in ``_handle_message_with_agent``) reads this to pick its
+    # guidance: interactive platforms (Telegram, Slack, Discord DMs, …) get
+    # "report the restore and ask what the user wants next"; non-interactive
+    # event platforms (webhook) get "finish the interrupted work" because
+    # nobody is there to answer, and an acknowledgement would silently
+    # abandon the task (#57056).  Read generically via ``getattr(adapter,
+    # "interactive_resume", True)`` — no per-platform branching at the call
+    # site.
+    interactive_resume: bool = True
+
+    # Back-reference to the running ``GatewayRunner``, injected by
+    # ``gateway/run.py`` after the adapter is created. Adapters consume it via
+    # ``getattr(self, "gateway_runner", None)`` for cross-platform delivery and
+    # — critically — for inbound profile routing: ``build_source`` resolves the
+    # target profile through ``runner._profile_name_for_source(...)``. Declaring
+    # it on the base (rather than only on adapters that happen to pre-declare
+    # it) means EVERY platform adapter receives the injection, so profile
+    # routing is platform-generic instead of Discord-only.
+    gateway_runner = None  # type: ignore[assignment]  # set by gateway/run.py
+
     def __init__(self, config: PlatformConfig, platform: Platform):
         self.config = config
         self.platform = platform
@@ -2379,6 +2451,12 @@ class BasePlatformAdapter(ABC):
         self._fatal_error_message: Optional[str] = None
         self._fatal_error_retryable = True
         self._fatal_error_handler: Optional[Callable[["BasePlatformAdapter"], Awaitable[None] | None]] = None
+        # Cross-HERMES_HOME token takeover is armed by GatewayRunner only for
+        # an adapter's initial connect during an explicit ``gateway run
+        # --replace`` startup.  Ordinary starts and every reconnect fail safe
+        # through the existing retryable conflict path.
+        self._platform_lock_takeover_allowed = False
+        self._platform_lock_takeover_attempted = False
         
         # Track active message handlers per session for interrupt support.
         # _active_sessions stores the per-session interrupt Event; _session_tasks
@@ -2396,7 +2474,7 @@ class BasePlatformAdapter(ABC):
         # pre-sync read matches the single-knob default rather than silently
         # queueing.
         self._busy_text_mode: str = (
-            env_get("HADES_GATEWAY_BUSY_TEXT_MODE", "interrupt").strip().lower()
+            os.environ.get("HERMES_GATEWAY_BUSY_TEXT_MODE", "interrupt").strip().lower()
             or "interrupt"
         )
         self._busy_text_debounce_seconds: float = _float_env(
@@ -2442,6 +2520,13 @@ class BasePlatformAdapter(ABC):
         # Chats where typing indicator is paused (e.g. during approval waits).
         # _keep_typing skips send_typing when the chat_id is in this set.
         self._typing_paused: set = set()
+        # Dynamic working-state status text per chat (chat_id -> phrase).
+        # Set by the gateway on tool starts ("is running pytest…") and read
+        # by adapters whose typing indicator renders text (Slack's
+        # assistant.threads.setStatus). The regular _keep_typing refresh
+        # cadence picks up changes, so updating this dict costs no extra
+        # platform API calls. Cleared when the typing loop winds down.
+        self._status_text: Dict[str, str] = {}
 
     @property
     def message_len_fn(self) -> Callable[[str], int]:
@@ -2771,8 +2856,18 @@ class BasePlatformAdapter(ABC):
             await result
 
     def _acquire_platform_lock(self, scope: str, identity: str, resource_desc: str) -> bool:
-        """Acquire a scoped lock for this adapter. Returns True on success."""
-        from gateway.status import acquire_scoped_lock
+        """Acquire a scoped lock for this adapter. Returns True on success.
+
+        A live cross-HERMES_HOME holder may be replaced only when the runner
+        explicitly arms this adapter for its initial ``--replace`` connect.
+        The status module validates PID/start-time/home ownership, places the
+        marker in the target's home, and performs the bounded termination.
+        """
+        from gateway.status import (
+            acquire_scoped_lock,
+            take_over_scoped_lock_holder,
+        )
+
         self._platform_lock_scope = scope
         self._platform_lock_identity = identity
         acquired, existing = acquire_scoped_lock(
@@ -2780,6 +2875,42 @@ class BasePlatformAdapter(ABC):
         )
         if acquired:
             return True
+
+        takeover_allowed = bool(
+            getattr(self, "_platform_lock_takeover_allowed", False)
+        )
+        takeover_attempted = bool(
+            getattr(self, "_platform_lock_takeover_attempted", False)
+        )
+        if takeover_allowed and not takeover_attempted and isinstance(existing, dict):
+            # Consume the authority before doing any I/O: one adapter connect
+            # gets at most one termination attempt, even if lock re-acquire or
+            # later initialization fails.
+            self._platform_lock_takeover_allowed = False
+            self._platform_lock_takeover_attempted = True
+            owner_pid = take_over_scoped_lock_holder(existing)
+            if owner_pid is not None:
+                logger.warning(
+                    "[%s] %s was held by gateway PID %d — explicit --replace "
+                    "handoff completed",
+                    self.name,
+                    resource_desc,
+                    owner_pid,
+                )
+                acquired, existing = acquire_scoped_lock(
+                    scope,
+                    identity,
+                    metadata={"platform": self.platform.value},
+                )
+                if acquired:
+                    logger.info(
+                        "[%s] Acquired %s after taking over PID %d",
+                        self.name,
+                        resource_desc,
+                        owner_pid,
+                    )
+                    return True
+
         owner_pid = existing.get('pid') if isinstance(existing, dict) else None
         message = (
             f'{resource_desc} already in use'
@@ -3101,23 +3232,6 @@ class BasePlatformAdapter(ABC):
         return None
 
 
-    @property
-    def supports_message_edit(self) -> bool:
-        """True only when the concrete class overrides ``edit_message``.
-
-        Truthful capability detection for the transaction outbox: a
-        platform "proves" edit compensation by overriding the method,
-        never by optimistic platform-name lists.
-        """
-        return type(self).edit_message is not BasePlatformAdapter.edit_message
-
-    @property
-    def supports_message_delete(self) -> bool:
-        """True only when the concrete class overrides ``delete_message``."""
-        return (
-            type(self).delete_message is not BasePlatformAdapter.delete_message
-        )
-
     async def edit_message(
         self,
         chat_id: str,
@@ -3176,7 +3290,7 @@ class BasePlatformAdapter(ABC):
         auto-deletion.  Non-fatal if config is unreadable.
         """
         try:
-            from hades_cli.config import load_config as _load_config
+            from hermes_cli.config import load_config as _load_config
         except Exception:
             return 0
         try:
@@ -3541,7 +3655,7 @@ class BasePlatformAdapter(ABC):
         Override in subclasses to send audio as voice bubbles (Telegram)
         or file attachments (Discord). Default falls back to a friendly
         notice — never echo the local audio_path into chat, since it is a
-        host filesystem path that would leak the Hades home layout.
+        host filesystem path that would leak the Hermes home layout.
         """
         # audio_path is intentionally NOT included in the chat text — it is a
         # host-local path that leaks filesystem layout. The path is logged for
@@ -3591,7 +3705,7 @@ class BasePlatformAdapter(ABC):
         Override in subclasses to send videos as inline playable media.
         Default falls back to a friendly notice — never echo the local
         video_path into chat, since it is a host filesystem path that
-        would leak the Hades home layout.
+        would leak the Hermes home layout.
         """
         # See send_voice for the rationale: do not echo host paths into chat.
         logger.warning(
@@ -3619,7 +3733,7 @@ class BasePlatformAdapter(ABC):
         Override in subclasses to send files as downloadable attachments.
         Default falls back to a friendly notice — never echo the local
         file_path into chat, since it is a host filesystem path that
-        would leak the Hades home layout.
+        would leak the Hermes home layout.
         """
         # See send_voice for the rationale: do not echo host paths into chat.
         logger.warning(
@@ -3653,7 +3767,7 @@ class BasePlatformAdapter(ABC):
         Override in subclasses for native photo attachments. Default falls
         back to a friendly notice — never echo the local image_path into
         chat, since it is a host filesystem path that would leak the
-        Hades home layout.
+        Hermes home layout.
         """
         # See send_voice for the rationale: do not echo host paths into chat.
         logger.warning(
@@ -4060,6 +4174,10 @@ class BasePlatformAdapter(ABC):
                 except Exception:
                     pass
             self._typing_paused.discard(chat_id)
+            # getattr-guard: bare object.__new__() adapters in tests lack
+            # _status_text (same class of issue as _typing_paused, but that
+            # one is always present because those tests predate it).
+            getattr(self, "_status_text", {}).pop(str(chat_id), None)
 
     async def _stop_typing_refresh(
         self,
@@ -4270,6 +4388,34 @@ class BasePlatformAdapter(ABC):
                 ttl = 0
             return response.text, int(ttl or 0)
         return response, 0
+
+    def _final_delivery_adapter(
+        self, source: Optional[SessionSource]
+    ) -> "BasePlatformAdapter":
+        """Return the runner's current adapter for a new final-response send.
+
+        A reconnect removes the failed adapter from the runner registry before
+        its in-flight message task completes. That task must keep its own
+        cleanup and partial-message ownership, but an as-yet-unsent final
+        response belongs on the replacement transport. This helper deliberately
+        does not migrate message IDs or route edits/deletes through the new
+        adapter: those operations remain owned by the old transport.
+        """
+        runner = getattr(self, "gateway_runner", None)
+        resolve = getattr(runner, "_adapter_for_source", None)
+        if not callable(resolve):
+            return self
+        try:
+            live_adapter = resolve(source)
+        except Exception:
+            logger.debug("[%s] Failed to resolve live adapter for final delivery", self.name)
+            return self
+        if (
+            not isinstance(live_adapter, BasePlatformAdapter)
+            or live_adapter.platform != self.platform
+        ):
+            return self
+        return live_adapter
 
     async def _send_with_retry(
         self,
@@ -4829,7 +4975,7 @@ class BasePlatformAdapter(ABC):
             # session lifecycle and its cleanup races with the running task
             # (see PR #4926).
             cmd = event.get_command()
-            from hades_cli.commands import should_bypass_active_session
+            from hermes_cli.commands import should_bypass_active_session
 
             if should_bypass_active_session(cmd):
                 # /stop, /new, /reset must cancel the in-flight adapter task
@@ -4989,7 +5135,7 @@ class BasePlatformAdapter(ABC):
           HERMES_HUMAN_DELAY_MIN_MS: minimum delay in ms (default 800, custom mode)
           HERMES_HUMAN_DELAY_MAX_MS: maximum delay in ms (default 2500, custom mode)
         """
-        mode = env_get("HADES_HUMAN_DELAY_MODE", "off").lower()
+        mode = os.getenv("HERMES_HUMAN_DELAY_MODE", "off").lower()
         if mode == "off":
             return 0.0
         if mode == "natural":
@@ -4997,11 +5143,11 @@ class BasePlatformAdapter(ABC):
             return random.uniform(min_ms / 1000.0, max_ms / 1000.0)
         # custom mode — tolerate malformed env vars instead of crashing.
         try:
-            min_ms = int(env_get("HADES_HUMAN_DELAY_MIN_MS", "800"))
+            min_ms = int(os.getenv("HERMES_HUMAN_DELAY_MIN_MS", "800"))
         except (TypeError, ValueError):
             min_ms = 800
         try:
-            max_ms = int(env_get("HADES_HUMAN_DELAY_MAX_MS", "2500"))
+            max_ms = int(os.getenv("HERMES_HUMAN_DELAY_MAX_MS", "2500"))
         except (TypeError, ValueError):
             max_ms = 2500
         return random.uniform(min_ms / 1000.0, max_ms / 1000.0)
@@ -5201,28 +5347,95 @@ class BasePlatformAdapter(ABC):
                         except OSError:
                             pass
 
-                # Send the text portion
+                # Send the text portion. A reconnect may have replaced this
+                # adapter while its in-flight handler was still producing a
+                # final response; that response is a new message, so resolve
+                # the current transport before sending it.
                 if text_content and not _tts_caption_delivered:
-                    logger.info("[%s] Sending response (%d chars) to %s", self.name, len(text_content), event.source.chat_id)
+                    delivery_adapter = self._final_delivery_adapter(event.source)
+                    logger.info(
+                        "[%s] Sending response (%d chars) to %s",
+                        delivery_adapter.name,
+                        len(text_content),
+                        event.source.chat_id,
+                    )
                     _reply_anchor = _reply_anchor_for_event(event)
-                    result = await self._send_with_retry(
+                    # Delivery-obligation ledger: durably record the final
+                    # response BEFORE the send attempt so a gateway crash
+                    # between finalize and platform ACK can redeliver it on
+                    # the next boot instead of silently losing the turn's
+                    # output (#58818). Best-effort at every step — ledger
+                    # trouble must never block or delay the actual send.
+                    # Slash-command and ephemeral replies are cheap to
+                    # regenerate and are not recorded.
+                    _obligation_id = None
+                    if not is_ephemeral_response and not str(
+                        event.text or ""
+                    ).lstrip().startswith(("/", self.typed_command_prefix or "!")):
+                        try:
+                            from gateway.delivery_ledger import (
+                                compute_obligation_id,
+                                ledger_enabled,
+                                mark_attempting,
+                                record_obligation,
+                            )
+
+                            if ledger_enabled():
+                                _obligation_id = compute_obligation_id(
+                                    session_key,
+                                    str(getattr(event, "message_id", "") or ""),
+                                    text_content,
+                                )
+                                record_obligation(
+                                    obligation_id=_obligation_id,
+                                    session_key=session_key,
+                                    platform=str(
+                                        getattr(event.source.platform, "value",
+                                                event.source.platform)
+                                    ),
+                                    chat_id=event.source.chat_id,
+                                    thread_id=getattr(event.source, "thread_id", None),
+                                    content=text_content,
+                                )
+                                mark_attempting(_obligation_id)
+                        except Exception:
+                            logger.debug("delivery ledger record failed", exc_info=True)
+                            _obligation_id = None
+                    result = await delivery_adapter._send_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,
                         reply_to=_reply_anchor,
                         metadata=_final_thread_metadata,
                     )
                     _record_delivery(result)
+                    if _obligation_id is not None:
+                        try:
+                            from gateway.delivery_ledger import (
+                                mark_delivered,
+                                mark_failed,
+                            )
 
-                    # Schedule auto-deletion of system-notice replies.
-                    # Detached so the handler returns immediately; errors
-                    # (permission denied, message too old) are swallowed.
+                            if getattr(result, "success", False):
+                                mark_delivered(_obligation_id)
+                            else:
+                                mark_failed(
+                                    _obligation_id,
+                                    str(getattr(result, "error", "") or ""),
+                                )
+                        except Exception:
+                            logger.debug(
+                                "delivery ledger update failed", exc_info=True
+                            )
+
+                    # Schedule auto-deletion on the adapter that owns the new
+                    # message ID, which may be the reconnect replacement.
                     if (
                         _ephemeral_ttl
                         and _ephemeral_ttl > 0
                         and result.success
                         and result.message_id
                     ):
-                        self._schedule_ephemeral_delete(
+                        delivery_adapter._schedule_ephemeral_delete(
                             chat_id=event.source.chat_id,
                             message_id=result.message_id,
                             ttl_seconds=_ephemeral_ttl,
@@ -5658,11 +5871,41 @@ class BasePlatformAdapter(ABC):
         resolves the matching profile from guild/chat/thread and stamps it on
         ``source.profile``. Downstream code (``_resolve_profile_home_for_source``
         in run.py) reads that field to enter ``_profile_runtime_scope`` for
-        per-profile HADES_HOME isolation.
+        per-profile HERMES_HOME isolation.
         """
         # Normalize empty topic to None
         if chat_topic is not None and not chat_topic.strip():
             chat_topic = None
+
+        # Resolve profile from configured routes (None when no match / no routes)
+        profile = None
+        runner = getattr(self, "gateway_runner", None)
+        if runner is not None:
+            try:
+                profile = runner._profile_name_for_source(
+                    SessionSource(
+                        platform=self.platform,
+                        chat_id=str(chat_id),
+                        chat_name=chat_name,
+                        chat_type=chat_type,
+                        user_id=str(user_id) if user_id else None,
+                        user_name=user_name,
+                        thread_id=str(thread_id) if thread_id else None,
+                        chat_topic=chat_topic.strip() if chat_topic else None,
+                        user_id_alt=user_id_alt,
+                        chat_id_alt=chat_id_alt,
+                        is_bot=is_bot,
+                        guild_id=str(guild_id) if guild_id else None,
+                        parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
+                        message_id=str(message_id) if message_id else None,
+                    )
+                )
+            except Exception:
+                logger.warning(
+                    "Profile resolution failed for %s/%s, defaulting to active profile",
+                    self.platform, chat_id, exc_info=True,
+                )
+
         source = SessionSource(
             platform=self.platform,
             chat_id=str(chat_id),
@@ -5679,18 +5922,15 @@ class BasePlatformAdapter(ABC):
             guild_id=str(guild_id) if guild_id else None,
             parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
             message_id=str(message_id) if message_id else None,
+            profile=profile,
             role_authorized=role_authorized,
             auto_thread_created=auto_thread_created,
             auto_thread_initial_name=auto_thread_initial_name,
         )
-        runner = self.gateway_runner
-        if runner is not None:
-            try:
-                profile = runner._profile_name_for_source(source)
-                if profile:
-                    source.profile = profile
-            except Exception:
-                pass
+        # In-process transport provenance is deliberately not serialized by
+        # SessionSource.to_dict(). The live receiving adapter is authoritative
+        # for this turn even when profile_routes selects a different runtime.
+        source._transport_adapter_ref = weakref.ref(self)
         return source
     
     @abstractmethod
@@ -5762,7 +6002,10 @@ class BasePlatformAdapter(ABC):
             # a potential closing fence, and the chunk indicator.
             headroom = max_length - INDICATOR_RESERVE - _len(prefix) - _len(FENCE_CLOSE)
             if headroom < 1:
-                headroom = max_length // 2
+                # Floor at 1 so a pathologically small max_length (0 or 1 —
+                # e.g. a relay capability descriptor whose max_message_length
+                # is 0/1) can't make headroom 0 and stall the loop below.
+                headroom = max(1, max_length // 2)
 
             # Everything remaining fits in one final chunk
             if _len(prefix) + _len(remaining) <= max_length - INDICATOR_RESERVE:
@@ -5786,7 +6029,24 @@ class BasePlatformAdapter(ABC):
             if split_at < _cp_limit // 2:
                 split_at = region.rfind(" ")
             if split_at < 1:
-                split_at = _cp_limit
+                # Consume at least one codepoint. Without the max(1, …) floor,
+                # a zero _cp_limit — reachable when max_length is 0/1, or under
+                # utf16_len when the next char is a surrogate pair wider than
+                # the whole budget — leaves split_at at 0, so ``remaining``
+                # never shrinks and the while-loop spins forever appending
+                # empty chunks (an unbounded hang / OOM).
+                #
+                # Length contract for a degenerate budget: a codepoint is the
+                # smallest indivisible unit, so when the budget is smaller than
+                # one codepoint (e.g. max_length=1 with a 2-unit surrogate pair
+                # under utf16_len) the emitted chunk WILL exceed max_length by
+                # that one codepoint. That is intentional — emitting the
+                # codepoint whole preserves the content, whereas the only
+                # alternatives are dropping it (data loss) or looping forever.
+                # Real callers never hit this: platform caps are hundreds/
+                # thousands, and the relay path normalizes a 0/negative
+                # descriptor bound to 4096 (see gateway/relay/descriptor.py).
+                split_at = max(1, _cp_limit)
 
             # Avoid splitting inside an inline code span (`...`).
             # If the text before split_at has an odd number of unescaped

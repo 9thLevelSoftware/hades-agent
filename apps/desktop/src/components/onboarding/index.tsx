@@ -49,6 +49,7 @@ export {
 interface DesktopOnboardingOverlayProps {
   enabled: boolean
   onCompleted?: () => void
+  profile: string
   requestGateway: OnboardingContext['requestGateway']
 }
 
@@ -99,7 +100,7 @@ const API_KEY_OPTIONS: ApiKeyOption[] = [
     id: 'local',
     name: 'Local / custom endpoint',
     envKey: 'OPENAI_BASE_URL',
-    docsUrl: 'https://github.com/9thLevelSoftware/hades-agent#bring-your-own-endpoint',
+    docsUrl: 'https://github.com/NousResearch/hermes-agent#bring-your-own-endpoint',
     placeholder: 'http://127.0.0.1:8000/v1'
   }
 ]
@@ -177,17 +178,25 @@ function useApiKeyCatalog(): ApiKeyOption[] {
 // → surface-out (520ms, held back by [transition-delay:660ms]). Finalize after.
 const ONBOARDING_EXIT_MS = 1180
 
-export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway }: DesktopOnboardingOverlayProps) {
+export function DesktopOnboardingOverlay({
+  enabled,
+  onCompleted,
+  profile,
+  requestGateway
+}: DesktopOnboardingOverlayProps) {
   const { t } = useI18n()
   const onboarding = useStore($desktopOnboarding)
   const boot = useStore($desktopBoot)
-  const ctxRef = useRef<OnboardingContext>({ requestGateway, onCompleted })
-  ctxRef.current = { requestGateway, onCompleted }
+  const ctxRef = useRef<OnboardingContext>({ requestGateway, onCompleted, profile })
+  ctxRef.current = { requestGateway, onCompleted, profile }
 
   const ctx = useMemo<OnboardingContext>(
     () => ({
       requestGateway: (...args) => ctxRef.current.requestGateway(...args),
-      onCompleted: () => ctxRef.current.onCompleted?.()
+      onCompleted: () => ctxRef.current.onCompleted?.(),
+      get profile() {
+        return ctxRef.current.profile
+      }
     }),
     []
   )

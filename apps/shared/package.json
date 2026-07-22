@@ -1,5 +1,5 @@
 {
-  "name": "@hades/shared",
+  "name": "@hermes/shared",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -7,7 +7,8 @@
     ".": "./src/index.ts",
     "./billing": "./src/billing-types.ts",
     "./billing-policy": "./src/billing-policy.ts",
-    "./charge-settlement": "./src/charge-settlement.ts"
+    "./charge-settlement": "./src/charge-settlement.ts",
+    "./skin": "./src/skin.ts"
   },
   "types": "./src/index.ts",
   "scripts": {

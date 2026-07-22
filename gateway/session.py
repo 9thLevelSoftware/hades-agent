@@ -12,13 +12,12 @@ import asyncio
 import hashlib
 import logging
 import os
-from hades_constants import env_get
 import json
 import threading
 import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -49,7 +48,7 @@ def auto_continue_freshness_window() -> float:
     disables the freshness gate (restores the pre-fix "always fresh" behaviour
     for users who want to opt out).
     """
-    raw = env_get("HADES_AUTO_CONTINUE_FRESHNESS")
+    raw = os.environ.get("HERMES_AUTO_CONTINUE_FRESHNESS")
     if raw is None or raw == "":
         return float(_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT)
     try:
@@ -96,6 +95,7 @@ from .whatsapp_identity import (
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
 )
 from utils import atomic_replace
+from agent.turn_context import extract_api_content_sidecar
 
 # Session keys/ids flow into filesystem paths downstream (e.g.
 # ``sessions_dir / f"{session_id}.json"`` in hermes_state, request-dump
@@ -358,8 +358,8 @@ def _discord_tools_loaded() -> bool:
     if not (os.environ.get("DISCORD_BOT_TOKEN") or "").strip():
         return False
     try:
-        from hades_cli.config import load_config
-        from hades_cli.tools_config import _get_platform_tools
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
         cfg = load_config()
         enabled = _get_platform_tools(cfg, "discord", include_default_mcp_servers=False)
         return "discord" in enabled or "discord_admin" in enabled
@@ -526,6 +526,13 @@ def build_session_context_prompt(
             "current message's Slack block/attachment payload when available, but "
             "you still cannot call Slack APIs yourself."
         )
+        if context.shared_multi_user_session:
+            lines.append(
+                "In shared Slack threads, use the current turn's sender prefix "
+                "as the only verified current-author mention target. Do not "
+                "guess or reuse `<@U...>` mentions from names, memory, or prior "
+                "conversation history."
+            )
     elif context.source.platform == Platform.DISCORD:
         # Inject the Discord IDs block only when the agent actually has
         # Discord tools loaded this session — i.e. the user opted into
@@ -564,6 +571,16 @@ def build_session_context_prompt(
                 "Do not promise to perform these actions. If the user asks, explain "
                 "that you can only read messages sent directly to you and respond."
             )
+        # Static (never per-turn): live voice-channel state used to be
+        # appended here and changed bytes every turn the bot sat in a voice
+        # channel, busting the prompt cache.  It now arrives on the current
+        # user message as a `[Voice channel now: ...]` note, injected only
+        # when it actually changed.
+        lines.append("")
+        lines.append(
+            "Voice-channel state, when relevant, appears in the current "
+            "message as a `[Voice channel now: ...]` note."
+        )
     elif context.source.platform == Platform.BLUEBUBBLES:
         lines.append("")
         lines.append(
@@ -608,7 +625,7 @@ def build_session_context_prompt(
     lines.append("")
     lines.append("**Delivery options for scheduled tasks:**")
 
-    from hades_constants import display_hades_home
+    from hermes_constants import display_hermes_home
 
     # Origin delivery
     if context.source.platform == Platform.LOCAL:
@@ -622,7 +639,7 @@ def build_session_context_prompt(
 
     # Local always available
     lines.append(
-        f"- `\"local\"` → Save to local files only ({display_hades_home()}/cron/output/)"
+        f"- `\"local\"` → Save to local files only ({display_hermes_home()}/cron/output/)"
     )
 
     # Platform home channels
@@ -681,6 +698,11 @@ class SessionEntry:
     display_name: Optional[str] = None
     platform: Optional[Platform] = None
     chat_type: str = "dm"
+
+    # Lightweight persisted key/value state scoped to this session entry
+    # (e.g. Slack thread-context watermarks). Survives gateway restarts via
+    # the routing index; must stay small and JSON-serializable.
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     # Token tracking
     input_tokens: int = 0
@@ -750,6 +772,7 @@ class SessionEntry:
             "display_name": self.display_name,
             "platform": self.platform.value if self.platform else None,
             "chat_type": self.chat_type,
+            "metadata": self.metadata,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
@@ -829,6 +852,7 @@ class SessionEntry:
             display_name=data.get("display_name"),
             platform=platform,
             chat_type=data.get("chat_type", "dm"),
+            metadata=dict(data.get("metadata") or {}),
             input_tokens=data.get("input_tokens", 0),
             output_tokens=data.get("output_tokens", 0),
             cache_read_tokens=data.get("cache_read_tokens", 0),
@@ -1044,7 +1068,7 @@ class SessionStore:
         # Initialize SQLite session database
         self._db = None
         try:
-            from hades_state import SessionDB
+            from hermes_state import SessionDB
             self._db = SessionDB()
         except Exception as e:
             print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
@@ -1314,10 +1338,10 @@ class SessionStore:
         data = {
             "_README": (
                 "LEGACY MIRROR of the gateway routing index (the primary copy "
-                "lives in the gateway_routing table in ~/.hades/state.db). "
+                "lives in the gateway_routing table in ~/.hermes/state.db). "
                 "Maps messaging session keys (agent:main:<platform>:...) to "
                 "active session IDs. This is NOT the session list. ALL "
-                "sessions (CLI, TUI, and gateway) live in ~/.hades/state.db "
+                "sessions (CLI, TUI, and gateway) live in ~/.hermes/state.db "
                 "and are shown by `hermes sessions list` and `/sessions`. "
                 "Disable this file with `gateway.write_sessions_json: false` "
                 "in config.yaml."
@@ -1359,7 +1383,7 @@ class SessionStore:
         if source is not None and source.profile:
             return source.profile
         try:
-            from hades_cli.profiles import get_active_profile_name
+            from hermes_cli.profiles import get_active_profile_name
             return get_active_profile_name() or "default"
         except Exception:
             return None
@@ -1378,7 +1402,7 @@ class SessionStore:
     @staticmethod
     def _active_profile_name() -> str:
         try:
-            from hades_cli.profiles import get_active_profile_name
+            from hermes_cli.profiles import get_active_profile_name
             return get_active_profile_name() or "default"
         except Exception:
             return "default"
@@ -2139,6 +2163,42 @@ class SessionStore:
                     display_name=entry.display_name,
                 )
 
+    def get_session_metadata(
+        self,
+        session_key: str,
+        key: str,
+        default: Any = None,
+    ) -> Any:
+        """Return a metadata value stored on a live session entry."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return default
+            return entry.metadata.get(key, default)
+
+    def set_session_metadata(
+        self,
+        session_key: str,
+        key: str,
+        value: Any,
+    ) -> bool:
+        """Persist a metadata value on a live session entry.
+
+        Values must be small and JSON-serializable — they are written into
+        the routing index (state.db gateway_routing table + the legacy
+        sessions.json mirror) so they survive gateway restarts.
+        """
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return False
+            entry.metadata[key] = value
+            entry.updated_at = _now()
+            self._save()
+            return True
+
     def set_model_override(
         self, session_key: str, override: Optional[Dict[str, Any]]
     ) -> None:
@@ -2391,6 +2451,42 @@ class SessionStore:
 
         return new_entry
 
+    def advance_compression_session(
+        self,
+        session_key: str,
+        expected_session_id: str,
+        target_session_id: str,
+    ) -> Optional[SessionEntry]:
+        """CAS-advance one route along an already-verified compression lineage.
+
+        Unlike ``switch_session``, this does not end or reopen SQLite rows. The
+        compression transaction already owns that lifecycle; this method only
+        repairs the persisted gateway key→session mapping. Returning ``None``
+        means the route moved after the caller's snapshot (for example /new),
+        so the caller must fail closed instead of overwriting the newer route.
+        """
+        if not session_key or not expected_session_id or not target_session_id:
+            return None
+
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return None
+            if entry.session_id == target_session_id:
+                return entry
+            if entry.session_id != expected_session_id:
+                return None
+            if not self._heal_compression_tip_locked(
+                entry,
+                expected_session_id,
+                target_session_id,
+            ):
+                return None
+            entry.updated_at = _now()
+            self._save()
+            return entry
+
     def switch_session(self, session_key: str, target_session_id: str) -> Optional[SessionEntry]:
         """Switch a session key to point at an existing session ID.
 
@@ -2583,6 +2679,11 @@ class SessionStore:
             platform_message_id=(message.get("platform_message_id") or message.get("message_id")),
             observed=bool(message.get("observed")),
             timestamp=message.get("timestamp"),
+            # api_content sidecar: the exact bytes sent to the API for
+            # this message (prompt-cache-stable replay). Must survive
+            # any gateway-side persistence path or the next turn's
+            # replay diverges at this row.
+            api_content=extract_api_content_sidecar(message),
         )
 
     # Maximum in-memory pending messages per session before dropping the

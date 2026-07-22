@@ -6,13 +6,13 @@ PR #3526 salvage — user-configurable extra HTTP headers on LLM API calls
 
 import json
 
-from hades_cli.config import (
+from hermes_cli.config import (
     _normalize_custom_provider_entry,
     apply_custom_provider_extra_headers_to_client_kwargs,
     get_custom_provider_extra_headers,
     normalize_extra_headers,
 )
-from hades_cli import models as models_mod
+from hermes_cli import models as models_mod
 
 
 def test_normalize_extra_headers_stringifies_and_drops_none():
@@ -97,6 +97,20 @@ def test_get_custom_provider_extra_headers_no_match_returns_empty():
     # prefix look-alike host must not match (no substring bypass)
     assert get_custom_provider_extra_headers(
         "https://llm.internal.example.com.attacker.test/v1",
+        custom_providers=providers,
+    ) == {}
+
+
+def test_get_custom_provider_extra_headers_preserves_extra_path_segment():
+    providers = [
+        {
+            "base_url": "https://llm.internal.example.com/v1//",
+            "extra_headers": {"Authorization": "secret"},
+        }
+    ]
+
+    assert get_custom_provider_extra_headers(
+        "https://llm.internal.example.com/v1",
         custom_providers=providers,
     ) == {}
 

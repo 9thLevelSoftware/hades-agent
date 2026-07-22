@@ -1,10 +1,11 @@
-"""Tests for hades_cli.web_server and related config utilities."""
+"""Tests for hermes_cli.web_server and related config utilities."""
 
 import asyncio
 import os
 import json
 import shutil
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
@@ -12,7 +13,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 import yaml
 
-from hades_cli.config import (
+from hermes_cli.config import (
     reload_env,
     redact_key,
     OPTIONAL_ENV_VARS,
@@ -37,7 +38,7 @@ _EXAMPLE_PLUGIN_FIXTURE = (
 
 @pytest.fixture
 def _install_example_plugin(_isolate_hermes_home):
-    """Drop the example-dashboard fixture into the per-test HADES_HOME
+    """Drop the example-dashboard fixture into the per-test HERMES_HOME
     user-plugins directory and force the web_server's dashboard plugin
     cache + API mount to rediscover it.
 
@@ -46,20 +47,20 @@ def _install_example_plugin(_isolate_hermes_home):
     user's sidebar. It is now a tests-only fixture: any test that needs
     ``/api/plugins/example/hello`` or ``/dashboard-plugins/example/...``
     requests this fixture so the plugin appears only for that test's
-    isolated ``HADES_HOME``.
+    isolated ``HERMES_HOME``.
 
     The user-plugin source is preferred over a transient
-    ``HADES_BUNDLED_PLUGINS`` override because the bundled dir is
+    ``HERMES_BUNDLED_PLUGINS`` override because the bundled dir is
     resolved per-call (other tests in the suite implicitly rely on the
     real bundled plugins — kanban, hermes-achievements, model providers
     — being available, and globally swapping that root would yank them
     all). User plugins are first in the discovery search order, so
     laying down the fixture here is enough.
     """
-    from hades_constants import get_hades_home
-    from hades_cli import web_server
+    from hermes_constants import get_hermes_home
+    from hermes_cli import web_server
 
-    user_plugins_dir = get_hades_home() / "plugins"
+    user_plugins_dir = get_hermes_home() / "plugins"
     user_plugins_dir.mkdir(parents=True, exist_ok=True)
     dst = user_plugins_dir / "example-dashboard"
     if dst.exists():
@@ -73,7 +74,7 @@ def _install_example_plugin(_isolate_hermes_home):
     # fixtures exist to exercise the *serving* paths, so opt the example
     # plugin in exactly as a real operator would with `hermes plugins
     # enable example`.
-    from hades_cli.config import load_config, save_config
+    from hermes_cli.config import load_config, save_config
     _cfg = load_config()
     _plugins_cfg = _cfg.setdefault("plugins", {})
     _enabled = _plugins_cfg.get("enabled")
@@ -88,7 +89,7 @@ def _install_example_plugin(_isolate_hermes_home):
     #   1. Identify the routes the mount call appends.
     #   2. Restore the original list on teardown — otherwise leftover
     #      ``/api/plugins/example/*`` routes leak into subsequent tests
-    #      and start serving requests against a torn-down HADES_HOME.
+    #      and start serving requests against a torn-down HERMES_HOME.
     app = web_server.app
     original_routes = list(app.router.routes)
 
@@ -213,7 +214,7 @@ class TestSessionTokenInjection:
 
     def test_honors_injected_token(self, monkeypatch):
         import importlib
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "desktop-seeded-token")
         try:
@@ -225,7 +226,7 @@ class TestSessionTokenInjection:
 
     def test_falls_back_to_random_token(self, monkeypatch):
         import importlib
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
         importlib.reload(ws)
@@ -243,17 +244,17 @@ class TestWebServerEndpoints:
 
     @pytest.fixture(autouse=True)
     def _setup_test_client(self, monkeypatch, _isolate_hermes_home):
-        """Create a TestClient and isolate the state DB under the test HADES_HOME."""
+        """Create a TestClient and isolate the state DB under the test HERMES_HOME."""
         try:
             from starlette.testclient import TestClient
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        import hades_state
-        from hades_constants import get_hades_home
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        import hermes_state
+        from hermes_constants import get_hermes_home
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
 
-        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hades_home() / "state.db")
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db")
 
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
@@ -268,8 +269,8 @@ class TestWebServerEndpoints:
         assert data["can_update_hermes"] is True
 
     def test_status_active_session_count_uses_read_only_db(self, monkeypatch, tmp_path):
-        import hades_cli.web_server as web_server
-        import hades_state
+        import hermes_cli.web_server as web_server
+        import hermes_state
 
         # Satisfy the fresh-install guard: read_only opens require the DB
         # file to already exist.
@@ -295,7 +296,7 @@ class TestWebServerEndpoints:
             def close(self):
                 captured["closed"] = True
 
-        monkeypatch.setattr("hades_state.SessionDB", _FakeDB)
+        monkeypatch.setattr("hermes_state.SessionDB", _FakeDB)
         monkeypatch.setattr(web_server.time, "time", lambda: 100)
 
         assert web_server._count_status_active_sessions() == 1
@@ -306,19 +307,19 @@ class TestWebServerEndpoints:
     def test_status_active_session_count_fresh_install_returns_zero(self, monkeypatch, tmp_path):
         """No state.db yet (fresh install): return 0 without attempting a
         read-only open, which would raise OperationalError on every poll."""
-        import hades_cli.web_server as web_server
-        import hades_state
+        import hermes_cli.web_server as web_server
+        import hermes_state
 
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "absent.db")
 
         def _boom(*a, **k):
             raise AssertionError("SessionDB must not be constructed when db file is absent")
 
-        monkeypatch.setattr("hades_state.SessionDB", _boom)
+        monkeypatch.setattr("hermes_state.SessionDB", _boom)
         assert web_server._count_status_active_sessions() == 0
 
     def test_get_status_degrades_when_active_session_count_fails(self, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         def _locked_count():
             raise TimeoutError("database is locked")
@@ -330,7 +331,7 @@ class TestWebServerEndpoints:
         assert resp.json()["active_sessions"] == 0
 
     def test_get_status_uses_cached_gateway_pid_probe(self, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         calls = {"get_running_pid_cached": 0}
 
@@ -415,7 +416,7 @@ class TestWebServerEndpoints:
         assert resp.status_code == 400
 
     def test_get_status_hides_update_capability_in_managed_runtime(self, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "_dashboard_local_update_managed_externally", lambda: True)
 
@@ -424,8 +425,8 @@ class TestWebServerEndpoints:
         assert resp.json()["can_update_hermes"] is False
 
     def test_dashboard_update_capability_detects_generic_container(self, monkeypatch):
-        import hades_constants
-        import hades_cli.web_server as web_server
+        import hermes_constants
+        import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(hermes_constants, "is_container", lambda: True)
         # A docker install inside a container should be managed externally.
@@ -436,8 +437,8 @@ class TestWebServerEndpoints:
     def test_dashboard_update_capability_allows_git_in_container(self, monkeypatch):
         """A git checkout inside a container (e.g. bind-mounted in hermes-webui)
         should still offer dashboard updates — the checkout is self-managed."""
-        import hades_constants
-        import hades_cli.web_server as web_server
+        import hermes_constants
+        import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(hermes_constants, "is_container", lambda: True)
         monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
@@ -446,8 +447,8 @@ class TestWebServerEndpoints:
 
     def test_dashboard_update_capability_blocks_pip_in_container(self, monkeypatch):
         """A pip install inside a container is still managed externally."""
-        import hades_constants
-        import hades_cli.web_server as web_server
+        import hermes_constants
+        import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(hermes_constants, "is_container", lambda: True)
         monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "pip")
@@ -491,6 +492,28 @@ class TestWebServerEndpoints:
         assert fields["api_key"]["url"] == "https://app.honcho.dev"
         assert fields["baseUrl"]["kind"] == "text"
 
+    def test_instance_schema_serves_providers_without_declared_schema(self, monkeypatch):
+        # The default surface serves the plugin instance's get_config_schema().
+        from hermes_cli import web_server
+
+        class _Stub:
+            def get_config_schema(self):
+                return [
+                    {"key": "api_key", "description": "Stub API key", "secret": True, "url": "https://stub.example"},
+                    {"key": "baseUrl", "description": "Stub base URL"},
+                ]
+
+        monkeypatch.setattr(web_server, "_load_memory_provider", lambda name: _Stub())
+
+        resp = self.client.get("/api/memory/providers/mem0/config")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        fields = self._provider_field_map(data)
+        assert fields["api_key"]["kind"] == "secret"
+        assert fields["api_key"]["url"] == "https://stub.example"
+        assert fields["baseUrl"]["kind"] == "text"
+
     def test_declared_surface_serves_curated_hindsight_schema(self):
         resp = self.client.get("/api/memory/providers/hindsight/config?surface=declared")
 
@@ -502,14 +525,14 @@ class TestWebServerEndpoints:
         assert fields["api_key"]["kind"] == "secret"
 
     def test_declared_surface_hides_undeclared_providers(self):
-        resp = self.client.get("/api/memory/providers/honcho/config?surface=declared")
+        resp = self.client.get("/api/memory/providers/builtin/config?surface=declared")
 
         assert resp.status_code == 200
         assert resp.json()["fields"] == []
 
     def test_declared_surface_put_writes_config_and_secret(self):
-        from hades_constants import get_hades_home
-        from hades_cli.config import load_env
+        from hermes_constants import get_hermes_home
+        from hermes_cli.config import load_env
 
         resp = self.client.put(
             "/api/memory/providers/hindsight/config?surface=declared",
@@ -526,7 +549,7 @@ class TestWebServerEndpoints:
         assert resp.json() == {"ok": True}
         assert load_env()["HINDSIGHT_API_KEY"] == "hs-declared-key"
 
-        config_path = get_hades_home() / "hindsight" / "config.json"
+        config_path = get_hermes_home() / "hindsight" / "config.json"
         provider_config = json.loads(config_path.read_text(encoding="utf-8"))
         assert provider_config["mode"] == "local_external"
         assert provider_config["api_url"] == "http://localhost:8888"
@@ -534,7 +557,7 @@ class TestWebServerEndpoints:
 
     def test_declared_surface_put_rejects_undeclared_provider(self):
         resp = self.client.put(
-            "/api/memory/providers/honcho/config?surface=declared",
+            "/api/memory/providers/builtin/config?surface=declared",
             json={"values": {"api_key": "x"}},
         )
 
@@ -581,8 +604,10 @@ class TestWebServerEndpoints:
         assert config_resp.status_code == 200
         assert config_resp.json()["setup"]["external_dependencies"] == byterover_setup["external_dependencies"]
 
-    def test_memory_status_reports_honcho_needs_config_after_dependency_setup(self, monkeypatch):
-        import hades_cli.web_server as web_server
+    def test_memory_status_reports_honcho_needs_config_after_dependency_setup(self, monkeypatch, tmp_path):
+        # Pin HOME so a developer's real ~/.honcho config can't flip the status.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        import hermes_cli.web_server as web_server
 
         original_dependency_importable = web_server._dependency_importable
         monkeypatch.setattr(
@@ -601,7 +626,7 @@ class TestWebServerEndpoints:
     def test_post_memory_provider_setup_runs_declared_external_install(self, monkeypatch):
         import subprocess
 
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         calls = []
         check_count = 0
@@ -667,7 +692,7 @@ class TestWebServerEndpoints:
             assert resp.status_code in (404, 405), (bad, resp.status_code)
 
     def test_post_memory_provider_setup_persists_values_without_activation(self):
-        from hades_cli.config import load_config, load_env
+        from hermes_cli.config import load_config, load_env
 
         resp = self.client.post(
             "/api/memory/providers/retaindb/setup",
@@ -680,8 +705,8 @@ class TestWebServerEndpoints:
         assert load_config().get("memory", {}).get("provider") != "retaindb"
 
     def test_put_memory_provider_config_writes_config_and_secret(self):
-        from hades_constants import get_hades_home
-        from hades_cli.config import load_config, load_env
+        from hermes_constants import get_hermes_home
+        from hermes_cli.config import load_config, load_env
 
         resp = self.client.put(
             "/api/memory/providers/hindsight/config",
@@ -701,7 +726,7 @@ class TestWebServerEndpoints:
         assert load_config()["memory"]["provider"] == "hindsight"
         assert load_env()["HINDSIGHT_API_KEY"] == "hs-test-key"
 
-        config_path = get_hades_home() / "hindsight" / "config.json"
+        config_path = get_hermes_home() / "hindsight" / "config.json"
         provider_config = json.loads(config_path.read_text(encoding="utf-8"))
         assert provider_config["mode"] == "local_external"
         assert provider_config["api_url"] == "http://localhost:8888"
@@ -761,7 +786,7 @@ class TestWebServerEndpoints:
         assert "secret-value" not in json.dumps(data)
 
     def test_get_memory_status_reports_ready_and_missing_provider(self):
-        from hades_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_config
 
         self.client.put(
             "/api/memory/providers/hindsight/config",
@@ -802,7 +827,7 @@ class TestWebServerEndpoints:
         assert "builtin" not in {row["name"] for row in resp.json()["providers"]}
 
     def test_set_memory_provider_rejects_unready_and_clears_builtin(self):
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         resp = self.client.put("/api/memory/provider", json={"provider": "supermemory"})
         assert resp.status_code == 400
@@ -821,7 +846,7 @@ class TestWebServerEndpoints:
         assert resp.status_code == 400
 
     def test_dashboard_plugin_providers_accepts_builtin_alias(self):
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         resp = self.client.put(
             "/api/dashboard/plugin-providers",
@@ -840,7 +865,7 @@ class TestWebServerEndpoints:
         assert set(data["aggregator"]) == {"provider", "model"}
 
     def test_put_moa_models_persists_provider_model_slots(self):
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         payload = {
             "reference_models": [
@@ -865,7 +890,7 @@ class TestWebServerEndpoints:
         """#64156: a mid-edit autosave (provider picked, model empty) used to be
         silently normalized into the hardcoded default preset — the user's
         config was replaced without any error. The write path must reject it."""
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         original = load_config().get("moa")
 
@@ -902,7 +927,7 @@ class TestWebServerEndpoints:
         """GET → PUT round-trip must not erase newer per-preset knobs. The old
         Pydantic payload didn't declare fanout / reference_max_tokens, so any
         client save silently wiped hand-set values back to defaults."""
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         payload = {
             "presets": {
@@ -926,14 +951,341 @@ class TestWebServerEndpoints:
         fetched = self.client.get("/api/model/moa").json()
         assert fetched["presets"]["default"]["fanout"] == "user_turn"
         assert fetched["presets"]["default"]["reference_max_tokens"] == 600
+    # ── Memory provider config (Honcho host-block backend) ──────────────
+
+    @pytest.fixture(autouse=True)
+    def _isolate_honcho_config(self):
+        # Honcho tests write the suite-wide HERMES_HOME honcho.json; snapshot and
+        # restore it so provider status/config state never leaks across tests.
+        from hermes_constants import get_hermes_home
+
+        path = get_hermes_home() / "honcho.json"
+        before = path.read_bytes() if path.exists() else None
+        yield
+        if before is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(before)
+
+    @staticmethod
+    def _seed_local_honcho(cfg=None):
+        from hermes_constants import get_hermes_home
+
+        path = get_hermes_home() / "honcho.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg if cfg is not None else {}), encoding="utf-8")
+        return path
+
+    def test_get_honcho_config_returns_safe_defaults(self, monkeypatch, tmp_path):
+        # HOME isn't isolated by the suite; pin it so ~/.honcho can't leak in.
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        resp = self.client.get("/api/memory/providers/honcho/config?surface=declared")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["name"] == "honcho"
+        assert data["label"] == "Honcho"
+        assert data["docs_url"] == "https://docs.honcho.dev/v3/guides/integrations/hermes"
+
+        fields = self._provider_field_map(data)
+        assert fields["environment"]["kind"] == "select"
+        assert fields["environment"]["value"] == "production"
+        assert {opt["value"] for opt in fields["environment"]["options"]} == {
+            "production",
+            "local",
+        }
+        assert fields["sessionStrategy"]["value"] == "per-directory"
+        # Blank workspace/aiPeer surface the resolved host as the placeholder.
+        assert fields["workspace"]["value"] == ""
+        assert fields["workspace"]["placeholder"] == "hermes"
+        assert fields["aiPeer"]["placeholder"] == "hermes"
+        assert fields["apiKey"]["kind"] == "secret"
+        assert fields["apiKey"]["is_set"] is False
+
+    def test_put_honcho_writes_host_block_root_and_secret(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HONCHO_API_KEY", "guard")
+        monkeypatch.delenv("HONCHO_API_KEY")
+        self._seed_local_honcho()
+        from hermes_constants import get_hermes_home
+        from hermes_cli.config import load_config, load_env
+
+        resp = self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={
+                "values": {
+                    "apiKey": "hch-test-key",
+                    "baseUrl": "https://honcho.example.dev",
+                    "environment": "local",
+                    "workspace": "myws",
+                    "peerName": "eri",
+                    "aiPeer": "hermes",
+                    "sessionStrategy": "per-repo",
+                }
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        assert load_config()["memory"]["provider"] == "honcho"
+        assert load_env()["HONCHO_API_KEY"] == "hch-test-key"
+
+        cfg = json.loads((get_hermes_home() / "honcho.json").read_text(encoding="utf-8"))
+        # baseUrl is root-scoped; the rest live in the active host block.
+        assert cfg["baseUrl"] == "https://honcho.example.dev"
+        assert cfg["hosts"]["hermes"]["workspace"] == "myws"
+        assert cfg["hosts"]["hermes"]["peerName"] == "eri"
+        assert cfg["hosts"]["hermes"]["environment"] == "local"
+        assert cfg["hosts"]["hermes"]["sessionStrategy"] == "per-repo"
+        # The key lands where the client reads first; GET keeps it write-only.
+        assert cfg["hosts"]["hermes"]["apiKey"] == "hch-test-key"
+
+    def test_put_honcho_blank_text_clears_key(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        self._seed_local_honcho()
+        from hermes_constants import get_hermes_home
+
+        self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"workspace": "myws"}},
+        )
+        self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"workspace": ""}},
+        )
+
+        cfg = json.loads((get_hermes_home() / "honcho.json").read_text(encoding="utf-8"))
+        assert "workspace" not in cfg.get("hosts", {}).get("hermes", {})
+
+    def test_put_honcho_partial_save_preserves_other_keys(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        self._seed_local_honcho()
+        from hermes_constants import get_hermes_home
+
+        self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"workspace": "myws"}},
+        )
+        self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"peerName": "eri"}},
+        )
+
+        host = json.loads((get_hermes_home() / "honcho.json").read_text(encoding="utf-8"))["hosts"]["hermes"]
+        assert host["workspace"] == "myws"
+        assert host["peerName"] == "eri"
+
+    def test_put_honcho_rejects_unsupported_select_value(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        resp = self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"environment": "bogus"}},
+        )
+
+        assert resp.status_code == 400
+
+    def test_get_honcho_config_does_not_return_secret(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HONCHO_API_KEY", "guard")
+        monkeypatch.delenv("HONCHO_API_KEY")
+        self._seed_local_honcho()
+
+        self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"apiKey": "secret-value"}},
+        )
+
+        resp = self.client.get("/api/memory/providers/honcho/config?surface=declared")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        fields = self._provider_field_map(data)
+        assert fields["apiKey"]["is_set"] is True
+        assert fields["apiKey"]["value"] == ""
+        assert "secret-value" not in json.dumps(data)
+
+    def test_put_honcho_bool_stored_natively_and_false_survives(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        self._seed_local_honcho()
+        from hermes_constants import get_hermes_home
+
+        self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"saveMessages": "false", "dialecticDynamic": "true"}},
+        )
+
+        host = json.loads((get_hermes_home() / "honcho.json").read_text(encoding="utf-8"))["hosts"]["hermes"]
+        # Native JSON bools, not the strings "false"/"true" (which read truthy).
+        assert host["saveMessages"] is False
+        assert host["dialecticDynamic"] is True
+
+        fields = self._provider_field_map(self.client.get("/api/memory/providers/honcho/config?surface=declared").json())
+        assert fields["saveMessages"]["value"] == "false"
+        assert fields["dialecticDynamic"]["value"] == "true"
+
+    def test_put_honcho_number_stored_as_native_number(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        self._seed_local_honcho()
+        from hermes_constants import get_hermes_home
+
+        self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"dialecticMaxChars": "1200", "timeout": "2.5"}},
+        )
+
+        cfg = json.loads((get_hermes_home() / "honcho.json").read_text(encoding="utf-8"))
+        assert cfg["hosts"]["hermes"]["dialecticMaxChars"] == 1200
+        assert isinstance(cfg["hosts"]["hermes"]["dialecticMaxChars"], int)
+        # timeout is root-scoped and keeps its fractional part.
+        assert cfg["timeout"] == 2.5
+
+        fields = self._provider_field_map(self.client.get("/api/memory/providers/honcho/config?surface=declared").json())
+        assert fields["dialecticMaxChars"]["value"] == "1200"
+
+    def test_put_honcho_json_round_trips_object(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        self._seed_local_honcho()
+        from hermes_constants import get_hermes_home
+
+        self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"userPeerAliases": '{"telegram_1": "eri"}'}},
+        )
+
+        host = json.loads((get_hermes_home() / "honcho.json").read_text(encoding="utf-8"))["hosts"]["hermes"]
+        assert host["userPeerAliases"] == {"telegram_1": "eri"}
+
+        fields = self._provider_field_map(self.client.get("/api/memory/providers/honcho/config?surface=declared").json())
+        assert json.loads(fields["userPeerAliases"]["value"]) == {"telegram_1": "eri"}
+
+    def test_put_honcho_first_save_merges_into_resolved_config(self, monkeypatch, tmp_path):
+        # With no profile-local file, a save merges into the resolved global config.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        from hermes_constants import get_hermes_home
+
+        global_path = tmp_path / ".honcho" / "config.json"
+        global_path.parent.mkdir(parents=True)
+        global_path.write_text(
+            json.dumps({"baseUrl": "https://kept.example", "hosts": {"hermes": {"workspace": "kept"}}}),
+            encoding="utf-8",
+        )
+
+        resp = self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"peerName": "eri"}},
+        )
+
+        assert resp.status_code == 200
+        assert not (get_hermes_home() / "honcho.json").exists()
+        cfg = json.loads(global_path.read_text(encoding="utf-8"))
+        assert cfg["baseUrl"] == "https://kept.example"
+        assert cfg["hosts"]["hermes"] == {"workspace": "kept", "peerName": "eri"}
+
+    def test_put_honcho_updates_legacy_dot_form_host_block(self, monkeypatch, tmp_path):
+        # The legacy dot-form block reads resolve is updated in place, not shadowed.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HONCHO_HOST", "hermes_work")
+
+        path = self._seed_local_honcho({"hosts": {"hermes.work": {"workspace": "w", "peerName": "eri"}}})
+
+        resp = self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"sessionStrategy": "per-repo"}},
+        )
+
+        assert resp.status_code == 200
+        hosts = json.loads(path.read_text(encoding="utf-8"))["hosts"]
+        assert set(hosts) == {"hermes.work"}
+        assert hosts["hermes.work"] == {"workspace": "w", "peerName": "eri", "sessionStrategy": "per-repo"}
+
+    def test_put_honcho_api_key_never_overwrites_oauth_token(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HONCHO_API_KEY", "guard")
+        monkeypatch.delenv("HONCHO_API_KEY")
+        from hermes_cli.config import load_env
+
+        path = self._seed_local_honcho({"hosts": {"hermes": {"apiKey": "hch-at-oauth-token"}}})
+
+        resp = self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"apiKey": "manual-key"}},
+        )
+
+        assert resp.status_code == 200
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        # The OAuth grant owns the JSON slot; the manual key lands in the env store.
+        assert cfg["hosts"]["hermes"]["apiKey"] == "hch-at-oauth-token"
+        assert load_env()["HONCHO_API_KEY"] == "manual-key"
+
+    def test_put_honcho_tolerates_null_hosts(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        path = self._seed_local_honcho({"hosts": None})
+
+        resp = self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"workspace": "myws"}},
+        )
+
+        assert resp.status_code == 200
+        assert json.loads(path.read_text(encoding="utf-8"))["hosts"]["hermes"]["workspace"] == "myws"
+
+    def test_memory_provider_config_honors_profile_param(self, monkeypatch, tmp_path):
+        # A ?profile= save must land in that profile's config, not the serving
+        # process's — same contract as the skills/toolsets endpoints.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # The suite pins HERMES_HONCHO_HOST=hermes; this test exercises
+        # profile-driven host resolution, so drop the override explicitly.
+        monkeypatch.delenv("HERMES_HONCHO_HOST", raising=False)
+        from hermes_constants import get_hermes_home
+        from hermes_cli.profiles import get_profile_dir
+
+        self._seed_local_honcho()
+
+        worker_home = get_profile_dir("worker")
+        worker_home.mkdir(parents=True, exist_ok=True)
+        worker_cfg = worker_home / "honcho.json"
+        worker_cfg.write_text(json.dumps({"hosts": {"hermes_worker": {"workspace": "kept"}}}), encoding="utf-8")
+
+        resp = self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared&profile=worker",
+            json={"values": {"peerName": "eri"}},
+        )
+
+        assert resp.status_code == 200
+        worker_hosts = json.loads(worker_cfg.read_text(encoding="utf-8"))["hosts"]
+        host_block = next(iter(worker_hosts.values()))
+        assert host_block["peerName"] == "eri"
+        # The serving process's own config is untouched.
+        own = json.loads((get_hermes_home() / "honcho.json").read_text(encoding="utf-8"))
+        assert "peerName" not in json.dumps(own)
+
+        fields = self._provider_field_map(
+            self.client.get("/api/memory/providers/honcho/config?surface=declared&profile=worker").json()
+        )
+        assert fields["peerName"]["value"] == "eri"
+
+    def test_put_honcho_rejects_malformed_number_and_json(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        assert self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"dialecticMaxChars": "lots"}},
+        ).status_code == 400
+        assert self.client.put(
+            "/api/memory/providers/honcho/config?surface=declared",
+            json={"values": {"userPeerAliases": "{not json"}},
+        ).status_code == 400
 
     # ── GET /api/media (remote image display) ───────────────────────────
 
     def test_get_media_serves_image_in_root(self):
         """An image under the gateway's images dir is returned as a data URL."""
-        from hades_constants import get_hades_home
+        from hermes_constants import get_hermes_home
 
-        img_dir = get_hades_home() / "images"
+        img_dir = get_hermes_home() / "images"
         img_dir.mkdir(parents=True, exist_ok=True)
         img = img_dir / "shot.png"
         img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
@@ -951,9 +1303,9 @@ class TestWebServerEndpoints:
         assert resp.status_code == 403
 
     def test_get_media_rejects_non_image_extension(self):
-        from hades_constants import get_hades_home
+        from hermes_constants import get_hermes_home
 
-        img_dir = get_hades_home() / "images"
+        img_dir = get_hermes_home() / "images"
         img_dir.mkdir(parents=True, exist_ok=True)
         env = img_dir / "leak.env"
         env.write_text("SECRET=1")
@@ -962,14 +1314,14 @@ class TestWebServerEndpoints:
         assert resp.status_code == 415
 
     def test_get_media_404_for_missing_file(self):
-        from hades_constants import get_hades_home
+        from hermes_constants import get_hermes_home
 
-        missing = get_hades_home() / "images" / "nope.png"
+        missing = get_hermes_home() / "images" / "nope.png"
         resp = self.client.get("/api/media", params={"path": str(missing)})
         assert resp.status_code == 404
 
     def test_get_media_requires_auth(self):
-        from hades_cli.web_server import _SESSION_HEADER_NAME
+        from hermes_cli.web_server import _SESSION_HEADER_NAME
 
         resp = self.client.get(
             "/api/media",
@@ -981,7 +1333,7 @@ class TestWebServerEndpoints:
     # ── POST /api/chat/image-upload (browser clipboard/drop images) ─────
 
     def test_chat_image_upload_writes_to_default_profile_images(self):
-        from hades_constants import get_hades_home
+        from hermes_constants import get_hermes_home
 
         data_url = (
             "data:image/png;base64,"
@@ -999,14 +1351,14 @@ class TestWebServerEndpoints:
         target = Path(data["path"])
         assert data["ok"] is True
         assert data["mime_type"] == "image/png"
-        assert target.parent == get_hades_home() / "images"
+        assert target.parent == get_hermes_home() / "images"
         assert target.name.startswith("dashboard_")
         assert target.name.endswith("_clip.png")
         assert target.is_file()
         assert target.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
     def test_chat_image_upload_writes_to_requested_profile_images(self):
-        from hades_cli import profiles as profiles_mod
+        from hermes_cli import profiles as profiles_mod
 
         worker_home = profiles_mod.get_profile_dir("worker")
         worker_home.mkdir(parents=True)
@@ -1053,7 +1405,7 @@ class TestWebServerEndpoints:
         assert "does not exist" in resp.json()["detail"]
 
     def test_chat_image_upload_enforces_image_size_cap(self, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "_CHAT_IMAGE_UPLOAD_MAX_BYTES", 4)
 
@@ -1069,7 +1421,7 @@ class TestWebServerEndpoints:
         assert "too large" in resp.json()["detail"].lower()
 
     def test_chat_image_upload_requires_auth(self):
-        from hades_cli.web_server import _SESSION_HEADER_NAME
+        from hermes_cli.web_server import _SESSION_HEADER_NAME
 
         resp = self.client.post(
             "/api/chat/image-upload",
@@ -1089,7 +1441,7 @@ class TestWebServerEndpoints:
 
     def test_set_dashboard_font_persists_valid_choice(self):
         """A valid catalog id is accepted, persisted, and read back."""
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         resp = self.client.put("/api/dashboard/font", json={"font": "inter"})
         assert resp.status_code == 200
@@ -1121,7 +1473,7 @@ class TestWebServerEndpoints:
 
     def test_get_dashboard_font_coerces_stale_persisted_value(self):
         """A config value no longer in the catalog reads back as 'theme'."""
-        from hades_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_config
 
         config = load_config()
         config.setdefault("dashboard", {})["font"] = "retired-font-id"
@@ -1132,7 +1484,7 @@ class TestWebServerEndpoints:
     def test_dashboard_font_override_independent_of_theme(self):
         """The font override and the theme are stored separately — setting
         one must not disturb the other."""
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         self.client.put("/api/dashboard/theme", json={"name": "ember"})
         self.client.put("/api/dashboard/font", json={"font": "jetbrains-mono"})
@@ -1147,7 +1499,7 @@ class TestWebServerEndpoints:
         /api/sessions should reflect per-session DB state, not process/global
         cwd settings, so workspace grouping stays stable and deterministic.
         """
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         monkeypatch.setenv("TERMINAL_CWD", "/tmp/global-default")
 
@@ -1188,7 +1540,7 @@ class TestWebServerEndpoints:
             def close(self):
                 pass
 
-        monkeypatch.setattr("hades_state.SessionDB", _FakeDB)
+        monkeypatch.setattr("hermes_state.SessionDB", _FakeDB)
 
         resp = self.client.get("/api/sessions?limit=5&offset=0&min_messages=3")
         assert resp.status_code == 200
@@ -1196,7 +1548,7 @@ class TestWebServerEndpoints:
         assert captured["count"] == 3
 
     def _create_session_with_heavy_fields(self, session_id: str) -> None:
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1262,7 +1614,7 @@ class TestWebServerEndpoints:
     def test_rename_session_updates_title(self):
         """PATCH /api/sessions/{id} renames a session (regression: the route
         was missing entirely, so the desktop rename dialog got a 405)."""
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1281,7 +1633,7 @@ class TestWebServerEndpoints:
             db.close()
 
     def test_rename_session_clears_title_when_empty(self):
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1305,7 +1657,7 @@ class TestWebServerEndpoints:
         assert resp.status_code == 404
 
     def test_import_sessions_endpoint_imports_exported_json(self):
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         payload = {
             "id": "imported-web-session",
@@ -1352,7 +1704,7 @@ class TestWebServerEndpoints:
         ]
 
     def test_import_sessions_endpoint_rejects_oversized_stream(self):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         payload = b'{"sessions":[]}' + b" " * web_server._SESSION_IMPORT_MAX_BYTES
         response = self.client.post(
@@ -1412,7 +1764,7 @@ class TestWebServerEndpoints:
 
     def test_archive_session_via_patch(self):
         """PATCH archived=true soft-hides a session; archived=false restores it."""
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1438,7 +1790,7 @@ class TestWebServerEndpoints:
 
     def test_patch_session_without_fields_is_400(self):
         """An existing session + empty body is a bad request, not a 404."""
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1452,7 +1804,7 @@ class TestWebServerEndpoints:
     def test_profiles_sessions_tags_default_profile(self):
         """The cross-profile aggregator returns the default profile's rows
         tagged profile="default" (single-profile parity with /api/sessions)."""
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1473,11 +1825,57 @@ class TestWebServerEndpoints:
         resp = self.client.get("/api/profiles/sessions?archived=bogus")
         assert resp.status_code == 400
 
+    def test_profiles_sessions_sidebar_batches_three_slices(self):
+        """The batched sidebar endpoint returns recents/cron/messaging in one
+        pass, each source-scoped by the caller-supplied excludes, so the desktop
+        stops reopening every profile DB three times per refresh."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            for sid, src in (
+                ("sb-desktop", "desktop"),
+                ("sb-cron", "cron"),
+                ("sb-telegram", "telegram"),
+            ):
+                db.create_session(session_id=sid, source=src)
+                db.append_message(session_id=sid, role="user", content="hi")
+        finally:
+            db.close()
+
+        resp = self.client.get(
+            "/api/profiles/sessions/sidebar"
+            "?recents_profile=all&recents_limit=20&recents_exclude=cron,telegram"
+            "&cron_limit=50&messaging_limit=100"
+            "&messaging_exclude=cron,cli,codex,desktop,gateway,local,tui"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        recents_ids = {s["id"] for s in data["recents"]["sessions"]}
+        cron_ids = {s["id"] for s in data["cron"]["sessions"]}
+        messaging_ids = {s["id"] for s in data["messaging"]["sessions"]}
+
+        # Each session lands only in its own slice.
+        assert "sb-desktop" in recents_ids
+        assert "sb-desktop" not in cron_ids and "sb-desktop" not in messaging_ids
+        assert "sb-cron" in cron_ids
+        assert "sb-cron" not in recents_ids and "sb-cron" not in messaging_ids
+        assert "sb-telegram" in messaging_ids
+        assert "sb-telegram" not in recents_ids and "sb-telegram" not in cron_ids
+
+        # Rows carry profile tagging like /api/profiles/sessions.
+        row = next(s for s in data["recents"]["sessions"] if s["id"] == "sb-desktop")
+        assert row["profile"] == "default"
+        assert row["is_default_profile"] is True
+        assert isinstance(data.get("errors"), list)
+        assert data["recents"]["total"] >= 1
+
     def test_sessions_endpoint_reads_requested_profile(self):
         """The machine dashboard's global profile switcher must retarget
         the Sessions page, not just config/skills/model pages."""
-        from hades_state import SessionDB
-        from hades_cli import profiles as profiles_mod
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
 
         worker_home = profiles_mod.get_profile_dir("worker")
         worker_home.mkdir(parents=True)
@@ -1515,8 +1913,8 @@ class TestWebServerEndpoints:
 
     def test_latest_descendant_reads_requested_profile(self):
         """Chat resume must resolve compression tips in the chat profile DB."""
-        from hades_state import SessionDB
-        from hades_cli import profiles as profiles_mod
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
 
         worker_home = profiles_mod.get_profile_dir("worker")
         worker_home.mkdir(parents=True)
@@ -1552,7 +1950,7 @@ class TestWebServerEndpoints:
         """Regression for the #39140 CTE salvage: a corrupted parent chain
         that loops (a -> b -> a) must terminate (UNION dedup) instead of
         recursing forever like UNION ALL would."""
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1572,8 +1970,8 @@ class TestWebServerEndpoints:
         assert resp.json()["session_id"] == "cyc-b"
 
     def test_analytics_endpoints_read_requested_profile(self):
-        from hades_state import SessionDB
-        from hades_cli import profiles as profiles_mod
+        from hermes_state import SessionDB
+        from hermes_cli import profiles as profiles_mod
 
         worker_home = profiles_mod.get_profile_dir("worker")
         worker_home.mkdir(parents=True)
@@ -1625,7 +2023,7 @@ class TestWebServerEndpoints:
         first page by recency, listed under its live continuation id."""
         import time as _time
 
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1666,7 +2064,7 @@ class TestWebServerEndpoints:
         so the sidebar stops showing the same chat several times."""
         import time as _time
 
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1703,7 +2101,7 @@ class TestWebServerEndpoints:
         branch instead of being collapsed back to the parent/root."""
         import time as _time
 
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1736,7 +2134,7 @@ class TestWebServerEndpoints:
         live continuation, matching /resume behavior."""
         import time as _time
 
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1763,7 +2161,7 @@ class TestWebServerEndpoints:
         assert [m["content"] for m in payload["messages"]] == ["after compression"]
 
     def test_get_sessions_archived_is_boolean(self):
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1777,7 +2175,7 @@ class TestWebServerEndpoints:
 
     def test_rename_response_omits_archived_when_not_set(self):
         """Title-only PATCH keeps its legacy {ok, title} response shape."""
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -1841,7 +2239,7 @@ class TestWebServerEndpoints:
         once; this guards the contract so a future merge can't lose them
         without failing CI.
         """
-        from hades_cli.web_server import app
+        from hermes_cli.web_server import app
 
         paths = {getattr(r, "path", None) for r in app.routes}
         assert "/api/audio/transcribe" in paths
@@ -1849,7 +2247,7 @@ class TestWebServerEndpoints:
         assert "/api/audio/elevenlabs/voices" in paths
 
     def test_elevenlabs_voices_unavailable_without_key(self, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "load_env", lambda: {})
         monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
@@ -1888,7 +2286,7 @@ class TestWebServerEndpoints:
         assert resp.status_code == 400
 
     def test_update_hermes_returns_docker_guidance_without_spawning(self, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         spawned = False
 
@@ -1924,7 +2322,7 @@ class TestWebServerEndpoints:
         assert any("docker pull nousresearch/hermes-agent:latest" in line for line in status_data["lines"])
 
     def test_update_hermes_returns_managed_runtime_guidance_without_spawning(self, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         spawned = False
         detected = False
@@ -1966,7 +2364,7 @@ class TestWebServerEndpoints:
         assert any("managed outside this dashboard" in line for line in status_data["lines"])
 
     def test_update_hermes_spawns_on_non_docker_install(self, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         class Proc:
             pid = 12345
@@ -1992,7 +2390,7 @@ class TestWebServerEndpoints:
         assert calls == [(["update"], "hermes-update")]
 
     def test_action_status_reaps_completed_process(self, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         waited = {"done": False}
 
@@ -2026,7 +2424,7 @@ class TestWebServerEndpoints:
         }
 
     def test_action_status_ignores_wait_failure(self, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         class _Proc:
             pid = 99
@@ -2054,7 +2452,7 @@ class TestWebServerEndpoints:
         }
 
     def test_action_status_tails_large_log_without_read_text(self, tmp_path, monkeypatch):
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(web_server, "_ACTION_LOG_DIR", tmp_path)
         web_server._ACTION_PROCS.pop("hermes-update", None)
@@ -2086,7 +2484,7 @@ class TestWebServerEndpoints:
 
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         class _Platform:
             def __init__(self, value):
@@ -2122,7 +2520,7 @@ class TestWebServerEndpoints:
 
     def test_get_status_hides_stale_platforms_when_gateway_not_running(self, monkeypatch):
         import gateway.config as gateway_config
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         class _GatewayConfig:
             def get_connected_platforms(self):
@@ -2192,6 +2590,121 @@ class TestWebServerEndpoints:
         assert len(data["category_order"]) > 0
         assert "general" in data["category_order"]
 
+    def _schema_provider_options(self, key):
+        resp = self.client.get("/api/config/schema")
+        assert resp.status_code == 200
+        return resp.json()["fields"][key]["options"]
+
+    def test_config_schema_merges_custom_command_tts_provider(self):
+        """A tts.providers.<name> command block appears in tts.provider options,
+        appended AFTER the built-ins (original order preserved, no re-sort)."""
+        from hermes_cli.config import load_config, save_config
+        from hermes_cli.web_server import CONFIG_SCHEMA
+
+        builtins = list(CONFIG_SCHEMA["tts.provider"]["options"])
+
+        cfg = load_config()
+        cfg.setdefault("tts", {}).setdefault("providers", {})["mycustomtts"] = {
+            "type": "command",
+            "command": "mytts --text {text} --out {output}",
+        }
+        save_config(cfg)
+
+        options = self._schema_provider_options("tts.provider")
+        assert options[: len(builtins)] == builtins  # built-in order kept
+        assert "mycustomtts" in options
+        assert options.count("mycustomtts") == 1
+        # The module-level schema must NOT have been mutated.
+        assert "mycustomtts" not in CONFIG_SCHEMA["tts.provider"]["options"]
+
+    def test_config_schema_merges_custom_command_stt_provider(self):
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg.setdefault("stt", {}).setdefault("providers", {})["mywhisper"] = {
+            "command": "whisper-cli {input}",  # type: omitted → command implied
+        }
+        save_config(cfg)
+
+        options = self._schema_provider_options("stt.provider")
+        assert "mywhisper" in options
+
+    def test_config_schema_excludes_builtin_name_collisions(self):
+        """A providers.EDGE command block must NOT be offered — the runtime
+        rejects built-in names as command providers (case-insensitively)."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg.setdefault("tts", {}).setdefault("providers", {})["EDGE"] = {
+            "type": "command",
+            "command": "fake-edge {text}",
+        }
+        save_config(cfg)
+
+        options = self._schema_provider_options("tts.provider")
+        lowered = [o.lower() for o in options]
+        assert lowered.count("edge") == 1  # only the built-in entry
+
+    def test_config_schema_excludes_non_command_blocks(self):
+        """Built-in-shaped blocks (voice/model, no command) and non-dicts are
+        not offered as providers."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        tts = cfg.setdefault("tts", {})
+        tts.setdefault("providers", {})["notacommand"] = {"voice": "en-US-Foo"}
+        tts["stringy"] = "oops"
+        save_config(cfg)
+
+        options = self._schema_provider_options("tts.provider")
+        assert "notacommand" not in options
+        assert "stringy" not in options
+
+    def test_config_schema_preserves_current_custom_provider_value(self):
+        """A custom active tts.provider without a providers.<name> block stays
+        selectable (current-value preservation, matching desktop behavior)."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg.setdefault("tts", {})["provider"] = "orphancustom"
+        save_config(cfg)
+
+        options = self._schema_provider_options("tts.provider")
+        assert "orphancustom" in options
+
+    def test_config_schema_reflects_config_changes_without_restart(self):
+        """Options are computed per-request — adding a provider after the
+        first schema fetch shows up on the next fetch."""
+        from hermes_cli.config import load_config, save_config
+
+        before = self._schema_provider_options("tts.provider")
+        assert "latecomer" not in before
+
+        cfg = load_config()
+        cfg.setdefault("tts", {}).setdefault("providers", {})["latecomer"] = {
+            "type": "command",
+            "command": "late {text}",
+        }
+        save_config(cfg)
+
+        after = self._schema_provider_options("tts.provider")
+        assert "latecomer" in after
+
+    def test_config_schema_legacy_toplevel_command_provider(self):
+        """The legacy top-level ``tts.<name>`` command block (runtime
+        back-compat fallback) is also offered."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg.setdefault("tts", {})["legacytts"] = {
+            "type": "command",
+            "command": "legacy {text}",
+        }
+        save_config(cfg)
+
+        options = self._schema_provider_options("tts.provider")
+        assert "legacytts" in options
+
     def test_get_config_defaults(self):
         resp = self.client.get("/api/config/defaults")
         assert resp.status_code == 200
@@ -2206,7 +2719,7 @@ class TestWebServerEndpoints:
         assert any(k.endswith("_API_KEY") or k.endswith("_TOKEN") for k in data.keys())
 
     def test_get_env_vars_marks_channel_managed_keys(self):
-        from hades_cli.web_server import _channel_managed_env_keys
+        from hermes_cli.web_server import _channel_managed_env_keys
 
         data = self.client.get("/api/env").json()
         # Every entry carries the classification the Keys page relies on.
@@ -2226,7 +2739,7 @@ class TestWebServerEndpoints:
         tencent-tokenhub, copilot were configurable via `hermes model` but
         invisible in the desktop Providers → API keys tab.
         """
-        from hades_cli.provider_catalog import provider_catalog
+        from hermes_cli.provider_catalog import provider_catalog
 
         data = self.client.get("/api/env").json()
         for d in provider_catalog():
@@ -2270,7 +2783,7 @@ class TestWebServerEndpoints:
         assert data["AWS_PROFILE"]["provider"] == "bedrock"
 
     def test_platform_scoped_messaging_env_vars_are_channel_managed(self):
-        from hades_cli.web_server import (
+        from hermes_cli.web_server import (
             _MESSAGING_KEYS_PAGE_KEYS,
             _build_catalog_entry,
             _channel_managed_env_keys,
@@ -2289,7 +2802,7 @@ class TestWebServerEndpoints:
 
     def test_model_set_requires_confirmation_for_expensive_model(self, monkeypatch):
         monkeypatch.setattr(
-            "hades_cli.model_cost_guard.expensive_model_warning",
+            "hermes_cli.model_cost_guard.expensive_model_warning",
             lambda *_args, **_kwargs: SimpleNamespace(message="EXPENSIVE MODEL WARNING"),
         )
 
@@ -2326,7 +2839,7 @@ class TestWebServerEndpoints:
         persist the vendor-prefixed slug verbatim (it 400s against the native
         API and reads as "changing models does nothing")."""
         monkeypatch.setattr(
-            "hades_cli.model_cost_guard.expensive_model_warning",
+            "hermes_cli.model_cost_guard.expensive_model_warning",
             lambda *_args, **_kwargs: None,
         )
         resp = self.client.post(
@@ -2344,7 +2857,7 @@ class TestWebServerEndpoints:
         # Vendor prefix stripped + dots→hyphens for the native Anthropic API.
         assert data["model"] == "claude-opus-4-6"
 
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
         cfg = load_config()
         assert cfg["model"]["provider"] == "anthropic"
         assert cfg["model"]["default"] == "claude-opus-4-6"
@@ -2354,10 +2867,10 @@ class TestWebServerEndpoints:
         a Hermes provider — keep the user's aggregator instead of writing a
         provider that can never resolve credentials."""
         monkeypatch.setattr(
-            "hades_cli.model_cost_guard.expensive_model_warning",
+            "hermes_cli.model_cost_guard.expensive_model_warning",
             lambda *_args, **_kwargs: None,
         )
-        from hades_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_config
         cfg = load_config()
         cfg["model"] = {"provider": "openrouter", "default": "openai/gpt-5.5"}
         save_config(cfg)
@@ -2379,7 +2892,7 @@ class TestWebServerEndpoints:
     def test_model_set_keeps_aggregator_slug_unchanged(self, monkeypatch):
         """The happy path (picker → openrouter + vendor/model) is untouched."""
         monkeypatch.setattr(
-            "hades_cli.model_cost_guard.expensive_model_warning",
+            "hermes_cli.model_cost_guard.expensive_model_warning",
             lambda *_args, **_kwargs: None,
         )
         resp = self.client.post(
@@ -2399,7 +2912,7 @@ class TestWebServerEndpoints:
     def test_ops_import_passes_force_flag(self, tmp_path, monkeypatch):
         """force=True must append --force so the spawned non-interactive
         `hermes import` doesn't auto-abort at the overwrite prompt."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         archive = tmp_path / "backup.zip"
         import zipfile
@@ -2431,8 +2944,8 @@ class TestWebServerEndpoints:
     def test_ops_backup_defaults_to_dashboard_downloadable_archive(self, monkeypatch):
         from pathlib import Path
 
-        import hades_cli.web_server as ws
-        from hades_cli.config import get_hades_home
+        import hermes_cli.web_server as ws
+        from hermes_cli.config import get_hermes_home
 
         captured = {}
 
@@ -2452,17 +2965,17 @@ class TestWebServerEndpoints:
         assert data["name"] == "backup"
         assert captured["name"] == "backup"
         assert captured["args"] == ["backup", "-o", str(archive)]
-        assert archive.parent == get_hades_home() / "backups"
+        assert archive.parent == get_hermes_home() / "backups"
         assert archive.name.startswith("hermes-backup-")
         assert archive.suffix == ".zip"
 
     def test_ops_backup_uses_hosted_hermes_home(self, tmp_path, monkeypatch):
         from pathlib import Path
 
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         hosted_home = tmp_path / "opt-data"
-        monkeypatch.setenv("HADES_HOME", str(hosted_home))
+        monkeypatch.setenv("HERMES_HOME", str(hosted_home))
         captured = {}
 
         def fake_spawn(subcommand, name):
@@ -2482,7 +2995,7 @@ class TestWebServerEndpoints:
         assert archive.parent.is_dir()
 
     def test_ops_backup_download_streams_dashboard_backup(self, tmp_path):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         backup_dir = ws._dashboard_backup_dir()
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -2509,7 +3022,7 @@ class TestWebServerEndpoints:
         import zipfile
         from pathlib import Path
 
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         archive = tmp_path / "backup.zip"
         with zipfile.ZipFile(archive, "w") as zf:
@@ -2551,7 +3064,7 @@ class TestWebServerEndpoints:
         assert data["archive"] == str(staged)
 
     def test_ops_import_upload_rejects_invalid_zip(self, monkeypatch):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         def fail_spawn(*_args):
             raise AssertionError("invalid uploads must not spawn import")
@@ -2570,8 +3083,8 @@ class TestWebServerEndpoints:
 
     def test_reveal_env_var(self, tmp_path):
         """POST /api/env/reveal should return the real unredacted value."""
-        from hades_cli.config import save_env_value
-        from hades_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
+        from hermes_cli.config import save_env_value
+        from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
         save_env_value("TEST_REVEAL_KEY", "super-secret-value-12345")
         resp = self.client.post(
             "/api/env/reveal",
@@ -2585,7 +3098,7 @@ class TestWebServerEndpoints:
 
     def test_reveal_env_var_not_found(self):
         """POST /api/env/reveal should 404 for unknown keys."""
-        from hades_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
+        from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
         resp = self.client.post(
             "/api/env/reveal",
             json={"key": "NONEXISTENT_KEY_XYZ"},
@@ -2596,8 +3109,8 @@ class TestWebServerEndpoints:
     def test_reveal_env_var_no_token(self, tmp_path):
         """POST /api/env/reveal without token should return 401."""
         from starlette.testclient import TestClient
-        from hades_cli.web_server import app
-        from hades_cli.config import save_env_value
+        from hermes_cli.web_server import app
+        from hermes_cli.config import save_env_value
         save_env_value("TEST_REVEAL_NOAUTH", "secret-value")
         # Use a fresh client WITHOUT the dashboard session header
         unauth_client = TestClient(app)
@@ -2609,8 +3122,8 @@ class TestWebServerEndpoints:
 
     def test_reveal_env_var_bad_token(self, tmp_path):
         """POST /api/env/reveal with wrong token should return 401."""
-        from hades_cli.config import save_env_value
-        from hades_cli.web_server import _SESSION_HEADER_NAME
+        from hermes_cli.config import save_env_value
+        from hermes_cli.web_server import _SESSION_HEADER_NAME
         save_env_value("TEST_REVEAL_BADAUTH", "secret-value")
         resp = self.client.post(
             "/api/env/reveal",
@@ -2621,8 +3134,8 @@ class TestWebServerEndpoints:
 
     def test_reveal_env_var_custom_session_header_ignores_proxy_authorization(self, tmp_path):
         """A valid dashboard session header should coexist with proxy auth."""
-        from hades_cli.config import save_env_value
-        from hades_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
+        from hermes_cli.config import save_env_value
+        from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
 
         save_env_value("TEST_REVEAL_PROXY_AUTH", "secret-value")
         resp = self.client.post(
@@ -2639,8 +3152,8 @@ class TestWebServerEndpoints:
 
     def test_reveal_env_var_legacy_authorization_header_still_works(self, tmp_path):
         """Keep old dashboard bundles working while the new header rolls out."""
-        from hades_cli.config import save_env_value
-        from hades_cli.web_server import _SESSION_TOKEN
+        from hermes_cli.config import save_env_value
+        from hermes_cli.web_server import _SESSION_TOKEN
 
         save_env_value("TEST_REVEAL_LEGACY_AUTH", "secret-value")
         resp = self.client.post(
@@ -2714,7 +3227,7 @@ class TestWebServerEndpoints:
         # plugin registry. The override must still supply a docs link so the
         # Channels page renders a working "Open setup guide" button instead of
         # an empty href (which resolves to the packaged app's own index.html).
-        from hades_cli.web_server import _build_catalog_entry
+        from hermes_cli.web_server import _build_catalog_entry
 
         teams = _build_catalog_entry("teams")
         assert teams["docs_url"] == (
@@ -2726,7 +3239,7 @@ class TestWebServerEndpoints:
         # the plugin registry. The override must supply a docs link so the
         # Channels page renders a working "Open setup guide" button instead of
         # an empty href (which resolves to the packaged app's own index.html).
-        from hades_cli.web_server import _build_catalog_entry
+        from hermes_cli.web_server import _build_catalog_entry
 
         google_chat = _build_catalog_entry("google_chat")
         assert google_chat["name"] == "Google Chat"
@@ -2770,7 +3283,7 @@ class TestWebServerEndpoints:
             platform_registry.unregister("ircfake")
 
     def test_update_messaging_platform_saves_env_and_enablement(self):
-        from hades_cli.config import load_config, load_env
+        from hermes_cli.config import load_config, load_env
 
         resp = self.client.put(
             "/api/messaging/platforms/telegram",
@@ -2807,7 +3320,7 @@ class TestWebServerEndpoints:
         assert "numeric user IDs" in resp.json()["detail"]
 
     def test_update_messaging_platform_saves_slack_allowed_users(self):
-        from hades_cli.config import load_env
+        from hermes_cli.config import load_env
 
         resp = self.client.put(
             "/api/messaging/platforms/slack",
@@ -2847,7 +3360,7 @@ class TestWebServerEndpoints:
     def test_update_messaging_platform_accepts_slack_allowed_users_wildcard(self):
         # "*" is the gateway's allow-all wildcard (gateway/platforms/slack.py),
         # so the dashboard must accept it rather than rejecting it as malformed.
-        from hades_cli.config import load_env
+        from hermes_cli.config import load_env
 
         resp = self.client.put(
             "/api/messaging/platforms/slack",
@@ -2860,7 +3373,7 @@ class TestWebServerEndpoints:
     def test_update_messaging_platform_accepts_slack_allowed_users_trailing_comma(self):
         # The gateway drops empty entries (gateway/platforms/slack.py), so a
         # trailing/interior comma must not be rejected by the dashboard.
-        from hades_cli.config import load_env
+        from hermes_cli.config import load_env
 
         resp = self.client.put(
             "/api/messaging/platforms/slack",
@@ -2884,7 +3397,7 @@ class TestWebServerEndpoints:
 
     def test_telegram_onboarding_worker_request_uses_httpx(self, monkeypatch):
         import httpx
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         calls = {}
 
@@ -2916,7 +3429,7 @@ class TestWebServerEndpoints:
         payload = ws._telegram_onboarding_request_sync(
             "POST",
             "/v1/telegram/pairings",
-            body={"bot_name": "Hades Agent"},
+            body={"bot_name": "Hermes Agent"},
             bearer_token="poll-secret",
         )
 
@@ -2924,7 +3437,7 @@ class TestWebServerEndpoints:
         method, url, kwargs = calls["request"]
         assert method == "POST"
         assert url == "https://worker.example/v1/telegram/pairings"
-        assert kwargs["json"] == {"bot_name": "Hades Agent"}
+        assert kwargs["json"] == {"bot_name": "Hermes Agent"}
         assert kwargs["headers"]["Accept"] == "application/json"
         assert kwargs["headers"]["Authorization"] == "Bearer poll-secret"
         assert kwargs["headers"]["Content-Type"] == "application/json"
@@ -2933,7 +3446,7 @@ class TestWebServerEndpoints:
     def test_telegram_onboarding_worker_request_maps_unexpected_errors(
         self, monkeypatch
     ):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setenv("TELEGRAM_ONBOARDING_URL", "not a valid url")
 
@@ -2941,7 +3454,7 @@ class TestWebServerEndpoints:
             ws._telegram_onboarding_request_sync(
                 "POST",
                 "/v1/telegram/pairings",
-                body={"bot_name": "Hades Agent"},
+                body={"bot_name": "Hermes Agent"},
             )
 
         assert exc.value.status_code == 502
@@ -2951,7 +3464,7 @@ class TestWebServerEndpoints:
         )
 
     def test_telegram_onboarding_start_strips_poll_token(self, monkeypatch):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         with ws._telegram_onboarding_lock:
             ws._telegram_onboarding_pairings.clear()
@@ -2990,8 +3503,8 @@ class TestWebServerEndpoints:
         ]
 
     def test_telegram_onboarding_ready_and_apply_never_returns_bot_token(self, monkeypatch):
-        import hades_cli.web_server as ws
-        from hades_cli.config import load_config, load_env
+        import hermes_cli.web_server as ws
+        from hermes_cli.config import load_config, load_env
 
         with ws._telegram_onboarding_lock:
             ws._telegram_onboarding_pairings.clear()
@@ -3063,8 +3576,8 @@ class TestWebServerEndpoints:
     def test_telegram_onboarding_apply_reports_restart_failure_after_save(
         self, monkeypatch
     ):
-        import hades_cli.web_server as ws
-        from hades_cli.config import load_config, load_env
+        import hermes_cli.web_server as ws
+        from hermes_cli.config import load_config, load_env
 
         with ws._telegram_onboarding_lock:
             ws._telegram_onboarding_pairings.clear()
@@ -3128,7 +3641,7 @@ class TestWebServerEndpoints:
         """A live in-flight gateway restart is reused instead of spawning a
         second racing ``hermes gateway restart`` child (e.g. when a stale
         cached frontend also fires its own restart call)."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         with ws._telegram_onboarding_lock:
             ws._telegram_onboarding_pairings.clear()
@@ -3182,7 +3695,7 @@ class TestWebServerEndpoints:
         assert applied_data["restart_pid"] == 5151
 
     def test_telegram_onboarding_apply_requires_ready_pairing(self, monkeypatch):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         with ws._telegram_onboarding_lock:
             ws._telegram_onboarding_pairings.clear()
@@ -3211,7 +3724,7 @@ class TestWebServerEndpoints:
         assert "not ready" in resp.json()["detail"]
 
     def test_telegram_onboarding_cancel_clears_local_session(self, monkeypatch):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         with ws._telegram_onboarding_lock:
             ws._telegram_onboarding_pairings.clear()
@@ -3253,7 +3766,7 @@ class TestWebServerEndpoints:
     def test_unauthenticated_api_blocked(self):
         """API requests without the session token should be rejected."""
         from starlette.testclient import TestClient
-        from hades_cli.web_server import app
+        from hermes_cli.web_server import app
         # Create a client WITHOUT the dashboard session header
         unauth_client = TestClient(app)
         resp = unauth_client.get("/api/env")
@@ -3290,7 +3803,7 @@ class TestWebServerEndpoints:
     def test_spa_assets_are_read_as_utf8(self, monkeypatch, tmp_path):
         from fastapi import FastAPI
         from starlette.testclient import TestClient
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         dist = tmp_path / "web_dist"
         assets = dist / "assets"
@@ -3331,7 +3844,7 @@ class TestWebServerEndpoints:
         when a built dist is present — only the API/WS surface is reachable."""
         from fastapi import FastAPI
         from starlette.testclient import TestClient
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         dist = tmp_path / "web_dist"
         (dist / "assets").mkdir(parents=True)
@@ -3351,7 +3864,7 @@ class TestWebServerEndpoints:
         """Switching the main provider to Nous calls apply_nous_managed_defaults
         (mirroring the CLI's post-model-selection Tool Gateway routing) and
         surfaces the routed tools in the response."""
-        import hades_cli.nous_subscription as ns
+        import hermes_cli.nous_subscription as ns
 
         called = {}
 
@@ -3378,7 +3891,7 @@ class TestWebServerEndpoints:
 
     def test_set_model_main_non_nous_skips_gateway_defaults(self, monkeypatch):
         """Non-Nous providers must NOT trigger Tool Gateway auto-routing."""
-        import hades_cli.nous_subscription as ns
+        import hermes_cli.nous_subscription as ns
 
         def boom(*args, **kwargs):  # pragma: no cover - must not be called
             raise AssertionError("apply_nous_managed_defaults called for non-nous provider")
@@ -3400,7 +3913,7 @@ class TestWebServerEndpoints:
         it on same-provider re-assignment, and always drop a hardcoded
         context_length override. Both POST /api/model/set and profile-model
         writes route through this, so the contract is pinned here."""
-        from hades_cli.web_server import _apply_main_model_assignment
+        from hermes_cli.web_server import _apply_main_model_assignment
 
         # Custom + base_url → persisted; stale context_length dropped.
         out = _apply_main_model_assignment(
@@ -3477,10 +3990,22 @@ class TestWebServerEndpoints:
         assert "api_key" not in out
         assert "api_mode" not in out
 
+        # switching providers when the stale secret lives under the legacy
+        # ``api`` alias only (no api_key) → it must be cleared too. The resolver
+        # reads ``model.api`` as a key, so leaving it behind keeps a secret in
+        # config.yaml that contaminates the next custom resolution.
+        out = _apply_main_model_assignment(
+            {"provider": "custom", "api": "sk-legacy-stale", "base_url": "http://endpoint-a/v1"},
+            "openrouter",
+            "m",
+        )
+        assert "api" not in out
+        assert "api_key" not in out
+
     def test_parse_model_ids_handles_openai_and_bare_shapes(self):
         """Model discovery must tolerate the common /v1/models shapes and
         never raise (so a slightly non-standard local endpoint still works)."""
-        from hades_cli.web_server import _parse_model_ids
+        from hermes_cli.web_server import _parse_model_ids
 
         class FakeResp:
             def __init__(self, payload, ok=True):
@@ -3510,7 +4035,7 @@ class TestWebServerEndpoints:
         resolver (which ignores OPENAI_BASE_URL) can route to a self-hosted
         endpoint without an API key. Regression for the desktop onboarding bug
         where 'Local / custom endpoint' could never be configured."""
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         resp = self.client.post(
             "/api/model/set",
@@ -3539,7 +4064,7 @@ class TestWebServerEndpoints:
         endpoint reappears as a ready row in the picker — matching the
         ``hermes model`` custom flow. Regression for the desktop loop where a
         keyed custom endpoint could never be configured from the GUI."""
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         resp = self.client.post(
             "/api/model/set",
@@ -3575,7 +4100,7 @@ class TestWebServerEndpoints:
     def test_set_model_main_non_custom_clears_stale_base_url(self):
         """Switching to a hosted provider must clear a stale base_url so the
         resolver picks that provider's own default endpoint."""
-        from hades_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_config
 
         cfg = load_config()
         cfg["model"] = {
@@ -3597,7 +4122,7 @@ class TestWebServerEndpoints:
         base_url. Regression for the desktop bug where selecting a Xiaomi MiMo
         model reset a Token Plan endpoint back to the registry default, breaking
         Token Plan keys (https://token-plan-*.xiaomimimo.com/v1)."""
-        from hades_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_config
 
         cfg = load_config()
         cfg["model"] = {
@@ -3624,7 +4149,7 @@ class TestWebServerEndpoints:
         """Switching the main provider must report auxiliary slots still pinned
         to a *different* provider so the UI can warn the user their helper tasks
         aren't following the switch (the silent credit-burn path)."""
-        from hades_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_config
 
         cfg = load_config()
         cfg["model"] = {"provider": "nous", "default": "hermes-4"}
@@ -3655,7 +4180,7 @@ class TestWebServerEndpoints:
 
     def test_set_model_main_no_stale_when_aux_matches_new_provider(self):
         """Aux slots pinned to the SAME provider as the new main are not stale."""
-        from hades_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_config
 
         cfg = load_config()
         cfg["model"] = {"provider": "nous", "default": "hermes-4"}
@@ -3676,9 +4201,304 @@ class TestWebServerEndpoints:
         assert model_cfg["provider"] == "openrouter"
         assert model_cfg.get("base_url", "") == ""
 
+    def test_custom_endpoints_list_includes_direct_custom_config(self):
+        """A bare model.provider=custom config should show up in Desktop even
+        before the user has materialized it under providers.
+        """
+        from hermes_cli.config import save_config
+
+        save_config({
+            "model": {
+                "provider": "custom",
+                "default": "gpt-5.4",
+                "base_url": "http://127.0.0.1:8081/v1",
+                "api_key": "sk-local",
+            },
+            "providers": {},
+        })
+
+        resp = self.client.get("/api/providers/custom-endpoints")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["current"] == {
+            "provider": "custom",
+            "model": "gpt-5.4",
+            "base_url": "http://127.0.0.1:8081/v1",
+        }
+        assert data["endpoints"][0]["id"] == "custom"
+        assert data["endpoints"][0]["source"] == "direct-config"
+        assert data["endpoints"][0]["has_api_key"] is True
+
+    def test_custom_endpoint_upsert_persists_provider_and_sets_default(self):
+        """Desktop can persist an OpenAI-compatible proxy in providers and make
+        it the default for new chats.
+        """
+        from hermes_cli.config import load_config
+
+        resp = self.client.post(
+            "/api/providers/custom-endpoints",
+            json={
+                "id": "axet-proxy",
+                "name": "Axet Proxy",
+                "base_url": "http://127.0.0.1:8081/v1/",
+                "model": "gpt-5.4",
+                "api_key": "sk-local",
+                "context_length": 262144,
+                "make_default": True,
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["id"] == "axet-proxy"
+        endpoint = next(e for e in data["endpoints"] if e["id"] == "axet-proxy")
+        assert endpoint["base_url"] == "http://127.0.0.1:8081/v1"
+        assert endpoint["model"] == "gpt-5.4"
+        assert endpoint["is_current"] is True
+
+        cfg = load_config()
+        assert cfg["providers"]["axet-proxy"]["base_url"] == "http://127.0.0.1:8081/v1"
+        assert cfg["providers"]["axet-proxy"]["models"]["gpt-5.4"]["context_length"] == 262144
+        assert cfg["model"]["provider"] == "axet-proxy"
+        assert cfg["model"]["default"] == "gpt-5.4"
+        assert cfg["model"]["base_url"] == "http://127.0.0.1:8081/v1"
+
+    def _seed_custom_provider_with_key(self):
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["providers"] = {
+            "acme": {
+                "name": "Acme",
+                "base_url": "https://llm.acme.corp/v1",
+                "model": "acme/m1",
+                "api_key": "sk-stored-old",
+                "models": {"acme/m1": {}},
+            }
+        }
+        save_config(cfg)
+
+    def test_set_model_main_honors_an_explicitly_supplied_api_key(self):
+        """A key in the request must win over the provider entry's stored one.
+
+        The entry-key fallback exists so switching to a configured provider
+        picks up its credential. Applying it unconditionally discards a key the
+        caller is rotating in — and ``model.api_key`` outranks the environment
+        at client construction (#62269), so the stale key keeps authenticating
+        while the UI reports the change saved.
+        """
+        from hermes_cli.config import load_config
+
+        self._seed_custom_provider_with_key()
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "acme",
+                "model": "acme/m1",
+                "api_key": "sk-new-rotated",
+            },
+        )
+        assert resp.status_code == 200
+        assert load_config()["model"]["api_key"] == "sk-new-rotated"
+
+    def test_set_model_main_falls_back_to_the_provider_entry_key(self):
+        """With no key in the request the stored one is still adopted."""
+        from hermes_cli.config import load_config
+
+        self._seed_custom_provider_with_key()
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "acme", "model": "acme/m1"},
+        )
+        assert resp.status_code == 200
+        model_cfg = load_config()["model"]
+        assert model_cfg["api_key"] == "sk-stored-old"
+        # The sibling base_url fill is unaffected.
+        assert model_cfg["base_url"] == "https://llm.acme.corp/v1"
+
+    def test_custom_endpoint_edit_preserves_hand_written_provider_fields(self):
+        """The panel edits a few fields; it does not own the whole entry.
+
+        A ``providers.<name>`` block can carry keys the dashboard has no field
+        for — ``api_mode``, ``key_env``, ``extra_headers`` (which may carry
+        credentials), ``request_overrides``. Rebuilding the entry from scratch
+        on an unrelated edit silently dropped all of them, leaving a provider
+        that no longer authenticates or speaks the right protocol.
+        """
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["providers"] = {
+            "acme": {
+                "name": "Acme",
+                "base_url": "https://llm.acme.corp/v1",
+                "model": "acme/model-1",
+                "api_mode": "responses",
+                "key_env": "ACME_API_KEY",
+                "extra_headers": {"X-Org-Id": "org_123"},
+                "request_overrides": {"reasoning_effort": "high"},
+                "models": {
+                    "acme/model-1": {"context_length": 200000},
+                    "acme/model-2": {"context_length": 400000},
+                },
+            }
+        }
+        save_config(cfg)
+
+        # The user opens the panel and only switches the default model.
+        resp = self.client.post(
+            "/api/providers/custom-endpoints",
+            json={
+                "id": "acme",
+                "name": "Acme",
+                "base_url": "https://llm.acme.corp/v1",
+                "model": "acme/model-2",
+            },
+        )
+        assert resp.status_code == 200
+
+        entry = load_config()["providers"]["acme"]
+        assert entry["api_mode"] == "responses"
+        assert entry["key_env"] == "ACME_API_KEY"
+        assert entry["extra_headers"] == {"X-Org-Id": "org_123"}
+        assert entry["request_overrides"] == {"reasoning_effort": "high"}
+        # The edit still applies.
+        assert entry["model"] == "acme/model-2"
+
+    def test_custom_endpoint_edit_keeps_the_other_models(self):
+        """The panel names one default model; it doesn't enumerate the catalogue."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["providers"] = {
+            "acme": {
+                "name": "Acme",
+                "base_url": "https://llm.acme.corp/v1",
+                "model": "acme/model-1",
+                "models": {
+                    "acme/model-1": {"context_length": 200000},
+                    "acme/model-2": {"context_length": 400000},
+                },
+            }
+        }
+        save_config(cfg)
+
+        self.client.post(
+            "/api/providers/custom-endpoints",
+            json={
+                "id": "acme",
+                "name": "Acme",
+                "base_url": "https://llm.acme.corp/v1",
+                "model": "acme/model-2",
+            },
+        )
+
+        models = load_config()["providers"]["acme"]["models"]
+        assert sorted(models) == ["acme/model-1", "acme/model-2"]
+        assert models["acme/model-1"]["context_length"] == 200000
+
+    def test_deleting_the_active_custom_endpoint_clears_its_model_mirror(self):
+        """Deleting an endpoint must not leave its key running the agent.
+
+        ``activate`` copies the endpoint's base_url + api_key onto ``model``,
+        and ``model.api_key`` outranks the environment at client construction
+        (#62269). Without clearing that mirror the agent keeps authenticating
+        to the deleted host with the deleted key, and the key the operator
+        just removed through the dashboard stays in config.yaml.
+        """
+        from hermes_cli.config import load_config
+
+        self.client.post(
+            "/api/providers/custom-endpoints",
+            json={
+                "id": "acme",
+                "name": "Acme",
+                "base_url": "https://llm.acme.corp/v1",
+                "model": "acme/model-1",
+                "api_key": "sk-acme-secret",
+            },
+        )
+        assert self.client.post(
+            "/api/providers/custom-endpoints/acme/activate", json={}
+        ).status_code == 200
+
+        cfg = load_config()
+        assert cfg["model"]["api_key"] == "sk-acme-secret"
+
+        assert self.client.request(
+            "DELETE", "/api/providers/custom-endpoints/acme"
+        ).status_code == 200
+
+        cfg = load_config()
+        assert "acme" not in (cfg.get("providers") or {})
+        model_cfg = cfg.get("model") or {}
+        assert not model_cfg.get("api_key"), "deleted endpoint's key still in config.yaml"
+        assert not model_cfg.get("base_url"), "deleted endpoint's host still routed to"
+        assert not model_cfg.get("provider")
+
+    def test_deleting_an_inactive_custom_endpoint_leaves_the_active_one_alone(self):
+        """Only the mirror of the DELETED provider is scrubbed."""
+        from hermes_cli.config import load_config
+
+        for name, key in (("acme", "sk-acme"), ("other", "sk-other")):
+            self.client.post(
+                "/api/providers/custom-endpoints",
+                json={
+                    "id": name,
+                    "name": name,
+                    "base_url": f"https://llm.{name}.corp/v1",
+                    "model": f"{name}/m",
+                    "api_key": key,
+                },
+            )
+
+        self.client.post("/api/providers/custom-endpoints/other/activate", json={})
+        self.client.request("DELETE", "/api/providers/custom-endpoints/acme")
+
+        model_cfg = load_config().get("model") or {}
+        assert model_cfg.get("provider") == "other"
+        assert model_cfg.get("api_key") == "sk-other"
+        assert model_cfg.get("base_url") == "https://llm.other.corp/v1"
+
+    def test_set_model_main_preserves_base_url_for_named_custom_provider(self):
+        """Selecting a named custom endpoint from the Desktop model picker
+        should keep its endpoint URL attached to model config.
+        """
+        from hermes_cli.config import load_config, save_config
+
+        save_config({
+            "model": {"provider": "nous", "default": "hermes-4"},
+            "providers": {
+                "axet-proxy": {
+                    "name": "Axet Proxy",
+                    "base_url": "http://127.0.0.1:8081/v1",
+                    "api_key": "sk-local",
+                    "model": "gpt-5.4",
+                    "models": {"gpt-5.4": {}},
+                }
+            },
+        })
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={"scope": "main", "provider": "axet-proxy", "model": "gpt-5.4"},
+        )
+
+        assert resp.status_code == 200
+        model_cfg = load_config()["model"]
+        assert model_cfg["provider"] == "axet-proxy"
+        assert model_cfg["default"] == "gpt-5.4"
+        assert model_cfg["base_url"] == "http://127.0.0.1:8081/v1"
+        assert model_cfg["api_key"] == "sk-local"
+
     def test_set_model_main_gateway_failure_does_not_block_save(self, monkeypatch):
         """A Portal/gateway hiccup must never prevent saving the model."""
-        import hades_cli.nous_subscription as ns
+        import hermes_cli.nous_subscription as ns
 
         def boom(*args, **kwargs):
             raise RuntimeError("portal unreachable")
@@ -3697,7 +4517,7 @@ class TestWebServerEndpoints:
     def test_recommended_default_nous_honors_free_tier(self, monkeypatch):
         """For a free-tier Nous user, the recommended default must be a free
         model (mirroring `hermes model`), not the first curated paid entry."""
-        import hades_cli.models as models_mod
+        import hermes_cli.models as models_mod
 
         monkeypatch.setattr(models_mod, "get_curated_nous_model_ids", lambda: ["paid/expensive", "free/cheap"])
         monkeypatch.setattr(
@@ -3724,7 +4544,7 @@ class TestWebServerEndpoints:
 
     def test_recommended_default_nous_paid_uses_curated_default(self, monkeypatch):
         """A paid Nous user gets the first curated/paid-augmented model."""
-        import hades_cli.models as models_mod
+        import hermes_cli.models as models_mod
 
         monkeypatch.setattr(models_mod, "get_curated_nous_model_ids", lambda: ["top/model", "other/model"])
         monkeypatch.setattr(models_mod, "get_pricing_for_provider", lambda provider: {})
@@ -3743,7 +4563,7 @@ class TestWebServerEndpoints:
 
     def test_recommended_default_handles_failure_gracefully(self, monkeypatch):
         """Endpoint never 500s — returns empty model on internal error."""
-        import hades_cli.models as models_mod
+        import hermes_cli.models as models_mod
 
         def boom():
             raise RuntimeError("portal down")
@@ -3764,18 +4584,18 @@ class TestWebServerEndpoints:
 
 class TestBuildSchemaFromConfig:
     def test_produces_expected_field_count(self):
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         # DEFAULT_CONFIG has ~150+ leaf fields
         assert len(CONFIG_SCHEMA) > 100
 
     def test_schema_entries_have_required_fields(self):
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         for key, entry in list(CONFIG_SCHEMA.items())[:10]:
             assert "type" in entry, f"Missing type for {key}"
             assert "category" in entry, f"Missing category for {key}"
 
     def test_overrides_applied(self):
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         # terminal.backend should be a select with options
         if "terminal.backend" in CONFIG_SCHEMA:
             entry = CONFIG_SCHEMA["terminal.backend"]
@@ -3792,24 +4612,64 @@ class TestBuildSchemaFromConfig:
         key server-side, breaking Desktop's dropdown). The dashboard hides the
         field client-side instead.
         """
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         entry = CONFIG_SCHEMA["memory.provider"]
         assert entry["type"] == "select"
         assert entry["category"] == "memory"
         options = entry["options"]
-        # Built-in sentinel first, plus at least one discovered provider.
+        # Built-in-only sentinel first, plus at least one discovered provider.
+        # The literal "builtin" alias must NOT be offered — built-in memory is
+        # not a provider plugin (#49513).
         assert options[0] == ""
-        assert "builtin" in options
-        assert len(options) >= 3
+        assert "builtin" not in options
+        assert len(options) >= 2
 
     def test_memory_provider_options_cover_discovered_providers(self):
         """Every provider the /api/memory endpoint can activate is selectable."""
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         from plugins.memory import list_memory_provider_names
 
         options = set(CONFIG_SCHEMA["memory.provider"]["options"])
         missing = set(list_memory_provider_names()) - options
         assert missing == set(), f"discovered providers missing from schema options: {missing}"
+
+    def test_dynamic_merge_recomputes_memory_provider_options(self, monkeypatch):
+        """The per-request schema merge re-discovers memory providers.
+
+        The import-time _SCHEMA_OVERRIDES freezes the list at server start;
+        _schema_with_dynamic_provider_options must recompute it so a provider
+        installed mid-session is selectable without a restart.
+        """
+        from hermes_cli import web_server
+
+        monkeypatch.setattr(web_server, "load_config", lambda: {"memory": {"provider": "honcho"}})
+        monkeypatch.setattr(
+            web_server,
+            "_memory_provider_options",
+            lambda: ["", "honcho", "hindsight", "freshly_installed"],
+        )
+
+        fields = web_server._schema_with_dynamic_provider_options()
+
+        assert "freshly_installed" in fields["memory.provider"]["options"]
+        # The entry is copied, not mutated in place, and keeps its select type.
+        assert fields["memory.provider"]["type"] == "select"
+        assert web_server.CONFIG_SCHEMA["memory.provider"] is not fields["memory.provider"]
+
+    def test_dynamic_merge_preserves_configured_memory_provider(self, monkeypatch):
+        """A configured-but-undiscovered provider stays visible as the selection.
+
+        e.g. the plugin dir was removed but config still points at it — the
+        dropdown must not silently drop the active value.
+        """
+        from hermes_cli import web_server
+
+        monkeypatch.setattr(web_server, "load_config", lambda: {"memory": {"provider": "gone_from_disk"}})
+        monkeypatch.setattr(web_server, "_memory_provider_options", lambda: ["", "honcho"])
+
+        fields = web_server._schema_with_dynamic_provider_options()
+
+        assert "gone_from_disk" in fields["memory.provider"]["options"]
 
     def test_approvals_mode_options_match_config_values(self):
         """approvals.mode select options must match the values accepted by config.py.
@@ -3819,7 +4679,7 @@ class TestBuildSchemaFromConfig:
         are 'manual', 'smart', and 'off' (see hermes_cli/config.py).
         'smart' was missing entirely, making it unreachable from the UI.
         """
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         entry = CONFIG_SCHEMA["approvals.mode"]
         assert entry["type"] == "select"
         options = entry["options"]
@@ -3832,7 +4692,7 @@ class TestBuildSchemaFromConfig:
         assert "deny" not in options, "stale option 'deny' should not appear"
 
     def test_empty_prefix_produces_correct_keys(self):
-        from hades_cli.web_server import _build_schema_from_config
+        from hermes_cli.web_server import _build_schema_from_config
         test_config = {"model": "test", "nested": {"key": "val"}}
         schema = _build_schema_from_config(test_config)
         assert "model" in schema
@@ -3840,18 +4700,18 @@ class TestBuildSchemaFromConfig:
 
     def test_top_level_scalars_get_general_category(self):
         """Top-level scalar fields should be in 'general' category."""
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         assert CONFIG_SCHEMA["model"]["category"] == "general"
 
     def test_nested_keys_get_parent_category(self):
         """Nested fields should use the top-level parent as their category."""
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         if "agent.max_turns" in CONFIG_SCHEMA:
             assert CONFIG_SCHEMA["agent.max_turns"]["category"] == "agent"
 
     def test_category_merge_applied(self):
         """Small categories should be merged into larger ones."""
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         categories = {e["category"] for e in CONFIG_SCHEMA.values()}
         # These should be merged away
         assert "privacy" not in categories  # merged into security
@@ -3859,7 +4719,7 @@ class TestBuildSchemaFromConfig:
 
     def test_no_single_field_categories(self):
         """After merging, no category should have just 1 field."""
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         from collections import Counter
         cats = Counter(e["category"] for e in CONFIG_SCHEMA.values())
         for cat, count in cats.items():
@@ -3880,7 +4740,7 @@ class TestConfigRoundTrip:
             from starlette.testclient import TestClient
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
@@ -3898,7 +4758,7 @@ class TestConfigRoundTrip:
 
     def test_round_trip_preserves_model_subkeys(self):
         """Save and reload should not lose model.provider, model.base_url, etc."""
-        from hades_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_config
 
         # Set up a config with model as a dict (the common user config form)
         save_config({
@@ -3927,7 +4787,7 @@ class TestConfigRoundTrip:
 
     def test_edit_model_name_preserved(self):
         """Changing the model string should update model.default on disk."""
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         web_config = self.client.get("/api/config").json()
         original_model = web_config["model"]
@@ -3948,7 +4808,7 @@ class TestConfigRoundTrip:
 
     def test_edit_nested_value(self):
         """Editing a nested config value should persist correctly."""
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         web_config = self.client.get("/api/config").json()
         original_turns = web_config.get("agent", {}).get("max_turns")
@@ -3972,7 +4832,7 @@ class TestConfigRoundTrip:
         frontend never sends it in PUT bodies. Saving must still preserve
         it on disk — otherwise every dashboard click that saves silently
         wipes the user's custom endpoints."""
-        from hades_cli.config import load_config, save_config
+        from hermes_cli.config import load_config, save_config
 
         save_config({
             "model": {"default": "test/model", "provider": "custom:myprov"},
@@ -4006,7 +4866,7 @@ class TestConfigRoundTrip:
         round-trip. Deep-merge is required — a shallow merge would drop
         ``agent.<custom_key>`` when the frontend sends a partial ``agent``
         dict containing only schema-known sub-fields."""
-        from hades_cli.config import load_config, read_raw_config, save_config
+        from hermes_cli.config import load_config, read_raw_config, save_config
 
         # Seed config with a key under `agent` that isn't in the schema.
         # Use a sentinel name to avoid colliding with future schema fields.
@@ -4082,11 +4942,11 @@ class TestNewEndpoints:
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        import hades_state
-        from hades_constants import get_hades_home
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        import hermes_state
+        from hermes_constants import get_hermes_home
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
 
-        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hades_home() / "state.db")
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db")
 
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
@@ -4151,8 +5011,8 @@ class TestNewEndpoints:
     # --- Profiles ---
 
     def test_profiles_list_includes_default(self):
-        from hades_constants import get_hades_home
-        get_hades_home().mkdir(parents=True, exist_ok=True)
+        from hermes_constants import get_hermes_home
+        get_hermes_home().mkdir(parents=True, exist_ok=True)
 
         resp = self.client.get("/api/profiles")
         assert resp.status_code == 200
@@ -4160,10 +5020,10 @@ class TestNewEndpoints:
         assert "default" in names
 
     def test_profiles_list_falls_back_when_profile_listing_fails(self, monkeypatch):
-        from hades_constants import get_hades_home
-        import hades_cli.profiles as profiles_mod
+        from hermes_constants import get_hermes_home
+        import hermes_cli.profiles as profiles_mod
 
-        hermes_home = get_hades_home()
+        hermes_home = get_hermes_home()
         hermes_home.mkdir(parents=True, exist_ok=True)
         (hermes_home / "config.yaml").write_text(
             "model:\n  provider: openrouter\n  name: anthropic/claude-sonnet-4.6\n",
@@ -4193,7 +5053,7 @@ class TestNewEndpoints:
     def test_profiles_create_rename_delete_round_trip(self, monkeypatch):
         # Stub gateway service teardown so the test doesn't shell out to
         # launchctl/systemctl on the host.
-        import hades_cli.profiles as profiles_mod
+        import hermes_cli.profiles as profiles_mod
         monkeypatch.setattr(profiles_mod, "_cleanup_gateway_service", lambda *a, **kw: None)
 
         created = self.client.post("/api/profiles", json={"name": "test-prof"})
@@ -4215,9 +5075,9 @@ class TestNewEndpoints:
         assert "test-prof-2" not in names
 
     def test_profile_setup_command_uses_named_profile_wrapper(self):
-        from hades_constants import get_hades_home
+        from hermes_constants import get_hermes_home
 
-        (get_hades_home() / "profiles" / "coder").mkdir(parents=True)
+        (get_hermes_home() / "profiles" / "coder").mkdir(parents=True)
 
         resp = self.client.get("/api/profiles/coder/setup-command")
 
@@ -4225,9 +5085,9 @@ class TestNewEndpoints:
         assert resp.json()["command"] == "coder setup"
 
     def test_profile_setup_command_uses_hermes_for_default_profile(self):
-        from hades_constants import get_hades_home
+        from hermes_constants import get_hermes_home
 
-        get_hades_home().mkdir(parents=True, exist_ok=True)
+        get_hermes_home().mkdir(parents=True, exist_ok=True)
 
         resp = self.client.get("/api/profiles/default/setup-command")
 
@@ -4235,12 +5095,12 @@ class TestNewEndpoints:
         assert resp.json()["command"] == "hermes setup"
 
     def test_profiles_create_creates_wrapper_alias_when_safe(self, monkeypatch, tmp_path):
-        import hades_cli.profiles as profiles_mod
+        import hermes_cli.profiles as profiles_mod
 
         wrapper_dir = tmp_path / "bin"
         wrapper_dir.mkdir()
         monkeypatch.setattr(profiles_mod, "_get_wrapper_dir", lambda: wrapper_dir)
-        monkeypatch.setattr(profiles_mod.shutil, "which", lambda name: "/opt/hades/bin/hermes")
+        monkeypatch.setattr(profiles_mod.shutil, "which", lambda name: "/opt/hermes/bin/hermes")
 
         resp = self.client.post(
             "/api/profiles",
@@ -4255,18 +5115,18 @@ class TestNewEndpoints:
         if is_windows:
             assert lines == ["@echo off", "hermes -p writer %*"]
         else:
-            assert lines == ["#!/bin/sh", 'exec /opt/hades/bin/hermes -p writer "$@"']
+            assert lines == ["#!/bin/sh", 'exec /opt/hermes/bin/hermes -p writer "$@"']
 
     def test_profiles_create_with_clone_from_copies_source_skills(self, monkeypatch):
-        from hades_constants import get_hades_home
-        import hades_cli.profiles as profiles_mod
+        from hermes_constants import get_hermes_home
+        import hermes_cli.profiles as profiles_mod
 
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
-        (get_hades_home() / "config.yaml").write_text(
+        (get_hermes_home() / "config.yaml").write_text(
             "model:\n  provider: openrouter\n",
             encoding="utf-8",
         )
-        default_skill = get_hades_home() / "skills" / "custom" / "new-skill"
+        default_skill = get_hermes_home() / "skills" / "custom" / "new-skill"
         default_skill.mkdir(parents=True)
         (default_skill / "SKILL.md").write_text("---\nname: new-skill\n---\n", encoding="utf-8")
 
@@ -4276,7 +5136,7 @@ class TestNewEndpoints:
         )
 
         assert resp.status_code == 200
-        cloned_root = get_hades_home() / "profiles" / "cloned"
+        cloned_root = get_hermes_home() / "profiles" / "cloned"
         cloned_skill = cloned_root / "skills" / "custom" / "new-skill" / "SKILL.md"
         assert cloned_skill.exists()
         cloned_config = yaml.safe_load((cloned_root / "config.yaml").read_text(encoding="utf-8"))
@@ -4285,14 +5145,14 @@ class TestNewEndpoints:
         assert profiles["cloned"]["skill_count"] == 1
 
     def test_profiles_create_with_clone_from_duplicates_source(self, monkeypatch):
-        from hades_constants import get_hades_home
-        import hades_cli.profiles as profiles_mod
+        from hermes_constants import get_hermes_home
+        import hermes_cli.profiles as profiles_mod
 
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
         # Create a source profile and give it a distinctive skill.
         assert self.client.post("/api/profiles", json={"name": "source-prof"}).status_code == 200
-        source_skill = get_hades_home() / "profiles" / "source-prof" / "skills" / "custom" / "src-skill"
+        source_skill = get_hermes_home() / "profiles" / "source-prof" / "skills" / "custom" / "src-skill"
         source_skill.mkdir(parents=True)
         (source_skill / "SKILL.md").write_text("---\nname: src-skill\n---\n", encoding="utf-8")
 
@@ -4304,18 +5164,18 @@ class TestNewEndpoints:
 
         assert resp.status_code == 200
         cloned_skill = (
-            get_hades_home() / "profiles" / "source-prof-copy" / "skills" / "custom" / "src-skill" / "SKILL.md"
+            get_hermes_home() / "profiles" / "source-prof-copy" / "skills" / "custom" / "src-skill" / "SKILL.md"
         )
         assert cloned_skill.exists()
 
     def test_profiles_create_clone_all_from_named_source(self, monkeypatch):
-        from hades_constants import get_hades_home
-        import hades_cli.profiles as profiles_mod
+        from hermes_constants import get_hermes_home
+        import hermes_cli.profiles as profiles_mod
 
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
         assert self.client.post("/api/profiles", json={"name": "full-src"}).status_code == 200
-        source_dir = get_hades_home() / "profiles" / "full-src"
+        source_dir = get_hermes_home() / "profiles" / "full-src"
         (source_dir / "config.yaml").write_text("model:\n  provider: source-only\n", encoding="utf-8")
         (source_dir / "workspace" / "artifact.txt").parent.mkdir(parents=True, exist_ok=True)
         (source_dir / "workspace" / "artifact.txt").write_text("copied", encoding="utf-8")
@@ -4326,13 +5186,13 @@ class TestNewEndpoints:
         )
 
         assert resp.status_code == 200
-        target_dir = get_hades_home() / "profiles" / "full-copy"
+        target_dir = get_hermes_home() / "profiles" / "full-copy"
         assert (target_dir / "config.yaml").read_text(encoding="utf-8") == "model:\n  provider: source-only\n"
         assert (target_dir / "workspace" / "artifact.txt").read_text(encoding="utf-8") == "copied"
 
     def test_profiles_create_without_clone_seeds_bundled_skills(self, monkeypatch):
-        from hades_constants import get_hades_home
-        import hades_cli.profiles as profiles_mod
+        from hermes_constants import get_hermes_home
+        import hermes_cli.profiles as profiles_mod
 
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
@@ -4350,7 +5210,7 @@ class TestNewEndpoints:
         )
 
         assert resp.status_code == 200
-        seeded_skill = get_hades_home() / "profiles" / "fresh" / "skills" / "software-development" / "plan" / "SKILL.md"
+        seeded_skill = get_hermes_home() / "profiles" / "fresh" / "skills" / "software-development" / "plan" / "SKILL.md"
         assert seeded_skill.exists()
         profiles = {p["name"]: p for p in self.client.get("/api/profiles").json()["profiles"]}
         assert profiles["fresh"]["skill_count"] == 1
@@ -4359,15 +5219,15 @@ class TestNewEndpoints:
         """Profile-builder create: model + MCP servers + keep-skills selection
         all land in the NEW profile's config, and hub installs are spawned
         scoped to that profile via ``-p <name>``."""
-        from hades_constants import (
-            get_hades_home,
-            set_hades_home_override,
-            reset_hades_home_override,
+        from hermes_constants import (
+            get_hermes_home,
+            set_hermes_home_override,
+            reset_hermes_home_override,
         )
-        from hades_cli.config import load_config
-        from hades_cli.skills_config import get_disabled_skills
-        import hades_cli.profiles as profiles_mod
-        import hades_cli.web_server as web_server
+        from hermes_cli.config import load_config
+        from hermes_cli.skills_config import get_disabled_skills
+        import hermes_cli.profiles as profiles_mod
+        import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
@@ -4424,8 +5284,8 @@ class TestNewEndpoints:
         ]
 
         # Verify the writes landed in the NEW profile's config, not the root.
-        prof_dir = get_hades_home() / "profiles" / "builder"
-        token = set_hades_home_override(str(prof_dir))
+        prof_dir = get_hermes_home() / "profiles" / "builder"
+        token = set_hermes_home_override(str(prof_dir))
         try:
             cfg = load_config()
             assert cfg["model"]["default"] == "anthropic/claude-sonnet-4.6"
@@ -4435,13 +5295,13 @@ class TestNewEndpoints:
             assert "drop-me" in disabled
             assert "keep-me" not in disabled
         finally:
-            reset_hades_home_override(token)
+            reset_hermes_home_override(token)
 
     def test_profiles_create_builder_mcp_auth_is_profile_scoped(
         self, monkeypatch
     ):
-        from hades_constants import get_hades_home
-        import hades_cli.profiles as profiles_mod
+        from hermes_constants import get_hermes_home
+        import hermes_cli.profiles as profiles_mod
 
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
@@ -4485,7 +5345,7 @@ class TestNewEndpoints:
         assert resp.status_code == 200
         assert resp.json()["mcp_written"] == 3
 
-        root = get_hades_home()
+        root = get_hermes_home()
         profile_dir = root / "profiles" / "builder-auth"
         config_text = (profile_dir / "config.yaml").read_text(encoding="utf-8")
         config = yaml.safe_load(config_text)
@@ -4519,10 +5379,10 @@ class TestNewEndpoints:
         assert not (root / ".env").exists()
 
     def test_profile_open_terminal_uses_macos_terminal(self, monkeypatch):
-        from hades_constants import get_hades_home
-        import hades_cli.web_server as web_server
+        from hermes_constants import get_hermes_home
+        import hermes_cli.web_server as web_server
 
-        (get_hades_home() / "profiles" / "coder").mkdir(parents=True)
+        (get_hermes_home() / "profiles" / "coder").mkdir(parents=True)
         calls = []
         monkeypatch.setattr(web_server.sys, "platform", "darwin")
         monkeypatch.setattr(web_server.subprocess, "Popen", lambda args, **kwargs: calls.append(args))
@@ -4535,10 +5395,10 @@ class TestNewEndpoints:
         assert "coder setup" in " ".join(calls[0])
 
     def test_profile_open_terminal_uses_windows_cmd(self, monkeypatch):
-        from hades_constants import get_hades_home
-        import hades_cli.web_server as web_server
+        from hermes_constants import get_hermes_home
+        import hermes_cli.web_server as web_server
 
-        (get_hades_home() / "profiles" / "coder").mkdir(parents=True)
+        (get_hermes_home() / "profiles" / "coder").mkdir(parents=True)
         calls = []
         monkeypatch.setattr(web_server.sys, "platform", "win32")
         monkeypatch.setattr(web_server.subprocess, "Popen", lambda args, **kwargs: calls.append(args))
@@ -4563,7 +5423,7 @@ class TestNewEndpoints:
         assert resp.status_code == 404
 
     def test_profile_soul_round_trip(self, monkeypatch):
-        import hades_cli.profiles as profiles_mod
+        import hermes_cli.profiles as profiles_mod
         monkeypatch.setattr(profiles_mod, "_cleanup_gateway_service", lambda *a, **kw: None)
 
         self.client.post("/api/profiles", json={"name": "soul-prof"})
@@ -4589,8 +5449,8 @@ class TestNewEndpoints:
     # --- New profiles endpoints: active / description / model / describe-auto ---
 
     def test_profiles_active_defaults(self):
-        from hades_constants import get_hades_home
-        get_hades_home().mkdir(parents=True, exist_ok=True)
+        from hermes_constants import get_hermes_home
+        get_hermes_home().mkdir(parents=True, exist_ok=True)
 
         resp = self.client.get("/api/profiles/active")
         assert resp.status_code == 200
@@ -4599,7 +5459,7 @@ class TestNewEndpoints:
         assert data["current"] == "default"
 
     def test_profiles_set_active_round_trip(self, monkeypatch):
-        import hades_cli.profiles as profiles_mod
+        import hermes_cli.profiles as profiles_mod
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
         self.client.post("/api/profiles", json={"name": "router"})
@@ -4614,7 +5474,7 @@ class TestNewEndpoints:
         assert resp.status_code == 404
 
     def test_profile_description_round_trip(self, monkeypatch):
-        import hades_cli.profiles as profiles_mod
+        import hermes_cli.profiles as profiles_mod
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
         self.client.post("/api/profiles", json={"name": "desc-prof"})
@@ -4639,8 +5499,8 @@ class TestNewEndpoints:
         assert resp.status_code == 404
 
     def test_profile_model_round_trip(self, monkeypatch):
-        from hades_constants import get_hades_home
-        import hades_cli.profiles as profiles_mod
+        from hermes_constants import get_hermes_home
+        import hermes_cli.profiles as profiles_mod
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
         self.client.post("/api/profiles", json={"name": "model-prof"})
@@ -4653,13 +5513,13 @@ class TestNewEndpoints:
         assert resp.json()["provider"] == "openrouter"
 
         import yaml
-        cfg_path = get_hades_home() / "profiles" / "model-prof" / "config.yaml"
+        cfg_path = get_hermes_home() / "profiles" / "model-prof" / "config.yaml"
         cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
         assert cfg["model"]["provider"] == "openrouter"
         assert cfg["model"]["default"] == "anthropic/claude-sonnet-4.6"
 
     def test_profile_model_requires_provider_and_model(self, monkeypatch):
-        import hades_cli.profiles as profiles_mod
+        import hermes_cli.profiles as profiles_mod
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
         self.client.post("/api/profiles", json={"name": "model-prof2"})
@@ -4670,12 +5530,12 @@ class TestNewEndpoints:
         assert resp.status_code == 400
 
     def test_profile_describe_auto_success(self, monkeypatch):
-        import hades_cli.profiles as profiles_mod
+        import hermes_cli.profiles as profiles_mod
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
         self.client.post("/api/profiles", json={"name": "auto-prof"})
 
-        from hades_cli import profile_describer
+        from hermes_cli import profile_describer
         monkeypatch.setattr(
             profile_describer,
             "describe_profile",
@@ -4692,12 +5552,12 @@ class TestNewEndpoints:
         assert body["description_auto"] is True
 
     def test_profile_describe_auto_failure_is_not_auto(self, monkeypatch):
-        import hades_cli.profiles as profiles_mod
+        import hermes_cli.profiles as profiles_mod
         monkeypatch.setattr(profiles_mod, "create_wrapper_script", lambda name: None)
 
         self.client.post("/api/profiles", json={"name": "auto-fail"})
 
-        from hades_cli import profile_describer
+        from hermes_cli import profile_describer
         monkeypatch.setattr(
             profile_describer,
             "describe_profile",
@@ -4723,8 +5583,8 @@ class TestNewEndpoints:
 
     def test_skills_list_includes_disabled_skills(self, monkeypatch):
         import tools.skills_tool as skills_tool
-        import hades_cli.skills_config as skills_config
-        import hades_cli.web_server as web_server
+        import hermes_cli.skills_config as skills_config
+        import hermes_cli.web_server as web_server
 
         def _fake_find_all_skills(*, skip_disabled=False):
             if skip_disabled:
@@ -4773,9 +5633,9 @@ class TestNewEndpoints:
             assert "enabled" in toolsets[0]
 
     def test_toolsets_list_matches_cli_enabled_state(self, monkeypatch):
-        import hades_cli.tools_config as tools_config
+        import hermes_cli.tools_config as tools_config
         import toolsets as toolsets_module
-        import hades_cli.web_server as web_server
+        import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(
             tools_config,
@@ -4869,7 +5729,7 @@ class TestNewEndpoints:
 
     def test_discord_toolsets_read_and_write_discord_platform(self):
         """Platform-restricted toolsets must not be saved as successful CLI no-ops."""
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
 
         listing = {t["name"]: t for t in self.client.get("/api/tools/toolsets").json()}
         assert listing["discord"]["platform"] == "discord"
@@ -4940,6 +5800,76 @@ class TestNewEndpoints:
         else:
             assert data["active_provider"] is None
 
+    def test_get_toolset_config_reports_truthful_provider_status(self, monkeypatch):
+        """Each provider row carries a server-computed readiness `status`.
+
+        Regression: the GUI pilled every zero-env-var row "Ready" — including
+        logged-out Nous Subscription rows, xAI TTS without Grok OAuth, and
+        never-installed KittenTTS/Piper. The endpoint now reports the honest
+        state so keyless ≠ ready.
+        """
+        import hermes_cli.tools_config as tools_config
+        from hermes_cli.nous_account import NousPortalAccountInfo
+
+        # Logged out of Nous Portal → managed subscription rows need sign-in.
+        monkeypatch.setattr(
+            "hermes_cli.nous_subscription.get_nous_portal_account_info",
+            lambda *a, **k: NousPortalAccountInfo(
+                logged_in=False, source="none", fresh=False, paid_service_access=None
+            ),
+        )
+        # No xAI credentials → the Grok OAuth-backed row needs sign-in.
+        monkeypatch.setattr(tools_config, "_xai_credentials_present", lambda: False)
+        # Local TTS engines not installed → their rows need setup.
+        monkeypatch.setattr(tools_config, "_module_installed", lambda name: False)
+        monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+
+        resp = self.client.get("/api/tools/toolsets/tts/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        by_name = {p["name"]: p for p in data["providers"]}
+
+        valid = {"ready", "needs_keys", "needs_auth", "needs_setup"}
+        assert all(p["status"] in valid for p in data["providers"])
+        # Genuinely-free keyless row stays Ready.
+        assert by_name["Microsoft Edge TTS"]["status"] == "ready"
+        # Keyless ≠ ready for gated rows:
+        assert by_name["Nous Subscription"]["status"] == "needs_auth"
+        assert by_name["xAI TTS"]["status"] == "needs_auth"
+        assert by_name["KittenTTS"]["status"] == "needs_setup"
+        assert by_name["Piper"]["status"] == "needs_setup"
+        # Keyed row with the key unset:
+        assert by_name["ElevenLabs"]["status"] == "needs_keys"
+
+    def test_get_toolset_config_status_ready_when_key_set(self, monkeypatch):
+        """A keyed provider flips to status=ready once its env var is set."""
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-test")
+
+        resp = self.client.get("/api/tools/toolsets/tts/config")
+        assert resp.status_code == 200
+        by_name = {p["name"]: p for p in resp.json()["providers"]}
+        assert by_name["ElevenLabs"]["status"] == "ready"
+
+    def test_get_toolset_config_tts_rows_carry_provider_key(self):
+        """TTS provider rows surface their tts_provider config key.
+
+        The desktop Capabilities panel renders the provider's voice/model
+        config fields (tts.<key>.*) inline; without the key it can only show
+        API keys. Every built-in TTS row declares one.
+        """
+        resp = self.client.get("/api/tools/toolsets/tts/config")
+        assert resp.status_code == 200
+        providers = resp.json()["providers"]
+        assert providers
+        for prov in providers:
+            assert prov.get("tts_provider"), f"row {prov['name']!r} missing tts_provider"
+        by_name = {p["name"]: p for p in providers}
+        assert by_name["OpenAI TTS"]["tts_provider"] == "openai"
+        assert by_name["Microsoft Edge TTS"]["tts_provider"] == "edge"
+        # Non-TTS toolsets must not grow the field.
+        web = self.client.get("/api/tools/toolsets/web/config").json()
+        assert all("tts_provider" not in p for p in web["providers"])
+
     def test_get_toolset_config_reflects_selected_provider(self):
         """Selecting a provider is reflected in the next /config read.
 
@@ -4989,7 +5919,7 @@ class TestNewEndpoints:
         assert body["name"] == "web"
         assert body["provider"] == "Firecrawl Self-Hosted"
 
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
         cfg = load_config()
         assert cfg["web"]["backend"] == "firecrawl"
 
@@ -5000,12 +5930,347 @@ class TestNewEndpoints:
         )
         assert resp.status_code == 400
 
+    def test_select_managed_nous_provider_reports_needs_nous_auth(self, monkeypatch):
+        """Selecting a managed Nous row while logged out flags needs_nous_auth.
+
+        Regression: the GUI PUT wrote browser.cloud_provider + use_gateway
+        but skipped the Portal entitlement handshake the CLI runs inline
+        (ensure_nous_portal_access) — so the row never activated and nothing
+        told the user to sign in. The endpoint now reports the entitlement
+        gap so the client can drive the existing Nous OAuth flow.
+        """
+        from hermes_cli.nous_account import NousPortalAccountInfo
+
+        monkeypatch.setattr(
+            "hermes_cli.nous_subscription.get_nous_portal_account_info",
+            lambda *a, **k: NousPortalAccountInfo(
+                logged_in=False, source="none", fresh=False, paid_service_access=None
+            ),
+        )
+
+        resp = self.client.put(
+            "/api/tools/toolsets/browser/provider",
+            json={"provider": "Nous Subscription (Browser Use cloud)"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["needs_nous_auth"] is True
+        assert data["feature"] == "browser"
+        # The selection is still persisted — activation is what's gated.
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        assert cfg["browser"]["cloud_provider"] == "browser-use"
+
+    def test_select_managed_nous_provider_entitled_no_auth_flag(self, monkeypatch):
+        """A signed-in, entitled subscriber gets no needs_nous_auth field."""
+        from hermes_cli.nous_account import NousPortalAccountInfo
+
+        monkeypatch.setattr(
+            "hermes_cli.nous_subscription.get_nous_portal_account_info",
+            lambda *a, **k: NousPortalAccountInfo(
+                logged_in=True, source="jwt", fresh=True, paid_service_access=True
+            ),
+        )
+
+        resp = self.client.put(
+            "/api/tools/toolsets/browser/provider",
+            json={"provider": "Nous Subscription (Browser Use cloud)"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert "needs_nous_auth" not in data
+
+    def test_select_unmanaged_provider_has_no_nous_auth_field(self):
+        """Non-managed rows never carry the entitlement fields."""
+        resp = self.client.put(
+            "/api/tools/toolsets/web/provider",
+            json={"provider": "Firecrawl Self-Hosted"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert "needs_nous_auth" not in data
+        assert "feature" not in data
+
     def test_select_toolset_provider_unknown_toolset_returns_400(self):
         resp = self.client.put(
             "/api/tools/toolsets/not_a_real_toolset/provider",
             json={"provider": "whatever"},
         )
         assert resp.status_code == 400
+
+    # -- Web capability split (search vs extract backends) ------------------
+
+    def test_web_config_reports_per_capability_backends(self):
+        """GET web/config carries the resolved search/extract backends.
+
+        The runtime resolves web_search and web_extract independently
+        (web.search_backend / web.extract_backend → web.backend → auto-detect);
+        the config payload must surface both so the GUI can show which backend
+        each capability actually hits.
+        """
+        resp = self.client.get("/api/tools/toolsets/web/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "active_search_backend" in data
+        assert "active_extract_backend" in data
+        # Provider rows carry their backend key + supported capabilities so
+        # the GUI can hide "Use for Extract" on search-only rows.
+        rows_with_backend = [p for p in data["providers"] if p.get("web_backend")]
+        assert rows_with_backend, "expected at least one provider with a web backend key"
+        for prov in rows_with_backend:
+            assert isinstance(prov["capabilities"], list)
+            assert set(prov["capabilities"]) <= {"search", "extract"}
+            assert prov["capabilities"], "a web provider must support at least one capability"
+
+    def test_web_capability_fields_only_on_web_toolset(self):
+        resp = self.client.get("/api/tools/toolsets/tts/config")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "active_search_backend" not in data
+        assert "active_extract_backend" not in data
+
+    def test_select_web_search_backend_matches_runtime_resolution(self, monkeypatch):
+        """PUT provider with capability=search writes web.search_backend and the
+        runtime search dispatcher resolves to it — while extract is untouched."""
+        # Make SearXNG available so both the endpoint gate and the runtime
+        # availability check agree it's usable.
+        monkeypatch.setenv("SEARXNG_URL", "http://localhost:8888")
+        # Give extract an explicit shared backend so the assertion isn't
+        # hostage to whatever creds exist on the machine running the tests.
+        monkeypatch.setenv("FIRECRAWL_API_URL", "http://localhost:3002")
+        base = self.client.put(
+            "/api/tools/toolsets/web/provider",
+            json={"provider": "Firecrawl Self-Hosted"},
+        )
+        assert base.status_code == 200
+
+        resp = self.client.put(
+            "/api/tools/toolsets/web/provider",
+            json={"provider": "SearXNG", "capability": "search"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["capability"] == "search"
+
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        assert cfg["web"]["search_backend"] == "searxng"
+        # The shared backend selected first must be preserved for extract.
+        assert cfg["web"]["backend"] == "firecrawl"
+
+        # The REAL runtime resolution — not a parallel reimplementation.
+        from tools.web_tools import _get_extract_backend, _get_search_backend
+        assert _get_search_backend() == "searxng"
+        assert _get_extract_backend() == "firecrawl"
+
+        # And the config endpoint reports the same split.
+        data = self.client.get("/api/tools/toolsets/web/config").json()
+        assert data["active_search_backend"] == "searxng"
+        assert data["active_extract_backend"] == "firecrawl"
+
+    def test_select_web_extract_backend_writes_extract_key(self, monkeypatch):
+        monkeypatch.setenv("FIRECRAWL_API_URL", "http://localhost:3002")
+        resp = self.client.put(
+            "/api/tools/toolsets/web/provider",
+            json={"provider": "Firecrawl Self-Hosted", "capability": "extract"},
+        )
+        assert resp.status_code == 200
+
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        assert cfg["web"]["extract_backend"] == "firecrawl"
+        # Whole-provider/search keys untouched by a capability-scoped write
+        # (the default config seeds them as empty strings).
+        assert not cfg["web"].get("search_backend")
+
+        from tools.web_tools import _get_extract_backend
+        assert _get_extract_backend() == "firecrawl"
+
+    def test_select_web_capability_rejects_unsupported_capability(self):
+        """A search-only provider (ddgs) can't be set as the extract backend."""
+        resp = self.client.put(
+            "/api/tools/toolsets/web/provider",
+            json={"provider": "DuckDuckGo (ddgs)", "capability": "extract"},
+        )
+        assert resp.status_code == 400
+        assert "does not support extract" in resp.json()["detail"]
+
+    def test_select_web_capability_rejects_bad_values(self):
+        resp = self.client.put(
+            "/api/tools/toolsets/web/provider",
+            json={"provider": "Firecrawl Self-Hosted", "capability": "browse"},
+        )
+        assert resp.status_code == 400
+
+        # capability is a web-only concept.
+        resp = self.client.put(
+            "/api/tools/toolsets/tts/provider",
+            json={"provider": "Microsoft Edge TTS", "capability": "search"},
+        )
+        assert resp.status_code == 400
+
+    # -- Terminal execution backend picker ---------------------------------
+
+    def test_get_terminal_backends_shape_and_local_ready(self, monkeypatch):
+        """GET .../backends returns one row per backend; local is always ready."""
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server.shutil, "which", lambda name: None)
+
+        resp = self.client.get("/api/tools/terminal/backends")
+        assert resp.status_code == 200
+        body = resp.json()
+        names = [row["name"] for row in body["backends"]]
+        assert names == ["local", "docker", "singularity", "modal", "daytona", "ssh"]
+        assert body["active"] in set(names)
+        for row in body["backends"]:
+            assert row["status"] in {"ready", "needs_setup", "unavailable"}
+            assert isinstance(row["label"], str) and row["label"]
+            assert isinstance(row["description"], str)
+            assert isinstance(row["detail"], str)
+            assert isinstance(row["active"], bool)
+        local = body["backends"][0]
+        assert local["status"] == "ready"
+        # Exactly one backend is flagged active, matching the summary field.
+        active_rows = [r["name"] for r in body["backends"] if r["active"]]
+        assert active_rows == [body["active"]]
+
+    def test_terminal_docker_probe_missing_cli(self, monkeypatch):
+        """No docker binary on PATH -> needs_setup with install guidance."""
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server.shutil, "which", lambda name: None)
+
+        body = self.client.get("/api/tools/terminal/backends").json()
+        docker = next(r for r in body["backends"] if r["name"] == "docker")
+        assert docker["status"] == "needs_setup"
+        assert "not found" in docker["detail"]
+
+    def test_terminal_docker_probe_daemon_down(self, monkeypatch):
+        """docker CLI present but daemon unreachable -> needs_setup."""
+        import subprocess as subprocess_mod
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(
+            web_server.shutil,
+            "which",
+            lambda name: "/usr/bin/docker" if name == "docker" else None,
+        )
+        monkeypatch.setattr(
+            web_server.subprocess,
+            "run",
+            lambda cmd, **kw: subprocess_mod.CompletedProcess(cmd, 1, stdout="", stderr="daemon down"),
+        )
+
+        body = self.client.get("/api/tools/terminal/backends").json()
+        docker = next(r for r in body["backends"] if r["name"] == "docker")
+        assert docker["status"] == "needs_setup"
+        assert "daemon" in docker["detail"].lower()
+
+    def test_terminal_docker_probe_daemon_ready(self, monkeypatch):
+        """docker CLI + reachable daemon -> ready."""
+        import subprocess as subprocess_mod
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(
+            web_server.shutil,
+            "which",
+            lambda name: "/usr/bin/docker" if name in {"docker", "singularity"} else None,
+        )
+        monkeypatch.setattr(
+            web_server.subprocess,
+            "run",
+            lambda cmd, **kw: subprocess_mod.CompletedProcess(cmd, 0, stdout="27.0\n", stderr=""),
+        )
+
+        body = self.client.get("/api/tools/terminal/backends").json()
+        rows = {r["name"]: r for r in body["backends"]}
+        assert rows["docker"]["status"] == "ready"
+        # singularity resolves via which() too
+        assert rows["singularity"]["status"] == "ready"
+
+    def test_terminal_probe_failure_is_a_status_not_a_500(self, monkeypatch):
+        """A probe that raises must surface as a status row, never an error."""
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(
+            web_server.shutil,
+            "which",
+            lambda name: "/usr/bin/docker" if name == "docker" else None,
+        )
+
+        def boom(cmd, **kw):
+            raise OSError("exec format error")
+
+        monkeypatch.setattr(web_server.subprocess, "run", boom)
+
+        resp = self.client.get("/api/tools/terminal/backends")
+        assert resp.status_code == 200
+        docker = next(r for r in resp.json()["backends"] if r["name"] == "docker")
+        assert docker["status"] == "unavailable"
+        assert "probe failed" in docker["detail"].lower()
+
+    def test_terminal_ssh_probe_reports_missing_keys(self, monkeypatch):
+        """SSH without host/user config lists the missing terminal.* keys."""
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server.shutil, "which", lambda name: None)
+
+        body = self.client.get("/api/tools/terminal/backends").json()
+        ssh = next(r for r in body["backends"] if r["name"] == "ssh")
+        assert ssh["status"] == "needs_setup"
+        assert "terminal.ssh_host" in ssh["detail"]
+
+    def test_terminal_ssh_probe_ready_when_configured(self, monkeypatch):
+        """SSH host + user in config.yaml -> ready."""
+        import hermes_cli.web_server as web_server
+        from hermes_cli.config import load_config, save_config
+
+        monkeypatch.setattr(web_server.shutil, "which", lambda name: None)
+        config = load_config()
+        config.setdefault("terminal", {})
+        config["terminal"]["ssh_host"] = "devbox.example.com"
+        config["terminal"]["ssh_user"] = "hermes"
+        save_config(config)
+
+        body = self.client.get("/api/tools/terminal/backends").json()
+        ssh = next(r for r in body["backends"] if r["name"] == "ssh")
+        assert ssh["status"] == "ready"
+        assert "hermes@devbox.example.com" in ssh["detail"]
+
+    def test_select_terminal_backend_persists_config(self, monkeypatch):
+        """PUT .../backend writes terminal.backend and the list reflects it."""
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server.shutil, "which", lambda name: None)
+
+        resp = self.client.put(
+            "/api/tools/terminal/backend", json={"backend": "docker"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "backend": "docker"}
+
+        from hermes_cli.config import load_config
+        assert load_config()["terminal"]["backend"] == "docker"
+
+        body = self.client.get("/api/tools/terminal/backends").json()
+        assert body["active"] == "docker"
+        docker = next(r for r in body["backends"] if r["name"] == "docker")
+        assert docker["active"] is True
+        # Selecting a needs-setup backend is allowed; the row still carries
+        # its guidance detail.
+        assert docker["status"] == "needs_setup"
+
+    def test_select_terminal_backend_unknown_returns_400(self):
+        resp = self.client.put(
+            "/api/tools/terminal/backend", json={"backend": "kubernetes"}
+        )
+        assert resp.status_code == 400
+        assert "Unknown terminal backend" in resp.json()["detail"]
 
     def test_get_toolset_models_no_catalog_toolset(self):
         """Toolsets without a model catalog report has_models: false."""
@@ -5051,7 +6316,7 @@ class TestNewEndpoints:
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
 
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
         cfg = load_config()
         assert cfg["image_gen"]["model"] == model_id
 
@@ -5124,7 +6389,7 @@ class TestNewEndpoints:
         ``billing_provider``. The Models dashboard should show one provider
         card, not a real card plus a misleading duplicate empty card.
         """
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -5167,7 +6432,7 @@ class TestNewEndpoints:
         assert row["avg_tokens_per_session"] == 13_550
 
     def test_analytics_usage_includes_skill_breakdown(self):
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -5244,7 +6509,7 @@ class TestModelContextLength:
 
     def test_normalize_extracts_context_length_from_dict(self):
         """normalize should surface context_length from model dict."""
-        from hades_cli.web_server import _normalize_config_for_web
+        from hermes_cli.web_server import _normalize_config_for_web
 
         cfg = {
             "model": {
@@ -5259,7 +6524,7 @@ class TestModelContextLength:
 
     def test_normalize_bare_string_model_yields_zero(self):
         """normalize should set model_context_length=0 for bare string model."""
-        from hades_cli.web_server import _normalize_config_for_web
+        from hermes_cli.web_server import _normalize_config_for_web
 
         result = _normalize_config_for_web({"model": "anthropic/claude-sonnet-4"})
         assert result["model"] == "anthropic/claude-sonnet-4"
@@ -5267,7 +6532,7 @@ class TestModelContextLength:
 
     def test_normalize_dict_without_context_length_yields_zero(self):
         """normalize should default to 0 when model dict has no context_length."""
-        from hades_cli.web_server import _normalize_config_for_web
+        from hermes_cli.web_server import _normalize_config_for_web
 
         cfg = {"model": {"default": "test/model", "provider": "openrouter"}}
         result = _normalize_config_for_web(cfg)
@@ -5275,7 +6540,7 @@ class TestModelContextLength:
 
     def test_normalize_non_int_context_length_yields_zero(self):
         """normalize should coerce non-int context_length to 0."""
-        from hades_cli.web_server import _normalize_config_for_web
+        from hermes_cli.web_server import _normalize_config_for_web
 
         cfg = {"model": {"default": "test/model", "context_length": "invalid"}}
         result = _normalize_config_for_web(cfg)
@@ -5283,8 +6548,8 @@ class TestModelContextLength:
 
     def test_denormalize_writes_context_length_into_model_dict(self):
         """denormalize should write model_context_length back into model dict."""
-        from hades_cli.web_server import _denormalize_config_from_web
-        from hades_cli.config import save_config
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
 
         # Set up disk config with model as a dict
         save_config({
@@ -5301,8 +6566,8 @@ class TestModelContextLength:
 
     def test_denormalize_zero_removes_context_length(self):
         """denormalize with model_context_length=0 should remove context_length key."""
-        from hades_cli.web_server import _denormalize_config_from_web
-        from hades_cli.config import save_config
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
 
         save_config({
             "model": {
@@ -5321,8 +6586,8 @@ class TestModelContextLength:
 
     def test_denormalize_upgrades_bare_string_to_dict(self):
         """denormalize should upgrade bare string model to dict when context_length set."""
-        from hades_cli.web_server import _denormalize_config_from_web
-        from hades_cli.config import save_config
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
 
         # Disk has model as bare string
         save_config({"model": "anthropic/claude-sonnet-4"})
@@ -5337,8 +6602,8 @@ class TestModelContextLength:
 
     def test_denormalize_bare_string_stays_string_when_zero(self):
         """denormalize should keep bare string model as string when context_length=0."""
-        from hades_cli.web_server import _denormalize_config_from_web
-        from hades_cli.config import save_config
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
 
         save_config({"model": "anthropic/claude-sonnet-4"})
 
@@ -5350,8 +6615,8 @@ class TestModelContextLength:
 
     def test_denormalize_coerces_string_context_length(self):
         """denormalize should handle string model_context_length from frontend."""
-        from hades_cli.web_server import _denormalize_config_from_web
-        from hades_cli.config import save_config
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
 
         save_config({
             "model": {"default": "test/model", "provider": "openrouter"}
@@ -5373,8 +6638,8 @@ class TestDenormalizeProviderSwitch:
     def test_vendor_slug_switches_off_non_aggregator_provider(self):
         """ollama-local + a vendor/model slug → switch to openrouter and drop
         the stale local base_url (the issue's exact repro)."""
-        from hades_cli.web_server import _denormalize_config_from_web
-        from hades_cli.config import save_config
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
 
         save_config({
             "model": {
@@ -5395,8 +6660,8 @@ class TestDenormalizeProviderSwitch:
     def test_unchanged_model_preserves_provider_and_base_url(self):
         """Saving with the model unchanged must never re-detect/overwrite the
         provider — protects unrelated config saves and custom endpoints."""
-        from hades_cli.web_server import _denormalize_config_from_web
-        from hades_cli.config import save_config
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
 
         save_config({
             "model": {
@@ -5414,8 +6679,8 @@ class TestDenormalizeProviderSwitch:
     def test_bare_model_name_change_keeps_local_provider(self):
         """A bare (non-slug) model name gives no provider signal — leave the
         existing provider alone rather than guessing."""
-        from hades_cli.web_server import _denormalize_config_from_web
-        from hades_cli.config import save_config
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
 
         save_config({
             "model": {
@@ -5432,8 +6697,8 @@ class TestDenormalizeProviderSwitch:
 
     def test_same_aggregator_model_swap_keeps_provider(self):
         """Swapping models within an aggregator must not change the provider."""
-        from hades_cli.web_server import _denormalize_config_from_web
-        from hades_cli.config import save_config
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
 
         save_config({
             "model": {"default": "anthropic/claude-opus-4.6", "provider": "openrouter"}
@@ -5447,8 +6712,8 @@ class TestDenormalizeProviderSwitch:
     def test_context_length_override_survives_provider_switch(self):
         """An explicit context-length override must persist alongside a
         provider switch."""
-        from hades_cli.web_server import _denormalize_config_from_web
-        from hades_cli.config import save_config
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
 
         save_config({"model": {"default": "llama3.2", "provider": "ollama-local"}})
 
@@ -5465,18 +6730,18 @@ class TestModelContextLengthSchema:
     """Tests for model_context_length placement in CONFIG_SCHEMA."""
 
     def test_schema_has_model_context_length(self):
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         assert "model_context_length" in CONFIG_SCHEMA
 
     def test_schema_model_context_length_after_model(self):
         """model_context_length should appear immediately after model in schema."""
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         keys = list(CONFIG_SCHEMA.keys())
         model_idx = keys.index("model")
         assert keys[model_idx + 1] == "model_context_length"
 
     def test_schema_model_context_length_is_number(self):
-        from hades_cli.web_server import CONFIG_SCHEMA
+        from hermes_cli.web_server import CONFIG_SCHEMA
         entry = CONFIG_SCHEMA["model_context_length"]
         assert entry["type"] == "number"
         assert "category" in entry
@@ -5491,7 +6756,7 @@ class TestModelInfoEndpoint:
             from starlette.testclient import TestClient
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
-        from hades_cli.web_server import app
+        from hermes_cli.web_server import app
         self.client = TestClient(app)
 
     def test_model_info_returns_200(self):
@@ -5506,7 +6771,7 @@ class TestModelInfoEndpoint:
         assert "capabilities" in data
 
     def test_model_info_with_dict_config(self, monkeypatch):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "load_config", lambda: {
             "model": {
@@ -5527,7 +6792,7 @@ class TestModelInfoEndpoint:
         assert data["effective_context_length"] == 100000  # override wins
 
     def test_model_info_auto_detect_when_no_override(self, monkeypatch):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "load_config", lambda: {
             "model": {"default": "anthropic/claude-opus-4.6", "provider": "openrouter"}
@@ -5542,7 +6807,7 @@ class TestModelInfoEndpoint:
         assert data["effective_context_length"] == 200000  # auto wins
 
     def test_model_info_empty_model(self, monkeypatch):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "load_config", lambda: {"model": ""})
 
@@ -5552,7 +6817,7 @@ class TestModelInfoEndpoint:
         assert data["effective_context_length"] == 0
 
     def test_model_info_bare_string_model(self, monkeypatch):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "load_config", lambda: {
             "model": "anthropic/claude-sonnet-4"
@@ -5568,7 +6833,7 @@ class TestModelInfoEndpoint:
         assert data["effective_context_length"] == 200000
 
     def test_model_info_capabilities(self, monkeypatch):
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "load_config", lambda: {
             "model": {"default": "anthropic/claude-opus-4.6", "provider": "openrouter"}
@@ -5595,7 +6860,7 @@ class TestModelInfoEndpoint:
 
     def test_model_info_graceful_on_metadata_error(self, monkeypatch):
         """Endpoint should return zeros on import/resolution errors, not 500."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "load_config", lambda: {
             "model": "some/obscure-model"
@@ -5619,15 +6884,35 @@ class TestProbeGatewayHealth:
 
     def test_returns_false_when_no_url_configured(self, monkeypatch):
         """When GATEWAY_HEALTH_URL is unset, the probe returns (False, None)."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", None)
         alive, body = ws._probe_gateway_health()
         assert alive is False
         assert body is None
 
+    def test_probe_uses_configured_short_timeout(self, monkeypatch):
+        """The HTTP probe must not fall through to the OS TCP timeout."""
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642")
+        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_TIMEOUT", 0.75)
+        timeouts = []
+
+        def mock_urlopen(req, **kwargs):
+            timeouts.append(kwargs.get("timeout"))
+            raise TimeoutError("mock timeout")
+
+        monkeypatch.setattr(ws.urllib.request, "urlopen", mock_urlopen)
+
+        alive, body = ws._probe_gateway_health()
+
+        assert alive is False
+        assert body is None
+        assert timeouts == [0.75, 0.75]
+
     def test_normalizes_url_with_health_suffix(self, monkeypatch):
         """If the user sets the URL to include /health, it's stripped to base."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642/health")
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_TIMEOUT", 1)
         # Both paths should fail (no server), but we verify they were constructed
@@ -5647,7 +6932,7 @@ class TestProbeGatewayHealth:
 
     def test_normalizes_url_with_health_detailed_suffix(self, monkeypatch):
         """If the user sets the URL to include /health/detailed, it's stripped to base."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642/health/detailed")
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_TIMEOUT", 1)
         calls = []
@@ -5663,7 +6948,7 @@ class TestProbeGatewayHealth:
 
     def test_successful_detailed_probe(self, monkeypatch):
         """Successful /health/detailed probe returns (True, body_dict)."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642")
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_TIMEOUT", 1)
 
@@ -5687,7 +6972,7 @@ class TestProbeGatewayHealth:
 
     def test_detailed_fails_falls_back_to_simple_health(self, monkeypatch):
         """If /health/detailed fails, falls back to /health."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642")
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_TIMEOUT", 1)
 
@@ -5721,13 +7006,13 @@ class TestStatusRemoteGateway:
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
     def test_status_falls_back_to_remote_probe(self, monkeypatch):
         """When local PID check fails and remote probe succeeds, gateway shows running."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
@@ -5747,9 +7032,32 @@ class TestStatusRemoteGateway:
         assert data["gateway_state"] == "running"
         assert data["gateway_health_url"] == "http://gw:8642"
 
+    def test_status_bounds_the_complete_remote_probe(self, monkeypatch):
+        """Two serial HTTP attempts cannot consume more than the route budget."""
+        import hermes_cli.web_server as ws
+
+        probe_started = threading.Event()
+
+        def slow_probe():
+            probe_started.set()
+            threading.Event().wait(timeout=0.1)
+            return True, {"status": "ok", "pid": 999}
+
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
+        monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
+        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642")
+        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_ROUTE_TIMEOUT", 0.02)
+        monkeypatch.setattr(ws, "_probe_gateway_health", slow_probe)
+
+        resp = self.client.get("/api/status")
+
+        assert probe_started.is_set()
+        assert resp.status_code == 200
+        assert resp.json()["gateway_running"] is False
+
     def test_status_remote_probe_not_attempted_when_local_pid_found(self, monkeypatch):
         """When local PID check succeeds, the remote probe is never called."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
@@ -5772,7 +7080,7 @@ class TestStatusRemoteGateway:
 
     def test_status_remote_probe_not_attempted_when_no_url(self, monkeypatch):
         """When GATEWAY_HEALTH_URL is unset, no probe is attempted."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
@@ -5786,7 +7094,7 @@ class TestStatusRemoteGateway:
 
     def test_status_remote_running_null_pid(self, monkeypatch):
         """Remote gateway running but PID not in response — pid should be None."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
@@ -5819,13 +7127,13 @@ class TestGatewayBusyReadout:
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
     def test_busy_when_running_with_active_agents(self, monkeypatch):
         """gateway_busy is True iff running AND active_agents > 0."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
@@ -5843,7 +7151,7 @@ class TestGatewayBusyReadout:
 
     def test_idle_running_is_drainable_but_not_busy(self, monkeypatch):
         """A running gateway with zero in-flight turns is drainable, not busy."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
@@ -5861,7 +7169,7 @@ class TestGatewayBusyReadout:
         """While draining, the gateway is not a fresh begin-drain target, and
         busy is False even with a stale active_agents>0 in the file — the state
         gate dominates."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
@@ -5877,7 +7185,7 @@ class TestGatewayBusyReadout:
     def test_down_gateway_degrades_to_safe_falsy(self, monkeypatch):
         """Gateway down (no PID, no remote probe): busy/drainable False,
         active_agents 0 — never a spurious busy that would wedge NAS."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
@@ -5893,7 +7201,7 @@ class TestGatewayBusyReadout:
         """A leftover status file claiming running + active_agents>0 must NOT
         read as busy when the live PID probe says the gateway is down. Liveness
         wins over the file."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
         monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", None)
@@ -5914,7 +7222,7 @@ class TestGatewayBusyReadout:
     def test_restart_drain_timeout_surfaced_and_numeric(self, monkeypatch):
         """restart_drain_timeout is present and resolves to a non-negative
         float so NAS can size its poll deadline without out-of-band knowledge."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
@@ -5932,7 +7240,7 @@ class TestGatewayBusyReadout:
     def test_active_agents_unparseable_in_file_degrades_to_zero(self, monkeypatch):
         """A corrupt active_agents value in the status file must not 500 or
         produce a spurious busy — it degrades to 0/not-busy."""
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
         monkeypatch.setattr(ws, "read_runtime_status", lambda: {
@@ -5946,6 +7254,155 @@ class TestGatewayBusyReadout:
         assert data["gateway_busy"] is False
 
 
+class TestGatewayUpdatedAtContract:
+    """Contract tests for /api/status ``gateway_updated_at``.
+
+    The field is promised to consumers (web/src/lib/api.ts declares
+    ``string | null``) as an RFC3339 timestamp or null — NEVER a number.
+    Legacy gateways wrote epoch floats into gateway_state.json and the file
+    is hand-editable, so the endpoint must normalize whatever it reads.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup_test_client(self):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        self.client = TestClient(app)
+        self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+
+    @staticmethod
+    def _assert_contract(value):
+        """gateway_updated_at is None or a tz-aware-parseable ISO string."""
+        from datetime import datetime
+
+        assert not isinstance(value, bool), f"bool leaked: {value!r}"
+        assert not isinstance(value, (int, float)), f"number leaked: {value!r}"
+        if value is not None:
+            assert isinstance(value, str)
+            parsed = datetime.fromisoformat(value)
+            assert parsed.tzinfo is not None, f"naive timestamp leaked: {value!r}"
+
+    @pytest.mark.parametrize("updated_at", [
+        1750000000.5,          # legacy epoch float
+        1750000000,            # legacy epoch int
+        "not-a-timestamp",     # garbage string
+        None,                  # explicit null
+        True,                  # bool (int subclass) garbage
+        {"nested": "junk"},    # structured garbage
+    ])
+    def test_local_runtime_updated_at_normalized(self, monkeypatch, updated_at):
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
+        monkeypatch.setattr(ws, "read_runtime_status", lambda: {
+            "gateway_state": "running",
+            "platforms": {},
+            "active_agents": 0,
+            "updated_at": updated_at,
+        })
+
+        resp = self.client.get("/api/status")
+        assert resp.status_code == 200
+        self._assert_contract(resp.json()["gateway_updated_at"])
+
+    def test_local_runtime_updated_at_absent(self, monkeypatch):
+        """Key missing entirely from the status file → null, not a crash."""
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
+        monkeypatch.setattr(ws, "read_runtime_status", lambda: {
+            "gateway_state": "running",
+            "platforms": {},
+            "active_agents": 0,
+        })
+
+        data = self.client.get("/api/status").json()
+        assert data["gateway_updated_at"] is None
+
+    def test_local_runtime_valid_epoch_becomes_iso_string(self, monkeypatch):
+        """A plausible legacy epoch value is converted, not dropped."""
+        from datetime import datetime, timezone
+        import hermes_cli.web_server as ws
+
+        epoch = 1750000000
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
+        monkeypatch.setattr(ws, "read_runtime_status", lambda: {
+            "gateway_state": "running",
+            "platforms": {},
+            "active_agents": 0,
+            "updated_at": epoch,
+        })
+
+        value = self.client.get("/api/status").json()["gateway_updated_at"]
+        assert isinstance(value, str)
+        parsed = datetime.fromisoformat(value)
+        assert parsed.tzinfo is not None
+        assert parsed == datetime.fromtimestamp(epoch, tz=timezone.utc)
+
+    def test_local_runtime_valid_iso_passes_through_parseable(self, monkeypatch):
+        """The canonical writer format survives normalization round-trip."""
+        from datetime import datetime
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: 1234)
+        monkeypatch.setattr(ws, "read_runtime_status", lambda: {
+            "gateway_state": "running",
+            "platforms": {},
+            "active_agents": 0,
+            "updated_at": "2026-07-21T12:00:00+00:00",
+        })
+
+        value = self.client.get("/api/status").json()["gateway_updated_at"]
+        assert isinstance(value, str)
+        assert datetime.fromisoformat(value).tzinfo is not None
+
+    def test_remote_health_numeric_updated_at_normalized(self, monkeypatch):
+        """Cross-container path: the remote /health/detailed body is the
+        runtime source, and a numeric updated_at from an older gateway build
+        must still come out as string|null."""
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
+        monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
+        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642")
+        monkeypatch.setattr(ws, "_probe_gateway_health", lambda: (True, {
+            "status": "ok",
+            "gateway_state": "running",
+            "platforms": {},
+            "updated_at": 1750000000.25,
+            "pid": 999,
+        }))
+
+        resp = self.client.get("/api/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["gateway_running"] is True
+        self._assert_contract(data["gateway_updated_at"])
+        # A plausible epoch is converted, not nulled.
+        assert isinstance(data["gateway_updated_at"], str)
+
+    def test_remote_health_garbage_updated_at_nulled(self, monkeypatch):
+        """Remote body with unparseable updated_at → null, never verbatim."""
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "get_running_pid_cached", lambda: None)
+        monkeypatch.setattr(ws, "read_runtime_status", lambda: None)
+        monkeypatch.setattr(ws, "_GATEWAY_HEALTH_URL", "http://gw:8642")
+        monkeypatch.setattr(ws, "_probe_gateway_health", lambda: (True, {
+            "status": "ok",
+            "gateway_state": "running",
+            "platforms": {},
+            "updated_at": "yesterday-ish",
+        }))
+
+        data = self.client.get("/api/status").json()
+        assert data["gateway_updated_at"] is None
+
+
 # ---------------------------------------------------------------------------
 # Dashboard theme normaliser tests
 # ---------------------------------------------------------------------------
@@ -5955,20 +7412,20 @@ class TestNormaliseThemeDefinition:
     """Tests for _normalise_theme_definition() — parses YAML theme files."""
 
     def test_rejects_missing_name(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         assert _normalise_theme_definition({}) is None
         assert _normalise_theme_definition({"name": ""}) is None
         assert _normalise_theme_definition({"name": "   "}) is None
 
     def test_rejects_non_dict(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         assert _normalise_theme_definition("string") is None
         assert _normalise_theme_definition(None) is None
         assert _normalise_theme_definition([1, 2, 3]) is None
 
     def test_loose_colors_shorthand(self):
         """Bare hex strings under `colors` parse as {hex, alpha=1.0}."""
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         result = _normalise_theme_definition({
             "name": "loose",
             "colors": {"background": "#000000", "midground": "#ffffff"},
@@ -5981,7 +7438,7 @@ class TestNormaliseThemeDefinition:
         assert result["palette"]["foreground"]["alpha"] == 0.0
 
     def test_full_palette_form(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         result = _normalise_theme_definition({
             "name": "full",
             "palette": {
@@ -5997,7 +7454,7 @@ class TestNormaliseThemeDefinition:
         assert result["palette"]["noiseOpacity"] == 0.5
 
     def test_default_typography_applied_when_missing(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         result = _normalise_theme_definition({"name": "minimal"})
         typo = result["typography"]
         assert "fontSans" in typo
@@ -6007,7 +7464,7 @@ class TestNormaliseThemeDefinition:
         assert typo["letterSpacing"] == "0"
 
     def test_partial_typography_merges_with_defaults(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         result = _normalise_theme_definition({
             "name": "partial",
             "typography": {
@@ -6021,13 +7478,13 @@ class TestNormaliseThemeDefinition:
         assert "monospace" in result["typography"]["fontMono"]
 
     def test_layout_defaults(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         result = _normalise_theme_definition({"name": "minimal"})
         assert result["layout"]["radius"] == "0.5rem"
         assert result["layout"]["density"] == "comfortable"
 
     def test_invalid_density_falls_back(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         result = _normalise_theme_definition({
             "name": "bad",
             "layout": {"density": "ultra-spacious"},
@@ -6035,13 +7492,13 @@ class TestNormaliseThemeDefinition:
         assert result["layout"]["density"] == "comfortable"
 
     def test_valid_densities_accepted(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         for d in ("compact", "comfortable", "spacious"):
             r = _normalise_theme_definition({"name": "x", "layout": {"density": d}})
             assert r["layout"]["density"] == d
 
     def test_color_overrides_filter_unknown_keys(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         result = _normalise_theme_definition({
             "name": "o",
             "colorOverrides": {
@@ -6057,12 +7514,12 @@ class TestNormaliseThemeDefinition:
         }
 
     def test_color_overrides_omitted_when_empty(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         result = _normalise_theme_definition({"name": "x"})
         assert "colorOverrides" not in result
 
     def test_alpha_clamped_to_unit_range(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         r = _normalise_theme_definition({
             "name": "c",
             "palette": {"background": {"hex": "#000", "alpha": 99.5}},
@@ -6075,7 +7532,7 @@ class TestNormaliseThemeDefinition:
         assert r2["palette"]["background"]["alpha"] == 0.0
 
     def test_invalid_alpha_uses_default(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         r = _normalise_theme_definition({
             "name": "c",
             "palette": {"background": {"hex": "#000", "alpha": "not a number"}},
@@ -6084,15 +7541,15 @@ class TestNormaliseThemeDefinition:
 
 
 class TestDiscoverUserThemes:
-    """Tests for _discover_user_themes() — scans ~/.hades/dashboard-themes/."""
+    """Tests for _discover_user_themes() — scans ~/.hermes/dashboard-themes/."""
 
     def test_returns_empty_when_dir_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
-        from hades_cli import web_server
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli import web_server
         assert web_server._discover_user_themes() == []
 
     def test_loads_and_normalises_yaml(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         themes_dir = tmp_path / "dashboard-themes"
         themes_dir.mkdir()
         (themes_dir / "ocean.yaml").write_text(
@@ -6105,7 +7562,7 @@ class TestDiscoverUserThemes:
             "layout:\n"
             "  density: spacious\n"
         )
-        from hades_cli import web_server
+        from hermes_cli import web_server
         results = web_server._discover_user_themes()
         assert len(results) == 1
         assert results[0]["name"] == "ocean"
@@ -6116,13 +7573,13 @@ class TestDiscoverUserThemes:
         assert "fontSans" in results[0]["typography"]
 
     def test_malformed_yaml_skipped(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         themes_dir = tmp_path / "dashboard-themes"
         themes_dir.mkdir()
         (themes_dir / "bad.yaml").write_text("::: not valid yaml :::\n\tindent wrong")
         (themes_dir / "nameless.yaml").write_text("label: No Name Here\n")
         (themes_dir / "ok.yaml").write_text("name: ok\n")
-        from hades_cli import web_server
+        from hermes_cli import web_server
         results = web_server._discover_user_themes()
         names = [r["name"] for r in results]
         assert "ok" in names
@@ -6130,7 +7587,7 @@ class TestDiscoverUserThemes:
         assert len(results) == 1  # only the valid one
 
     def test_ignores_transient_profile_override(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         themes_dir = tmp_path / "dashboard-themes"
         themes_dir.mkdir()
         (themes_dir / "mine.yaml").write_text("name: mine\n")
@@ -6138,17 +7595,17 @@ class TestDiscoverUserThemes:
         other = tmp_path / "other-profile"
         other.mkdir()
 
-        from hades_constants import (
-            reset_hades_home_override,
-            set_hades_home_override,
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
         )
-        from hades_cli import web_server
+        from hermes_cli import web_server
 
-        token = set_hades_home_override(str(other))
+        token = set_hermes_home_override(str(other))
         try:
             results = web_server._discover_user_themes()
         finally:
-            reset_hades_home_override(token)
+            reset_hermes_home_override(token)
 
         assert [r["name"] for r in results] == ["mine"]
 
@@ -6179,9 +7636,9 @@ class TestThemeBootstrapCSS:
     def test_user_theme_renders_bundle_vars(self, tmp_path, monkeypatch):
         """Active user theme → style block with ONLY variable names the
         bundle actually consumes (layerVars/typographyVars tokens)."""
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         self._write_theme(tmp_path)
-        from hades_cli import web_server
+        from hermes_cli import web_server
         monkeypatch.setattr(
             web_server, "load_config", lambda: {"dashboard": {"theme": "ocean"}}
         )
@@ -6206,8 +7663,8 @@ class TestThemeBootstrapCSS:
         assert "#0a1628" not in css.split("html,body")[1]
 
     def test_builtin_theme_renders_nothing(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
-        from hades_cli import web_server
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli import web_server
         for builtin in ("default", "midnight", "cyberpunk"):
             monkeypatch.setattr(
                 web_server, "load_config",
@@ -6217,16 +7674,16 @@ class TestThemeBootstrapCSS:
 
     def test_unknown_theme_renders_nothing(self, tmp_path, monkeypatch):
         """Configured theme has no YAML on disk → empty string, no crash."""
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
-        from hades_cli import web_server
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli import web_server
         monkeypatch.setattr(
             web_server, "load_config", lambda: {"dashboard": {"theme": "ghost"}}
         )
         assert web_server._render_active_theme_bootstrap_css() == ""
 
     def test_non_string_theme_renders_nothing(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
-        from hades_cli import web_server
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli import web_server
         monkeypatch.setattr(
             web_server, "load_config", lambda: {"dashboard": {"theme": 42}}
         )
@@ -6235,20 +7692,20 @@ class TestThemeBootstrapCSS:
     def test_malformed_theme_yaml_no_crash(self, tmp_path, monkeypatch):
         """A garbage YAML for the active theme name must not crash — the
         discover helper skips it, so no style block is emitted."""
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         themes_dir = tmp_path / "dashboard-themes"
         themes_dir.mkdir()
         (themes_dir / "broken.yaml").write_text(
             "::: not valid yaml :::\n\tindent wrong", encoding="utf-8"
         )
-        from hades_cli import web_server
+        from hermes_cli import web_server
         monkeypatch.setattr(
             web_server, "load_config", lambda: {"dashboard": {"theme": "broken"}}
         )
         assert web_server._render_active_theme_bootstrap_css() == ""
 
     def test_load_config_exception_no_crash(self, monkeypatch):
-        from hades_cli import web_server
+        from hermes_cli import web_server
 
         def boom():
             raise RuntimeError("config unreadable")
@@ -6258,7 +7715,7 @@ class TestThemeBootstrapCSS:
 
     def test_style_escape_defends_style_breakout(self, tmp_path, monkeypatch):
         """`</style>` in a theme value cannot break out of the block."""
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         themes_dir = tmp_path / "dashboard-themes"
         themes_dir.mkdir()
         (themes_dir / "sneaky.yaml").write_text(
@@ -6267,7 +7724,7 @@ class TestThemeBootstrapCSS:
             "  fontSans: '</style><script>alert(1)</script>'\n",
             encoding="utf-8",
         )
-        from hades_cli import web_server
+        from hermes_cli import web_server
         monkeypatch.setattr(
             web_server, "load_config", lambda: {"dashboard": {"theme": "sneaky"}}
         )
@@ -6279,7 +7736,7 @@ class TestThemeBootstrapCSS:
     def _mount_spa_client(tmp_path, monkeypatch):
         from fastapi import FastAPI
         from starlette.testclient import TestClient
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         dist = tmp_path / "web_dist"
         (dist / "assets").mkdir(parents=True)
@@ -6293,9 +7750,9 @@ class TestThemeBootstrapCSS:
         return TestClient(spa_app)
 
     def test_serve_index_injects_bootstrap_for_user_theme(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         self._write_theme(tmp_path)
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
         monkeypatch.setattr(
             ws, "load_config", lambda: {"dashboard": {"theme": "ocean"}}
         )
@@ -6309,8 +7766,8 @@ class TestThemeBootstrapCSS:
         assert "hermes-theme-bootstrap" in head
 
     def test_serve_index_no_bootstrap_for_builtin_theme(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
-        import hades_cli.web_server as ws
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import hermes_cli.web_server as ws
         monkeypatch.setattr(
             ws, "load_config", lambda: {"dashboard": {"theme": "default"}}
         )
@@ -6322,8 +7779,8 @@ class TestThemeBootstrapCSS:
     def test_serve_index_survives_render_failure(self, tmp_path, monkeypatch):
         """Even if theme rendering blows up internally, index serving
         must not crash (the helper swallows and returns '')."""
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
-        import hades_cli.web_server as ws
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import hermes_cli.web_server as ws
 
         def boom():
             raise RuntimeError("boom")
@@ -6342,25 +7799,25 @@ class TestNormaliseThemeExtensions:
     the dashboard without shipping code."""
 
     def test_layout_variant_defaults_to_standard(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         result = _normalise_theme_definition({"name": "t"})
         assert result["layoutVariant"] == "standard"
 
     def test_layout_variant_accepts_known_values(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         for variant in ("standard", "cockpit", "tiled"):
             r = _normalise_theme_definition({"name": "t", "layoutVariant": variant})
             assert r["layoutVariant"] == variant
 
     def test_layout_variant_rejects_unknown(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         r = _normalise_theme_definition({"name": "t", "layoutVariant": "warship"})
         assert r["layoutVariant"] == "standard"
         r2 = _normalise_theme_definition({"name": "t", "layoutVariant": 12})
         assert r2["layoutVariant"] == "standard"
 
     def test_assets_named_slots_passthrough(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         r = _normalise_theme_definition({
             "name": "t",
             "assets": {
@@ -6378,7 +7835,7 @@ class TestNormaliseThemeExtensions:
         assert "notAKnownKey" not in r["assets"]  # unknown slot ignored
 
     def test_assets_custom_block(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         r = _normalise_theme_definition({
             "name": "t",
             "assets": {
@@ -6396,12 +7853,12 @@ class TestNormaliseThemeExtensions:
         }
 
     def test_assets_absent_means_no_field(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         r = _normalise_theme_definition({"name": "t"})
         assert "assets" not in r
 
     def test_custom_css_passthrough_and_capped(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         # Small CSS passes through verbatim.
         r = _normalise_theme_definition({
             "name": "t",
@@ -6415,13 +7872,13 @@ class TestNormaliseThemeExtensions:
         assert len(r2["customCSS"]) <= 32 * 1024
 
     def test_custom_css_empty_dropped(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         for val in ("", "   \n\t", None):
             r = _normalise_theme_definition({"name": "t", "customCSS": val})
             assert "customCSS" not in r
 
     def test_component_styles_per_bucket(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         r = _normalise_theme_definition({
             "name": "t",
             "componentStyles": {
@@ -6442,7 +7899,7 @@ class TestNormaliseThemeExtensions:
         assert "rogueBucket" not in r["componentStyles"]
 
     def test_component_styles_empty_buckets_dropped(self):
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         r = _normalise_theme_definition({
             "name": "t",
             "componentStyles": {
@@ -6457,7 +7914,7 @@ class TestNormaliseThemeExtensions:
 
     def test_component_styles_accepts_numeric_values(self):
         """Numeric values (e.g. opacity: 0.8) are coerced to strings."""
-        from hades_cli.web_server import _normalise_theme_definition
+        from hermes_cli.web_server import _normalise_theme_definition
         r = _normalise_theme_definition({
             "name": "t",
             "componentStyles": {"card": {"opacity": 0.8, "zIndex": 5}},
@@ -6484,19 +7941,19 @@ class TestDeleteSessionEndpoint:
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        import hades_state
-        from hades_constants import get_hades_home
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        import hermes_state
+        from hermes_constants import get_hermes_home
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
 
         monkeypatch.setattr(
-            hermes_state, "DEFAULT_DB_PATH", get_hades_home() / "state.db"
+            hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db"
         )
 
         self.auth_client = TestClient(app)
         self.auth_client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
     def _seed(self, ids):
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -6506,7 +7963,7 @@ class TestDeleteSessionEndpoint:
             db.close()
 
     def _exists(self, sid) -> bool:
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -6561,12 +8018,12 @@ class TestBulkDeleteSessionsEndpoint:
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        import hades_state
-        from hades_constants import get_hades_home
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        import hermes_state
+        from hermes_constants import get_hermes_home
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
 
         monkeypatch.setattr(
-            hermes_state, "DEFAULT_DB_PATH", get_hades_home() / "state.db"
+            hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db"
         )
 
         self.client = TestClient(app)
@@ -6574,7 +8031,7 @@ class TestBulkDeleteSessionsEndpoint:
         self.auth_client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
     def _seed(self, ids):
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -6588,7 +8045,7 @@ class TestBulkDeleteSessionsEndpoint:
         assert resp.status_code == 401
 
     def test_deletes_listed_sessions_only(self):
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         self._seed(["a", "b", "c"])
         resp = self.auth_client.post(
@@ -6685,14 +8142,14 @@ class TestDeleteEmptySessionsEndpoint:
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        import hades_state
-        from hades_constants import get_hades_home
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        import hermes_state
+        from hermes_constants import get_hermes_home
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
 
-        # Pin the SessionDB to the isolated HADES_HOME so each test
+        # Pin the SessionDB to the isolated HERMES_HOME so each test
         # starts with a clean state.db.
         monkeypatch.setattr(
-            hermes_state, "DEFAULT_DB_PATH", get_hades_home() / "state.db"
+            hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db"
         )
 
         self.client = TestClient(app)
@@ -6707,7 +8164,7 @@ class TestDeleteEmptySessionsEndpoint:
         * ``live``    — un-ended, empty → must survive (active)
         * ``archived``— ended, empty, archived → must survive
         """
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB()
         try:
@@ -6755,7 +8212,7 @@ class TestDeleteEmptySessionsEndpoint:
         """DELETE returns the deleted count and removes only the
         empty-ended-unarchived rows — same shape contract as the
         DB-level method's unit tests."""
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         self._seed()
         resp = self.auth_client.delete("/api/sessions/empty")
@@ -6814,18 +8271,18 @@ class TestPluginAPIAuth:
         Pulls in ``_install_example_plugin`` so ``test_plugin_route_allows_auth``
         has the ``/api/plugins/example/hello`` endpoint available — the
         example plugin is no longer a bundled plugin, so the fixture
-        installs it into the per-test ``HADES_HOME``.
+        installs it into the per-test ``HERMES_HOME``.
         """
         try:
             from starlette.testclient import TestClient
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        import hades_state
-        from hades_constants import get_hades_home
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        import hermes_state
+        from hermes_constants import get_hermes_home
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
 
-        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hades_home() / "state.db")
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db")
 
         self.client = TestClient(app)
         self.auth_client = TestClient(app)
@@ -6841,7 +8298,7 @@ class TestPluginAPIAuth:
         """Plugin API routes should work with a valid session token.
 
         Uses ``/api/plugins/example/hello`` from the example-dashboard
-        test fixture (installed into HADES_HOME by the class-level
+        test fixture (installed into HERMES_HOME by the class-level
         ``_install_example_plugin`` fixture) — a stable, side-effect-free
         GET that's only loaded for tests. With a valid token the handler
         should run (200); without one the middleware should 401 before
@@ -6934,7 +8391,7 @@ class TestDashboardPluginManifestExtensions:
         return plug_dir
 
     def test_override_and_hidden_carried_through(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         self._write_plugin(tmp_path, "skin-home", {
             "name": "skin-home",
             "label": "Skin Home",
@@ -6942,7 +8399,7 @@ class TestDashboardPluginManifestExtensions:
             "slots": ["sidebar", "header-left"],
             "entry": "dist/index.js",
         })
-        from hades_cli import web_server
+        from hermes_cli import web_server
         # Bust the process-level cache so the test plugin is picked up.
         web_server._dashboard_plugins_cache = None
         plugins = web_server._get_dashboard_plugins(force_rescan=True)
@@ -6954,10 +8411,10 @@ class TestDashboardPluginManifestExtensions:
     def test_user_plugins_ignore_profile_home_override(self, tmp_path, monkeypatch):
         """Regression: user dashboard extensions are a dashboard-owned asset
         (like theme YAML), so they must stay visible after a context-local
-        HADES_HOME override scopes a request to another profile."""
-        from hades_constants import (
-            reset_hades_home_override,
-            set_hades_home_override,
+        HERMES_HOME override scopes a request to another profile."""
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
         )
         launch_home = tmp_path / "launch"
         launch_home.mkdir()
@@ -6970,38 +8427,38 @@ class TestDashboardPluginManifestExtensions:
         other = tmp_path / "other-profile"
         other.mkdir()
 
-        monkeypatch.setenv("HADES_HOME", str(launch_home))
-        from hades_cli import web_server
-        token = set_hades_home_override(str(other))
+        monkeypatch.setenv("HERMES_HOME", str(launch_home))
+        from hermes_cli import web_server
+        token = set_hermes_home_override(str(other))
         try:
             plugins = web_server._discover_dashboard_plugins()
         finally:
-            reset_hades_home_override(token)
+            reset_hermes_home_override(token)
         assert any(p["name"] == "skin-home" for p in plugins)
 
     def test_override_requires_leading_slash(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         self._write_plugin(tmp_path, "bad-override", {
             "name": "bad-override",
             "label": "Bad",
             "tab": {"path": "/bad", "override": "no-leading-slash"},
             "entry": "dist/index.js",
         })
-        from hades_cli import web_server
+        from hermes_cli import web_server
         web_server._dashboard_plugins_cache = None
         plugins = web_server._get_dashboard_plugins(force_rescan=True)
         entry = next(p for p in plugins if p["name"] == "bad-override")
         assert "override" not in entry["tab"]
 
     def test_slots_default_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         self._write_plugin(tmp_path, "no-slots", {
             "name": "no-slots",
             "label": "No Slots",
             "tab": {"path": "/no-slots"},
             "entry": "dist/index.js",
         })
-        from hades_cli import web_server
+        from hermes_cli import web_server
         web_server._dashboard_plugins_cache = None
         plugins = web_server._get_dashboard_plugins(force_rescan=True)
         entry = next(p for p in plugins if p["name"] == "no-slots")
@@ -7010,7 +8467,7 @@ class TestDashboardPluginManifestExtensions:
         assert "override" not in entry["tab"]
 
     def test_slots_filters_non_string_entries(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         self._write_plugin(tmp_path, "mixed-slots", {
             "name": "mixed-slots",
             "label": "Mixed",
@@ -7018,7 +8475,7 @@ class TestDashboardPluginManifestExtensions:
             "slots": ["sidebar", "", 42, None, "header-right"],
             "entry": "dist/index.js",
         })
-        from hades_cli import web_server
+        from hermes_cli import web_server
         web_server._dashboard_plugins_cache = None
         plugins = web_server._get_dashboard_plugins(force_rescan=True)
         entry = next(p for p in plugins if p["name"] == "mixed-slots")
@@ -7029,7 +8486,7 @@ class TestDashboardPluginManifestExtensions:
         the manifest loader untouched.  The backend has no allowlist — the
         frontend ``<PluginSlot name="...">`` placements decide what actually
         renders — but the loader must not mangle colons in slot names."""
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         self._write_plugin(tmp_path, "page-slots", {
             "name": "page-slots",
             "label": "Page Slots",
@@ -7047,7 +8504,7 @@ class TestDashboardPluginManifestExtensions:
             ],
             "entry": "dist/index.js",
         })
-        from hades_cli import web_server
+        from hermes_cli import web_server
         web_server._dashboard_plugins_cache = None
         plugins = web_server._get_dashboard_plugins(force_rescan=True)
         entry = next(p for p in plugins if p["name"] == "page-slots")
@@ -7087,7 +8544,7 @@ class TestPtyWebSocket:
     def _setup(self, monkeypatch, _isolate_hermes_home):
         from starlette.testclient import TestClient
 
-        import hades_cli.web_server as ws
+        import hermes_cli.web_server as ws
 
         # Avoid exec'ing the actual TUI in tests: every test below installs
         # its own fake argv via ``ws._resolve_chat_argv``.
@@ -7108,7 +8565,7 @@ class TestPtyWebSocket:
 
     def test_resolve_chat_argv_uses_dashboard_scroll_env(self, monkeypatch):
         """Dashboard chat runs the TUI in browser-scrollback mode."""
-        import hades_cli.main as main_mod
+        import hermes_cli.main as main_mod
 
         monkeypatch.setattr(
             main_mod,
@@ -7127,7 +8584,7 @@ class TestPtyWebSocket:
         chalk in the TUI child degrade skin hex colors to the xterm 256
         palette (gold banner rendered salmon-red). xterm.js always supports
         24-bit color, so the PTY env must advertise truecolor."""
-        import hades_cli.main as main_mod
+        import hermes_cli.main as main_mod
 
         monkeypatch.setattr(
             main_mod,
@@ -7142,7 +8599,7 @@ class TestPtyWebSocket:
 
     def test_resolve_chat_argv_keeps_operator_colorterm(self, monkeypatch):
         """An explicit operator COLORTERM wins over the backfill."""
-        import hades_cli.main as main_mod
+        import hermes_cli.main as main_mod
 
         monkeypatch.setattr(
             main_mod,
@@ -7157,7 +8614,7 @@ class TestPtyWebSocket:
 
     def test_resolve_chat_argv_sets_tui_python_environment(self, monkeypatch):
         """Dashboard chat gives the Node TUI the same Python env as CLI launches."""
-        import hades_cli.main as main_mod
+        import hermes_cli.main as main_mod
 
         monkeypatch.delenv("HERMES_PYTHON_SRC_ROOT", raising=False)
         monkeypatch.delenv("HERMES_PYTHON", raising=False)
@@ -7177,7 +8634,7 @@ class TestPtyWebSocket:
 
     def test_resolve_chat_argv_replaces_invalid_tui_python_environment(self, monkeypatch):
         """Dashboard chat does not preserve unusable inherited TUI Python env."""
-        import hades_cli.main as main_mod
+        import hermes_cli.main as main_mod
 
         monkeypatch.setenv("HERMES_PYTHON_SRC_ROOT", "/definitely/missing/hermes-src")
         monkeypatch.setenv("HERMES_PYTHON", "/definitely/missing/python")
@@ -7199,12 +8656,14 @@ class TestPtyWebSocket:
         self, monkeypatch, tmp_path
     ):
         """Relative Python paths are resolved from the TUI child's cwd."""
-        import hades_cli.main as main_mod
+        import hermes_cli.main as main_mod
 
         relative_python = Path(".review-venv") / "bin" / Path(sys.executable).name
         python_path = tmp_path / relative_python
         python_path.parent.mkdir(parents=True)
-        os.link(sys.executable, python_path)
+        # copy2, not os.link: tmp_path may sit on a different filesystem than
+        # the venv (tmpfs /tmp vs disk home) where hard links raise EXDEV.
+        shutil.copy2(sys.executable, python_path)
         monkeypatch.setenv("HERMES_CWD", str(tmp_path))
         monkeypatch.setenv("HERMES_PYTHON", str(relative_python))
         monkeypatch.setattr(
@@ -7220,13 +8679,15 @@ class TestPtyWebSocket:
 
     def test_tui_python_command_uses_child_path(self, tmp_path):
         """Bare Python commands are resolved from the TUI child's PATH."""
-        import hades_cli.main as main_mod
+        import hermes_cli.main as main_mod
 
         command = f"hermes-review-python{Path(sys.executable).suffix}"
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         executable = bin_dir / command
-        os.link(sys.executable, executable)
+        # copy2, not os.link: tmp_path may sit on a different filesystem than
+        # the venv (tmpfs /tmp vs disk home) where hard links raise EXDEV.
+        shutil.copy2(sys.executable, executable)
         env = {
             "HERMES_CWD": str(tmp_path),
             "HERMES_PYTHON": command,
@@ -7239,7 +8700,7 @@ class TestPtyWebSocket:
 
     def test_resolve_chat_argv_falls_back_when_getcwd_is_missing(self, monkeypatch, tmp_path):
         """Dashboard chat still starts if the service cwd was deleted."""
-        import hades_cli.main as main_mod
+        import hermes_cli.main as main_mod
 
         monkeypatch.delenv("HERMES_CWD", raising=False)
         monkeypatch.setenv("PWD", str(tmp_path))
@@ -7258,9 +8719,9 @@ class TestPtyWebSocket:
     def test_resolve_chat_argv_applies_terminal_backend_config(
         self, monkeypatch, _isolate_hermes_home
     ):
-        import hades_cli.main as main_mod
+        import hermes_cli.main as main_mod
 
-        config_path = Path(os.environ["HADES_HOME"]) / "config.yaml"
+        config_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
         config_path.write_text(
             "\n".join(
                 [
@@ -7519,7 +8980,7 @@ class TestPtyWebSocket:
             assert b"99" in buf and b"41" in buf
 
     def test_unavailable_platform_closes_with_message(self, monkeypatch):
-        from hades_cli.pty_bridge import PtyUnavailableError
+        from hermes_cli.pty_bridge import PtyUnavailableError
 
         def _raise(argv, **kwargs):
             raise PtyUnavailableError("pty missing for tests")
@@ -7530,7 +8991,7 @@ class TestPtyWebSocket:
             lambda resume=None, sidecar_url=None, profile=None: (["/bin/cat"], None, None),
         )
         # Patch PtyBridge.spawn at the web_server module's binding.
-        import hades_cli.web_server as ws_mod
+        import hermes_cli.web_server as ws_mod
 
         monkeypatch.setattr(ws_mod.PtyBridge, "spawn", classmethod(lambda cls, *a, **k: _raise(*a, **k)))
 
@@ -7605,7 +9066,7 @@ class TestPtyWebSocket:
         asserting the exact fan-out contract.
         """
         import asyncio
-        from hades_cli import web_server as ws_mod
+        from hermes_cli import web_server as ws_mod
 
         class _FakeSub:
             def __init__(self):
@@ -7659,8 +9120,8 @@ class TestPtyWebSocket:
 
 
 def test_resolve_chat_argv_injects_gateway_ws_url(monkeypatch):
-    import hades_cli.main as cli_main
-    import hades_cli.web_server as ws
+    import hermes_cli.main as cli_main
+    import hermes_cli.web_server as ws
 
     monkeypatch.setattr(
         cli_main,
@@ -7700,14 +9161,14 @@ class TestDashboardPluginStaticAssetAllowlist:
         is served while ``plugin_api.py`` and ``__pycache__/*.pyc``
         from the same directory are not. Since the example plugin is
         no longer bundled, ``_install_example_plugin`` lays it down in
-        the per-test ``HADES_HOME`` user-plugins dir.
+        the per-test ``HERMES_HOME`` user-plugins dir.
         """
         try:
             from starlette.testclient import TestClient
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        from hades_cli.web_server import app
+        from hermes_cli.web_server import app
 
         self.client = TestClient(app)
 
@@ -7801,7 +9262,7 @@ class TestValidateProviderCredential:
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
 
         self.client = TestClient(app)
         self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
@@ -7924,7 +9385,7 @@ class TestDesktopCronTicker:
             from starlette.testclient import TestClient
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
-        from hades_cli.web_server import app
+        from hermes_cli.web_server import app
 
         return TestClient(app)
 
@@ -7951,45 +9412,61 @@ class TestDesktopCronTicker:
             assert not called.wait(0.5), "ticker must not run outside the desktop app"
 
 
-# ---------------------------------------------------------------------------
-# Autonomy (Preferences & Autonomy Center) endpoints — secondary Dashboard
-# management surface (Task 9).  Profile-scoped REST over the SAME
-# AutonomyService as CLI/TUI; never raw table/YAML access.
-# ---------------------------------------------------------------------------
+class TestServeIndexMissingIndex:
+    """_serve_index must not raise per-request when index.html vanishes
+    (partial build, wiped dist) after mount_spa saw an existing dist dir.
+    It should return the same JSON 404 payload mount_spa emits for a
+    fully-missing dist."""
+
+    @staticmethod
+    def _client_with_dist(tmp_path, monkeypatch, *, write_index: bool):
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+        import hermes_cli.web_server as ws
+
+        dist = tmp_path / "web_dist"
+        (dist / "assets").mkdir(parents=True)
+        if write_index:
+            (dist / "index.html").write_text(
+                "<html><head></head><body>SPA</body></html>", encoding="utf-8"
+            )
+        monkeypatch.setattr(ws, "WEB_DIST", dist)
+        monkeypatch.delenv("HERMES_SERVE_HEADLESS", raising=False)
+        spa_app = FastAPI()
+        ws.mount_spa(spa_app)
+        return TestClient(spa_app), dist
+
+    def test_missing_index_inside_existing_dist_returns_json_404(
+        self, tmp_path, monkeypatch
+    ):
+        client, _dist = self._client_with_dist(
+            tmp_path, monkeypatch, write_index=False
+        )
+        for route in ("/", "/chat"):
+            resp = client.get(route)
+            assert resp.status_code == 404
+            assert resp.json()["error"] == (
+                "Frontend not built. Run: cd web && npm run build"
+            )
+
+    def test_index_deleted_after_mount_returns_json_404(self, tmp_path, monkeypatch):
+        client, dist = self._client_with_dist(tmp_path, monkeypatch, write_index=True)
+        assert client.get("/chat").status_code == 200  # healthy first
+        (dist / "index.html").unlink()
+        resp = client.get("/chat")
+        assert resp.status_code == 404
+        assert "Frontend not built" in resp.json()["error"]
+        # And recovers once the index reappears (e.g. a rebuild finished).
+        (dist / "index.html").write_text(
+            "<html><head></head><body>SPA-rebuilt</body></html>", encoding="utf-8"
+        )
+        resp = client.get("/chat")
+        assert resp.status_code == 200
+        assert "SPA-rebuilt" in resp.text
 
 
-def _autonomy_stable_entry(rule_id="allow-send", effect="allow", **overrides):
-    entry = {
-        "rule_id": rule_id,
-        "effect": effect,
-        "action_classes": ["message.send"],
-        "data_classes": ["public"],
-        "recipient_classes": ["designated_test"],
-        "description": "allow public sends to the designated test recipient",
-    }
-    entry.update(overrides)
-    return entry
-
-
-def _write_autonomy_config(home, stable_rules, mode="enforce"):
-    (home / "config.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "autonomy": {
-                    "schema_version": 1,
-                    "mode": mode,
-                    "stable_rules": stable_rules,
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-class TestAutonomyEndpoints:
-    """Profile-scoped dashboard autonomy management endpoints."""
-
-    RAW_RECIPIENT = "alice@example.test"
+class TestDashboardComponentHealth:
+    """Component-health rollup: error middleware, /api/status components, self-test."""
 
     @pytest.fixture(autouse=True)
     def _setup(self, monkeypatch, _isolate_hermes_home):
@@ -7998,485 +9475,181 @@ class TestAutonomyEndpoints:
         except ImportError:
             pytest.skip("fastapi/starlette not installed")
 
-        import hades_state
-        from hades_constants import get_hades_home
-        from hades_cli import profiles
-        from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+        import hermes_state
+        from hermes_constants import get_hermes_home
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db")
+        # Fresh state holder per test so counters don't leak across tests.
+        monkeypatch.setattr(ws, "DASHBOARD_HEALTH", ws.DashboardHealth())
+        self.ws = ws
+        self.client = TestClient(ws.app, raise_server_exceptions=False)
+        self.client.headers[ws._SESSION_HEADER_NAME] = ws._SESSION_TOKEN
+
+    # -- middleware -------------------------------------------------------
+
+    def test_middleware_counts_unhandled_exception(self):
+        """An exception escaping a route must be recorded (and re-raised)."""
+        route_path = "/api/_test_boom"
+
+        async def _boom():
+            raise RuntimeError("kaboom")
+
+        from fastapi.routing import APIRoute
+
+        self.ws.app.router.routes.insert(
+            0, APIRoute(route_path, _boom, methods=["GET"])
+        )
+        try:
+            resp = self.client.get(route_path)
+            assert resp.status_code == 500
+            assert self.ws.DASHBOARD_HEALTH.recent_error_count() == 1
+            assert self.ws.DASHBOARD_HEALTH.last_error_type == "RuntimeError"
+            # Path is retained internally only — snapshot must not export it.
+            assert self.ws.DASHBOARD_HEALTH.last_error_path == route_path
+        finally:
+            self.ws.app.router.routes[:] = [
+                r for r in self.ws.app.router.routes
+                if getattr(r, "path", None) != route_path
+            ]
+
+    def test_middleware_counts_5xx_response(self):
+        route_path = "/api/_test_teapot_fire"
+
+        async def _fivehundred():
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=503, content={"detail": "down"})
+
+        from fastapi.routing import APIRoute
+
+        self.ws.app.router.routes.insert(
+            0, APIRoute(route_path, _fivehundred, methods=["GET"])
+        )
+        try:
+            resp = self.client.get(route_path)
+            assert resp.status_code == 503
+            assert self.ws.DASHBOARD_HEALTH.recent_error_count() == 1
+            assert self.ws.DASHBOARD_HEALTH.last_error_type == "http_503"
+        finally:
+            self.ws.app.router.routes[:] = [
+                r for r in self.ws.app.router.routes
+                if getattr(r, "path", None) != route_path
+            ]
+
+    def test_error_window_expires_old_entries(self, monkeypatch):
+        health = self.ws.DashboardHealth(window_seconds=300)
+        now = {"t": 1000.0}
+        monkeypatch.setattr(self.ws.time, "time", lambda: now["t"])
+        health.record_error("RuntimeError", "/api/x")
+        assert health.recent_error_count() == 1
+        now["t"] = 1000.0 + 301
+        assert health.recent_error_count() == 0
+
+    # -- /api/status components ------------------------------------------
+
+    def test_status_includes_components_and_overall(self):
+        resp = self.client.get("/api/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["overall"] in {"ok", "degraded"}
+        components = data["components"]
+        assert set(components) == {"gateway", "storage", "dashboard", "platforms"}
+        for comp in components.values():
+            assert comp["status"] in {"ok", "degraded"}
+        dashboard = components["dashboard"]
+        assert dashboard["recent_unhandled_errors"] == 0
+        assert "last_error_at" in dashboard
+        assert dashboard["selftest"] in {"unknown", "ok", "failing"}
+
+    def test_storage_degraded_when_state_db_probe_fails(self, monkeypatch):
+        import gateway.readiness as readiness
 
         monkeypatch.setattr(
-            hades_state, "DEFAULT_DB_PATH", get_hades_home() / "state.db"
+            readiness, "_probe_state_db", lambda home: {"status": "degraded", "detail": "OperationalError"}
         )
-        self.home = get_hades_home()
-        self.home.mkdir(parents=True, exist_ok=True)
-        _write_autonomy_config(self.home, [])
-        profiles_root = self.home / "profiles"
-        self.other_home = profiles_root / "other"
-        self.other_home.mkdir(parents=True, exist_ok=True)
-        _write_autonomy_config(self.other_home, [])
-        monkeypatch.setattr(profiles, "_get_default_hermes_home", lambda: self.home)
-        monkeypatch.setattr(profiles, "_get_profiles_root", lambda: profiles_root)
-
-        self.client = TestClient(app)
-        self.client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
-
-    # ── Seeding helpers (service-level, per-profile) ───────────────────
-
-    def _seed_suggestion(self, rule_id="suggest-1"):
-        import time as _time
-
-        from agent.autonomy import AutonomyRule, AutonomyService, RuleProvenance
-
-        AutonomyService().propose_suggestion(
-            AutonomyRule(
-                rule_id=rule_id,
-                source="learned_suggestion",
-                state="awaiting_confirmation",
-                effect="allow",
-                action_classes=("message.send",),
-                data_classes=("internal",),
-                recipient_classes=("colleague",),
-                provenance=RuleProvenance(
-                    actor_kind="learner",
-                    actor_id="pattern-miner",
-                    source_ref="observed-behavior",
-                    observed_at_ms=100,
-                    confirmed_at_ms=None,
-                    confidence_ppm=990_000,
-                ),
-                created_at_ms=int(_time.time() * 1000),
-                description="observed repeated sends to a colleague",
-            )
-        )
-
-    def _seed_mandate(self, rule_id="mandate-1"):
-        import time as _time
-
-        from agent.autonomy import AutonomyRule, AutonomyService, RuleProvenance
-
-        now = int(_time.time() * 1000)
-        AutonomyService().create_mandate(
-            AutonomyRule(
-                rule_id=rule_id,
-                source="temporary_mandate",
-                state="active",
-                effect="allow",
-                action_classes=("workspace.delete",),
-                data_classes=("internal",),
-                allowed_reversibility=("reversible",),
-                provenance=RuleProvenance(
-                    actor_kind="user",
-                    actor_id="user-1",
-                    source_ref="dashboard",
-                    observed_at_ms=now,
-                    confirmed_at_ms=now,
-                    confidence_ppm=1_000_000,
-                ),
-                created_at_ms=now,
-                expires_at_ms=now + 365 * 86_400_000,
-                max_uses=3,
-                remaining_uses=3,
-                description="bounded checkpointed delete",
-            )
-        )
-
-    # ── Auth middleware (session token / CSRF posture) ─────────────────
-
-    def test_autonomy_endpoints_require_session_token(self):
-        from starlette.testclient import TestClient
-        from hades_cli.web_server import app
-
-        unauth = TestClient(app)
-        assert unauth.get("/api/autonomy/status").status_code == 401
-        assert unauth.get("/api/autonomy/rules").status_code == 401
-        assert (
-            unauth.post("/api/autonomy/preview", json={"set_rules": []}).status_code
-            == 401
-        )
-        assert (
-            unauth.post(
-                "/api/autonomy/apply",
-                json={"set_rules": [], "expected_contract_hash": "x"},
-            ).status_code
-            == 401
-        )
-        assert unauth.get("/api/autonomy/audit").status_code == 401
-
-    # ── Status / rules ─────────────────────────────────────────────────
-
-    def test_status_reports_contract_and_rule_counts(self):
-        _write_autonomy_config(self.home, [_autonomy_stable_entry("stable-allow")])
-        resp = self.client.get("/api/autonomy/status")
-        assert resp.status_code == 200
+        resp = self.client.get("/api/status")
         data = resp.json()
-        assert data["mode"] == "enforce"
-        assert data["stable_rules"] == 1
-        assert data["active_mandates"] == 0
-        assert data["pending_suggestions"] == 0
-        assert data["pending_apply"] is False
-        assert data["contract_hash"]
-        assert isinstance(data["contract_version"], int)
+        assert data["components"]["storage"] == {"status": "degraded"}
+        assert data["overall"] == "degraded"
 
-    def test_rules_lists_every_source_with_redacted_docs_and_edit_routes(self):
-        recipient_hash = "ab" * 32
-        _write_autonomy_config(
-            self.home,
-            [
-                _autonomy_stable_entry(
-                    "stable-deny", effect="deny", recipient_hashes=[recipient_hash]
-                )
-            ],
-        )
-        self._seed_mandate("mandate-1")
-        self._seed_suggestion("suggest-1")
-
-        resp = self.client.get("/api/autonomy/rules")
-        assert resp.status_code == 200
+    def test_dashboard_component_degraded_after_error(self):
+        self.ws.DASHBOARD_HEALTH.record_error("RuntimeError", "/api/x")
+        resp = self.client.get("/api/status")
         data = resp.json()
-        by_id = {r["rule_id"]: r for r in data["rules"]}
-        assert set(by_id) == {"stable-deny", "mandate-1", "suggest-1"}
-        assert by_id["stable-deny"]["source"] == "user_assertion"
-        assert by_id["mandate-1"]["source"] == "temporary_mandate"
-        assert by_id["suggest-1"]["source"] == "learned_suggestion"
-        assert by_id["suggest-1"]["state"] == "awaiting_confirmation"
-        for doc in by_id.values():
-            assert doc["edit_command"]
-            assert "recipient_hashes" in doc
-            # Redaction: hashes only, never a raw recipient identifier field.
-            assert "recipient" not in doc
-            assert "recipients" not in doc
-        assert by_id["stable-deny"]["recipient_hashes"] == [recipient_hash]
-        assert self.RAW_RECIPIENT not in resp.text
+        dashboard = data["components"]["dashboard"]
+        assert dashboard["status"] == "degraded"
+        assert dashboard["recent_unhandled_errors"] == 1
+        assert data["overall"] == "degraded"
 
-    def test_rule_explanation_names_layer_conflicts_and_edit_route(self):
-        _write_autonomy_config(
-            self.home,
-            [
-                _autonomy_stable_entry("stable-allow", effect="allow"),
-                _autonomy_stable_entry("stable-deny", effect="deny"),
-            ],
-        )
-        resp = self.client.get("/api/autonomy/rules/stable-deny")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["layer"] == "stable_config"
-        assert data["in_current_contract"] is True
-        assert "stable-allow" in data["conflicts_with"]
-        assert data["edit_route"]
-        assert data["revoke_route"]
+    def test_public_component_payload_carries_no_secret_bearing_fields(self):
+        """PUBLIC_API_PATHS contract: counts/enums only — no paths/messages."""
+        self.ws.DASHBOARD_HEALTH.record_error("RuntimeError", "/api/secret-route?token=abc")
+        resp = self.client.get("/api/status")
+        payload = json.dumps(resp.json()["components"])
+        assert "secret-route" not in payload
+        assert "token=abc" not in payload
+        assert "last_error_path" not in payload
+        assert "last_error_type" not in payload
+        assert "kaboom" not in payload
 
-        assert self.client.get("/api/autonomy/rules/no-such-rule").status_code == 404
+    # -- self-test ---------------------------------------------------------
 
-    # ── Profile scoping ────────────────────────────────────────────────
+    def test_selftest_records_failure_on_500(self, monkeypatch):
+        httpx = pytest.importorskip("httpx")
 
-    def test_rules_scope_to_requested_profile(self):
-        _write_autonomy_config(self.home, [_autonomy_stable_entry("default-rule")])
-        _write_autonomy_config(
-            self.other_home, [_autonomy_stable_entry("other-rule")]
-        )
+        class _FakeResponse:
+            status_code = 500
 
-        own = self.client.get("/api/autonomy/rules")
-        assert own.status_code == 200
-        assert {r["rule_id"] for r in own.json()["rules"]} == {"default-rule"}
+        class _FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
 
-        other = self.client.get("/api/autonomy/rules", params={"profile": "other"})
-        assert other.status_code == 200
-        assert {r["rule_id"] for r in other.json()["rules"]} == {"other-rule"}
+            async def __aenter__(self):
+                return self
 
-    def test_invalid_or_unknown_profile_is_rejected(self):
-        bad = self.client.get(
-            "/api/autonomy/status", params={"profile": "../escape"}
-        )
-        assert bad.status_code == 400
-        missing = self.client.get(
-            "/api/autonomy/status", params={"profile": "ghost"}
-        )
-        assert missing.status_code == 404
+            async def __aexit__(self, *exc):
+                return False
 
-    # ── Preview / exact-hash apply ─────────────────────────────────────
+            async def get(self, *args, **kwargs):
+                return _FakeResponse()
 
-    def test_preview_then_exact_hash_apply_persists_the_rule(self):
-        entry = _autonomy_stable_entry("allow-send")
-        preview = self.client.post(
-            "/api/autonomy/preview", json={"set_rules": [entry]}
-        )
-        assert preview.status_code == 200
-        pdata = preview.json()
-        assert pdata["applied"] is False
-        assert pdata["added_rule_ids"] == ["allow-send"]
-        assert pdata["before_contract_hash"]
-        assert pdata["after_contract_hash"]
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+        asyncio.run(self.ws._dashboard_selftest_once())
+        assert self.ws.DASHBOARD_HEALTH.selftest_status == "failing"
+        assert self.ws.DASHBOARD_HEALTH.selftest_http_status == 500
+        assert self.ws.DASHBOARD_HEALTH.snapshot()["status"] == "degraded"
 
-        applied = self.client.post(
-            "/api/autonomy/apply",
-            json={
-                "set_rules": [entry],
-                "expected_contract_hash": pdata["before_contract_hash"],
-            },
-        )
-        assert applied.status_code == 200
-        adata = applied.json()
-        assert adata["applied"] is True
-        # The contract hash covers compiled_at_ms, so the informational
-        # after-hash from preview time need not byte-match the minted head;
-        # the compare-and-set anchor is the exact BEFORE hash.
-        assert adata["contract_hash"]
-        assert adata["contract_version"] >= 1
+    def test_selftest_records_pass_on_200(self, monkeypatch):
+        httpx = pytest.importorskip("httpx")
 
-        rules = self.client.get("/api/autonomy/rules").json()["rules"]
-        assert "allow-send" in {r["rule_id"] for r in rules}
-        raw = yaml.safe_load((self.home / "config.yaml").read_text())
-        assert [r["rule_id"] for r in raw["autonomy"]["stable_rules"]] == [
-            "allow-send"
-        ]
+        class _FakeResponse:
+            status_code = 200
 
-    def test_stale_hash_apply_conflicts_and_writes_nothing(self):
-        entry = _autonomy_stable_entry("allow-send")
-        before = (self.home / "config.yaml").read_text()
-        resp = self.client.post(
-            "/api/autonomy/apply",
-            json={"set_rules": [entry], "expected_contract_hash": "0" * 64},
-        )
-        assert resp.status_code == 409
-        assert (self.home / "config.yaml").read_text() == before
+        class _FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.calls = []
 
-    def test_cross_profile_hash_apply_conflicts_and_writes_nothing(self):
-        """A hash previewed against one profile can never apply to another."""
-        _write_autonomy_config(
-            self.other_home, [_autonomy_stable_entry("other-rule")]
-        )
-        entry = _autonomy_stable_entry("allow-send")
-        default_preview = self.client.post(
-            "/api/autonomy/preview", json={"set_rules": [entry]}
-        ).json()
+            async def __aenter__(self):
+                return self
 
-        other_before = (self.other_home / "config.yaml").read_text()
-        resp = self.client.post(
-            "/api/autonomy/apply",
-            json={
-                "profile": "other",
-                "set_rules": [entry],
-                "expected_contract_hash": default_preview["before_contract_hash"],
-            },
-        )
-        assert resp.status_code == 409
-        assert (self.other_home / "config.yaml").read_text() == other_before
+            async def __aexit__(self, *exc):
+                return False
 
-    def test_managed_config_is_a_stronger_boundary(self):
-        entry = _autonomy_stable_entry("allow-send")
-        pdata = self.client.post(
-            "/api/autonomy/preview", json={"set_rules": [entry]}
-        ).json()
-        (self.home / ".managed").write_text("nix", encoding="utf-8")
-        before = (self.home / "config.yaml").read_text()
-        try:
-            resp = self.client.post(
-                "/api/autonomy/apply",
-                json={
-                    "set_rules": [entry],
-                    "expected_contract_hash": pdata["before_contract_hash"],
-                },
-            )
-            assert resp.status_code == 403
-            assert (self.home / "config.yaml").read_text() == before
-        finally:
-            (self.home / ".managed").unlink()
+            async def get(self, url, headers=None, **kwargs):
+                # The probe must authenticate with the real session token.
+                assert headers[self.ws_header] == self.ws_token
+                return _FakeResponse()
 
-    # ── Bounds ─────────────────────────────────────────────────────────
+        _FakeClient.ws_header = self.ws._SESSION_HEADER_NAME
+        _FakeClient.ws_token = self.ws._SESSION_TOKEN
+        monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+        asyncio.run(self.ws._dashboard_selftest_once())
+        assert self.ws.DASHBOARD_HEALTH.selftest_status == "ok"
+        assert self.ws.DASHBOARD_HEALTH.selftest_http_status == 200
 
-    def test_request_size_and_audit_limit_bounds(self):
-        huge = _autonomy_stable_entry("huge", description="x" * (1_048_576 + 1))
-        resp = self.client.post(
-            "/api/autonomy/preview", json={"set_rules": [huge]}
-        )
-        assert resp.status_code == 413
-
-        empty = self.client.post("/api/autonomy/preview", json={})
-        assert empty.status_code == 400
-
-        assert (
-            self.client.get("/api/autonomy/audit", params={"limit": 501}).status_code
-            == 400
-        )
-        assert (
-            self.client.get("/api/autonomy/audit", params={"limit": 0}).status_code
-            == 400
-        )
-
-    # ── Suggestions ────────────────────────────────────────────────────
-
-    def test_suggestion_accept_stable_previews_then_applies_exact_hash(self):
-        self._seed_suggestion("suggest-1")
-        preview = self.client.post(
-            "/api/autonomy/suggestions/suggest-1/accept",
-            json={"destination": "stable"},
-        )
-        assert preview.status_code == 200
-        pdata = preview.json()
-        assert pdata["applied"] is False
-        assert pdata["destination"] == "stable"
-        assert pdata["suggestion_id"] == "suggest-1"
-        assert pdata["new_rule_id"]
-
-        stale = self.client.post(
-            "/api/autonomy/suggestions/suggest-1/accept",
-            json={"destination": "stable", "expected_contract_hash": "0" * 64},
-        )
-        assert stale.status_code == 409
-
-        applied = self.client.post(
-            "/api/autonomy/suggestions/suggest-1/accept",
-            json={
-                "destination": "stable",
-                "expected_contract_hash": pdata["before_contract_hash"],
-            },
-        )
-        assert applied.status_code == 200
-        assert applied.json()["applied"] is True
-
-        rules = self.client.get("/api/autonomy/rules").json()["rules"]
-        by_id = {r["rule_id"]: r for r in rules}
-        assert by_id[pdata["new_rule_id"]]["source"] == "user_assertion"
-        # The origin suggestion is resolved — it never becomes authority.
-        assert by_id["suggest-1"]["state"] == "rejected"
-
-    def test_suggestion_accept_temporary_requires_bounds_and_creates_mandate(self):
-        self._seed_suggestion("suggest-2")
-        unbounded = self.client.post(
-            "/api/autonomy/suggestions/suggest-2/accept",
-            json={"destination": "mandate"},
-        )
-        assert unbounded.status_code == 400
-
-        resp = self.client.post(
-            "/api/autonomy/suggestions/suggest-2/accept",
-            json={
-                "destination": "mandate",
-                "expires_in_ms": 3_600_000,
-                "max_uses": 2,
-            },
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["destination"] == "mandate"
-        mandates = self.client.get("/api/autonomy/mandates").json()["mandates"]
-        by_id = {m["rule_id"]: m for m in mandates}
-        assert data["new_rule_id"] in by_id
-        assert by_id[data["new_rule_id"]]["max_uses"] == 2
-        assert by_id[data["new_rule_id"]]["expires_at_ms"] is not None
-
-    def test_suggestion_reject_is_terminal_and_unknown_is_404(self):
-        self._seed_suggestion("suggest-3")
-        resp = self.client.post(
-            "/api/autonomy/suggestions/suggest-3/reject",
-            json={"reason": "not wanted"},
-        )
-        assert resp.status_code == 200
-        assert resp.json()["state"] == "rejected"
-
-        missing = self.client.post(
-            "/api/autonomy/suggestions/no-such/reject", json={}
-        )
-        assert missing.status_code == 404
-
-    # ── Mandates ───────────────────────────────────────────────────────
-
-    def test_mandates_list_and_revoke(self):
-        self._seed_mandate("mandate-1")
-        listed = self.client.get("/api/autonomy/mandates")
-        assert listed.status_code == 200
-        assert {m["rule_id"] for m in listed.json()["mandates"]} == {"mandate-1"}
-
-        revoked = self.client.post(
-            "/api/autonomy/mandates/mandate-1/revoke", json={"reason": "done"}
-        )
-        assert revoked.status_code == 200
-        assert revoked.json()["state"] == "revoked"
-
-        missing = self.client.post(
-            "/api/autonomy/mandates/no-such/revoke", json={}
-        )
-        assert missing.status_code == 404
-
-    # ── Audit ──────────────────────────────────────────────────────────
-
-    def test_audit_returns_bounded_redacted_decisions(self):
-        from agent.autonomy import ActionContext, AutonomyService
-
-        recipient_hash = "cd" * 32
-        AutonomyService().evaluate(
-            ActionContext(
-                operation_key="op-dash-1",
-                stage="execute",
-                action_class="message.send",
-                data_classes=("public",),
-                reversibility="reversible",
-                recipient_hash=recipient_hash,
-            ),
-            consume=True,
-        )
-        resp = self.client.get("/api/autonomy/audit", params={"limit": 10})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["limit"] == 10
-        assert data["count"] >= 1
-        doc = data["decisions"][0]
-        assert doc["verdict"] in {"allow", "ask", "deny"}
-        assert doc["context_hash"]
-        assert doc["decision_id"]
-        # Redacted: hashes and identifiers only, never raw context fields.
-        assert "recipient_hash" not in doc
-        assert self.RAW_RECIPIENT not in resp.text
-
-    # ── Event-loop safety ──────────────────────────────────────────────
-
-    def test_profile_scope_is_never_held_on_the_event_loop(self, monkeypatch):
-        """Every autonomy endpoint enters _profile_scope in a worker thread
-        (where no asyncio loop is running), so the process-global scope can
-        never be held across an await on the event loop."""
-        from contextlib import contextmanager
-
-        import hades_cli.web_server as web_server
-
-        real_scope = web_server._profile_scope
-        observed = []
-
-        @contextmanager
-        def recording_scope(profile):
-            try:
-                asyncio.get_running_loop()
-                observed.append("event-loop")
-            except RuntimeError:
-                observed.append("worker")
-            with real_scope(profile) as scoped:
-                yield scoped
-
-        monkeypatch.setattr(web_server, "_profile_scope", recording_scope)
-
-        self._seed_suggestion("suggest-loop")
-        self._seed_mandate("mandate-loop")
-        entry = _autonomy_stable_entry("allow-send")
-
-        self.client.get("/api/autonomy/status")
-        self.client.get("/api/autonomy/rules")
-        self.client.get("/api/autonomy/rules/mandate-loop")
-        self.client.get("/api/autonomy/mandates")
-        self.client.get("/api/autonomy/audit")
-        pdata = self.client.post(
-            "/api/autonomy/preview", json={"set_rules": [entry]}
-        ).json()
-        self.client.post(
-            "/api/autonomy/apply",
-            json={
-                "set_rules": [entry],
-                "expected_contract_hash": pdata["before_contract_hash"],
-            },
-        )
-        self.client.post(
-            "/api/autonomy/suggestions/suggest-loop/reject", json={}
-        )
-        self.client.post(
-            "/api/autonomy/mandates/mandate-loop/revoke", json={}
-        )
-
-        assert observed, "autonomy endpoints must resolve through _profile_scope"
-        assert set(observed) == {"worker"}
+    def test_selftest_real_asgi_roundtrip(self):
+        """End-to-end: the in-process ASGI self-test hits the real route."""
+        pytest.importorskip("httpx")
+        asyncio.run(self.ws._dashboard_selftest_once())
+        assert self.ws.DASHBOARD_HEALTH.selftest_status in {"ok", "failing"}
+        assert self.ws.DASHBOARD_HEALTH.selftest_http_status is not None

@@ -10,7 +10,7 @@ This module provides a fail-closed, context-local secret scope:
 
 - ``set_secret_scope(mapping)`` installs the active profile's secrets for the
   current task (a contextvar, so it propagates into the agent's worker thread
-  via ``copy_context()`` exactly like the HADES_HOME override).
+  via ``copy_context()`` exactly like the HERMES_HOME override).
 - ``get_secret(name)`` reads from that scope. When multiplexing is **active**
   and no scope is set, it RAISES rather than silently falling back to
   ``os.environ`` — an un-migrated or newly-added call site fails loud at that
@@ -96,10 +96,10 @@ def current_secret_scope() -> Optional[Mapping[str, str]]:
 # list tight: when in doubt a value is a profile secret, not a global.
 _GLOBAL_ENV_EXACT = frozenset({
     # Hermes runtime / deployment
-    "HADES_HOME", "HERMES_PROFILE", "HERMES_GATEWAY_LOCK_DIR",
+    "HERMES_HOME", "HERMES_PROFILE", "HERMES_GATEWAY_LOCK_DIR",
     "HERMES_MAX_ITERATIONS", "HERMES_MAX_TOKENS", "HERMES_API_TIMEOUT",
     "HERMES_REDACT_SECRETS", "HERMES_NOUS_TIMEOUT_SECONDS",
-    "_HADES_GATEWAY",
+    "_HERMES_GATEWAY",
     # OS / interpreter
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "PWD", "SHELL", "TMPDIR",
     "VIRTUAL_ENV", "PYTHONPATH", "SSL_CERT_FILE",
@@ -113,30 +113,10 @@ _GLOBAL_ENV_PREFIXES = (
 )
 
 
-_SECRET_GLOBAL_SUFFIXES = (
-    "_TOKEN",
-    "_KEY",
-    "_SECRET",
-    "_PASSWORD",
-    "_PASSWD",
-    "_CREDENTIAL",
-    "_API_KEY",
-    "_AUTH",
-)
-
-
 def _is_global_env(name: str) -> bool:
-    """Return True for genuinely process-global (non-profile-secret) env vars.
-
-    Prefix allowlists never treat credential-like suffixes as global — a
-    future ``HERMES_TELEGRAM_BOT_TOKEN`` style name must stay fail-closed
-    under multiplex (audit L3-08).
-    """
+    """Return True for genuinely process-global (non-profile-secret) env vars."""
     if name in _GLOBAL_ENV_EXACT:
         return True
-    upper = name.upper()
-    if any(upper.endswith(sfx) for sfx in _SECRET_GLOBAL_SUFFIXES):
-        return False
     return any(name.startswith(p) for p in _GLOBAL_ENV_PREFIXES)
 
 
@@ -147,10 +127,16 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
 
     1. Genuinely-global vars (``_is_global_env``) always read ``os.environ`` —
        they are deployment settings, not profile secrets.
-    2. When a secret scope is installed (multiplexed turn), read from it; an
-       absent key returns ``default``. The scope is authoritative — we do NOT
-       fall through to ``os.environ``, because in a multiplexer ``os.environ``
-       may hold another profile's value.
+    2. When a secret scope is installed (multiplexed turn), read from it. Under
+       multiplexing the scope is authoritative — an absent key returns
+       ``default`` and we do NOT fall through to ``os.environ``, because in a
+       multiplexer ``os.environ`` may hold another profile's value. When
+       multiplexing is OFF, a scope miss falls through to ``os.environ``:
+       single-profile deployments legitimately provide credentials via the
+       process environment (systemd ``Environment=``, secret-manager wrappers
+       like ``pass-cli run`` / ``op run``, plain shell exports) rather than
+       ``<home>/.env``, and the scope — installed unconditionally around e.g.
+       every cron job — must stay a ``.env`` overlay, not a blindfold.
     3. No scope installed:
        - multiplex INACTIVE (default deployment): read ``os.environ`` —
          identical to the legacy ``os.getenv`` behavior every caller had before.
@@ -164,6 +150,17 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     scope = _SECRET_SCOPE.get()
     if scope is not None:
         val = scope.get(name)
+        if val is not None:
+            return val
+        if _MULTIPLEX_ACTIVE:
+            return default
+        # Multiplex off: the scope is an overlay over the process environment,
+        # not an isolation boundary — there is no other profile to leak from.
+        # Without this fallthrough, credentials injected only into the process
+        # environment vanish inside any set_secret_scope(...) block (the cron
+        # scheduler installs one around every job), so cron jobs send a
+        # placeholder API key and 401 while interactive turns keep working.
+        val = os.environ.get(name)
         return val if val is not None else default
 
     if _MULTIPLEX_ACTIVE:
@@ -221,5 +218,18 @@ def build_profile_secret_scope(hermes_home: Path) -> Dict[str, str]:
     global vars are intentionally NOT copied in — ``get_secret`` reads those
     from ``os.environ`` directly, so the scope holds only profile secrets.
     """
-    return load_env_file(Path(hermes_home) / ".env")
+    home = Path(hermes_home)
+    secrets = load_env_file(home / ".env")
 
+    try:
+        from hermes_cli.env_loader import get_secret_source_values
+        external_secrets = get_secret_source_values(home)
+    except Exception:
+        external_secrets = {}
+
+    for key, value in external_secrets.items():
+        if _is_global_env(key):
+            continue
+        secrets[key] = value
+
+    return secrets

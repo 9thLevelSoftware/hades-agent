@@ -8,14 +8,15 @@ model in the Telegram/Discord picker silently reverted on the next launch while
 *typing* the same model persisted — a contradiction the same PR introduced.
 
 After the fix (#49176), the picker callback honors the resolved
-``persist_global`` (defaults to ``True``, still respects ``--session``) and runs
-the same read-modify-write block the text path uses, so a tapped model survives
-across sessions like a typed one.
+``persist_global`` and runs the same read-modify-write block the text path
+uses, so a tapped model behaves exactly like a typed one.  Since the
+session-scope-by-default change, both default to session-only and persist
+only with ``--global`` (or ``model.persist_switch_by_default: true``).
 
 These tests drive the real ``_handle_model_command`` with a fake picker-capable
 adapter that captures the ``on_model_selected`` callback, then invoke that
 callback and assert ``config.yaml`` is (or isn't) updated — exercising the exact
-closure the PR changed, against a real temp ``HADES_HOME``.
+closure the PR changed, against a real temp ``HERMES_HOME``.
 """
 
 import types
@@ -65,7 +66,7 @@ def _make_event(text):
 
 def _fake_switch_result():
     """A successful ModelSwitchResult that bypasses real provider resolution."""
-    from hades_cli.model_switch import ModelSwitchResult
+    from hermes_cli.model_switch import ModelSwitchResult
 
     return ModelSwitchResult(
         success=True,
@@ -83,15 +84,15 @@ def _fake_switch_result():
 def _stub_picker_dependencies(monkeypatch):
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
     monkeypatch.setattr(
-        "hades_cli.model_switch.list_picker_providers",
+        "hermes_cli.model_switch.list_picker_providers",
         lambda **kw: [{"slug": "openrouter", "name": "OpenRouter", "models": ["gpt-5.5"]}],
     )
     monkeypatch.setattr(
-        "hades_cli.model_switch.switch_model",
+        "hermes_cli.model_switch.switch_model",
         lambda **kw: _fake_switch_result(),
     )
     monkeypatch.setattr(
-        "hades_cli.model_switch.resolve_display_context_length",
+        "hermes_cli.model_switch.resolve_display_context_length",
         lambda *a, **k: 272000,
     )
 
@@ -100,7 +101,7 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
     """Write a config.yaml with the given ``model:`` value and stub heavy bits."""
     import gateway.run as gateway_run
 
-    hermes_home = tmp_path / ".hades"
+    hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
     cfg_path = hermes_home / "config.yaml"
     cfg_path.write_text(
@@ -110,9 +111,9 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
 
     monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
     _stub_picker_dependencies(monkeypatch)
-    # save_config writes to ``get_hades_home() / config.yaml`` — point it here.
-    monkeypatch.setattr("hades_constants.get_hades_home", lambda: hermes_home)
-    monkeypatch.setattr("hades_cli.config.get_hades_home", lambda: hermes_home)
+    # save_config writes to ``get_hermes_home() / config.yaml`` — point it here.
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
+    monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: hermes_home)
     return cfg_path
 
 
@@ -166,6 +167,7 @@ async def _drive_picker(runner, event):
             "default": "old-model",
             "provider": "custom",
             "base_url": "https://api.custom.example/v1",
+            "context_length": 1_048_576,
             "api_key": "sk-stale",
             "api_mode": "anthropic_messages",
         },
@@ -176,14 +178,14 @@ async def _drive_picker(runner, event):
     ],
     ids=["nested-dict", "flat-string"],
 )
-async def test_picker_tap_persists_by_default(tmp_path, monkeypatch, seed_model):
-    """Tapping a model in the picker (bare /model) persists to config.yaml,
-    matching the typed ``/model`` default — this is the #49176 fix. The written
-    ``model:`` must always end up a nested dict regardless of the seed shape."""
+async def test_picker_tap_global_flag_persists(tmp_path, monkeypatch, seed_model):
+    """Tapping a model in a ``/model --global`` picker persists to config.yaml,
+    matching the typed ``/model --global`` path. The written ``model:`` must
+    always end up a nested dict regardless of the seed shape."""
     adapter = _FakePickerAdapter()
     cfg_path = _setup_isolated_home(tmp_path, monkeypatch, seed_model)
 
-    confirmation = await _drive_picker(_make_runner(adapter), _make_event("/model"))
+    confirmation = await _drive_picker(_make_runner(adapter), _make_event("/model --global"))
 
     assert confirmation is not None
     assert "gpt-5.5" in confirmation
@@ -196,6 +198,35 @@ async def test_picker_tap_persists_by_default(tmp_path, monkeypatch, seed_model)
     assert "base_url" not in written["model"]
     assert "api_key" not in written["model"]
     assert "api_mode" not in written["model"]
+    assert "context_length" not in written["model"]
+
+
+@pytest.mark.asyncio
+async def test_picker_tap_is_session_scoped_by_default(tmp_path, monkeypatch):
+    """Tapping a model in a bare ``/model`` picker applies an in-memory session
+    override and does NOT touch config.yaml — switches are session-scoped
+    unless the user opts in with ``--global`` (or sets
+    ``model.persist_switch_by_default: true``)."""
+    adapter = _FakePickerAdapter()
+    cfg_path = _setup_isolated_home(
+        tmp_path, monkeypatch, {"default": "old-model", "provider": "openrouter"}
+    )
+    runner = _make_runner(adapter)
+
+    confirmation = await _drive_picker(runner, _make_event("/model"))
+
+    assert confirmation is not None
+    assert "gpt-5.5" in confirmation
+    # The session override IS applied in-memory (the switch worked).
+    assert runner._session_model_overrides, "session override should be set"
+    assert any(
+        ov.get("model") == "gpt-5.5"
+        for ov in runner._session_model_overrides.values()
+    )
+    # But config.yaml is untouched — session-scoped by default.
+    written = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert written["model"]["default"] == "old-model"
+    assert written["model"]["provider"] == "openrouter"
 
 
 @pytest.mark.asyncio
@@ -249,7 +280,7 @@ async def test_multiplex_picker_keeps_profile_adapter_and_callback_scope(
         resolved.append(get_secret("PROFILE_MODEL_KEY"))
         return _fake_switch_result()
 
-    monkeypatch.setattr("hades_cli.model_switch.switch_model", _profile_switch)
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", _profile_switch)
     event = _named_event("--session")
 
     set_multiplex_active(True)
