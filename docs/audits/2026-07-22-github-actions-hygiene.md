@@ -56,3 +56,23 @@ Recent Actions history on `9thLevelSoftware/hades-agent` was almost entirely red
 ## Branch protection
 
 Require only: **All required checks pass**.
+
+## Follow-up after first CI run (same PR)
+
+### Critical product bug unblocked by workflow work
+
+`cli.py` called `env_set(...)` **before** importing it (phase-7 bulk conversion
+bug). That broke every test that imports `cli` at collection time.
+
+### Remaining suite debt (not workflow inheritance)
+
+Even with a lean CI and a correct lockfile, full Python CI still reports
+dozens of real test failures from incomplete Hermes→Hades renames and
+partial upstream merges (compressor floor tests, streaming, plugins, etc.).
+Those are **codebase** defects, not Actions config — track separately.
+
+### JS follow-ups shipped on the PR
+
+- QueuePanel `onResume` / `parked` props
+- topupCommand billing copy assertion
+- bulk test rename of `hermes_time` / `reload(hades_constants)` leftovers
