@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "./api";
+import { api, setManagementProfile } from "./api";
 
 const SESSION_HEADER = "X-Hermes-Session-Token";
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  setManagementProfile("");
 });
 
 function jsonFetchMock(body: unknown = { ok: true }) {
@@ -102,5 +103,43 @@ describe("api OAuth helpers", () => {
       expect(init.credentials).toBe("include");
       expect((init.headers as Headers).has(SESSION_HEADER)).toBe(false);
     }
+  });
+});
+
+describe("Hades management API contract", () => {
+  it("requests filtered autonomy rules within the active management profile", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({ rules: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    await api.getAutonomyRules({ source: "user_assertion", effective: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0];
+    const requestUrl = new URL(String(url), "http://test");
+    expect(requestUrl.pathname).toBe("/api/autonomy/rules");
+    expect(requestUrl.searchParams.get("source")).toBe("user_assertion");
+    expect(requestUrl.searchParams.get("effective")).toBe("true");
+    expect(requestUrl.searchParams.get("profile")).toBe("alpha");
+  });
+
+  it("requests filtered receipts within the active management profile", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({ receipts: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    await api.getReceipts({ status: "verified", limit: 10 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0];
+    const requestUrl = new URL(String(url), "http://test");
+    expect(requestUrl.pathname).toBe("/api/receipts");
+    expect(requestUrl.searchParams.get("status")).toBe("verified");
+    expect(requestUrl.searchParams.get("limit")).toBe("10");
+    expect(requestUrl.searchParams.get("profile")).toBe("alpha");
   });
 });
