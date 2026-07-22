@@ -48,7 +48,7 @@ from typing import List, Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 # Suppress startup messages for clean CLI experience
-os.environ["HADES_QUIET"] = "1"  # Our own modules
+env_set("HADES_QUIET", "1")  # Our own modules
 
 import yaml
 
@@ -215,7 +215,7 @@ _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 
 # Load .env from ~/.hades/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
-from hades_constants import get_hades_home, display_hades_home
+from hades_constants import get_hades_home, display_hades_home, env_get, env_set
 from hades_cli.browser_connect import (
     DEFAULT_BROWSER_CDP_URL,
     is_browser_debug_ready,
@@ -370,7 +370,7 @@ def _resolve_prefill_messages_file(config: Dict[str, Any]) -> str:
     ``agent.prefill_messages_file`` remains a legacy fallback for older CLI and
     godmode-generated configs.
     """
-    env_path = os.getenv("HADES_PREFILL_MESSAGES_FILE", "").strip()
+    env_path = env_get("HADES_PREFILL_MESSAGES_FILE", "").strip()
     if env_path:
         return env_path
     top_level = str(config.get("prefill_messages_file", "") or "").strip()
@@ -428,7 +428,7 @@ def load_cli_config() -> Dict[str, Any]:
 
     # --ignore-user-config: force-skip the user config.yaml (still honor project
     # config as a fallback so defaults stay sensible).
-    ignore_user_config = os.environ.get("HADES_IGNORE_USER_CONFIG") == "1"
+    ignore_user_config = env_get("HADES_IGNORE_USER_CONFIG") == "1"
 
     # Use user config if it exists, otherwise project config
     if user_config_path.exists() and not ignore_user_config:
@@ -770,8 +770,7 @@ def load_cli_config() -> Dict[str, Any]:
     if isinstance(security_config, dict):
         redact = security_config.get("redact_secrets")
         if redact is not None:
-            os.environ["HADES_REDACT_SECRETS"] = str(redact).lower()
-
+            env_set("HADES_REDACT_SECRETS", str(redact).lower())
     return defaults
 
 # Load configuration at module startup
@@ -998,10 +997,10 @@ def _prepare_deferred_agent_startup() -> None:
     global _deferred_agent_startup_done
     if _deferred_agent_startup_done:
         return
-    if os.environ.get("HADES_DEFER_AGENT_STARTUP") != "1":
+    if env_get("HADES_DEFER_AGENT_STARTUP") != "1":
         return
     _deferred_agent_startup_done = True
-    _accept_hooks = os.environ.get("HADES_ACCEPT_HOOKS", "").lower() in {
+    _accept_hooks = env_get("HADES_ACCEPT_HOOKS", "").lower() in {
         "1",
         "true",
         "yes",
@@ -1063,7 +1062,7 @@ def _arm_exit_watchdog(timeout_s: float | None = None) -> None:
     """
     if timeout_s is None:
         try:
-            timeout_s = float(os.getenv("HADES_EXIT_WATCHDOG_S", "30"))
+            timeout_s = float(env_get("HADES_EXIT_WATCHDOG_S", "30"))
         except (TypeError, ValueError):
             timeout_s = 30.0
     if timeout_s <= 0:
@@ -1137,7 +1136,7 @@ def _arm_exit_watchdog_on_shutdown_signal() -> None:
         return
     _signal_watchdog_armed = True
     try:
-        base = float(os.getenv("HADES_EXIT_WATCHDOG_S", "30"))
+        base = float(env_get("HADES_EXIT_WATCHDOG_S", "30"))
     except (TypeError, ValueError):
         base = 30.0
     if base <= 0:
@@ -2279,7 +2278,7 @@ def _detect_light_mode() -> bool:
                 _LIGHT_MODE_CACHE = result
                 return result
         # 2. Theme hint
-        theme = (os.environ.get("HADES_TUI_THEME") or "").strip().lower()
+        theme = (env_get("HADES_TUI_THEME") or "").strip().lower()
         if theme == "light":
             result = True
             _LIGHT_MODE_CACHE = result
@@ -2288,7 +2287,7 @@ def _detect_light_mode() -> bool:
             _LIGHT_MODE_CACHE = result
             return result
         # 3. Explicit bg hex
-        bg_hint = os.environ.get("HADES_TUI_BACKGROUND") or ""
+        bg_hint = env_get("HADES_TUI_BACKGROUND") or ""
         bg_lum = _luminance_from_hex(bg_hint)
         if bg_lum is not None:
             result = bg_lum >= 0.5
@@ -3567,7 +3566,7 @@ def _build_compact_banner() -> str:
         line1 = f"{agent_name} - AI Agent Framework"
         tiny_line = agent_name
 
-    if os.environ.get("HADES_FAST_STARTUP_BANNER") == "1":
+    if env_get("HADES_FAST_STARTUP_BANNER") == "1":
         from hades_cli import __release_date__ as _release_date
         from hades_cli import __version__ as _version
 
@@ -3877,7 +3876,7 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         _DEFAULT_CONFIG_MODEL = ""
         self.model = model or _config_model or _DEFAULT_CONFIG_MODEL
         # Read max_tokens from config (env var override: HADES_MAX_TOKENS)
-        _env_mt = os.environ.get("HADES_MAX_TOKENS")
+        _env_mt = env_get("HADES_MAX_TOKENS")
         if _env_mt:
             try:
                 self.max_tokens = int(_env_mt)
@@ -3913,7 +3912,7 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         self.requested_provider = (
             provider
             or CLI_CONFIG["model"].get("provider")
-            or os.getenv("HADES_INFERENCE_PROVIDER")
+            or env_get("HADES_INFERENCE_PROVIDER")
             or "auto"
         )
         self._provider_source: Optional[str] = None
@@ -3940,9 +3939,9 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self.max_turns = CLI_CONFIG["agent"]["max_turns"]
         elif CLI_CONFIG.get("max_turns"):  # Backwards compat: root-level max_turns
             self.max_turns = CLI_CONFIG["max_turns"]
-        elif os.getenv("HADES_MAX_ITERATIONS"):
+        elif env_get("HADES_MAX_ITERATIONS"):
             try:
-                self.max_turns = int(os.getenv("HADES_MAX_ITERATIONS", ""))
+                self.max_turns = int(env_get("HADES_MAX_ITERATIONS", ""))
             except (TypeError, ValueError):
                 self.max_turns = 90
         else:
@@ -3974,11 +3973,11 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # by `hades chat --ignore-rules` in hades_cli/main.py. When true we
         # pass skip_context_files=True and skip_memory=True to AIAgent so
         # AGENTS.md/SOUL.md/.cursorrules and persistent memory are not loaded.
-        self.ignore_rules = ignore_rules or os.environ.get("HADES_IGNORE_RULES") == "1"
+        self.ignore_rules = ignore_rules or env_get("HADES_IGNORE_RULES") == "1"
         
         # Ephemeral system prompt: env var takes precedence, then config
         self.system_prompt = (
-            os.getenv("HADES_EPHEMERAL_SYSTEM_PROMPT", "")
+            env_get("HADES_EPHEMERAL_SYSTEM_PROMPT", "")
             or CLI_CONFIG["agent"].get("system_prompt", "")
         )
         self.personalities = CLI_CONFIG["agent"].get("personalities", {})
@@ -6298,7 +6297,7 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         
         # Tool discovery is intentionally deferred on the Termux bare prompt
         # path; availability warnings are shown once tools are initialized.
-        if os.environ.get("HADES_DEFER_AGENT_STARTUP") != "1":
+        if env_get("HADES_DEFER_AGENT_STARTUP") != "1":
             self._show_tool_availability_warnings()
 
         # Warn about low context lengths (common with local servers). Keep
@@ -6597,7 +6596,7 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
     def _show_status(self):
         """Show compact startup status line."""
         # Avoid pulling the full tool registry into the bare Termux prompt path.
-        if os.environ.get("HADES_DEFER_AGENT_STARTUP") == "1":
+        if env_get("HADES_DEFER_AGENT_STARTUP") == "1":
             tool_status = "tools deferred"
         else:
             tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
@@ -7255,7 +7254,7 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     self.agent._session_db_created = False
                     self._session_db.create_session(
                         session_id=self.session_id,
-                        source=os.environ.get("HADES_SESSION_SOURCE", "cli"),
+                        source=env_get("HADES_SESSION_SOURCE", "cli"),
                         model=self.model,
                         model_config={
                             "max_iterations": self.max_turns,
@@ -13010,7 +13009,7 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # main thread simply blocks on the remaining import work instead of
         # redoing it. Skipped when agent startup is explicitly deferred
         # (Termux) — that path defers heavy work on purpose.
-        if os.environ.get("HADES_DEFER_AGENT_STARTUP") != "1":
+        if env_get("HADES_DEFER_AGENT_STARTUP") != "1":
             def _prewarm_agent_runtime() -> None:
                 try:
                     import run_agent  # noqa: F401  (imports model_tools + tool registry)
@@ -13029,7 +13028,7 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # won't affect the running process — we just want the operator to
         # see that they're running without the safety net.
         try:
-            _redact_raw = os.getenv("HADES_REDACT_SECRETS", "true")
+            _redact_raw = env_get("HADES_REDACT_SECRETS", "true")
             if _redact_raw.lower() not in {"1", "true", "yes", "on"}:
                 self._console_print(
                     "[bold red]⚠  Secret redaction is DISABLED[/] "
@@ -13167,10 +13166,10 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         self._voice_tts_done = threading.Event()  # Signals TTS playback finished
         self._voice_tts_done.set()  # Initially "done" (no TTS pending)
 
-        if os.environ.get("HADES_DEFER_AGENT_STARTUP") != "1":
+        if env_get("HADES_DEFER_AGENT_STARTUP") != "1":
             self._install_tool_callbacks()
 
-        if os.environ.get("HADES_DEFER_AGENT_STARTUP") != "1":
+        if env_get("HADES_DEFER_AGENT_STARTUP") != "1":
             self._ensure_tirith_security()
         
         # Key bindings for the input area
@@ -15235,7 +15234,7 @@ class HadesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 if getattr(self, "agent", None) and getattr(self, "_agent_running", False):
                     self.agent.interrupt(f"received signal {signum}")
                     try:
-                        _grace = float(os.getenv("HADES_SIGTERM_GRACE", "1.5"))
+                        _grace = float(env_get("HADES_SIGTERM_GRACE", "1.5"))
                     except (TypeError, ValueError):
                         _grace = 1.5
                     if _grace > 0:
@@ -15529,7 +15528,7 @@ def _run_kanban_goal_loop_q(cli: "HadesCLI", first_response: str) -> None:
     """
     import os as _os
 
-    task_id = (_os.environ.get("HADES_KANBAN_TASK") or "").strip()
+    task_id = (env_get("HADES_KANBAN_TASK") or "").strip()
     if not task_id:
         return
 
@@ -15678,8 +15677,7 @@ def main(
 
     # Signal to terminal_tool that we're in interactive mode
     # This enables interactive sudo password prompts with timeout
-    os.environ["HADES_INTERACTIVE"] = "1"
-    
+    env_set("HADES_INTERACTIVE", "1")
     # Handle gateway mode (messaging + cron)
     if gateway:
         import asyncio
@@ -15847,7 +15845,7 @@ def main(
             if _agent is not None:
                 _agent.interrupt(f"received signal {signum}")
                 try:
-                    _grace = float(os.getenv("HADES_SIGTERM_GRACE", "1.5"))
+                    _grace = float(env_get("HADES_SIGTERM_GRACE", "1.5"))
                 except (TypeError, ValueError):
                     _grace = 1.5
                 if _grace > 0:
@@ -15866,7 +15864,7 @@ def main(
         # first so the final debug trace isn't lost; SIGALRM deadman guards
         # the flush against any rare blocking-I/O case (the reporter measured
         # flush in <1ms; the alarm is a failsafe, not the common path).
-        if os.environ.get("HADES_KANBAN_TASK"):
+        if env_get("HADES_KANBAN_TASK"):
             try:
                 import signal as _sig_mod
                 if hasattr(_sig_mod, "SIGALRM"):
@@ -15911,7 +15909,7 @@ def main(
             # path or URL into a kanban task body never get it routed to the
             # model's vision input.
             single_query_image_urls: list[str] = []
-            _kanban_task_id = os.environ.get("HADES_KANBAN_TASK", "").strip()
+            _kanban_task_id = env_get("HADES_KANBAN_TASK", "").strip()
             if _kanban_task_id:
                 try:
                     from hades_cli import kanban_db as _kb
@@ -16055,7 +16053,7 @@ def main(
                         # out (→ sticky block). Gated on the env vars the
                         # dispatcher sets in `_default_spawn`; a no-op for every
                         # normal worker and every non-kanban `-q` run.
-                        if os.environ.get("HADES_KANBAN_GOAL_MODE") == "1":
+                        if env_get("HADES_KANBAN_GOAL_MODE") == "1":
                             try:
                                 _run_kanban_goal_loop_q(cli, response)
                             except Exception as _goal_exc:
@@ -16079,7 +16077,7 @@ def main(
                         _exit_code = 0
                         if isinstance(result, dict) and result.get("failed"):
                             _exit_code = 1
-                            if os.environ.get("HADES_KANBAN_TASK") and result.get(
+                            if env_get("HADES_KANBAN_TASK") and result.get(
                                 "failure_reason"
                             ) in ("rate_limit", "billing"):
                                 try:

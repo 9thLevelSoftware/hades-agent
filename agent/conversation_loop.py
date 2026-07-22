@@ -70,7 +70,7 @@ from agent.retry_utils import (
 )
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
-from hades_constants import PARTIAL_STREAM_STUB_ID
+from hades_constants import PARTIAL_STREAM_STUB_ID, env_get, env_set
 from hades_logging import set_session_context
 from tools.skill_provenance import set_current_write_origin
 from utils import base_url_host_matches, env_var_enabled
@@ -5705,7 +5705,7 @@ def run_conversation(
                     logger.info(
                         "kanban stop-loop nudge issued (attempt %d) task=%s",
                         agent._kanban_stop_nudges,
-                        os.environ.get("HADES_KANBAN_TASK", ""),
+                        env_get("HADES_KANBAN_TASK", ""),
                     )
                     agent._emit_status(
                         "⚠️ Kanban worker tried to exit without "

@@ -21,7 +21,7 @@ from gateway.mission_outbox import (
     delivery_capabilities,
     normalize_platform_token,
 )
-from hades_constants import get_hades_home
+from hades_constants import get_hades_home, env_get, env_set
 from hades_cli import missions_db as mdb
 from hades_cli import workflows_db as wfdb
 from hades_state import SessionDB
@@ -44,7 +44,7 @@ def _active_profile_name() -> str | None:
     """Derive the active profile from HADES_HOME and validate its hint."""
     home = get_hades_home().expanduser().resolve(strict=False)
     derived = home.name if home.parent.name == "profiles" else "default"
-    configured = os.environ.get("HERMES_PROFILE", "").strip()
+    configured = env_get("HERMES_PROFILE", "").strip()
     if configured and configured != derived:
         return None
     return derived
