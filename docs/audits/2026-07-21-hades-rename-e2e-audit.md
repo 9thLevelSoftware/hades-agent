@@ -1,10 +1,12 @@
 # Hades Agent Fork — E2E Rename/Refactor Audit (2026-07-21)
 
 Branch audited: `audit/phase-5-hygiene` @ `e26a4a3e39`  
+Remediation branch: `audit/phase-6-11-rename-hygiene` (phases 6–11)  
 Scope: end-to-end defect inventory after Hermes → Hades renames, dual-compat shims, and upstream merges.  
 Companion: phases 0–5 security/reliability track in `docs/audits/2026-07-21-agent-audit-remediation.md` (mostly complete).
 
-**Verdict: do not approve as “rename complete.”** Multiple security gates and packaging contracts are still single-spelling Hermes, while the live product folds paths and brands to Hades. That split is the root cause of most remaining glitches.
+**Status (phases 6–11): remediated on `audit/phase-6-11-rename-hygiene`.**  
+P0 dual-path security, env alias guard, packaging package-data, core import ratchet, and surface dual-bind landed. Residual: full god-file decomposition and operator dual-home data migration remain explicitly deferred.
 
 ---
 
@@ -354,18 +356,35 @@ The problem is **not** “missing shims at the root.” The problem is **consume
 
 ---
 
+## Remediation status (phases 6–11)
+
+| ID | Status |
+|----|--------|
+| R-SEC-01 … R-SEC-05 | **done** (phase 6) |
+| R-CI-01 env alias | **done** (phase 7) |
+| R-CI-02 / R-PKG-01 / R-PKG-02 packaging | **done** (phase 8) |
+| R-STR-02 / R-ID-01 import ratchet + aliases | **done** (phase 9) |
+| R-ID / R-PATH surface dual-bind | **done** (phase 10) |
+| R-STR-01 full god-file split | **deferred** (phase 11 docs only) |
+| Dual-home data consolidation | **deferred** (operator choice) |
+
+### Gate suites (post-remediation)
+
+```bash
+scripts/run_tests.sh \
+  tests/tools/test_approval.py \
+  tests/test_env_alias_guard.py \
+  tests/test_hermes_compat_shims.py \
+  tests/test_hades_import_ratchet.py \
+  tests/agent/test_file_safety_sandbox_mirror.py \
+  -q
+```
+
 ## Approval bar (this audit)
 
-**Not approved** for “rename complete” or release hygiene.
+**Original audit: not approved** for “rename complete.”
 
-Presumptive blockers before any further feature work on this fork:
-
-1. R-SEC-01 approval dual-path (23 red tests)
-2. R-CI-01 env alias guard (72 sites)
-3. R-CI-02 package-data `hades_cli` key
-4. R-PKG-01 `hades_bootstrap` in py-modules
-
-Everything else can sequence behind those four.
+**After phases 6–11 on `audit/phase-6-11-rename-hygiene`:** P0 blockers closed. Residual non-blockers: god-file decomposition, operator home consolidation, broader locale translations beyond `en.yaml`, desktop call-site migration from `hermesDesktop` to `hadesDesktop` (dual-bound).
 
 ---
 

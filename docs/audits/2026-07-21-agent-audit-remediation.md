@@ -14,8 +14,9 @@ homes or kill skill/memory review.
 | 3 | `audit/phase-3-transport` | codex queues, MCP instructions, elicitation soft |
 | 4 | `audit/phase-4-memory` | prefetch/sync hardening |
 | 5 | `audit/phase-5-hygiene` | trace/ssl/inline-shell/azure/effects/session lock |
+| 6–11 | `audit/phase-6-11-rename-hygiene` | Dual-name security/env/packaging/identity (see `2026-07-21-hades-rename-e2e-audit.md`) |
 
-Each phase is completed fully before its PR is opened.
+Each phase is completed fully before its PR is opened. Rename hygiene (6–11) ships as one consolidated PR.
 
 ## Finding → phase map
 
