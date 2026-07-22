@@ -387,7 +387,7 @@ def _emit_post_turn_outcome_unchecked(
         session_id = _opaque_identifier("session", raw_session_id)
         task_id = _opaque_identifier("task", raw_task_id)
     try:
-        from hermes_constants import effective_generic_reasoning_effort
+        from hades_constants import effective_generic_reasoning_effort
 
         effort = effective_generic_reasoning_effort(
             getattr(agent, "reasoning_config", None)
@@ -411,7 +411,7 @@ def _emit_post_turn_outcome_unchecked(
         "runtime_binding": runtime_binding,
     }
     try:
-        from hermes_cli.plugins import invoke_hook
+        from hades_cli.plugins import invoke_hook
 
         invoke_hook("post_turn_outcome", **payload)
     except Exception:

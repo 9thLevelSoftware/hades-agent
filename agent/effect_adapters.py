@@ -1656,3 +1656,9 @@ def register_hermes_state_adapters(registry: Any, *, workflow_conn: Any) -> None
     registry.register(HermesWorkflowStateAdapter(workflow_conn))
     registry.register(HermesCronStateAdapter())
     registry.register(HermesConfigStateAdapter())
+
+HadesWorkflowStateAdapter = HermesWorkflowStateAdapter
+
+HadesCronStateAdapter = HermesCronStateAdapter
+
+HadesConfigStateAdapter = HermesConfigStateAdapter

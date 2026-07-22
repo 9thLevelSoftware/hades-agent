@@ -2670,8 +2670,8 @@ def _resolve_cron_canonical_runtime(requested_runtime):
 
 def _resolve_cron_baseline_runtime(job: dict, cfg: dict) -> dict:
     """Preserve the historical cron primary/global-fallback resolution path."""
-    from hermes_cli.auth import AuthError
-    from hermes_cli.runtime_provider import (
+    from hades_cli.auth import AuthError
+    from hades_cli.runtime_provider import (
         format_runtime_provider_error,
         resolve_runtime_provider,
     )
@@ -3273,7 +3273,7 @@ def run_job(
             raise RuntimeError(
                 f"Cron job '{job_name}' has no model configured "
                 f"(job.model={job.get('model')!r}, "
-                f"HERMES_MODEL={os.getenv('HERMES_MODEL', '')!r}, "
+                f"HERMES_MODEL={env_get('HERMES_MODEL', '')!r}, "
                 "config.yaml model.default missing or empty). "
                 f"Set a per-job model via "
                 f"`cronjob action=update job_id={job_id} model=<name>` or set a "

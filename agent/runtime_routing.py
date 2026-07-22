@@ -23,7 +23,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Literal, Mapping, Protocol, TypeAlias
 from urllib.parse import urlsplit, urlunsplit
 
-from hermes_constants import get_hermes_home
+from hades_constants import get_hades_home
 
 
 logger = logging.getLogger(__name__)
@@ -719,7 +719,7 @@ def _runtime_fingerprint(spec: AgentRuntimeSpec, *, purpose: bytes) -> str:
 
 
 def _profile_home_hash() -> str:
-    path = os.path.normcase(str(get_hermes_home().resolve()))
+    path = os.path.normcase(str(get_hades_home().resolve()))
     return hashlib.sha256(path.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
@@ -804,7 +804,7 @@ def _valid_seal(prepared: PreparedAgentRuntime) -> bool:
 
 @contextmanager
 def _resolver_lease():
-    from hermes_cli.plugins import lease_agent_runtime_resolver
+    from hades_cli.plugins import lease_agent_runtime_resolver
 
     with lease_agent_runtime_resolver() as resolver:
         yield resolver
@@ -848,8 +848,8 @@ def _canonicalize_fallback_entry(
         requested_model = raw_model.strip()
         if not requested_provider or requested_provider == "auto" or not requested_model:
             return None
-        from hermes_cli.model_normalize import normalize_model_for_provider
-        from hermes_cli.models import normalize_provider
+        from hades_cli.model_normalize import normalize_model_for_provider
+        from hades_cli.models import normalize_provider
 
         provider = normalize_provider(requested_provider)
         if not provider or provider == "auto":
@@ -960,8 +960,8 @@ def _runtime_spec_has_canonical_identity(spec: AgentRuntimeSpec) -> bool:
     ):
         return False
     try:
-        from hermes_cli.model_normalize import normalize_model_for_provider
-        from hermes_cli.models import normalize_provider
+        from hades_cli.model_normalize import normalize_model_for_provider
+        from hades_cli.models import normalize_provider
 
         if normalize_provider(provider) != provider:
             return False
@@ -1352,14 +1352,14 @@ def _runtime_from_provider_record(
     resolved_model = model or baseline.model or record_model
     if not resolved_model and provider:
         try:
-            from hermes_cli.models import get_default_model_for_provider
+            from hades_cli.models import get_default_model_for_provider
 
             resolved_model = get_default_model_for_provider(provider) or ""
         except Exception:
             resolved_model = ""
     try:
-        from hermes_cli.model_normalize import normalize_model_for_provider
-        from hermes_cli.models import normalize_provider
+        from hades_cli.model_normalize import normalize_model_for_provider
+        from hades_cli.models import normalize_provider
 
         provider = normalize_provider(provider)
         resolved_model = normalize_model_for_provider(resolved_model, provider)
@@ -1375,7 +1375,7 @@ def _runtime_from_provider_record(
         record.get("api_key") if "api_key" in record else baseline.api_key
     )
     if provider == "minimax-oauth" and isinstance(resolved_api_key, str):
-        from hermes_cli.auth import build_minimax_oauth_token_provider
+        from hades_cli.auth import build_minimax_oauth_token_provider
 
         resolved_api_key = build_minimax_oauth_token_provider()
     record_api_mode = str(record.get("api_mode") or "").strip()
@@ -1441,7 +1441,7 @@ def resolve_ordinary_hermes_runtime(
     if provider in {"", "auto"} and has_explicit_base_url:
         requested = "custom"
 
-    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hades_cli.runtime_provider import resolve_runtime_provider
 
     try:
         record = resolve_runtime_provider(

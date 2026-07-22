@@ -417,7 +417,7 @@ def _run_agent(
         if effective_provider is None:
             effective_provider = (
                 cfg_provider
-                or os.getenv("HERMES_INFERENCE_PROVIDER", "").strip()
+                or env_get("HERMES_INFERENCE_PROVIDER", "").strip()
                 or "auto"
             )
             requested_base_url = (

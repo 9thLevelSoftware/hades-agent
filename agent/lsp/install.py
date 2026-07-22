@@ -405,3 +405,6 @@ __all__ = [
     "detect_status",
     "hermes_lsp_bin_dir",
 ]
+
+# Dual-name alias (Hades-first callers)
+hades_lsp_bin_dir = hermes_lsp_bin_dir

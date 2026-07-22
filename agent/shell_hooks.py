@@ -130,7 +130,7 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
-from hades_constants import get_hades_home, env_get
+from hades_constants import get_hades_home, env_get, env_set
 from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
@@ -514,7 +514,7 @@ def _windows_git_bash_candidates() -> List[str]:
         if path and os.path.isfile(path) and path not in candidates:
             candidates.append(path)
 
-    add_if_file(os.environ.get("HERMES_GIT_BASH_PATH", ""))
+    add_if_file(env_get("HERMES_GIT_BASH_PATH", ""))
 
     local_appdata = os.environ.get("LOCALAPPDATA", "")
     if local_appdata:

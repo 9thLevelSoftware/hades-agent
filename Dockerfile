@@ -217,6 +217,7 @@ USER root
 RUN mkdir -p /opt/hades/bin && \
     cp /opt/hades/docker/hermes-exec-shim.sh /opt/hades/bin/hermes && \
     chmod 0755 /opt/hades/bin/hermes && \
+    ln -sfn hermes /opt/hades/bin/hades && \
     printf 'docker\n' > /opt/hades/.install_method
 # The ``.install_method`` stamp is baked next to the running code (the install
 # tree), NOT into $HADES_HOME. $HADES_HOME (/opt/data) is a shared data
@@ -275,7 +276,10 @@ COPY --chmod=0755 docker/cont-init.d/015-supervise-perms /etc/cont-init.d/015-su
 COPY --chmod=0755 docker/cont-init.d/02-reconcile-profiles /etc/cont-init.d/02-reconcile-profiles
 
 # ---------- Runtime ----------
-ENV HERMES_WEB_DIST=/opt/hades/hermes_cli/web_dist
+# Dual-set web dist env so both HADES_* and HERMES_* readers resolve. Prefer
+# hades_cli (real package); hermes_cli/web_dist may exist as a checkout copy.
+ENV HADES_WEB_DIST=/opt/hades/hades_cli/web_dist
+ENV HERMES_WEB_DIST=/opt/hades/hades_cli/web_dist
 # Point the TUI launcher at the prebuilt bundle baked at build time (Layer 8:
 # `ui-tui && npm run build`). This makes _make_tui_argv take the prebuilt-bundle
 # fast path (`node --expose-gc /opt/hades/ui-tui/dist/entry.js`) and skip the
@@ -292,6 +296,7 @@ ENV HERMES_WEB_DIST=/opt/hades/hermes_cli/web_dist
 # embedded-chat (/api/pty) connections → ENOTEMPTY → the chat tab dies with a
 # 502 / "[session ended]". Pointing at the prebuilt bundle sidesteps the whole
 # check. (A separate launcher hardening is tracked independently.)
+ENV HADES_TUI_DIR=/opt/hades/ui-tui
 ENV HERMES_TUI_DIR=/opt/hades/ui-tui
 ENV HADES_HOME=/opt/data
 ENV HERMES_WRITE_SAFE_ROOT=/opt/data

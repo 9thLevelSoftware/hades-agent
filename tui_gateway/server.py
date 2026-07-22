@@ -18,20 +18,17 @@ from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from hades_constants import (
-    get_hades_home,
-    get_hades_home_override,
-    get_hermes_home,
-    reset_hades_home_override,
-    reset_hermes_home_override,
-    set_hades_home_override,
-    set_hermes_home_override,
     env_get,
     env_pop,
     env_set,
+    get_hades_home,
+    get_hades_home_override,
+    reset_hades_home_override,
+    set_hades_home_override,
 )
 from hades_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
-from tools.environments.local import hermes_subprocess_env
+from tools.environments.local import hades_subprocess_env as hermes_subprocess_env
 from agent.replay_cleanup import sanitize_replay_history
 from tui_gateway import git_probe
 from tui_gateway.transport import (
@@ -1136,10 +1133,10 @@ def _rebind_rpc_to_profile_home(
         return _PROFILE_REBIND_NOT_NEEDED
     try:
         requested = Path(profile_home).resolve()
-        current = Path(get_hermes_home()).resolve()
+        current = Path(get_hades_home()).resolve()
     except Exception:
         requested = Path(profile_home)
-        current = Path(get_hermes_home())
+        current = Path(get_hades_home())
     if requested == current:
         return _PROFILE_REBIND_NOT_NEEDED
     token = set_hermes_home_override(profile_home)
@@ -5382,7 +5379,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
             if isinstance(old_reasoning, dict):
                 reset_kw["reasoning_config_override"] = old_reasoning
             if profile_home:
-                from hermes_state import SessionDB
+                from hades_state import SessionDB
 
                 owned_new_db = SessionDB(
                     db_path=Path(profile_home) / "state.db"

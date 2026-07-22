@@ -284,3 +284,9 @@ class HermesConfigAdapter(_StateBridge):
 
     def _legacy(self) -> HermesConfigStateAdapter:
         return self._adapter
+
+HadesWorkflowAdapter = HermesWorkflowAdapter
+
+HadesCronAdapter = HermesCronAdapter
+
+HadesConfigAdapter = HermesConfigAdapter

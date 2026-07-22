@@ -308,3 +308,6 @@ def resolve_xai_http_credentials(
         "api_key": api_key,
         "base_url": base_url,
     }
+
+# Dual-name alias (Hades-first callers)
+hades_xai_user_agent = hermes_xai_user_agent

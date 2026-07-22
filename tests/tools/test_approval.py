@@ -120,9 +120,21 @@ class TestDetectDangerousRm:
         assert "delete" in desc.lower()
 
     def test_nonrecursive_verification_artifact_cleanup_is_not_dangerous(self):
-        with mock_patch("tempfile.gettempdir", return_value="/tmp"):
-            for prefix in ("hermes-verify-", "hermes-ad-hoc-"):
-                assert detect_dangerous_command(f"rm -f /tmp/{prefix}example.py") == (
+        # Use realpath so macOS /tmp → /private/tmp still matches the
+        # exact-path exemption in _is_verification_artifact_cleanup.
+        import os as _os
+        import tempfile as _tempfile
+
+        temp_dir = _os.path.realpath(_tempfile.gettempdir())
+        with mock_patch("tempfile.gettempdir", return_value=temp_dir):
+            for prefix in (
+                "hermes-verify-",
+                "hermes-ad-hoc-",
+                "hades-verify-",
+                "hades-ad-hoc-",
+            ):
+                path = _os.path.join(temp_dir, f"{prefix}example.py")
+                assert detect_dangerous_command(f"rm -f {path}") == (
                     False,
                     None,
                     None,
@@ -144,22 +156,28 @@ class TestDetectDangerousRm:
             )
 
     def test_verification_cleanup_exemption_rejects_broader_deletions(self):
+        import os as _os
+        import tempfile as _tempfile
+
+        temp_dir = _os.path.realpath(_tempfile.gettempdir())
+        exact = _os.path.join(temp_dir, "hermes-verify-example.py")
         commands = (
-            "rm -rf /tmp/hermes-verify-example.py",
-            "rm -f /tmp/hermes-verify-example.py /tmp/other.py",
-            "rm -f /tmp/nested/hermes-verify-example.py",
-            "rm -f /tmp/nested/../hermes-verify-example.py",
-            "rm -f /tmp/./hermes-verify-example.py",
-            "rm -f /tmp//hermes-verify-example.py",
-            "rm -f /tmp/a/../../tmp/hermes-verify-example.py",
+            f"rm -rf {exact}",
+            f"rm -f {exact} {_os.path.join(temp_dir, 'other.py')}",
+            f"rm -f {_os.path.join(temp_dir, 'nested', 'hermes-verify-example.py')}",
+            f"rm -f {_os.path.join(temp_dir, 'nested', '..', 'hermes-verify-example.py')}",
+            f"rm -f {_os.path.join(temp_dir, '.', 'hermes-verify-example.py')}",
+            f"rm -f {temp_dir}//hermes-verify-example.py",
+            f"rm -f {_os.path.join(temp_dir, 'a', '..', '..')}"
+            f"{_os.sep}{_os.path.basename(temp_dir)}{_os.sep}hermes-verify-example.py",
             "rm -f /var/tmp/hermes-verify-example.py",
-            "rm -f /tmp/unrelated.py",
-            "rm -f /tmp/hermes-verify-*",
-            "rm -f /tmp/hermes-verify-$(touch>/tmp/pwned).py",
-            "rm -f /tmp/hermes-ad-hoc-`touch>/tmp/pwned`.py",
-            "rm -f /tmp/hermes-verify-example.py; touch /tmp/pwned",
+            f"rm -f {_os.path.join(temp_dir, 'unrelated.py')}",
+            f"rm -f {_os.path.join(temp_dir, 'hermes-verify-*')}",
+            f"rm -f {_os.path.join(temp_dir, 'hermes-verify-$(touch>/tmp/pwned).py')}",
+            f"rm -f {_os.path.join(temp_dir, 'hermes-ad-hoc-`touch>/tmp/pwned`.py')}",
+            f"rm -f {exact}; touch /tmp/pwned",
         )
-        with mock_patch("tempfile.gettempdir", return_value="/tmp"):
+        with mock_patch("tempfile.gettempdir", return_value=temp_dir):
             for command in commands:
                 is_dangerous, key, desc = detect_dangerous_command(command)
                 assert is_dangerous is True, command
@@ -779,13 +797,14 @@ class TestHermesConfigWriteProtection:
         assert dangerous is True
 
     def test_perl_eval_no_inplace_safe(self):
-        # `perl -e` with no -i flag is code evaluation, not file mutation —
-        # the perl/ruby -i pattern must not fire on it.
+        # `perl -wne` with no -i flag is a read/print of the file, not an
+        # in-place mutation — the perl/ruby -i pattern must not fire on it.
+        # Reading config via perl is not itself a dangerous write.
         dangerous, key, desc = detect_dangerous_command(
             "perl -wne 'print' ~/.hades/config.yaml"
         )
-        assert dangerous is True
-        assert key != "in-place edit of Hades config/env (perl/ruby)"
+        assert dangerous is False
+        assert key is None
 
     def test_read_is_safe(self):
         # Reading config is not a write — must not trip.

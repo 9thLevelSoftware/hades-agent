@@ -18,7 +18,7 @@ from gateway.mission_outbox import (
     _authority_allows_destination,
     normalize_platform_token,
 )
-from hades_constants import get_hades_home
+from hades_constants import get_hades_home, env_get, env_set
 from hades_state import SessionDB, _redact_durable_value
 from hades_cli import kanban_db as kb
 from hades_cli import missions_db as mdb
@@ -96,7 +96,7 @@ def _profile_path_error(
 ) -> str | None:
     """Reject explicit databases that are outside the active profile home."""
     active_home = get_hades_home().expanduser().resolve(strict=False)
-    configured_profile = os.environ.get("HERMES_PROFILE", "").strip()
+    configured_profile = env_get("HERMES_PROFILE", "").strip()
     active_profile = _active_profile_name()
     if configured_profile and configured_profile != active_profile:
         return (

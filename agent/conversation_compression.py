@@ -41,6 +41,7 @@ from typing import Any, Optional, Tuple
 
 from agent.context_engine import sanitize_memory_context
 from agent.model_metadata import estimate_request_tokens_rough
+from hades_constants import env_get, env_set
 
 logger = logging.getLogger(__name__)
 
@@ -1252,7 +1253,7 @@ def compress_context(
 
                         set_current_session_id(agent.session_id)
                     except Exception:
-                        os.environ["HADES_SESSION_ID"] = agent.session_id
+                        env_set("HADES_SESSION_ID", agent.session_id)
                     # The gateway/tools session context (ContextVar + env) and the
                     # logging session context are SEPARATE mechanisms. The call above
                     # moves the former; the ``[session_id]`` tag on log lines comes
@@ -1272,7 +1273,7 @@ def compress_context(
                     try:
                         agent._session_db.create_session(
                             session_id=agent.session_id,
-                            source=agent.platform or os.environ.get("HADES_SESSION_SOURCE", "cli"),
+                            source=agent.platform or env_get("HADES_SESSION_SOURCE", "cli"),
                             model=agent.model,
                             model_config=agent._session_init_model_config,
                             parent_session_id=old_session_id,
@@ -1297,7 +1298,7 @@ def compress_context(
                             from gateway.session_context import set_current_session_id
                             set_current_session_id(agent.session_id)
                         except Exception:
-                            os.environ["HADES_SESSION_ID"] = agent.session_id
+                            env_set("HADES_SESSION_ID", agent.session_id)
                         try:
                             from hades_logging import set_session_context
                             set_session_context(agent.session_id)

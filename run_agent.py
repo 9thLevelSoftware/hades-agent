@@ -62,7 +62,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from hades_constants import get_hades_home
+from hades_constants import get_hades_home, env_get, env_set
 
 
 def _launch_cwd_for_session(source: str) -> Optional[str]:
@@ -95,7 +95,7 @@ def _session_source_for_agent(platform: Optional[str]) -> str:
 
         source = get_session_env("HADES_SESSION_SOURCE", "")
     except Exception:
-        source = os.environ.get("HADES_SESSION_SOURCE", "")
+        source = env_get("HADES_SESSION_SOURCE", "")
     source = str(source or "").strip()
     if source:
         return source
@@ -1328,7 +1328,7 @@ class AIAgent:
         if cfg is not None:
             return cfg, False
 
-        env_timeout = os.getenv("HADES_API_CALL_STALE_TIMEOUT")
+        env_timeout = env_get("HADES_API_CALL_STALE_TIMEOUT")
         if env_timeout is not None:
             return float(env_timeout), False
 
@@ -2436,7 +2436,7 @@ class AIAgent:
 
     @staticmethod
     def _hook_payload_max_chars() -> int:
-        raw = os.getenv("HADES_PLUGIN_PAYLOAD_MAX_CHARS", "50000")
+        raw = env_get("HADES_PLUGIN_PAYLOAD_MAX_CHARS", "50000")
         try:
             return max(1000, int(raw))
         except (TypeError, ValueError):
@@ -3043,7 +3043,7 @@ class AIAgent:
         """
         try:
             import os as _os
-            env = _os.environ.get("HADES_FILE_MUTATION_VERIFIER")
+            env = env_get("HADES_FILE_MUTATION_VERIFIER")
             if env is not None:
                 return env.strip().lower() not in {"0", "false", "no", "off"}
             # Read from the persisted config.yaml so gateway and CLI share
@@ -3140,7 +3140,7 @@ class AIAgent:
         """
         try:
             import os as _os
-            env = _os.environ.get("HADES_TURN_COMPLETION_EXPLAINER")
+            env = env_get("HADES_TURN_COMPLETION_EXPLAINER")
             if env is not None:
                 return env.strip().lower() not in {"0", "false", "no", "off"}
             # Read from the persisted config.yaml so gateway and CLI share
@@ -3266,7 +3266,7 @@ class AIAgent:
         """
         self._last_activity_ts = time.time()
         self._last_activity_desc = desc
-        if os.environ.get("HADES_KANBAN_TASK"):
+        if env_get("HADES_KANBAN_TASK"):
             try:
                 from tools.kanban_tools import heartbeat_current_worker_from_env
                 heartbeat_current_worker_from_env()
@@ -3339,7 +3339,7 @@ class AIAgent:
         headers = getattr(http_response, "headers", None)
         if not headers:
             return
-        _dev = is_truthy_value(os.environ.get("HADES_DEV_CREDITS"))
+        _dev = is_truthy_value(env_get("HADES_DEV_CREDITS"))
 
         # ── Parse (fail-open → miss; never overwrite good state with None) ──
         try:

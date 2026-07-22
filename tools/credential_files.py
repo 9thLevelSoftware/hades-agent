@@ -27,6 +27,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Dict, List, Optional
 from hades_cli.config import cfg_get
+from hades_constants import DEFAULT_CONTAINER_HOME
 
 try:  # pragma: no cover - exercised via the fail-closed test below
     from agent.file_safety import get_read_block_error
@@ -34,6 +35,10 @@ except ImportError:  # noqa: F401 - sentinel consumed in register_credential_fil
     get_read_block_error = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+# Preferred container-side mount root (Hades-first). Callers may still pass
+# LEGACY_CONTAINER_HOME (/root/.hermes) for older sandboxes.
+_DEFAULT_CONTAINER_BASE = DEFAULT_CONTAINER_HOME
 
 # Session-scoped list of credential files to mount.
 # Backed by ContextVar to prevent cross-session data bleed in the gateway pipeline.
@@ -61,7 +66,7 @@ def _resolve_hermes_home() -> Path:
 
 def register_credential_file(
     relative_path: str,
-    container_base: str = "/root/.hermes",
+    container_base: str = DEFAULT_CONTAINER_HOME,
 ) -> bool:
     """Register a credential file for mounting into remote sandboxes.
 
@@ -150,7 +155,7 @@ def register_credential_file(
 
 def register_credential_files(
     entries: list,
-    container_base: str = "/root/.hermes",
+    container_base: str = DEFAULT_CONTAINER_HOME,
 ) -> List[str]:
     """Register multiple credential files from skill frontmatter entries.
 
@@ -206,7 +211,7 @@ def _load_config_files() -> List[Dict[str, str]]:
                         continue
                     resolved_path = host_path.resolve()
                     if resolved_path.is_file():
-                        container_path = f"/root/.hermes/{rel}"
+                        container_path = f"{DEFAULT_CONTAINER_HOME.rstrip('/')}/{rel}"
                         result.append({
                             "host_path": str(resolved_path),
                             "container_path": container_path,
@@ -245,7 +250,7 @@ def get_credential_file_mounts() -> List[Dict[str, str]]:
 
 
 def get_skills_directory_mount(
-    container_base: str = "/root/.hermes",
+    container_base: str = DEFAULT_CONTAINER_HOME,
 ) -> list[Dict[str, str]]:
     """Return mount info for all skill directories (local + external).
 
@@ -336,7 +341,7 @@ def _safe_skills_path(skills_dir: Path) -> str:
 
 
 def iter_skills_files(
-    container_base: str = "/root/.hermes",
+    container_base: str = DEFAULT_CONTAINER_HOME,
 ) -> List[Dict[str, str]]:
     """Yield individual (host_path, container_path) entries for skills files.
 
@@ -399,7 +404,7 @@ _CACHE_DIRS: list[tuple[str, str]] = [
 
 
 def get_cache_directory_mounts(
-    container_base: str = "/root/.hermes",
+    container_base: str = DEFAULT_CONTAINER_HOME,
 ) -> List[Dict[str, str]]:
     """Return mount entries for each cache directory that exists on disk.
 
@@ -424,7 +429,7 @@ def get_cache_directory_mounts(
 
 def map_cache_path_to_container(
     host_path: str,
-    container_base: str = "/root/.hermes",
+    container_base: str = DEFAULT_CONTAINER_HOME,
 ) -> Optional[str]:
     """Map a host cache path to its mounted path under *container_base*.
 
@@ -448,7 +453,7 @@ def map_cache_path_to_container(
 
 def from_agent_visible_cache_path(
     container_path: str,
-    container_base: str = "/root/.hermes",
+    container_base: str = DEFAULT_CONTAINER_HOME,
 ) -> str:
     """Translate a sandbox/container cache path back to its host path.
 
@@ -472,7 +477,7 @@ def from_agent_visible_cache_path(
 
 def to_agent_visible_cache_path(
     host_path: str,
-    container_base: str = "/root/.hermes",
+    container_base: str = DEFAULT_CONTAINER_HOME,
 ) -> str:
     """Translate a host cache path to its mounted path inside the sandbox.
 
@@ -492,7 +497,7 @@ def to_agent_visible_cache_path(
 
 
 def iter_cache_files(
-    container_base: str = "/root/.hermes",
+    container_base: str = DEFAULT_CONTAINER_HOME,
 ) -> List[Dict[str, str]]:
     """Return individual (host_path, container_path) entries for cache files.
 

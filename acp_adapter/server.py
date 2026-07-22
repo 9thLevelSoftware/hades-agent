@@ -726,8 +726,8 @@ class HermesACPAgent(acp.Agent):
             apply_manual_runtime_transition,
             constructor_runtime_spec,
         )
-        from hermes_cli.config import load_config
-        from hermes_cli.fallback_config import get_fallback_chain
+        from hades_cli.config import load_config
+        from hades_cli.fallback_config import get_fallback_chain
 
         fallback_model = get_fallback_chain(load_config())
         provider_changed = target_provider != current_provider
@@ -1529,7 +1529,7 @@ class HermesACPAgent(acp.Agent):
 
         if state.agent is None:
             try:
-                from hermes_cli.plugins import discover_plugins
+                from hades_cli.plugins import discover_plugins
 
                 discover_plugins()
             except Exception:

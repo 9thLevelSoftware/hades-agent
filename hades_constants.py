@@ -1394,6 +1394,65 @@ def env_pop(name: str, env=None):
     return found
 
 
+# ── Dual-name path / service identity (Hades + Hermes) ───────────────────────
+# Single source of truth for security regexes, container mounts, and service
+# labels. Prefer writing/folding toward Hades; always accept both spellings.
+
+HOME_BASENAMES: tuple[str, ...] = (".hades", ".hermes")
+CANONICAL_HOME_BASENAME = ".hades"
+DEFAULT_CONTAINER_HOME = "/root/.hades"
+LEGACY_CONTAINER_HOME = "/root/.hermes"
+CONTAINER_HOME_CANDIDATES: tuple[str, ...] = (
+    DEFAULT_CONTAINER_HOME,
+    LEGACY_CONTAINER_HOME,
+)
+
+# launchd / systemd labels that stop or restart the agent gateway.
+SERVICE_LABEL_PATTERN = (
+    r"(?:hades|hermes|ai\.hades|ai\.hermes|hades-gateway|hermes-gateway)"
+)
+
+
+def home_basename_regex() -> str:
+    """Regex alternation for home directory basenames (no leading slash)."""
+    return r"(?:hades|hermes)"
+
+
+def home_dir_prefix_regex() -> str:
+    """Regex matching a Hades/Hermes home directory *prefix* (ends with /).
+
+    Covers:
+    - ``~/.hades/`` / ``~/.hermes/``
+    - ``$HOME/.hades/`` / ``${HOME}/.hermes/`` (and ``$home`` / ``${home}``)
+    - ``$HADES_HOME/`` / ``$HERMES_HOME/`` / ``$hades_home/`` / ``$hermes_home/``
+      (brace forms included)
+    """
+    base = home_basename_regex()
+    return (
+        r"(?:"
+        rf"~/\.{base}/|"
+        rf"(?:\$home|\$\{{home\}})/\.{base}/|"
+        r"(?:"
+        r"\$(?:HADES_HOME|HERMES_HOME|hades_home|hermes_home)|"
+        r"\$\{(?:HADES_HOME|HERMES_HOME|hades_home|hermes_home)\}"
+        r")/"
+        r")"
+    )
+
+
+def default_container_home() -> str:
+    """Preferred container-side home mount path (Hades-first)."""
+    return DEFAULT_CONTAINER_HOME
+
+
+def is_container_home_path(path: str | None) -> bool:
+    """True when *path* is a known container home root (either spelling)."""
+    if not path:
+        return False
+    cleaned = path.rstrip("/")
+    return cleaned in {c.rstrip("/") for c in CONTAINER_HOME_CANDIDATES}
+
+
 # ── Backward-compatibility aliases ───────────────────────────────────────────
 # Plugins and external code may still reference the old Hermes names.
 get_hermes_home = get_hades_home

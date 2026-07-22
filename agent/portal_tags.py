@@ -142,3 +142,6 @@ def nous_portal_tags(session_id: str | None = None) -> List[str]:
     if effective:
         tags.append(conversation_tag(effective))
     return tags
+
+# Dual-name alias (Hades-first callers)
+hades_client_tag = hermes_client_tag
