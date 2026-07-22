@@ -48,7 +48,7 @@ from typing import List, Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 # Suppress startup messages for clean CLI experience
-env_set("HADES_QUIET", "1")  # Our own modules
+os.environ["HADES_QUIET"] = "1"  # Our own modules
 
 import yaml
 
