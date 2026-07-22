@@ -80,6 +80,8 @@ const PROFILE_SCOPED_PREFIXES = [
   "/api/model/auxiliary",
   "/api/model/moa",
   "/api/model/options",
+  "/api/autonomy",
+  "/api/receipts",
 ];
 
 function withManagementProfile(url: string): string {
@@ -1268,7 +1270,291 @@ export const api = {
     fetchJSON<SkillHubScan>(
       `/api/skills/hub/scan?identifier=${encodeURIComponent(identifier)}`,
     ),
+
+  // ── Autonomy (Preferences & Autonomy Center) ─────────────────────────
+  // Secondary management surface over the profile-scoped autonomy
+  // endpoints. GET requests inherit the global management-profile scope
+  // via PROFILE_SCOPED_PREFIXES; mutating requests carry the profile in
+  // the body so reads and writes always target the same profile.
+  getAutonomyStatus: () => fetchJSON<AutonomyStatus>("/api/autonomy/status"),
+  getAutonomyRules: (params?: {
+    source?: string;
+    state?: string;
+    effective?: boolean;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.source) query.set("source", params.source);
+    if (params?.state) query.set("state", params.state);
+    if (params?.effective) query.set("effective", "true");
+    const qs = query.toString();
+    return fetchJSON<AutonomyRulesResponse>(
+      `/api/autonomy/rules${qs ? `?${qs}` : ""}`,
+    );
+  },
+  explainAutonomyRule: (ruleId: string) =>
+    fetchJSON<AutonomyRuleExplanation>(
+      `/api/autonomy/rules/${encodeURIComponent(ruleId)}`,
+    ),
+  previewAutonomyChange: (change: AutonomyChangeRequest) =>
+    fetchJSON<AutonomyPreviewResponse>("/api/autonomy/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profile: getManagementProfile() || undefined,
+        ...change,
+      }),
+    }),
+  applyAutonomyPreview: (change: AutonomyApplyRequest) =>
+    fetchJSON<AutonomyApplyResponse>("/api/autonomy/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profile: getManagementProfile() || undefined,
+        ...change,
+      }),
+    }),
+  acceptAutonomySuggestion: (
+    suggestionId: string,
+    body: AutonomySuggestionAcceptRequest,
+  ) =>
+    fetchJSON<AutonomySuggestionAcceptResponse>(
+      `/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/accept`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile: getManagementProfile() || undefined,
+          ...body,
+        }),
+      },
+    ),
+  rejectAutonomySuggestion: (suggestionId: string, reason = "") =>
+    fetchJSON<AutonomySuggestionRejectResponse>(
+      `/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/reject`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile: getManagementProfile() || undefined,
+          reason,
+        }),
+      },
+    ),
+  getAutonomyMandates: (state?: string) =>
+    fetchJSON<AutonomyMandatesResponse>(
+      `/api/autonomy/mandates${state ? `?state=${encodeURIComponent(state)}` : ""}`,
+    ),
+  revokeAutonomyMandate: (ruleId: string, reason = "") =>
+    fetchJSON<AutonomyMandateRevokeResponse>(
+      `/api/autonomy/mandates/${encodeURIComponent(ruleId)}/revoke`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile: getManagementProfile() || undefined,
+          reason,
+        }),
+      },
+    ),
+  getAutonomyAudit: (limit = 100, verdict?: string) =>
+    fetchJSON<AutonomyAuditResponse>(
+      `/api/autonomy/audit?limit=${limit}${verdict ? `&verdict=${encodeURIComponent(verdict)}` : ""}`,
+    ),
+
+  // ── Receipts (verified outcome & artifact receipts) ──────────────────
+  // Secondary READ-ONLY inspection surface over the profile-scoped
+  // receipt endpoints. GET-only by design: recheck/export/sign/prune
+  // stay with `hades receipt ...` / `/receipt ...`. Reads inherit the
+  // global management-profile scope via PROFILE_SCOPED_PREFIXES.
+  getReceipts: (params?: {
+    status?: ReceiptStatus;
+    subject?: string;
+    cursor?: string;
+    limit?: number;
+  }) => {
+    const query = new URLSearchParams();
+    if (params?.status) query.set("status", params.status);
+    if (params?.subject) query.set("subject", params.subject);
+    if (params?.cursor) query.set("cursor", params.cursor);
+    if (params?.limit) query.set("limit", String(params.limit));
+    const qs = query.toString();
+    return fetchJSON<ReceiptListResponse>(`/api/receipts${qs ? `?${qs}` : ""}`);
+  },
+  getReceipt: (receiptId: string) =>
+    fetchJSON<ReceiptDetailResponse>(
+      `/api/receipts/${encodeURIComponent(receiptId)}`,
+    ),
+  getReceiptObservations: (receiptId: string) =>
+    fetchJSON<ReceiptObservationsResponse>(
+      `/api/receipts/${encodeURIComponent(receiptId)}/observations`,
+    ),
 };
+
+// ── Autonomy (Preferences & Autonomy Center) types ───────────────────────
+// Mirrors the bounded structured renderer shared by CLI/TUI/dashboard:
+// labels, identifiers, and profile-local hashes only — never raw
+// recipients, rule text, secrets, or message bodies.
+
+export interface AutonomyStatus {
+  profile_id: string;
+  mode: string;
+  contract_version: number;
+  contract_hash: string;
+  stable_rules: number;
+  active_mandates: number;
+  pending_suggestions: number;
+  pending_apply: boolean;
+}
+
+export interface AutonomyRuleDoc {
+  rule_id: string;
+  source: "user_assertion" | "learned_suggestion" | "temporary_mandate";
+  state: string;
+  effect: "allow" | "ask" | "deny";
+  action_classes: string[];
+  data_classes: string[];
+  recipient_classes: string[];
+  recipient_hashes: string[];
+  resource_prefixes: string[];
+  scope: Record<string, string>;
+  allowed_reversibility: string[];
+  cost: {
+    currency: string;
+    max_per_action_cents: number | null;
+    max_per_window_cents: number | null;
+    window_ms: number | null;
+  } | null;
+  time: {
+    window_start_minute: number;
+    window_end_minute: number;
+    timezone: string;
+  } | null;
+  evidence_requirements: { kind: string; stage: string }[];
+  max_uncertainty_ppm: number | null;
+  provenance: string;
+  confidence_ppm: number;
+  created_at_ms: number | null;
+  expires_at_ms: number | null;
+  max_uses: number | null;
+  remaining_uses: number | null;
+  description: string;
+  edit_command: string;
+}
+
+export interface AutonomyRulesResponse {
+  effective: boolean;
+  contract_version?: number;
+  contract_hash?: string;
+  rules: AutonomyRuleDoc[];
+}
+
+export interface AutonomyRuleExplanation extends AutonomyRuleDoc {
+  layer: string;
+  revision: number | null;
+  in_current_contract: boolean;
+  conflicts_with: string[];
+  edit_route: string[];
+  revoke_route: string[];
+}
+
+export interface AutonomyChangeRequest {
+  set_rules?: Record<string, unknown>[];
+  remove_rule_ids?: string[];
+}
+
+export interface AutonomyApplyRequest extends AutonomyChangeRequest {
+  expected_contract_hash: string;
+}
+
+export interface AutonomyPreviewResponse {
+  applied: false;
+  profile_id: string;
+  before_contract_hash: string;
+  after_contract_hash: string;
+  added_rule_ids: string[];
+  removed_rule_ids: string[];
+  changed_rule_ids: string[];
+  warnings: string[];
+}
+
+export interface AutonomyApplyResponse {
+  applied: true;
+  config_hash: string;
+  contract_version: number;
+  contract_hash: string;
+}
+
+export interface AutonomySuggestionAcceptRequest {
+  destination: "stable" | "mandate";
+  expected_contract_hash?: string;
+  expires_in_ms?: number;
+  max_uses?: number;
+}
+
+export type AutonomySuggestionAcceptResponse =
+  | (AutonomyPreviewResponse & {
+      suggestion_id: string;
+      destination: "stable";
+      new_rule_id: string;
+    })
+  | (AutonomyApplyResponse & {
+      suggestion_id: string;
+      destination: "stable";
+      new_rule_id: string;
+    })
+  | {
+      suggestion_id: string;
+      destination: "mandate";
+      applied: true;
+      new_rule_id: string;
+      expires_at_ms: number | null;
+      max_uses: number | null;
+    };
+
+export interface AutonomySuggestionRejectResponse {
+  suggestion_id: string;
+  state: string;
+  reason: string;
+}
+
+export interface AutonomyMandatesResponse {
+  mandates: AutonomyRuleDoc[];
+}
+
+export interface AutonomyMandateRevokeResponse {
+  rule_id: string;
+  state: string;
+  reason: string;
+}
+
+export interface AutonomyDecisionDoc {
+  decision_id: string;
+  operation_key: string;
+  created_at_ms: number;
+  verdict: "allow" | "ask" | "deny";
+  code: string;
+  reason: string;
+  stage: string;
+  authority_version: number;
+  authority_hash: string;
+  context_hash: string;
+  matched_rule_ids: string[];
+  conflicting_rule_ids: string[];
+  required_evidence: { kind: string; stage: string }[];
+  clarification: {
+    question: string;
+    choices: string[];
+    code: string;
+  } | null;
+  expires_at_ms: number | null;
+  edit_targets: string[];
+}
+
+export interface AutonomyAuditResponse {
+  decisions: AutonomyDecisionDoc[];
+  count: number;
+  limit: number;
+}
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).
  *
@@ -2548,4 +2834,173 @@ export interface AgentPluginUpdateResponse {
 export interface PluginProvidersPutRequest {
   memory_provider?: string;
   context_engine?: string;
+}
+
+// ── Receipts (verified outcome & artifact receipts) types ────────────────
+// Mirrors the redacted read-only projections served by the dashboard
+// receipt endpoints: canonical statuses only, claim→evidence→artifact
+// edges, append-only recheck observations, and attestations that are
+// always labeled "provenance only" (a signature never proves truth).
+
+export type ReceiptStatus =
+  | "verified"
+  | "completed_unverified"
+  | "failed"
+  | "blocked"
+  | "unknown_effect";
+
+export interface ReceiptSourceKey {
+  source_kind: string;
+  source_id: string;
+}
+
+export interface ReceiptSummary {
+  receipt_id: string;
+  source: ReceiptSourceKey;
+  subject_kind: string;
+  subject_id: string;
+  session_id: string | null;
+  status: ReceiptStatus;
+  scorer_id: string;
+  scorer_version: string;
+  decided_at: string;
+  content_hash: string;
+}
+
+export interface ReceiptRequestedOutcome {
+  outcome_kind: string;
+  description: string;
+  constraints: string[];
+  producer_id: string;
+  content_hash: string;
+}
+
+export interface ReceiptClaimDoc {
+  claim_id: string;
+  claim_kind: string;
+  statement: string;
+  expected_json: string;
+  observed_json: string;
+  evidence_ids: string[];
+  artifact_ids: string[];
+  required: boolean;
+  verdict: "satisfied" | "unsatisfied" | "unknown" | "not_applicable";
+  uncertainty: string[];
+  content_hash: string;
+}
+
+export interface ReceiptEvidenceDoc {
+  evidence_id: string;
+  evidence_kind: string;
+  source_ref: string;
+  producer_id: string;
+  observed_at: string;
+  fresh_until: string | null;
+  summary: string;
+  payload_hash: string;
+  artifact_ids: string[];
+  content_hash: string;
+}
+
+export interface ReceiptArtifactDoc {
+  artifact_id: string;
+  source_kind: string;
+  source_ref: string;
+  display_name: string;
+  media_type: string | null;
+  size_bytes: number;
+  sha256: string;
+  mtime_ns: number | null;
+  captured_at: string;
+  content_hash: string;
+}
+
+export interface ReceiptDoc {
+  receipt_id: string;
+  source: ReceiptSourceKey;
+  subject_kind: string;
+  subject_id: string;
+  session_id: string | null;
+  turn_id: string | null;
+  mission_id: string | null;
+  transaction_id: string | null;
+  requested_outcome: ReceiptRequestedOutcome;
+  status: ReceiptStatus;
+  claims: ReceiptClaimDoc[];
+  evidence: ReceiptEvidenceDoc[];
+  artifacts: ReceiptArtifactDoc[];
+  uncertainty: string[];
+  scorer_id: string;
+  scorer_version: string;
+  decided_at: string;
+  content_hash: string;
+}
+
+export interface ReceiptObservationDoc {
+  observation_id: string;
+  receipt_id: string;
+  previous_observation_id: string | null;
+  status: ReceiptStatus;
+  claims: ReceiptClaimDoc[];
+  evidence: ReceiptEvidenceDoc[];
+  artifacts: ReceiptArtifactDoc[];
+  uncertainty: string[];
+  scorer_id: string;
+  scorer_version: string;
+  observed_at: string;
+  content_hash: string;
+}
+
+export interface ReceiptClaimEdge {
+  claim_id: string;
+  claim_kind: string;
+  statement: string;
+  verdict: string;
+  required: boolean;
+  evidence_ids: string[];
+  artifact_ids: string[];
+  uncertainty: string[];
+}
+
+export interface ReceiptAttestationDoc {
+  attestation_id: string;
+  target_kind: string;
+  target_id: string;
+  target_content_hash: string;
+  provider_id: string;
+  key_id: string;
+  algorithm: string;
+  signature_b64: string;
+  signed_at: string;
+  verification_state: string;
+  content_hash: string;
+  /** Always "provenance only" — a signature never proves a claim is true. */
+  role: string;
+}
+
+export interface ReceiptListResponse {
+  ok: boolean;
+  receipts: ReceiptSummary[];
+  count: number;
+  next_cursor: string | null;
+}
+
+export interface ReceiptDetailResponse {
+  ok: boolean;
+  receipt_id: string;
+  receipt: ReceiptDoc;
+  claim_edges: ReceiptClaimEdge[];
+  original_status: ReceiptStatus;
+  latest_observation: ReceiptObservationDoc | null;
+  observation_count: number;
+  attestations: ReceiptAttestationDoc[];
+  status_note: string;
+  recheck_hint: string;
+}
+
+export interface ReceiptObservationsResponse {
+  ok: boolean;
+  receipt_id: string;
+  observations: ReceiptObservationDoc[];
+  count: number;
 }
