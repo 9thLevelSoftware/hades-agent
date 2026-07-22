@@ -96,7 +96,7 @@ def _hades_home_from_env() -> Path:
     """
     val = os.environ.get("HADES_HOME", "").strip()
     if not val:
-        val = os.environ.get("HERMES_HOME", "").strip()
+        val = os.environ.get("HERMES_HOME", "").strip()  # ecosystem fallback
     if val:
         return Path(val)
     return _get_platform_default_hades_home()

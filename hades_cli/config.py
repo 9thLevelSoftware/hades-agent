@@ -824,8 +824,8 @@ def _secure_dir(path):
     permissions (0750) so interactive users in the hermes group can
     share state with the gateway service.
 
-    The mode can be overridden via the HERMES_HOME_MODE environment variable
-    (e.g. HERMES_HOME_MODE=0701) for deployments where a web server (nginx,
+    The mode can be overridden via the HADES_HOME_MODE environment variable
+    (e.g. HADES_HOME_MODE=0701) for deployments where a web server (nginx,
     caddy, etc.) needs to traverse HADES_HOME to reach a served subdirectory.
     The execute-only bit on a directory permits cd-through without exposing
     directory listings.
@@ -913,7 +913,7 @@ def _ensure_default_soul_md(home: Path) -> None:
     _secure_file(soul_path)
 
 
-_HERMES_HOME_ENSURED: set = set()
+_HADES_HOME_ENSURED: set = set()
 
 
 def ensure_hermes_home():
@@ -926,7 +926,7 @@ def ensure_hermes_home():
     home = get_hades_home()
     key = str(home)
 
-    if key in _HERMES_HOME_ENSURED and home.is_dir():
+    if key in _HADES_HOME_ENSURED and home.is_dir():
         return
     # Named profiles must be created explicitly (e.g. ``hermes profile create``).
     # If a stale process keeps running after the profile was renamed/deleted,
@@ -955,7 +955,7 @@ def ensure_hermes_home():
             _secure_dir(d)
         _ensure_default_soul_md(home)
 
-    _HERMES_HOME_ENSURED.add(key)
+    _HADES_HOME_ENSURED.add(key)
 
 
 def ensure_hades_home():
@@ -4671,7 +4671,7 @@ OPTIONAL_ENV_VARS = {
     # are intentionally NOT listed here: OPTIONAL_ENV_VARS feeds user-facing
     # surfaces (dashboard keys page, setup checklists) and deprecated knobs
     # shouldn't be offered there.
-    "HERMES_PREFILL_MESSAGES_FILE": {
+    "HADES_PREFILL_MESSAGES_FILE": {
         "description": "Path to JSON file with ephemeral prefill messages for few-shot priming",
         "prompt": "Prefill messages file path",
         "url": None,

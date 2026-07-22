@@ -2570,7 +2570,7 @@ def _background_delegation_origin(parent_agent) -> tuple[str, str, Optional[str]
     try:
         from gateway.session_context import get_session_env
 
-        source = get_session_env("HERMES_SESSION_SOURCE", "")
+        source = get_session_env("HADES_SESSION_SOURCE", "")
         origin_ui_session_id = get_session_env("HERMES_UI_SESSION_ID", "")
         if source == "tui":
             agent_session_id = str(getattr(parent_agent, "session_id", "") or "")
@@ -3593,7 +3593,7 @@ def _load_config() -> dict:
     rebuild via ``_get_max_concurrent_children``, so skipping the defensive
     deepcopy matters. Do NOT mutate the returned dict.
 
-    ``HERMES_IGNORE_USER_CONFIG=1`` (``hermes chat --ignore-user-config``) is
+    ``HADES_IGNORE_USER_CONFIG=1`` (``hermes chat --ignore-user-config``) is
     only honored by the legacy ``cli`` loader, not the shared one, so when the
     flag is set we keep ``cli.CLI_CONFIG`` authoritative to preserve the
     flag's contract of suppressing user config.yaml settings.

@@ -105,7 +105,7 @@ def _session_is_messaging_surface() -> bool:
     """Return whether this turn is delivered over a human messaging channel.
 
     The gateway binds the platform value (e.g. ``telegram``) to
-    ``HERMES_SESSION_PLATFORM``; the CLI and TUI set ``HERMES_SESSION_SOURCE``
+    ``HERMES_SESSION_PLATFORM``; the CLI and TUI set ``HADES_SESSION_SOURCE``
     (e.g. ``cli``, ``tui``) instead. Both are consulted via the session-context
     helper (with an ``os.environ`` fallback), alongside the ``HERMES_PLATFORM``
     override, matching the sibling platform resolution in
@@ -120,7 +120,7 @@ def _session_is_messaging_surface() -> bool:
             env_get("HADES_PLATFORM")
             or get_session_env("HERMES_SESSION_PLATFORM", "")
         )
-        source = get_session_env("HERMES_SESSION_SOURCE", "")
+        source = get_session_env("HADES_SESSION_SOURCE", "")
     except Exception:
         platform = env_get("HADES_PLATFORM", "") or env_get(
             "HERMES_SESSION_PLATFORM", ""

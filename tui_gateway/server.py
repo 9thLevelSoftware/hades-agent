@@ -1120,7 +1120,7 @@ def _rebind_rpc_to_profile_home(
     params: dict,
     profile_home: str | Path | None,
 ):
-    """Re-enter an RPC once with the session/profile HERMES_HOME bound.
+    """Re-enter an RPC once with the session/profile HADES_HOME bound.
 
     Several RPC handlers perform provider resolution before they reach their
     eventual persistence step.  Binding only around the write is too late: it

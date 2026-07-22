@@ -591,7 +591,7 @@ def _build_hermes_tools_mcp_entry() -> dict:
     if pythonpath:
         env["PYTHONPATH"] = pythonpath
     # Quiet mode + redaction defaults so the MCP wire stays clean.
-    env_set("HERMES_QUIET", "1", env=env)
+    env_set("HADES_QUIET", "1", env=env)
     env_set("HERMES_REDACT_SECRETS", env_get("HERMES_REDACT_SECRETS", "true", env=env), env=env)
 
     out: dict[str, Any] = {

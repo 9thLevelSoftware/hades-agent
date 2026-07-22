@@ -299,7 +299,7 @@ TIPS = [
     "The skills audit log at ~/.hades/skills/.hub/audit.log tracks every install and removal operation.",
     "Stale git worktrees are auto-cleaned: 24-72h old with no unpushed commits get pruned on startup.",
     "Profiles scope Hades state via HADES_HOME; host tool subprocesses keep your real HOME unless terminal.home_mode is profile.",
-    "HERMES_HOME_MODE env var (octal, e.g. 0701) sets custom directory permissions for web server traversal.",
+    "HADES_HOME_MODE env var (octal, e.g. 0701) sets custom directory permissions for web server traversal.",
     "Container mode: place .container-mode in HADES_HOME and the host CLI auto-execs into the container.",
     "Ctrl+C has 5 priority tiers: cancel recording → cancel prompts → cancel picker → interrupt agent → exit.",
     "Every interrupt during an agent run is logged to ~/.hades/interrupt_debug.log with timestamps.",

@@ -968,7 +968,7 @@ _CACHE_DIR_IMPORT_DEFAULTS = {
     "SCREENSHOT_CACHE_DIR": SCREENSHOT_CACHE_DIR,
 }
 
-_HERMES_HOME = get_hades_home()
+_HADES_HOME = get_hades_home()
 _HERMES_ROOT = get_default_hades_root()
 MEDIA_DELIVERY_ALLOW_DIRS_ENV = "HERMES_MEDIA_ALLOW_DIRS"
 MEDIA_DELIVERY_TRUST_RECENT_ENV = "HERMES_MEDIA_TRUST_RECENT_FILES"
@@ -986,18 +986,18 @@ MEDIA_DELIVERY_SAFE_ROOTS = (
     VIDEO_CACHE_DIR,
     DOCUMENT_CACHE_DIR,
     SCREENSHOT_CACHE_DIR,
-    _HERMES_HOME / "image_cache",
-    _HERMES_HOME / "audio_cache",
-    _HERMES_HOME / "video_cache",
-    _HERMES_HOME / "document_cache",
-    _HERMES_HOME / "browser_screenshots",
+    _HADES_HOME / "image_cache",
+    _HADES_HOME / "audio_cache",
+    _HADES_HOME / "video_cache",
+    _HADES_HOME / "document_cache",
+    _HADES_HOME / "browser_screenshots",
     # Canonical cache layout — listed alongside the legacy *_cache dirs so
     # generated artifacts deliver on installs that have both (#31733).
-    _HERMES_HOME / "cache" / "images",
-    _HERMES_HOME / "cache" / "audio",
-    _HERMES_HOME / "cache" / "videos",
-    _HERMES_HOME / "cache" / "documents",
-    _HERMES_HOME / "cache" / "screenshots",
+    _HADES_HOME / "cache" / "images",
+    _HADES_HOME / "cache" / "audio",
+    _HADES_HOME / "cache" / "videos",
+    _HADES_HOME / "cache" / "documents",
+    _HADES_HOME / "cache" / "screenshots",
 )
 
 # Default recency window for trusting freshly-produced files (seconds).
@@ -1203,7 +1203,7 @@ def _media_delivery_denied_paths() -> List[Path]:
         "pairing",
         "mcp-tokens",
     )
-    for hermes_root in (_HERMES_HOME, _HERMES_ROOT):
+    for hermes_root in (_HADES_HOME, _HERMES_ROOT):
         for rel in _ROOT_CREDENTIAL_FILES:
             denied.append(hermes_root / rel)
         for rel in _ROOT_CREDENTIAL_DIRS:

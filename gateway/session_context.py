@@ -71,14 +71,14 @@ def session_context_engaged() -> bool:
 # ---------------------------------------------------------------------------
 
 _SESSION_PLATFORM: ContextVar = ContextVar("HERMES_SESSION_PLATFORM", default=_UNSET)
-_SESSION_SOURCE: ContextVar = ContextVar("HERMES_SESSION_SOURCE", default=_UNSET)
+_SESSION_SOURCE: ContextVar = ContextVar("HADES_SESSION_SOURCE", default=_UNSET)
 _SESSION_CHAT_ID: ContextVar = ContextVar("HERMES_SESSION_CHAT_ID", default=_UNSET)
 _SESSION_CHAT_NAME: ContextVar = ContextVar("HERMES_SESSION_CHAT_NAME", default=_UNSET)
 _SESSION_THREAD_ID: ContextVar = ContextVar("HERMES_SESSION_THREAD_ID", default=_UNSET)
 _SESSION_USER_ID: ContextVar = ContextVar("HERMES_SESSION_USER_ID", default=_UNSET)
 _SESSION_USER_NAME: ContextVar = ContextVar("HERMES_SESSION_USER_NAME", default=_UNSET)
 _SESSION_KEY: ContextVar = ContextVar("HERMES_SESSION_KEY", default=_UNSET)
-_SESSION_ID: ContextVar = ContextVar("HERMES_SESSION_ID", default=_UNSET)
+_SESSION_ID: ContextVar = ContextVar("HADES_SESSION_ID", default=_UNSET)
 # In-process UI session/window id for multi-session desktop/TUI hosts. This is
 # intentionally separate from HERMES_SESSION_ID: the latter is the durable
 # conversation/session-db id, while the UI id is the live frontend tab/window
@@ -122,14 +122,14 @@ _CRON_AUTO_DELIVER_THREAD_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_
 
 _VAR_MAP = {
     "HERMES_SESSION_PLATFORM": _SESSION_PLATFORM,
-    "HERMES_SESSION_SOURCE": _SESSION_SOURCE,
+    "HADES_SESSION_SOURCE": _SESSION_SOURCE,
     "HERMES_SESSION_CHAT_ID": _SESSION_CHAT_ID,
     "HERMES_SESSION_CHAT_NAME": _SESSION_CHAT_NAME,
     "HERMES_SESSION_THREAD_ID": _SESSION_THREAD_ID,
     "HERMES_SESSION_USER_ID": _SESSION_USER_ID,
     "HERMES_SESSION_USER_NAME": _SESSION_USER_NAME,
     "HERMES_SESSION_KEY": _SESSION_KEY,
-    "HERMES_SESSION_ID": _SESSION_ID,
+    "HADES_SESSION_ID": _SESSION_ID,
     "HERMES_UI_SESSION_ID": _SESSION_UI_SESSION_ID,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
     "HERMES_SESSION_PROFILE": _SESSION_PROFILE,
@@ -140,12 +140,12 @@ _VAR_MAP = {
 
 
 def set_current_session_id(session_id: str) -> None:
-    """Synchronize ``HERMES_SESSION_ID`` across ContextVar and ``os.environ``.
+    """Synchronize ``HADES_SESSION_ID`` across ContextVar and ``os.environ``.
 
     Long-lived single-process entrypoints like the CLI can rotate sessions via
     ``/new``, ``/resume``, ``/branch``, or compression splits without
     reconstructing the entire agent. Tools still consult
-    ``get_session_env("HERMES_SESSION_ID")`` with an ``os.environ`` fallback,
+    ``get_session_env("HADES_SESSION_ID")`` with an ``os.environ`` fallback,
     so both storage paths must move together when the active session changes.
     """
     from hades_constants import env_set
