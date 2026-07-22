@@ -1,15 +1,11 @@
-import type { UsageModelData } from '@hades/shared/billing'
+import type { UsageModelData } from '@hermes/shared/billing'
+import type { HermesSkin } from '@hermes/shared/skin'
 
 import type { SessionInfo, SlashCategory, SubagentStatus, Usage } from './types.js'
 
-export interface GatewaySkin {
-  banner_hero?: string
-  banner_logo?: string
-  branding?: Record<string, string>
-  colors?: Record<string, string>
-  help_header?: string
-  tool_prefix?: string
-}
+/** The cross-surface skin contract (canonical shape in `@hermes/shared`).
+ *  Includes the paired light_colors/dark_colors overlays from #20379. */
+export type GatewaySkin = HermesSkin
 
 export interface GatewayCompletionItem {
   display: string
@@ -45,255 +41,7 @@ export interface SlashExecResponse {
   warning?: string
 }
 
-// ── Autonomy (Preferences & Autonomy Center) ─────────────────────────
-// Native `autonomy.exec` RPC: the bounded structured envelope over the
-// shared `hades autonomy ...` parser/service. Mutating /autonomy verbs
-// must use this route, never slash.exec.
-
-export interface AutonomyRuleDoc {
-  action_classes?: string[]
-  confidence_ppm?: number
-  data_classes?: string[]
-  description?: string
-  edit_command?: string
-  effect: string
-  expires_at_ms?: null | number
-  max_uses?: null | number
-  provenance?: string
-  recipient_classes?: string[]
-  remaining_uses?: null | number
-  rule_id: string
-  source: string
-  state: string
-}
-
-export interface AutonomyDecisionDoc {
-  authority_hash?: string
-  authority_version?: number
-  clarification?: null | { choices: string[]; code?: string; question: string }
-  code: string
-  conflicting_rule_ids?: string[]
-  context_hash?: string
-  edit_targets?: string[]
-  expires_at_ms?: null | number
-  matched_rule_ids?: string[]
-  reason?: string
-  required_evidence?: { kind: string; stage: string }[]
-  stage?: string
-  verdict: 'allow' | 'ask' | 'deny'
-}
-
-export interface AutonomyPreviewDoc {
-  added_rule_ids?: string[]
-  after_contract_hash: string
-  applied: false
-  before_contract_hash: string
-  changed_rule_ids?: string[]
-  profile_id?: string
-  removed_rule_ids?: string[]
-  warnings?: string[]
-}
-
-export interface AutonomyAppliedDoc {
-  applied: true
-  config_hash?: string
-  contract_hash: string
-  contract_version: number
-}
-
-export interface AutonomyContractDoc {
-  hash?: string
-  mode?: string
-  profile_id?: string
-  version?: number
-}
-
-export interface AutonomyExecResponse {
-  action: string
-  applied: AutonomyAppliedDoc | null
-  approval_pending: boolean
-  audit: Record<string, unknown>[]
-  contract: AutonomyContractDoc | null
-  decision: AutonomyDecisionDoc | null
-  exit_code: number
-  ok: boolean
-  output: string
-  preview: AutonomyPreviewDoc | null
-  profile_home: string
-  rules: AutonomyRuleDoc[]
-  suggestions: AutonomyRuleDoc[]
-}
-
-// ── Verified outcome & artifact receipts (native /receipt) ───────────
-
-export interface ReceiptSourceKeyDoc {
-  source_id: string
-  source_kind: string
-}
-
-export interface ReceiptRequestedOutcomeDoc {
-  constraints: string[]
-  content_hash: string
-  description: string
-  outcome_kind: string
-  producer_id: string
-}
-
-export interface ReceiptClaimDoc {
-  artifact_ids: string[]
-  claim_id: string
-  claim_kind: string
-  content_hash: string
-  evidence_ids: string[]
-  expected_json: string
-  observed_json: string
-  required: boolean
-  statement: string
-  uncertainty: string[]
-  verdict: string
-}
-
-export interface ReceiptEvidenceDoc {
-  artifact_ids: string[]
-  content_hash: string
-  evidence_id: string
-  evidence_kind: string
-  fresh_until: null | string
-  observed_at: string
-  payload_hash: string
-  producer_id: string
-  source_ref: string
-  summary: string
-}
-
-export interface ReceiptArtifactDoc {
-  artifact_id: string
-  captured_at: string
-  content_hash: string
-  display_name: string
-  media_type: null | string
-  mtime_ns: null | number
-  sha256: string
-  size_bytes: number
-  source_kind: string
-  source_ref: string
-}
-
-export interface ReceiptSummary {
-  content_hash: string
-  decided_at: string
-  receipt_id: string
-  scorer_id: string
-  scorer_version: string
-  session_id: null | string
-  source: ReceiptSourceKeyDoc
-  status: string
-  subject_id: string
-  subject_kind: string
-}
-
-export interface ReceiptDetail {
-  artifacts: ReceiptArtifactDoc[]
-  claims: ReceiptClaimDoc[]
-  content_hash: string
-  decided_at: string
-  evidence: ReceiptEvidenceDoc[]
-  mission_id: null | string
-  receipt_id: string
-  requested_outcome: ReceiptRequestedOutcomeDoc
-  scorer_id: string
-  scorer_version: string
-  session_id: null | string
-  source: ReceiptSourceKeyDoc
-  status: string
-  subject_id: string
-  subject_kind: string
-  transaction_id: null | string
-  turn_id: null | string
-  uncertainty: string[]
-}
-
-export interface ReceiptObservationDetail {
-  artifacts: ReceiptArtifactDoc[]
-  claims: ReceiptClaimDoc[]
-  content_hash: string
-  evidence: ReceiptEvidenceDoc[]
-  observation_id: string
-  observed_at: string
-  previous_observation_id: null | string
-  receipt_id: string
-  scorer_id: string
-  scorer_version: string
-  status: string
-  uncertainty: string[]
-}
-
-/** Every claim→evidence→artifact edge as one structured record. */
-export interface ReceiptClaimEdge {
-  artifact_ids: string[]
-  claim_id: string
-  claim_kind: string
-  evidence_ids: string[]
-  required: boolean
-  statement: string
-  uncertainty: string[]
-  verdict: string
-}
-
-export interface TransactionExecResponse {
-  action: string
-  blocked_node?: string
-  committed_nodes?: string[]
-  compensated_nodes?: string[]
-  counts?: Record<string, number>
-  eligibility?: Record<
-    string,
-    {
-      blockers: string[]
-      can_execute: boolean
-      code: string
-      fidelity: string
-      reason: string
-      required_cascade_node_ids: string[]
-    }
-  >
-  error?: string
-  exit_code: number
-  nodes?: Array<Record<string, unknown>>
-  ok: boolean
-  /** Shared truthful text rendering from hades_cli.transactions. */
-  output: string
-  preview_hash?: string
-  receipt?: { content_hash: string; receipt_id: string; status: string }
-  revision?: number
-  rows?: Array<Record<string, unknown>>
-  status?: string
-  transaction?: {
-    current_revision: number
-    receipt_id: string | null
-    status: string
-    transaction_id: string
-  }
-  transactions?: Array<Record<string, unknown>>
-}
-
-export interface ReceiptExecResponse {
-  action: string
-  claim_edges?: ReceiptClaimEdge[]
-  exit_code: number
-  export_path?: string
-  observations?: ReceiptObservationDetail[]
-  ok: boolean
-  /** Shared truthful text rendering from hades_cli.receipts (one renderer). */
-  output: string
-  profile_home: string
-  receipt?: ReceiptDetail
-  receipts?: ReceiptSummary[]
-  retention_plan_hash?: string
-  warning?: string
-}
-
-// ── Terminal billing (Phase 2b) ──────────────────────────────────────
+// ── Remote Spending (Phase 2b) ───────────────────────────────────────
 
 // Wire shapes now live in @hermes/shared for reuse by TypeScript clients.
 export type {
@@ -311,7 +59,7 @@ export type {
   SubscriptionUpgradeResponse,
   UsageBarData,
   UsageModelData
-} from '@hades/shared/billing'
+} from '@hermes/shared/billing'
 
 export type CommandDispatchResponse =
   | { output?: string; type: 'exec' | 'plugin' }
@@ -323,6 +71,7 @@ export type CommandDispatchResponse =
 // ── Config ───────────────────────────────────────────────────────────
 
 export interface ConfigDisplayConfig {
+  battery?: boolean
   bell_on_complete?: boolean
   busy_input_mode?: string
   details_mode?: string
@@ -350,6 +99,9 @@ export interface ConfigDisplayConfig {
   // validation anyway.
   tui_status_indicator?: string
   tui_statusbar?: 'bottom' | 'off' | 'on' | 'top' | boolean
+  /** Theme mode pin: 'light' / 'dark' beat background auto-detection; 'auto'
+   *  (default) trusts the OSC-11 probe + env signals. */
+  tui_theme?: string
 }
 
 export interface ConfigVoiceConfig {
@@ -368,6 +120,9 @@ export interface ConfigFullResponse {
 }
 
 export interface ConfigMtimeResponse {
+  /** Revision hash of MCP-relevant config sections; reload MCP only when it
+   *  changes (cosmetic writes like /skin must not trigger reconnects). */
+  mcp_rev?: string
   mtime?: number
 }
 
@@ -389,6 +144,13 @@ export interface ConfigSetResponse {
 
 export interface SetupStatusResponse {
   provider_configured?: boolean
+}
+
+export interface SystemBatteryResponse {
+  available?: boolean
+  category?: string
+  percent?: null | number
+  plugged?: null | boolean
 }
 
 // ── Session lifecycle ────────────────────────────────────────────────
@@ -666,6 +428,10 @@ export interface ModelOptionsResponse {
 export interface ReloadMcpResponse {
   status?: string
   message?: string
+  /** The mcp_rev the server actually loaded (re-hashed after discovery).
+   *  The client records THIS as its accepted revision, not the one it
+   *  requested — a reload that raced a config edit reports the newer rev. */
+  loaded_rev?: string
 }
 
 export interface ReloadEnvResponse {
@@ -890,7 +656,12 @@ export type GatewayEvent =
   | { payload: { rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
   | { payload?: { text?: string }; session_id?: string; type: 'message.interim' }
   | {
-      payload?: { reasoning?: string; rendered?: string; text?: string; usage?: Usage }
+      payload: { already_streamed?: boolean; text: string }
+      session_id?: string
+      type: 'message.interim'
+    }
+  | {
+      payload?: { reasoning?: string; rendered?: string; response_previewed?: boolean; text?: string; usage?: Usage }
       session_id?: string
       type: 'message.complete'
     }

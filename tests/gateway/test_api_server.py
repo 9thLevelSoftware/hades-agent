@@ -30,6 +30,7 @@ from gateway.platforms.api_server import (
     ResponseStore,
     _IdempotencyCache,
     _derive_chat_session_id,
+    _hermes_version,
     _redact_api_error_text,
     check_api_server_requirements,
     cors_middleware,
@@ -330,7 +331,7 @@ class TestAdapterInit:
         adapter = APIServerAdapter(config)
         assert adapter._port == 8642
 
-    def test_create_agent_forwards_config_reasoning_effort(self, monkeypatch):
+    def test_create_agent_forwards_runtime_config(self, monkeypatch):
         captured = {}
 
         class FakeAgent:
@@ -349,14 +350,22 @@ class TestAdapterInit:
         monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "gpt-5.5")
         monkeypatch.setattr(
             "gateway.run._load_gateway_config",
-            lambda: {"agent": {"reasoning_effort": "xhigh"}},
+            lambda: {
+                "agent": {"reasoning_effort": "xhigh"},
+                "checkpoints": {
+                    "enabled": True,
+                    "max_snapshots": 7,
+                    "max_total_size_mb": 321,
+                    "max_file_size_mb": 4,
+                },
+            },
         )
         monkeypatch.setattr(
             "gateway.run.GatewayRunner._load_reasoning_config",
             staticmethod(lambda: {"enabled": True, "effort": "xhigh"}),
         )
         monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
-        monkeypatch.setattr("hades_cli.tools_config._get_platform_tools", lambda *_: set())
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
 
         adapter = APIServerAdapter(PlatformConfig(enabled=True))
         monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
@@ -365,6 +374,10 @@ class TestAdapterInit:
 
         assert isinstance(agent, FakeAgent)
         assert captured["reasoning_config"] == {"enabled": True, "effort": "xhigh"}
+        assert captured["checkpoints_enabled"] is True
+        assert captured["checkpoint_max_snapshots"] == 7
+        assert captured["checkpoint_max_total_size_mb"] == 321
+        assert captured["checkpoint_max_file_size_mb"] == 4
 
     def test_create_agent_refreshes_max_iterations_from_runtime_config(self, monkeypatch):
         captured = {}
@@ -390,7 +403,7 @@ class TestAdapterInit:
         )
         monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
         monkeypatch.setattr("gateway.run._current_max_iterations", lambda: 200)
-        monkeypatch.setattr("hades_cli.tools_config._get_platform_tools", lambda *_: set())
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
 
         adapter = APIServerAdapter(PlatformConfig(enabled=True))
         monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
@@ -430,7 +443,7 @@ class TestAdapterInit:
         )
         monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
         monkeypatch.setattr("gateway.run._current_max_iterations", lambda: 90)
-        monkeypatch.setattr("hades_cli.tools_config._get_platform_tools", lambda *_: set())
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
 
         adapter = APIServerAdapter(PlatformConfig(enabled=True))
         monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
@@ -468,7 +481,7 @@ class TestAdapterInit:
         )
         monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
         monkeypatch.setattr("gateway.run._current_max_iterations", lambda: 90)
-        monkeypatch.setattr("hades_cli.tools_config._get_platform_tools", lambda *_: set())
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
 
         adapter = APIServerAdapter(PlatformConfig(enabled=True))
         monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
@@ -526,6 +539,27 @@ class TestAuth:
         assert result is not None
         assert result.status == 401
 
+    def test_non_ascii_bearer_token_returns_401_not_500(self):
+        """A non-ASCII byte in the bearer token must be rejected with 401, not
+        crash the handler: hmac.compare_digest raises TypeError on a str with
+        non-ASCII characters, and the token is raw client input."""
+        config = PlatformConfig(enabled=True, extra={"key": "sk-test123"})
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"Authorization": "Bearer ské-not-the-key"}
+        result = adapter._check_auth(mock_request)  # must not raise
+        assert result is not None
+        assert result.status == 401
+
+    def test_non_ascii_key_config_still_authenticates(self):
+        """A non-ASCII configured key must still match its exact value byte for
+        byte (bytes comparison keeps this working)."""
+        config = PlatformConfig(enabled=True, extra={"key": "sk-tést-kéy"})
+        adapter = APIServerAdapter(config)
+        mock_request = MagicMock()
+        mock_request.headers = {"Authorization": "Bearer sk-tést-kéy"}
+        assert adapter._check_auth(mock_request) is None
+
 
 # ---------------------------------------------------------------------------
 # Concurrency cap (gateway.api_server.max_concurrent_runs) — #7483
@@ -534,22 +568,22 @@ class TestAuth:
 
 class TestConcurrencyCap:
     def test_resolve_defaults_to_10_when_unset(self):
-        with patch("hades_cli.config.load_config", return_value={}):
+        with patch("hermes_cli.config.load_config", return_value={}):
             assert APIServerAdapter._resolve_max_concurrent_runs() == 10
 
     def test_resolve_reads_config_value(self):
         cfg = {"gateway": {"api_server": {"max_concurrent_runs": 3}}}
-        with patch("hades_cli.config.load_config", return_value=cfg):
+        with patch("hermes_cli.config.load_config", return_value=cfg):
             assert APIServerAdapter._resolve_max_concurrent_runs() == 3
 
     def test_resolve_clamps_negative_to_zero(self):
         cfg = {"gateway": {"api_server": {"max_concurrent_runs": -5}}}
-        with patch("hades_cli.config.load_config", return_value=cfg):
+        with patch("hermes_cli.config.load_config", return_value=cfg):
             assert APIServerAdapter._resolve_max_concurrent_runs() == 0
 
     def test_resolve_malformed_falls_back_to_default(self):
         cfg = {"gateway": {"api_server": {"max_concurrent_runs": "not-an-int"}}}
-        with patch("hades_cli.config.load_config", return_value=cfg):
+        with patch("hermes_cli.config.load_config", return_value=cfg):
             assert APIServerAdapter._resolve_max_concurrent_runs() == 10
 
     def test_under_cap_returns_none(self):
@@ -631,7 +665,26 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
+    app.router.add_post(
+        "/api/platforms/{platform}/events",
+        adapter._handle_platform_event_callback,
+    )
     return app
+
+
+class _FakeGoogleChatAdapter:
+    def __init__(self, *, verify_ok: bool = True, verify_code: str = ""):
+        self.verify_ok = verify_ok
+        self.verify_code = verify_code
+        self.dispatched = []
+
+    def verify_http_event_request(self, auth_header: str):
+        self.auth_header = auth_header
+        return self.verify_ok, self.verify_code
+
+    async def dispatch_http_event(self, payload):
+        self.dispatched.append(payload)
+        return {"ok": True}
 
 
 @pytest.fixture
@@ -708,7 +761,7 @@ class TestHealthEndpoint:
             assert resp.status == 200
             data = await resp.json()
             assert data["status"] == "ok"
-            assert data["platform"] == "hades-agent"
+            assert data["platform"] == "hermes-agent"
 
     @pytest.mark.asyncio
     async def test_health_reports_version(self, adapter):
@@ -724,6 +777,29 @@ class TestHealthEndpoint:
             assert isinstance(data["version"], str)
             assert data["version"] != ""
 
+    def test_health_version_prefers_runtime_source_over_stale_metadata(self):
+        """Editable installs can leave importlib.metadata at an older release.
+
+        The health endpoint must report the running Hermes source version, not
+        stale ``hermes_agent-*.dist-info`` metadata from before a source update.
+        """
+        from hermes_cli import __version__
+
+        with patch("importlib.metadata.version", return_value="0.18.0"):
+            assert _hermes_version() == __version__
+
+    @pytest.mark.asyncio
+    async def test_health_endpoint_prefers_runtime_version_over_stale_metadata(self, adapter):
+        from hermes_cli import __version__
+
+        app = _create_app(adapter)
+        with patch("importlib.metadata.version", return_value="0.18.0"):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.get("/health")
+                assert resp.status == 200
+                data = await resp.json()
+                assert data["version"] == __version__
+
     @pytest.mark.asyncio
     async def test_v1_health_alias_returns_ok(self, adapter):
         """GET /v1/health should return the same response as /health."""
@@ -733,7 +809,7 @@ class TestHealthEndpoint:
             assert resp.status == 200
             data = await resp.json()
             assert data["status"] == "ok"
-            assert data["platform"] == "hades-agent"
+            assert data["platform"] == "hermes-agent"
             assert data.get("version")
 
 
@@ -759,7 +835,7 @@ class TestHealthDetailedEndpoint:
                 assert resp.status == 200
                 data = await resp.json()
                 assert data["status"] == "ok"
-                assert data["platform"] == "hades-agent"
+                assert data["platform"] == "hermes-agent"
                 assert data["gateway_state"] == "running"
                 assert data["platforms"] == {"telegram": {"state": "connected"}}
                 assert data["active_agents"] == 2
@@ -850,6 +926,26 @@ class TestHealthDetailedEndpoint:
              patch("tools.async_delegation.active_count", return_value=2):
             assert adapter._readiness_work_counts() == (3, 4, 2)
 
+    def test_readiness_work_counts_include_stopping_runs(self, adapter):
+        """Regression: _handle_stop_run() sets status="stopping" and holds it
+        there — cooperatively, with no hard timeout — until the agent notices
+        the interrupt and the task actually exits. A run in that window is
+        still doing real executor-thread work and must count as active,
+        the same as "running"; excluding it undercounts active_api_runs for
+        the whole (now-unbounded) cooperative-stop duration."""
+        adapter._run_statuses = {
+            "queued": {"status": "queued"},
+            "running": {"status": "running"},
+            "approval": {"status": "waiting_for_approval"},
+            "stopping": {"status": "stopping"},
+            "done": {"status": "completed"},
+            "cancelled": {"status": "cancelled"},
+        }
+
+        with patch("tools.process_registry.process_registry.completion_queue.qsize", return_value=0), \
+             patch("tools.async_delegation.active_count", return_value=0):
+            assert adapter._readiness_work_counts() == (4, 0, 0)
+
 
 # ---------------------------------------------------------------------------
 # /v1/models endpoint
@@ -866,7 +962,7 @@ class TestModelsEndpoint:
             data = await resp.json()
             assert data["object"] == "list"
             assert len(data["data"]) == 1
-            assert data["data"][0]["id"] == "hades-agent"
+            assert data["data"][0]["id"] == "hermes-agent"
             assert data["data"][0]["owned_by"] == "hermes"
 
     @pytest.mark.asyncio
@@ -894,13 +990,13 @@ class TestModelsEndpoint:
         assert APIServerAdapter._resolve_model_name("my-bot") == "my-bot"
 
     def test_resolve_model_name_default_profile(self):
-        """Default profile falls back to 'hades-agent'."""
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="default"):
-            assert APIServerAdapter._resolve_model_name("") == "hades-agent"
+        """Default profile falls back to 'hermes-agent'."""
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="default"):
+            assert APIServerAdapter._resolve_model_name("") == "hermes-agent"
 
     def test_resolve_model_name_named_profile(self):
         """Named profile uses the profile name as model name."""
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="lucas"):
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="lucas"):
             assert APIServerAdapter._resolve_model_name("") == "lucas"
 
     @pytest.mark.asyncio
@@ -935,8 +1031,8 @@ class TestCapabilitiesEndpoint:
             assert resp.status == 200
             data = await resp.json()
             assert data["object"] == "hermes.api_server.capabilities"
-            assert data["platform"] == "hades-agent"
-            assert data["model"] == "hades-agent"
+            assert data["platform"] == "hermes-agent"
+            assert data["model"] == "hermes-agent"
             assert data["auth"]["type"] == "bearer"
             assert data["auth"]["required"] is False
             assert data["runtime"]["mode"] == "server_agent"
@@ -1030,13 +1126,13 @@ class TestToolsetsEndpoint:
             ("web", "Web Tools", "Search and extract"),
         ]
         with patch(
-            "hades_cli.tools_config._get_effective_configurable_toolsets",
+            "hermes_cli.tools_config._get_effective_configurable_toolsets",
             return_value=fake_toolsets,
         ), patch(
-            "hades_cli.tools_config._get_platform_tools",
+            "hermes_cli.tools_config._get_platform_tools",
             return_value={"default"},
         ), patch(
-            "hades_cli.tools_config._toolset_has_keys",
+            "hermes_cli.tools_config._toolset_has_keys",
             return_value=True,
         ), patch(
             "toolsets.resolve_toolset",
@@ -1073,13 +1169,13 @@ class TestToolsetsEndpoint:
             return ["some_tool"]
 
         with patch(
-            "hades_cli.tools_config._get_effective_configurable_toolsets",
+            "hermes_cli.tools_config._get_effective_configurable_toolsets",
             return_value=fake_toolsets,
         ), patch(
-            "hades_cli.tools_config._get_platform_tools",
+            "hermes_cli.tools_config._get_platform_tools",
             return_value=set(),
         ), patch(
-            "hades_cli.tools_config._toolset_has_keys",
+            "hermes_cli.tools_config._toolset_has_keys",
             return_value=False,
         ), patch(
             "toolsets.resolve_toolset",
@@ -1097,10 +1193,10 @@ class TestToolsetsEndpoint:
     @pytest.mark.asyncio
     async def test_toolsets_requires_auth_when_key_configured(self, auth_adapter):
         with patch(
-            "hades_cli.tools_config._get_effective_configurable_toolsets",
+            "hermes_cli.tools_config._get_effective_configurable_toolsets",
             return_value=[],
         ), patch(
-            "hades_cli.tools_config._get_platform_tools",
+            "hermes_cli.tools_config._get_platform_tools",
             return_value=set(),
         ):
             app = _create_app(auth_adapter)
@@ -1202,7 +1298,7 @@ class TestChatCompletionsEndpoint:
                 resp = await cli.post(
                     "/v1/chat/completions",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "messages": [{"role": "user", "content": "Hello"}],
                         "stream": "false",
                     },
@@ -1609,7 +1705,7 @@ class TestChatCompletionsEndpoint:
                 resp = await cli.post(
                     "/v1/chat/completions",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "messages": [{"role": "user", "content": "Hello"}],
                     },
                 )
@@ -1618,7 +1714,7 @@ class TestChatCompletionsEndpoint:
             data = await resp.json()
             assert data["object"] == "chat.completion"
             assert data["id"].startswith("chatcmpl-")
-            assert data["model"] == "hades-agent"
+            assert data["model"] == "hermes-agent"
             assert len(data["choices"]) == 1
             assert data["choices"][0]["message"]["role"] == "assistant"
             assert data["choices"][0]["message"]["content"] == "Hello! How can I help you today?"
@@ -1641,7 +1737,7 @@ class TestChatCompletionsEndpoint:
                 resp = await cli.post(
                     "/v1/chat/completions",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "messages": [
                             {"role": "system", "content": "You are a pirate."},
                             {"role": "user", "content": "Hello"},
@@ -1667,7 +1763,7 @@ class TestChatCompletionsEndpoint:
                 resp = await cli.post(
                     "/v1/chat/completions",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "messages": [
                             {"role": "user", "content": "1+1=?"},
                             {"role": "assistant", "content": "2"},
@@ -1693,7 +1789,7 @@ class TestChatCompletionsEndpoint:
                 resp = await cli.post(
                     "/v1/chat/completions",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "messages": [{"role": "user", "content": "Hello"}],
                     },
                 )
@@ -1716,7 +1812,7 @@ class TestChatCompletionsEndpoint:
                 await cli.post(
                     "/v1/chat/completions",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "messages": [{"role": "user", "content": "Hello"}],
                     },
                 )
@@ -1728,7 +1824,7 @@ class TestChatCompletionsEndpoint:
                 await cli.post(
                     "/v1/chat/completions",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "messages": [
                             {"role": "user", "content": "Hello"},
                             {"role": "assistant", "content": "Hi there!"},
@@ -1755,7 +1851,7 @@ class TestChatCompletionsEndpoint:
                     await cli.post(
                         "/v1/chat/completions",
                         json={
-                            "model": "hades-agent",
+                            "model": "hermes-agent",
                             "messages": [{"role": "user", "content": first_msg}],
                         },
                     )
@@ -1837,7 +1933,7 @@ class TestResponsesEndpoint:
                 resp = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "What is the capital of France?",
                     },
                 )
@@ -1864,7 +1960,7 @@ class TestResponsesEndpoint:
                 resp = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": [
                             {"role": "user", "content": "Hello"},
                             {"role": "user", "content": "What is 2+2?"},
@@ -1890,7 +1986,7 @@ class TestResponsesEndpoint:
                 resp = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "Hello",
                         "instructions": "Talk like a pirate.",
                     },
@@ -1916,7 +2012,7 @@ class TestResponsesEndpoint:
                 mock_run.return_value = (mock_result_1, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp1 = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "What is 1+1?"},
+                    json={"model": "hermes-agent", "input": "What is 1+1?"},
                 )
 
             assert resp1.status == 200
@@ -1935,7 +2031,7 @@ class TestResponsesEndpoint:
                 resp2 = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "Now add 1 more",
                         "previous_response_id": response_id,
                     },
@@ -1968,7 +2064,7 @@ class TestResponsesEndpoint:
                 )
                 resp1 = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "What is 1+1?"},
+                    json={"model": "hermes-agent", "input": "What is 1+1?"},
                 )
 
             assert resp1.status == 200
@@ -1992,7 +2088,7 @@ class TestResponsesEndpoint:
                 resp2 = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "Now add 1 more",
                         "previous_response_id": resp1_data["id"],
                     },
@@ -2005,6 +2101,273 @@ class TestResponsesEndpoint:
             assert stored_history == second_history
             assert stored_history.count(first_history[0]) == 1
             assert stored_history.count({"role": "user", "content": "Now add 1 more"}) == 1
+
+    @pytest.mark.asyncio
+    async def test_previous_response_id_stores_compressed_transcript_directly(self, adapter):
+        """After compression, stored history is the compressed transcript, not prior + compressed."""
+        prior_history = [
+            {"role": "user", "content": "What is 1+1?"},
+            {"role": "assistant", "content": "2"},
+        ] * 10  # 20 messages — enough to simulate a long conversation
+        adapter._response_store.put(
+            "resp_prev",
+            {
+                "response": {"id": "resp_prev", "status": "completed"},
+                "conversation_history": list(prior_history),
+                "session_id": "api-test-session",
+            },
+        )
+
+        compressed_history = [
+            # Compressed transcript starts with summary, NOT with prior[0]
+            {"role": "user", "content": "[Compressed summary of earlier conversation]"},
+            {"role": "user", "content": "Now add 1 more"},
+            {"role": "assistant", "content": "3"},
+        ]
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    {
+                        "final_response": "3",
+                        "messages": list(compressed_history),
+                        "_compressed": True,
+                        "api_calls": 1,
+                    },
+                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                )
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "Now add 1 more",
+                        "previous_response_id": "resp_prev",
+                    },
+                )
+                assert resp.status == 200
+                data = await resp.json()
+
+        stored = adapter._response_store.get(data["id"])
+        stored_history = stored["conversation_history"]
+        # Must NOT contain the original prior_history messages
+        for msg in prior_history:
+            assert msg not in stored_history, (
+                f"Prior history message leaked into stored compressed transcript: {msg}"
+            )
+        # Must contain the compressed transcript
+        assert stored_history == compressed_history
+
+    @pytest.mark.asyncio
+    async def test_rotation_compression_exercises_detection_and_persists_rotated_session_id(
+        self, adapter
+    ):
+        """Fake-agent rotation: _run_agent detects session_id change, sets
+        _compressed, and the Responses handler persists the rotated session_id
+        so subsequent previous_response_id chaining loads the compressed child."""
+        prior_history = [
+            {"role": "user", "content": "What is 1+1?"},
+            {"role": "assistant", "content": "2"},
+        ] * 10
+
+        adapter._response_store.put(
+            "resp_prev_rot",
+            {
+                "response": {"id": "resp_prev_rot", "status": "completed"},
+                "conversation_history": list(prior_history),
+                "session_id": "api-test-session",
+            },
+        )
+
+        compressed_history = [
+            {"role": "user", "content": "[Compressed summary]"},
+            {"role": "user", "content": "Now add 1 more"},
+            {"role": "assistant", "content": "3"},
+        ]
+
+        # Fake agent whose session_id was rotated by compression
+        mock_agent = MagicMock()
+        mock_agent.session_id = "rotated-child-session"
+        mock_agent._last_compaction_in_place = False
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        mock_agent.run_conversation.return_value = {
+            "final_response": "3",
+            "messages": list(compressed_history),
+            "api_calls": 1,
+        }
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=mock_agent):
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "Now add 1 more",
+                        "previous_response_id": "resp_prev_rot",
+                    },
+                )
+            assert resp.status == 200
+            data = await resp.json()
+
+        # The detection path in _run_agent must have set _compressed
+        # _run_agent mutates the result dict in place -- verify via stored data
+        stored = adapter._response_store.get(data["id"])
+        assert stored is not None
+
+        # Stored history must be the compressed transcript, not prior + compressed
+        stored_history = stored["conversation_history"]
+        for msg in prior_history:
+            assert msg not in stored_history
+        assert stored_history == compressed_history
+
+        # Stored session_id must be the rotated child, not the original
+        assert stored["session_id"] == "rotated-child-session"
+
+        # Response header must also reflect the rotated session
+        assert resp.headers.get("X-Hermes-Session-Id") == "rotated-child-session"
+
+    @pytest.mark.asyncio
+    async def test_inplace_compression_exercises_detection_and_persists_compressed_history(
+        self, adapter
+    ):
+        """Fake-agent in-place: _run_agent detects _last_compaction_in_place,
+        sets _compressed, and the Responses handler persists compressed history
+        WITHOUT rotating the session_id."""
+        prior_history = [
+            {"role": "user", "content": "What is 1+1?"},
+            {"role": "assistant", "content": "2"},
+        ] * 10
+
+        adapter._response_store.put(
+            "resp_prev_inplace",
+            {
+                "response": {"id": "resp_prev_inplace", "status": "completed"},
+                "conversation_history": list(prior_history),
+                "session_id": "api-test-session",
+            },
+        )
+
+        compressed_history = [
+            {"role": "user", "content": "[Compressed summary in-place]"},
+            {"role": "user", "content": "Continue"},
+            {"role": "assistant", "content": "42"},
+        ]
+
+        # Fake agent: in-place compaction, session_id unchanged
+        mock_agent = MagicMock()
+        mock_agent.session_id = "api-test-session"  # same as input -- no rotation
+        mock_agent._last_compaction_in_place = True
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+        mock_agent.run_conversation.return_value = {
+            "final_response": "42",
+            "messages": list(compressed_history),
+            "api_calls": 1,
+        }
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=mock_agent):
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "Continue",
+                        "previous_response_id": "resp_prev_inplace",
+                    },
+                )
+            assert resp.status == 200
+            data = await resp.json()
+
+        stored = adapter._response_store.get(data["id"])
+        assert stored is not None
+
+        # Stored history must be the compressed transcript
+        stored_history = stored["conversation_history"]
+        for msg in prior_history:
+            assert msg not in stored_history
+        assert stored_history == compressed_history
+
+        # Session_id must NOT change for in-place compaction
+        assert stored["session_id"] == "api-test-session"
+        assert resp.headers.get("X-Hermes-Session-Id") == "api-test-session"
+
+    @pytest.mark.asyncio
+    async def test_chained_rotation_propagates_effective_session_id(self, adapter):
+        """Two-request chain: first request triggers rotation, second request
+        loads history using the rotated session_id stored by the first."""
+        # First request -- no previous_response_id, establishes the conversation
+        mock_agent_1 = MagicMock()
+        mock_agent_1.session_id = "child-session-after-rotation"
+        mock_agent_1._last_compaction_in_place = False
+        mock_agent_1.session_prompt_tokens = 0
+        mock_agent_1.session_completion_tokens = 0
+        mock_agent_1.session_total_tokens = 0
+        compressed_msg_1 = [
+            {"role": "user", "content": "[Summary of turn 1]"},
+            {"role": "assistant", "content": "Hello back"},
+        ]
+        mock_agent_1.run_conversation.return_value = {
+            "final_response": "Hello back",
+            "messages": list(compressed_msg_1),
+            "api_calls": 1,
+        }
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", return_value=mock_agent_1):
+                resp1 = await cli.post(
+                    "/v1/responses",
+                    json={"model": "hermes-agent", "input": "Hello"},
+                )
+            assert resp1.status == 200
+            data1 = await resp1.json()
+            response_id_1 = data1["id"]
+
+            # Verify the rotated session_id was persisted
+            stored_1 = adapter._response_store.get(response_id_1)
+            assert stored_1["session_id"] == "child-session-after-rotation"
+            assert stored_1["conversation_history"] == compressed_msg_1
+
+            # Second request -- chains via previous_response_id
+            # _run_agent is called with the session_id from the stored response
+            mock_agent_2 = MagicMock()
+            mock_agent_2.session_id = "child-session-after-rotation"
+            mock_agent_2._last_compaction_in_place = False
+            mock_agent_2.session_prompt_tokens = 0
+            mock_agent_2.session_completion_tokens = 0
+            mock_agent_2.session_total_tokens = 0
+            mock_agent_2.run_conversation.return_value = {
+                "final_response": "Goodbye",
+                "messages": [
+                    {"role": "user", "content": "[Summary of turn 1]"},
+                    {"role": "assistant", "content": "Hello back"},
+                    {"role": "user", "content": "Goodbye"},
+                    {"role": "assistant", "content": "See you!"},
+                ],
+                "api_calls": 1,
+            }
+
+            with patch.object(adapter, "_create_agent", return_value=mock_agent_2):
+                resp2 = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "Goodbye",
+                        "previous_response_id": response_id_1,
+                    },
+                )
+            assert resp2.status == 200
+
+            # The second _run_agent call must receive the rotated session_id
+            # (from the stored response), not the original request session_id
+            call_kwargs = mock_agent_2.run_conversation.call_args.kwargs
+            # conversation_history loaded from store should be the compressed transcript
+            assert call_kwargs["conversation_history"] == compressed_msg_1
 
     @pytest.mark.asyncio
     async def test_previous_response_id_outputs_only_current_turn_items(self, adapter):
@@ -2074,7 +2437,7 @@ class TestResponsesEndpoint:
                 resp = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "Read new file",
                         "previous_response_id": "resp_prev",
                     },
@@ -2104,7 +2467,7 @@ class TestResponsesEndpoint:
                 mock_run.return_value = (mock_result, usage)
                 resp1 = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "Hello"},
+                    json={"model": "hermes-agent", "input": "Hello"},
                 )
             assert resp1.status == 200
             first_session_id = mock_run.call_args.kwargs["session_id"]
@@ -2117,7 +2480,7 @@ class TestResponsesEndpoint:
                 resp2 = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "Follow up",
                         "previous_response_id": response_id,
                     },
@@ -2135,7 +2498,7 @@ class TestResponsesEndpoint:
             resp = await cli.post(
                 "/v1/responses",
                 json={
-                    "model": "hades-agent",
+                    "model": "hermes-agent",
                     "input": "follow up",
                     "previous_response_id": "resp_nonexistent",
                 },
@@ -2154,7 +2517,7 @@ class TestResponsesEndpoint:
                 resp = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "Hello",
                         "store": False,
                     },
@@ -2180,7 +2543,7 @@ class TestResponsesEndpoint:
                 resp = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "Hello",
                         "store": "false",
                     },
@@ -2203,7 +2566,7 @@ class TestResponsesEndpoint:
                 resp1 = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "Hello",
                         "instructions": "Be a pirate",
                     },
@@ -2218,7 +2581,7 @@ class TestResponsesEndpoint:
                 resp2 = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "Tell me more",
                         "previous_response_id": resp_id,
                     },
@@ -2236,7 +2599,7 @@ class TestResponsesEndpoint:
                 mock_run.side_effect = RuntimeError("Boom")
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "Hello"},
+                    json={"model": "hermes-agent", "input": "Hello"},
                 )
 
             assert resp.status == 500
@@ -2258,7 +2621,7 @@ class TestResponsesEndpoint:
                 )
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "Hello"},
+                    json={"model": "hermes-agent", "input": "Hello"},
                 )
 
             assert resp.status == 200
@@ -2274,7 +2637,7 @@ class TestResponsesEndpoint:
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
                 "/v1/responses",
-                json={"model": "hades-agent", "input": 42},
+                json={"model": "hermes-agent", "input": 42},
             )
             assert resp.status == 400
 
@@ -2297,7 +2660,7 @@ class TestResponsesStreaming:
             with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "hi", "stream": True},
+                    json={"model": "hermes-agent", "input": "hi", "stream": True},
                 )
                 assert resp.status == 200
                 assert "text/event-stream" in resp.headers.get("Content-Type", "")
@@ -2330,7 +2693,7 @@ class TestResponsesStreaming:
                 resp = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "What is the capital of France?",
                         "stream": "false",
                     },
@@ -2378,7 +2741,7 @@ class TestResponsesStreaming:
                 mock_write_sse.return_value = web.Response(status=200, text="ok")
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "hi", "stream": True},
+                    json={"model": "hermes-agent", "input": "hi", "stream": True},
                 )
                 assert resp.status == 200
 
@@ -2432,7 +2795,7 @@ class TestResponsesStreaming:
             with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "read the file", "stream": True},
+                    json={"model": "hermes-agent", "input": "read the file", "stream": True},
                 )
                 assert resp.status == 200
                 body = await resp.text()
@@ -2461,7 +2824,7 @@ class TestResponsesStreaming:
             with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "store this", "stream": True},
+                    json={"model": "hermes-agent", "input": "store this", "stream": True},
                 )
                 body = await resp.text()
                 response_id = None
@@ -2522,7 +2885,7 @@ class TestResponsesStreaming:
                 resp = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "Now add 1 more",
                         "previous_response_id": "resp_prev",
                         "stream": True,
@@ -2595,7 +2958,7 @@ class TestResponsesStreaming:
                 await adapter._write_sse_responses(
                     request=fake_request,
                     response_id=response_id,
-                    model="hades-agent",
+                    model="hermes-agent",
                     created_at=int(time.time()),
                     stream_q=stream_q,
                     agent_task=agent_task,
@@ -2664,7 +3027,7 @@ class TestResponsesStreaming:
             await adapter._write_sse_responses(
                 request=fake_request,
                 response_id=response_id,
-                model="hades-agent",
+                model="hermes-agent",
                 created_at=int(time.time()),
                 stream_q=stream_q,
                 agent_task=agent_task,
@@ -2798,7 +3161,7 @@ class TestMultipleSystemMessages:
                 resp = await cli.post(
                     "/v1/chat/completions",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "messages": [
                             {"role": "system", "content": "You are helpful."},
                             {"role": "system", "content": "Be concise."},
@@ -2829,6 +3192,81 @@ class TestSendMethod:
         assert "HTTP request/response" in result.error
 
 
+class TestPlatformEventCallbackEndpoint:
+    @pytest.mark.asyncio
+    async def test_dispatches_authorized_google_chat_event(self, adapter):
+        app = _create_app(adapter)
+        google_adapter = _FakeGoogleChatAdapter()
+        app["platform_event_adapters"] = {"google_chat": google_adapter}
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/api/platforms/google_chat/events",
+                headers={"Authorization": "Bearer google-token"},
+                json={"type": "MESSAGE", "message": {"text": "hi"}},
+            )
+            body = await resp.json()
+
+        assert resp.status == 200
+        assert body == {"ok": True}
+        assert google_adapter.auth_header == "Bearer google-token"
+        assert google_adapter.dispatched == [
+            {"type": "MESSAGE", "message": {"text": "hi"}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_google_chat_auth(self, adapter):
+        app = _create_app(adapter)
+        app["platform_event_adapters"] = {
+            "google_chat": _FakeGoogleChatAdapter(
+                verify_ok=False,
+                verify_code="invalid_google_bearer",
+            )
+        }
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/api/platforms/google_chat/events",
+                headers={"Authorization": "Bearer bad"},
+                json={"type": "MESSAGE"},
+            )
+            body = await resp.json()
+
+        assert resp.status == 401
+        assert body["error"]["code"] == "invalid_google_bearer"
+
+    @pytest.mark.asyncio
+    async def test_requires_connected_google_chat_adapter(self, adapter):
+        app = _create_app(adapter)
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/api/platforms/google_chat/events",
+                headers={"Authorization": "Bearer google-token"},
+                json={"type": "MESSAGE"},
+            )
+            body = await resp.json()
+
+        assert resp.status == 503
+        assert body["error"]["code"] == "platform_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_rejects_malformed_platform_event_json(self, adapter):
+        app = _create_app(adapter)
+        app["platform_event_adapters"] = {"google_chat": _FakeGoogleChatAdapter()}
+
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/api/platforms/google_chat/events",
+                headers={"Authorization": "Bearer google-token"},
+                data="{",
+            )
+            body = await resp.json()
+
+        assert resp.status == 400
+        assert body["error"]["code"] == "invalid_json"
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/responses/{response_id}
 # ---------------------------------------------------------------------------
@@ -2847,7 +3285,7 @@ class TestGetResponse:
                 mock_run.return_value = (mock_result, {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "Hi"},
+                    json={"model": "hermes-agent", "input": "Hi"},
                 )
 
             assert resp.status == 200
@@ -2894,7 +3332,7 @@ class TestDeleteResponse:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "Hi"},
+                    json={"model": "hermes-agent", "input": "Hi"},
                 )
 
             data = await resp.json()
@@ -2971,7 +3409,7 @@ class TestToolCallsInOutput:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "What is 6*7?"},
+                    json={"model": "hermes-agent", "input": "What is 6*7?"},
                 )
 
             assert resp.status == 200
@@ -3001,7 +3439,7 @@ class TestToolCallsInOutput:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "Hello"},
+                    json={"model": "hermes-agent", "input": "Hello"},
                 )
 
             assert resp.status == 200
@@ -3028,7 +3466,7 @@ class TestUsageCounting:
                 mock_run.return_value = (mock_result, usage)
                 resp = await cli.post(
                     "/v1/responses",
-                    json={"model": "hades-agent", "input": "Hi"},
+                    json={"model": "hermes-agent", "input": "Hi"},
                 )
 
             assert resp.status == 200
@@ -3050,7 +3488,7 @@ class TestUsageCounting:
                 resp = await cli.post(
                     "/v1/chat/completions",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "messages": [{"role": "user", "content": "Hi"}],
                     },
                 )
@@ -3088,7 +3526,7 @@ class TestTruncation:
                 resp = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "follow up",
                         "previous_response_id": "resp_prev",
                         "truncation": "auto",
@@ -3099,6 +3537,95 @@ class TestTruncation:
         call_kwargs = mock_run.call_args.kwargs
         # History should be truncated to 100
         assert len(call_kwargs["conversation_history"]) <= 100
+        assert call_kwargs["conversation_history"][0]["content"] == "msg 50"
+
+    @pytest.mark.asyncio
+    async def test_truncation_auto_preserves_leading_compaction_summary(self, adapter):
+        """truncation=auto must not discard the compacted-history handoff."""
+        mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
+
+        summary = {
+            "role": "user",
+            "content": "[CONTEXT COMPACTION — REFERENCE ONLY]\nEarlier work.",
+            "_compressed_summary": True,
+        }
+        long_history = [summary] + [
+            {"role": "user", "content": f"msg {i}"}
+            for i in range(149)
+        ]
+        adapter._response_store.put("resp_summary", {
+            "response": {"id": "resp_summary", "object": "response"},
+            "conversation_history": long_history,
+            "instructions": None,
+        })
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "follow up",
+                        "previous_response_id": "resp_summary",
+                        "truncation": "auto",
+                    },
+                )
+
+        assert resp.status == 200
+        history = mock_run.call_args.kwargs["conversation_history"]
+        assert len(history) == 100
+        assert history[0] == summary
+        assert history[1]["content"] == "msg 50"
+        assert history[-1]["content"] == "msg 148"
+
+    @pytest.mark.asyncio
+    async def test_truncation_auto_preserves_non_leading_compaction_summary(self, adapter):
+        """A summary sitting after a retained system head must survive too.
+
+        The gateway /compress path can force a user-leading layout that
+        leaves the compaction summary after a kept system message, so the
+        preservation predicate must not assume the summary is at index 0.
+        """
+        mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
+
+        system_head = {"role": "system", "content": "You are a helpful agent."}
+        summary = {
+            "role": "user",
+            "content": "[CONTEXT COMPACTION — REFERENCE ONLY]\nEarlier work.",
+            "_compressed_summary": True,
+        }
+        long_history = [system_head, summary] + [
+            {"role": "user", "content": f"msg {i}"}
+            for i in range(148)
+        ]
+        adapter._response_store.put("resp_summary_mid", {
+            "response": {"id": "resp_summary_mid", "object": "response"},
+            "conversation_history": long_history,
+            "instructions": None,
+        })
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                resp = await cli.post(
+                    "/v1/responses",
+                    json={
+                        "model": "hermes-agent",
+                        "input": "follow up",
+                        "previous_response_id": "resp_summary_mid",
+                        "truncation": "auto",
+                    },
+                )
+
+        assert resp.status == 200
+        history = mock_run.call_args.kwargs["conversation_history"]
+        assert len(history) == 100
+        assert history[0] == summary
+        assert history[1]["content"] == "msg 49"
+        assert history[-1]["content"] == "msg 147"
 
     @pytest.mark.asyncio
     async def test_no_truncation_keeps_full_history(self, adapter):
@@ -3119,7 +3646,7 @@ class TestTruncation:
                 resp = await cli.post(
                     "/v1/responses",
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "input": "follow up",
                         "previous_response_id": "resp_prev2",
                     },
@@ -3142,82 +3669,6 @@ class TestChatCompletionsAgentIncomplete:
     error envelope (no usable text). Issue #22496."""
 
     @pytest.mark.asyncio
-    async def test_runtime_routing_deferred_is_retryable_503(self, adapter):
-        mock_result = {
-            "final_response": "",
-            "completed": False,
-            "partial": False,
-            "failed": True,
-            "error": "Runtime selection is still in progress.",
-            "retryable": True,
-            "retry_after_seconds": 3,
-        }
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (
-                    mock_result,
-                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                )
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "hermes-agent",
-                        "messages": [{"role": "user", "content": "hello"}],
-                    },
-                )
-                data = await resp.json()
-
-        assert resp.status == 503
-        assert resp.headers["Retry-After"] == "3"
-        assert data["error"]["code"] == "runtime_routing_deferred"
-        assert data["error"]["hermes"]["retryable"] is True
-
-    @pytest.mark.asyncio
-    async def test_stream_runtime_routing_deferred_keeps_retry_metadata(self, adapter):
-        mock_result = {
-            "final_response": "",
-            "completed": False,
-            "partial": False,
-            "failed": True,
-            "error": "Runtime selection is still in progress.",
-            "retryable": True,
-            "retry_after_seconds": 3,
-        }
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (
-                    mock_result,
-                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                )
-                resp = await cli.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": "hermes-agent",
-                        "messages": [{"role": "user", "content": "hello"}],
-                        "stream": True,
-                    },
-                )
-                body = await resp.text()
-
-        assert resp.status == 200
-        chunks = [
-            json.loads(line.removeprefix("data: "))
-            for line in body.splitlines()
-            if line.startswith("data: {")
-        ]
-        terminal = next(
-            chunk
-            for chunk in chunks
-            if chunk.get("choices", [{}])[0].get("finish_reason") == "error"
-        )
-        assert terminal["error"]["code"] == "runtime_routing_deferred"
-        assert terminal["error"]["hermes"]["retryable"] is True
-        assert terminal["hermes"]["retry_after_seconds"] == 3
-
-
-    @pytest.mark.asyncio
     async def test_truncation_with_partial_text_uses_length_finish_reason(self, adapter):
         """Partial text + truncation marker → finish_reason='length', 200 OK,
         plus hermes extras + headers."""
@@ -3235,7 +3686,7 @@ class TestChatCompletionsAgentIncomplete:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/chat/completions",
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "tell me everything"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "tell me everything"}]},
                 )
             assert resp.status == 200
             data = await resp.json()
@@ -3265,7 +3716,7 @@ class TestChatCompletionsAgentIncomplete:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/chat/completions",
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "hello"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hello"}]},
                 )
 
             assert resp.status == 502
@@ -3299,7 +3750,7 @@ class TestChatCompletionsAgentIncomplete:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/chat/completions",
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "x"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "x"}]},
                 )
             # Hard fail: SDK clients will raise on this status
             assert resp.status == 502
@@ -3328,7 +3779,7 @@ class TestChatCompletionsAgentIncomplete:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/chat/completions",
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "hi"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
                 )
             assert resp.status == 200
             data = await resp.json()
@@ -3336,120 +3787,6 @@ class TestChatCompletionsAgentIncomplete:
             assert data["choices"][0]["message"]["content"] == "All good."
             assert "hermes" not in data
             assert "X-Hermes-Completed" not in resp.headers
-
-
-class TestResponsesRuntimeRoutingDeferred:
-    @pytest.mark.asyncio
-    async def test_runtime_routing_deferred_is_retryable_503(self, adapter):
-        mock_result = {
-            "final_response": "",
-            "completed": False,
-            "partial": False,
-            "failed": True,
-            "error": "Runtime selection is still in progress.",
-            "retryable": True,
-            "retry_after_seconds": 4,
-        }
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (
-                    mock_result,
-                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                )
-                resp = await cli.post(
-                    "/v1/responses",
-                    json={"model": "hermes-agent", "input": "hello"},
-                )
-                data = await resp.json()
-
-        assert resp.status == 503
-        assert resp.headers["Retry-After"] == "4"
-        assert data["error"]["code"] == "runtime_routing_deferred"
-        assert data["error"]["hermes"]["retryable"] is True
-
-    @pytest.mark.asyncio
-    async def test_stream_runtime_routing_deferred_keeps_retry_metadata(self, adapter):
-        mock_result = {
-            "final_response": "",
-            "completed": False,
-            "partial": False,
-            "failed": True,
-            "error": "Runtime selection is still in progress.",
-            "retryable": True,
-            "retry_after_seconds": 4,
-        }
-        app = _create_app(adapter)
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
-                mock_run.return_value = (
-                    mock_result,
-                    {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-                )
-                resp = await cli.post(
-                    "/v1/responses",
-                    json={
-                        "model": "hermes-agent",
-                        "input": "hello",
-                        "stream": True,
-                    },
-                )
-                body = await resp.text()
-
-        assert resp.status == 200
-        events = [
-            json.loads(line.removeprefix("data: "))
-            for line in body.splitlines()
-            if line.startswith("data: {")
-        ]
-        failed = next(event for event in events if event.get("type") == "response.failed")
-        assert failed["response"]["error"]["code"] == "runtime_routing_deferred"
-        assert failed["response"]["error"]["hermes"]["retryable"] is True
-        assert failed["response"]["hermes"]["retry_after_seconds"] == 4
-
-
-class TestAutoRoutingAPIModelSemantics:
-    def test_advertised_alias_is_never_a_manual_model_route(self):
-        adapter = _make_adapter()
-        adapter._model_routes = {
-            adapter._model_name: {
-                "model": "must-not-pin",
-                "provider": "openrouter",
-            },
-            "operator-alias": {
-                "model": "manual-model",
-                "provider": "openrouter",
-            },
-        }
-
-        assert adapter._resolve_request_route(adapter._model_name) is None
-        assert adapter._resolve_request_route("operator-alias") == {
-            "model": "manual-model",
-            "provider": "openrouter",
-        }
-
-    def test_session_override_lookup_rehydrates_after_restart(self, monkeypatch):
-        adapter = _make_adapter()
-
-        class FakeRunner:
-            def __init__(self):
-                self._session_model_overrides = {}
-                self.rehydrated = []
-
-            def _rehydrate_session_model_override(self, session_key):
-                self.rehydrated.append(session_key)
-                self._session_model_overrides[session_key] = {
-                    "model": "manual-model",
-                    "provider": "openrouter",
-                }
-
-        runner = FakeRunner()
-        monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: runner)
-
-        override = adapter._session_model_override_for("persisted-session")
-
-        assert runner.rehydrated == ["persisted-session"]
-        assert override == {"model": "manual-model", "provider": "openrouter"}
 
 
 # ---------------------------------------------------------------------------
@@ -3761,7 +4098,7 @@ class TestSessionIdHeader:
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
                 resp = await cli.post(
                     "/v1/chat/completions",
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "Hi"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "Hi"}]},
                 )
             assert resp.status == 200
             assert resp.headers.get("X-Hermes-Session-Id") is not None
@@ -3784,7 +4121,7 @@ class TestSessionIdHeader:
                 resp = await cli.post(
                     "/v1/chat/completions",
                     headers={"X-Hermes-Session-Id": "my-session-123", "Authorization": "Bearer sk-secret"},
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "Continue"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "Continue"}]},
                 )
 
             assert resp.status == 200
@@ -3804,7 +4141,7 @@ class TestSessionIdHeader:
                     resp = await cli.post(
                         "/v1/chat/completions",
                         headers={"X-Hermes-Session-Id": bad, "Authorization": "Bearer sk-secret"},
-                        json={"model": "hades-agent", "messages": [{"role": "user", "content": "hi"}]},
+                        json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
                     )
                     assert resp.status == 400, f"{bad!r} should be rejected"
                 # The agent is never invoked for a rejected ID.
@@ -3831,7 +4168,7 @@ class TestSessionIdHeader:
                     headers={"X-Hermes-Session-Id": "existing-session", "Authorization": "Bearer sk-secret"},
                     # Request body has different history — should be ignored
                     json={
-                        "model": "hades-agent",
+                        "model": "hermes-agent",
                         "messages": [
                             {"role": "user", "content": "old msg from client"},
                             {"role": "assistant", "content": "old reply from client"},
@@ -3855,13 +4192,13 @@ class TestSessionIdHeader:
         app = _create_app(auth_adapter)
         async with TestClient(TestServer(app)) as cli:
             with patch.object(auth_adapter, "_run_agent", new_callable=AsyncMock) as mock_run, \
-                 patch("hades_state.SessionDB", side_effect=Exception("DB unavailable")):
+                 patch("hermes_state.SessionDB", side_effect=Exception("DB unavailable")):
                 mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
 
                 resp = await cli.post(
                     "/v1/chat/completions",
                     headers={"X-Hermes-Session-Id": "some-session", "Authorization": "Bearer sk-secret"},
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "Hi"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "Hi"}]},
                 )
 
             assert resp.status == 200
@@ -3897,7 +4234,7 @@ class TestSessionKeyHeader:
                         "X-Hermes-Session-Key": "webui:user-42",
                         "Authorization": "Bearer sk-secret",
                     },
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "hi"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
                 )
             assert resp.status == 200
             assert resp.headers.get("X-Hermes-Session-Key") == "webui:user-42"
@@ -3922,7 +4259,7 @@ class TestSessionKeyHeader:
                         "X-Hermes-Session-Id": "transcript-xyz",
                         "Authorization": "Bearer sk-secret",
                     },
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "hi"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
                 )
             assert resp.status == 200
             assert resp.headers.get("X-Hermes-Session-Key") == "channel-abc"
@@ -3942,7 +4279,7 @@ class TestSessionKeyHeader:
                 resp = await cli.post(
                     "/v1/chat/completions",
                     headers={"Authorization": "Bearer sk-secret"},
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "hi"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
                 )
             assert resp.status == 200
             assert "X-Hermes-Session-Key" not in resp.headers
@@ -3957,7 +4294,7 @@ class TestSessionKeyHeader:
             resp = await cli.post(
                 "/v1/chat/completions",
                 headers={"X-Hermes-Session-Key": "whatever"},
-                json={"model": "hades-agent", "messages": [{"role": "user", "content": "hi"}]},
+                json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
             )
             assert resp.status == 403
 
@@ -3986,7 +4323,7 @@ class TestSessionKeyHeader:
             resp = await cli.post(
                 "/v1/chat/completions",
                 headers={"X-Hermes-Session-Key": "x" * 1000, "Authorization": "Bearer sk-secret"},
-                json={"model": "hades-agent", "messages": [{"role": "user", "content": "hi"}]},
+                json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
             )
             assert resp.status == 400
 
@@ -4013,7 +4350,7 @@ class TestSessionKeyHeader:
                         "X-Hermes-Session-Key": "agent:main:webui:dm:user-7",
                         "Authorization": "Bearer sk-secret",
                     },
-                    json={"model": "hades-agent", "messages": [{"role": "user", "content": "hi"}]},
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "hi"}]},
                 )
             assert resp.status == 200
             # _create_agent must be called with gateway_session_key threaded through
@@ -4033,7 +4370,7 @@ class TestSessionKeyHeader:
                         "X-Hermes-Session-Key": "webui:chan-1",
                         "Authorization": "Bearer sk-secret",
                     },
-                    json={"model": "hades-agent", "input": "hello", "store": False},
+                    json={"model": "hermes-agent", "input": "hello", "store": False},
                 )
             assert resp.status == 200
             assert resp.headers.get("X-Hermes-Session-Key") == "webui:chan-1"
@@ -4083,7 +4420,7 @@ def _patch_create_agent_runtime(monkeypatch, captured: dict, fake_agent_cls):
         "gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None)
     )
     monkeypatch.setattr("gateway.run._current_max_iterations", lambda: 90)
-    monkeypatch.setattr("hades_cli.tools_config._get_platform_tools", lambda *_: set())
+    monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
 
 
 class TestModelRoutesParsing:
@@ -4119,7 +4456,7 @@ class TestModelRoutesParsing:
 
     def test_no_routes_configured(self):
         adapter = _make_routing_adapter({})
-        assert adapter._resolve_route("hades-agent") is None
+        assert adapter._resolve_route("hermes-agent") is None
 
 
 class TestModelRoutesModelsEndpoint:
@@ -4308,10 +4645,9 @@ class TestModelRoutesAgentCreation:
 
         adapter._create_agent(session_id="s1", route=adapter._resolve_route("alias"))
 
-        # The static route must NOT be applied. The persisted session /model
-        # override is the canonical manual runtime and must survive direct API
-        # reconstruction rather than silently falling back to the global model.
-        assert captured["model"] == "session/override-model"
+        # The route must NOT be applied — the session override path (global
+        # runtime here, since the gateway applies /model separately) wins.
+        assert captured["model"] == "global/model"
         assert captured["api_key"] == "sk-global"
 
     def test_session_override_lookup_reads_gateway_runner(self, monkeypatch):
@@ -4325,3 +4661,129 @@ class TestModelRoutesAgentCreation:
         assert adapter._session_model_override_for("chan-1") == {"model": "user/model"}
         assert adapter._session_model_override_for("chan-2") is None
         assert adapter._session_model_override_for(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Event-loop offloading for synchronous SessionDB calls (P1)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionDbOffEventLoop:
+    """Regression: synchronous SessionDB calls in the OpenAI-compatible API
+    server must run OFF the aiohttp event loop. A blocking SQLite read/write on
+    the loop freezes every in-flight request under load (same class of bug as
+    gateway build_channel_directory, #60794 / #60810), so each call is wrapped
+    in asyncio.to_thread.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_existing_session_or_404_offloads(self, auth_adapter):
+        import threading
+
+        captured = {}
+
+        class FakeDB:
+            def get_session(self, session_id):
+                captured["thread"] = threading.current_thread()
+                return {"id": session_id, "source": "api_server"}
+
+        auth_adapter._session_db = FakeDB()
+        session, err = await auth_adapter._get_existing_session_or_404("sess-x")
+        assert err is None
+        assert session["id"] == "sess-x"
+        # The blocking DB call must NOT execute on the event-loop thread.
+        assert captured["thread"] is not None
+        assert captured["thread"] != threading.current_thread()
+
+    @pytest.mark.asyncio
+    async def test_list_sessions_offloads_db_off_event_loop(self, auth_adapter):
+        import threading
+
+        captured = {}
+
+        class FakeDB:
+            def list_sessions_rich(self, **kwargs):
+                captured["thread"] = threading.current_thread()
+                return []
+
+        auth_adapter._session_db = FakeDB()
+        app = _create_app(auth_adapter)
+        app.router.add_get("/api/sessions", auth_adapter._handle_list_sessions)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.get(
+                "/api/sessions",
+                headers={"Authorization": "Bearer sk-secret"},
+            )
+        assert resp.status == 200
+        assert captured["thread"] is not None
+        assert captured["thread"] != threading.current_thread()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_same_id_create_one_201_one_409(self, auth_adapter):
+        """Two concurrent creates for the same ID must yield one 201 and one 409.
+
+        The create sequence (existence check + insert + title) runs as a
+        single off-loop call, so concurrent same-ID requests serialize at
+        the DB level.  Before the fix the TOCTOU window between the check
+        and the insert let both requests pass the existence guard and both
+        return 201 via the ON CONFLICT enrichment upsert.
+        """
+        import asyncio
+
+        app = _create_app(auth_adapter)
+        app.router.add_post("/api/sessions", auth_adapter._handle_create_session)
+
+        async with TestClient(TestServer(app)) as cli:
+            # Fire both requests concurrently through the same server.
+            resp_a, resp_b = await asyncio.gather(
+                cli.post(
+                    "/api/sessions",
+                    json={"id": "race-same-id"},
+                    headers={"Authorization": "Bearer sk-secret"},
+                ),
+                cli.post(
+                    "/api/sessions",
+                    json={"id": "race-same-id"},
+                    headers={"Authorization": "Bearer sk-secret"},
+                ),
+            )
+        assert sorted([resp_a.status, resp_b.status]) == [201, 409]
+
+    @pytest.mark.asyncio
+    async def test_ensure_session_db_first_request_path(self, auth_adapter):
+        """First /api/sessions request initializes SessionDB off the event loop."""
+        import threading
+
+        captured = {}
+
+        class FakeDB:
+            def __init__(self, db_path=None):
+                captured["init_thread"] = threading.current_thread()
+
+            def list_sessions_rich(self, **kwargs):
+                return []
+
+        # Simulate cold start -- no DB yet.
+        auth_adapter._session_db = None
+        auth_adapter._session_db_lock = None
+
+        original_class = None
+        import hermes_state
+        original_class = hermes_state.SessionDB
+        hermes_state.SessionDB = FakeDB
+        try:
+            app = _create_app(auth_adapter)
+            app.router.add_get("/api/sessions", auth_adapter._handle_list_sessions)
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.get(
+                    "/api/sessions",
+                    headers={"Authorization": "Bearer sk-secret"},
+                )
+            assert resp.status == 200
+            # SessionDB() was constructed -- the init must NOT be on the event-loop thread.
+            assert "init_thread" in captured
+            assert captured["init_thread"] != threading.current_thread()
+        finally:
+            hermes_state.SessionDB = original_class
+            auth_adapter._session_db = None
+            auth_adapter._session_db_lock = None

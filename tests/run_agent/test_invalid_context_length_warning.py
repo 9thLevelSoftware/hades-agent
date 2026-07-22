@@ -3,7 +3,7 @@
 from unittest.mock import patch
 
 
-def _build_agent(model_cfg, custom_providers=None, model="anthropic/claude-opus-4.6"):
+def _build_agent(model_cfg, custom_providers=None, model=None):
     """Build an AIAgent with the given model config."""
     cfg = {"model": model_cfg}
     if custom_providers is not None:
@@ -12,7 +12,7 @@ def _build_agent(model_cfg, custom_providers=None, model="anthropic/claude-opus-
     base_url = model_cfg.get("base_url", "")
 
     with (
-        patch("hades_cli.config.load_config", return_value=cfg),
+        patch("hermes_cli.config.load_config", return_value=cfg),
         patch("agent.model_metadata.get_model_context_length", return_value=128_000),
         patch("run_agent.get_tool_definitions", return_value=[]),
         patch("run_agent.check_toolset_requirements", return_value={}),
@@ -21,7 +21,7 @@ def _build_agent(model_cfg, custom_providers=None, model="anthropic/claude-opus-
         from run_agent import AIAgent
 
         agent = AIAgent(
-            model=model,
+            model=model or model_cfg.get("default") or "anthropic/claude-opus-4.6",
             api_key="test-key-1234567890",
             base_url=base_url,
             quiet_mode=True,

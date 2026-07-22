@@ -6,7 +6,7 @@ Connects to external MCP servers via stdio, HTTP/StreamableHTTP, or SSE
 transport, discovers their tools, and registers them into the hermes-agent
 tool registry so the agent can call them like any built-in tool.
 
-Configuration is read from ~/.hades/config.yaml under the ``mcp_servers`` key.
+Configuration is read from ~/.hermes/config.yaml under the ``mcp_servers`` key.
 The ``mcp`` Python package is optional -- if not installed, this module is a
 no-op and logs a debug message.
 
@@ -92,12 +92,13 @@ Thread safety:
 import asyncio
 import contextvars
 import concurrent.futures
+import errno
 import inspect
 import json
 import logging
 import math
 import os
-from hades_constants import env_get
+import random
 import re
 import shutil
 import sys
@@ -134,7 +135,7 @@ _OSV_MALWARE_CHECK_TIMEOUT_S = 12.0
 # corrupts the display and can hang the session.
 #
 # Instead we redirect every stdio MCP subprocess's stderr into a shared
-# per-profile log file (~/.hades/logs/mcp-stderr.log), tagged with the
+# per-profile log file (~/.hermes/logs/mcp-stderr.log), tagged with the
 # server name so individual servers remain debuggable.
 #
 # Fallback is os.devnull if opening the log file fails for any reason.
@@ -156,8 +157,8 @@ def _get_mcp_stderr_log() -> Any:
         if _mcp_stderr_log_fh is not None:
             return _mcp_stderr_log_fh
         try:
-            from hades_constants import get_hades_home
-            log_dir = get_hades_home() / "logs"
+            from hermes_constants import get_hermes_home
+            log_dir = get_hermes_home() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / "mcp-stderr.log"
             # Line-buffered so server output lands on disk promptly; errors=
@@ -297,7 +298,7 @@ def _check_logging_callback_support() -> bool:
     Mirrors ``_check_message_handler_support`` for backward compatibility
     with older MCP SDK versions.  Without a logging_callback, the SDK's
     default handler silently discards every ``notifications/message`` a
-    server emits, so server-side diagnostics never reach Hades' logs.
+    server emits, so server-side diagnostics never reach Hermes' logs.
     """
     if not _MCP_AVAILABLE:
         return False
@@ -337,6 +338,16 @@ _MAX_BACKOFF_SECONDS = 60
 # can ever reach the circuit-breaker half-open probe or _signal_reconnect.
 _PARKED_RETRY_INTERVAL = 300     # seconds between parked self-probes
 _RECYCLED_RECONNECT_TIMEOUT = 15.0
+# Jitter applied to reconnect backoff sleeps. Without it, every server that
+# lost the same backend retries in lockstep (thundering herd) and log lines
+# from N servers land in synchronized bursts.
+_BACKOFF_JITTER = 0.2            # +/-20%
+
+
+def _jittered(seconds: float) -> float:
+    """Return ``seconds`` with +/-20% uniform jitter, floored at 0."""
+    return max(0.0, seconds * random.uniform(1.0 - _BACKOFF_JITTER,
+                                             1.0 + _BACKOFF_JITTER))
 
 # Keepalive cadence for HTTP/SSE sessions. The MCP spec lets a server expire
 # idle sessions on any TTL it chooses (Streamable HTTP "Session Management"),
@@ -428,18 +439,28 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
     """Build a filtered environment dict for stdio subprocesses.
 
     Only passes through safe baseline variables (PATH, HOME, etc.) and XDG_*
-    variables from the current process environment, plus any variables
+    variables from the current process environment, secrets injected by an
+    external secret source (Bitwarden, 1Password, plugin backends) that
+    Hermes explicitly tagged during dotenv loading, plus any variables
     explicitly specified by the user in the server config.
 
     This prevents accidentally leaking secrets like API keys, tokens, or
-    credentials to MCP server subprocesses.
+    credentials to MCP server subprocesses.  Secret-source-injected vars are
+    an exception: users configured that backend specifically so Hermes and
+    its subprocesses can consume those credentials without duplicating them
+    in every MCP server's ``env:`` block.
     """
+    try:
+        from hermes_cli.env_loader import get_secret_source
+    except Exception:  # pragma: no cover — early bootstrap/import fallback
+        get_secret_source = None
     env = {}
     for key, value in os.environ.items():
         if (
             key in _SAFE_ENV_KEYS
             or key.upper() in _SAFE_ENV_KEYS_CASE_INSENSITIVE
             or key.startswith("XDG_")
+            or (get_secret_source is not None and get_secret_source(key))
         ):
             env[key] = value
     if user_env:
@@ -639,8 +660,8 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
             resolved_command = which_hit
         elif resolved_command in {"npx", "npm", "node"}:
             hermes_home = os.path.expanduser(
-                env_get(
-                    "HADES_HOME", os.path.join(os.path.expanduser("~"), ".hades")
+                os.getenv(
+                    "HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes")
                 )
             )
             candidates = [
@@ -648,7 +669,7 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
                 os.path.join(os.path.expanduser("~"), ".local", "bin", resolved_command),
                 # /usr/local/bin is the canonical install location for Node on
                 # Linux from-source builds, the upstream node:bookworm-slim
-                # image (which the Hades Docker image copies node + npm +
+                # image (which the Hermes Docker image copies node + npm +
                 # corepack from since #4977), and macOS Homebrew on Intel.
                 # Without this candidate, any MCP server configured with an
                 # env.PATH that omits /usr/local/bin (a common pattern when
@@ -849,7 +870,7 @@ def _render_mcp_resource_block(block, server_name: str = "") -> str:
 
     - ``EmbeddedResource`` with text contents → the text itself.
     - ``EmbeddedResource`` with blob contents → bytes are decoded (size-capped)
-      and materialized into the Hades document cache; returns a marker with
+      and materialized into the Hermes document cache; returns a marker with
       the local path so file/terminal tools can consume it.
     - ``ResourceLink`` → the URI plus a pointer at the server's read_resource
       tool. No network fetch happens here; the link is only readable through
@@ -946,6 +967,85 @@ class NonMcpEndpointError(ConnectionError):
     Subclasses :class:`ConnectionError` so callers that only catch the broad
     class still treat it as a connection problem.
     """
+
+
+def _unwrap_exception_group(exc: BaseException) -> BaseException:
+    """Extract the root-cause exception from anyio TaskGroup wrappers.
+
+    The MCP SDK uses anyio task groups, which wrap errors in
+    ``BaseExceptionGroup`` / ``ExceptionGroup``. Their ``str()`` is opaque —
+    "unhandled errors in a TaskGroup (1 sub-exception)" — so log sites must
+    unwrap to surface the real cause (e.g. ``BrokenPipeError`` on a dead
+    stdio pipe, "401 Unauthorized" on an auth failure).
+
+    Adapted from :func:`hermes_cli.mcp_config._unwrap_exception_group` with
+    two extra behaviours needed on the runtime path:
+
+    - **Fatal leaves re-raise.** A ``KeyboardInterrupt`` / ``SystemExit``
+      anywhere in the (possibly nested) group must propagate to the
+      interpreter, never be flattened into a loggable error.
+    - **Prefer non-cancellation leaves.** When a group carries both a real
+      error and the ``CancelledError``s that anyio cancellation sprays across
+      sibling tasks, the real error is the root cause worth logging.
+    """
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        fatal, _rest = exc.split((KeyboardInterrupt, SystemExit))
+        if fatal is not None:
+            # Surface the fatal signal itself, not the wrapper.
+            leaf: BaseException = fatal
+            while isinstance(leaf, BaseExceptionGroup) and leaf.exceptions:
+                leaf = leaf.exceptions[0]
+            raise leaf
+        # Prefer a non-cancellation leaf when one exists: cancellation
+        # noise from sibling tasks should not mask the real error.
+        chosen = exc.exceptions[0]
+        for sub in exc.exceptions:
+            if not _contains_only_cancellation(sub):
+                chosen = sub
+                break
+        exc = chosen
+    return exc
+
+
+def _contains_only_cancellation(exc: BaseException) -> bool:
+    """True if ``exc`` is (or a group containing only) CancelledError."""
+    if isinstance(exc, BaseExceptionGroup):
+        return all(_contains_only_cancellation(sub) for sub in exc.exceptions)
+    return isinstance(exc, asyncio.CancelledError)
+
+
+def _classify_mcp_failure(exc: BaseException) -> str:
+    """Classify an MCP connection failure as ``'permanent'`` or ``'transient'``.
+
+    Permanent failures are deterministic — every retry hits the same wall, so
+    burning the retry ladder (and log lines) on them is pure noise; ``run()``
+    parks them immediately:
+
+    - auth failures (401/403) — need new credentials, not a retry;
+    - :class:`NonMcpEndpointError` — the URL serves a web page, not MCP;
+    - :class:`InvalidMcpUrlError` — unusable config;
+    - ``FileNotFoundError`` / ``ENOENT`` — the stdio command doesn't exist.
+
+    Everything else (network blips, EOF, ``ClosedResourceError``, transport
+    TaskGroup drops, timeouts) is transient and keeps the normal
+    retry-with-backoff ladder.
+    """
+    root = _unwrap_exception_group(exc)
+    if _is_auth_error(root):
+        return "permanent"
+    if isinstance(root, (NonMcpEndpointError, InvalidMcpUrlError)):
+        return "permanent"
+    # Stdio command missing: FileNotFoundError, or an OSError carrying ENOENT.
+    if isinstance(root, FileNotFoundError):
+        return "permanent"
+    if isinstance(root, OSError) and getattr(root, "errno", None) == errno.ENOENT:
+        return "permanent"
+    # httpx.HTTPStatusError with 401/403 that _is_auth_error's type-gate
+    # missed (e.g. auth types not importable in this environment).
+    status = getattr(getattr(root, "response", None), "status_code", None)
+    if status in (401, 403):
+        return "permanent"
+    return "transient"
 
 
 def _validate_remote_mcp_url(server_name: str, url: Any) -> str:
@@ -1558,7 +1658,7 @@ class ElicitationHandler:
 
     Elicitation lets a server ask the client to collect structured input from
     the user mid-tool-call (e.g. payment authorization, OAuth confirmation).
-    Form-mode elicitations are routed through Hades' existing approval
+    Form-mode elicitations are routed through Hermes' existing approval
     system (``tools.approval.prompt_dangerous_approval``), which surfaces
     the prompt on whichever surface the active session uses -- CLI, TUI,
     Telegram, Slack, etc. URL-mode elicitations are declined as unsupported.
@@ -1731,7 +1831,7 @@ class MCPServerTask:
         "_lifecycle_started_at", "_last_tool_call_at",
         "_idle_timeout_seconds", "_max_lifetime_seconds", "_recycled_reason",
         "initialize_result", "_ping_unsupported",
-        "_reconnect_retries",
+        "_reconnect_retries", "_session_proven", "_was_parked",
     )
 
     def __init__(self, name: str):
@@ -1754,6 +1854,18 @@ class MCPServerTask:
         self._elicitation: Optional[ElicitationHandler] = None
         self._registered_tool_names: list[str] = []
         self._reconnect_retries: int = 0
+        # Rapid-drop budget (#62212): a freshly (re)established session is
+        # UNPROVEN until it demonstrates real health — it survived at least
+        # one full keepalive interval (keepalive success path) or served at
+        # least one successful tool call. Only a proven session clears the
+        # reconnect budget; a transport that flaps right after the handshake
+        # keeps getting charged and still reaches the park instead of
+        # hot-cycling respawns forever.
+        self._session_proven: bool = False
+        # True while parked (reconnect budget exhausted) or after a park,
+        # until the session proves healthy again — used to log the
+        # parked→revived transition exactly once.
+        self._was_parked: bool = False
         self._auth_type: str = ""
         self._refresh_lock = asyncio.Lock()
         # MCP stdio sessions are a single JSON-RPC stream. Some servers emit
@@ -1886,7 +1998,7 @@ class MCPServerTask:
         """Build a ``logging_callback`` for ``ClientSession``.
 
         Routes MCP ``notifications/message`` log notifications from the
-        server into Hades' logging (agent.log via hermes_logging), tagged
+        server into Hermes' logging (agent.log via hermes_logging), tagged
         with the server name.  Without this, the SDK's default callback
         silently discards them, so server-side warnings/errors during a
         tool call were invisible.  Port of anomalyco/opencode#34529.
@@ -2067,6 +2179,27 @@ class MCPServerTask:
         # Fallback probe for servers without ping support.
         await asyncio.wait_for(self.session.list_tools(), timeout=30.0)
 
+    def _mark_session_proven(self) -> None:
+        """Record that the current session demonstrated real health.
+
+        Called from the keepalive success path (session survived at least one
+        full keepalive interval) and the tool-call success path. Only then is
+        the reconnect budget cleared: a handshake that completes but drops
+        moments later must keep consuming ``_reconnect_retries`` so a flapping
+        transport still reaches the park instead of respawning forever
+        (#62212 — 6212 spawns in 63h).
+        """
+        if not self._session_proven:
+            self._session_proven = True
+            self._reconnect_retries = 0
+            if self._was_parked:
+                self._was_parked = False
+                logger.warning(
+                    "MCP server '%s': revived — session healthy again after "
+                    "parking (state: parked → connected)",
+                    self.name,
+                )
+
     async def _wait_for_lifecycle_event(self) -> str:
         """Block until either _shutdown_event or _reconnect_event fires.
 
@@ -2146,13 +2279,18 @@ class MCPServerTask:
                     try:
                         await self._keepalive_probe()
                     except Exception as exc:
+                        root = _unwrap_exception_group(exc)
                         logger.warning(
-                            "MCP server '%s' keepalive failed, "
-                            "triggering reconnect: %s",
-                            self.name, exc,
+                            "MCP server '%s' keepalive failed, triggering "
+                            "reconnect (state: connected → degraded): %s: %s",
+                            self.name, type(root).__name__, root,
                         )
                         self._reconnect_event.set()
                         break
+                    # Keepalive succeeded — the session survived a full
+                    # keepalive interval, which is real proof of health.
+                    # Clear the rapid-drop budget (#62212).
+                    self._mark_session_proven()
         finally:
             for t in (shutdown_task, reconnect_task):
                 if not t.done():
@@ -2216,9 +2354,9 @@ class MCPServerTask:
             raise ImportError(
                 f"MCP server '{self.name}' requires the 'mcp' Python SDK, but "
                 "it is not installed. Install with:\n"
-                "  pip install 'hades-agent[mcp]'\n"
+                "  pip install 'hermes-agent[mcp]'\n"
                 "or (full install):\n"
-                "  pip install 'hades-agent[all]'"
+                "  pip install 'hermes-agent[all]'"
             )
 
         command = config.get("command")
@@ -2303,7 +2441,7 @@ class MCPServerTask:
         # Redirect subprocess stderr into a shared log file so MCP servers
         # (FastMCP banners, slack-mcp startup JSON, etc.) don't dump onto
         # the user's TTY and corrupt the TUI.  Preserves debuggability via
-        # ~/.hades/logs/mcp-stderr.log.
+        # ~/.hermes/logs/mcp-stderr.log.
         _write_stderr_log_header(self.name)
         _errlog = _get_mcp_stderr_log()
         try:
@@ -2366,10 +2504,12 @@ class MCPServerTask:
                     # prior outage so the first call after recovery isn't
                     # gated on a stale consecutive-failure count (#16788).
                     _reset_server_error(self.name)
-                    # This session is live: reset the reconnect retry counter
-                    # so transient prior failures do not accumulate toward
-                    # permanent parking (#57604).
-                    self._reconnect_retries = 0
+                    # A completed handshake alone is NOT proof of health: a
+                    # flapping transport can handshake fine and drop moments
+                    # later, forever (#62212). The session must prove itself
+                    # (keepalive success or a successful tool call) before the
+                    # reconnect budget is cleared — see _mark_session_proven.
+                    self._session_proven = False
                     # stdio transport does not use OAuth, but we still honor
                     # _reconnect_event (e.g. future manual /mcp refresh) for
                     # consistency with _run_http.
@@ -2537,6 +2677,50 @@ class MCPServerTask:
             "(e.g. https://host/mcp, not https://host/)."
         )
 
+    def _reconnect_or_reraise_group(self, eg: BaseExceptionGroup) -> str:
+        """Map an SDK transport TaskGroup failure to a clean ``"reconnect"``.
+
+        Streamable-HTTP / SSE transports run their stream pump inside an anyio
+        TaskGroup. A transient stream drop (idle timeout, brief backend blip,
+        server-side TCP close) surfaces as a ``BaseExceptionGroup`` escaping the
+        transport context manager. Left unwrapped it reaches ``run()``'s error
+        path, which applies exponential backoff and eventually *parks* the
+        server for 300s and deregisters its tools — a multi-minute tool outage
+        for what is usually a sub-second glitch while the POST path stays
+        healthy (issue #66092).
+
+        Returning ``"reconnect"`` instead lets ``run()`` rebuild the session
+        immediately with no backoff, no park, and no tool deregistration.
+
+        Re-raise (rather than mask) when the failure is not a transient drop:
+        - shutdown is in progress (``shutdown()`` sets ``_shutdown_event``
+          before it ever cancels the task);
+        - the group carries a ``KeyboardInterrupt`` / ``SystemExit`` — fatal
+          signals must propagate to the interpreter, never be converted into
+          a reconnect;
+        - the group carries a real ``CancelledError`` (task cancellation must
+          propagate to asyncio, mirroring the ``run()`` guard for #9930);
+        - we never reached a live session this attempt (``_ready`` unset) — a
+          connect/handshake failure SHOULD fall through to ``run()``'s backoff
+          rather than hot-loop reconnects against a broken endpoint.
+        """
+        if self._shutdown_event.is_set():
+            raise eg
+        fatal, _rest = eg.split((KeyboardInterrupt, SystemExit))
+        if fatal is not None:
+            raise eg
+        cancelled, _rest = eg.split(asyncio.CancelledError)
+        if cancelled is not None:
+            raise eg
+        if not self._ready.is_set():
+            raise eg
+        logger.debug(
+            "MCP server '%s': transport TaskGroup exited after a live session "
+            "(%r) — reconnecting immediately instead of backing off",
+            self.name, eg,
+        )
+        return "reconnect"
+
     async def _run_http(self, config: dict):
         """Run the server using HTTP/StreamableHTTP transport."""
         if not _MCP_HTTP_AVAILABLE:
@@ -2643,31 +2827,37 @@ class MCPServerTask:
                     return _httpx_mod.AsyncClient(**kwargs)
 
                 _sse_kwargs["httpx_client_factory"] = _mcp_http_client_factory
-            async with sse_client(**_sse_kwargs) as (read_stream, write_stream):
-                async with ClientSession(
-                    read_stream, write_stream, **sampling_kwargs
-                ) as session:
-                    # Bound the handshake — same orphaned-task hang as the
-                    # stdio path (#59349): an endpoint that accepts the
-                    # connection but never answers ``initialize`` parks this
-                    # coroutine forever on the background loop.
-                    self.initialize_result = await asyncio.wait_for(
-                        session.initialize(), timeout=float(connect_timeout)
-                    )
-                    self.session = session
-                    await self._discover_tools()
-                    self._ready.set()
-                    # Session is live again: clear any breaker state from a
-                    # prior outage so the first call after recovery isn't
-                    # gated on a stale consecutive-failure count (#16788).
-                    _reset_server_error(self.name)
-                    self._reconnect_retries = 0
-                    reason = await self._wait_for_lifecycle_event()
-                    if reason == "reconnect":
-                        logger.info(
-                            "MCP server '%s': reconnect requested — "
-                            "tearing down SSE session", self.name,
+            try:
+                async with sse_client(**_sse_kwargs) as (read_stream, write_stream):
+                    async with ClientSession(
+                        read_stream, write_stream, **sampling_kwargs
+                    ) as session:
+                        # Bound the handshake — same orphaned-task hang as the
+                        # stdio path (#59349): an endpoint that accepts the
+                        # connection but never answers ``initialize`` parks this
+                        # coroutine forever on the background loop.
+                        self.initialize_result = await asyncio.wait_for(
+                            session.initialize(), timeout=float(connect_timeout)
                         )
+                        self.session = session
+                        await self._discover_tools()
+                        self._ready.set()
+                        # Session is live again: clear any breaker state from a
+                        # prior outage so the first call after recovery isn't
+                        # gated on a stale consecutive-failure count (#16788).
+                        _reset_server_error(self.name)
+                        # Unproven until keepalive/tool-call success (#62212).
+                        self._session_proven = False
+                        reason = await self._wait_for_lifecycle_event()
+                        if reason == "reconnect":
+                            logger.info(
+                                "MCP server '%s': reconnect requested — "
+                                "tearing down SSE session", self.name,
+                            )
+            except BaseExceptionGroup as _eg:
+                # SSE transport TaskGroup dropped (idle timeout / stream blip):
+                # reconnect immediately instead of backoff/park (#66092).
+                reason = self._reconnect_or_reraise_group(_eg)
             return reason
 
         if _MCP_NEW_HTTP:
@@ -2702,29 +2892,35 @@ class MCPServerTask:
 
             # Caller owns the client lifecycle — the SDK skips cleanup when
             # http_client is provided, so we wrap in async-with.
-            async with httpx.AsyncClient(**client_kwargs) as http_client:
-                async with streamable_http_client(url, http_client=http_client) as (
-                    read_stream, write_stream, _get_session_id,
-                ):
-                    async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                        # Bound the handshake (#59349) — see stdio path.
-                        self.initialize_result = await asyncio.wait_for(
-                            session.initialize(), timeout=float(connect_timeout)
-                        )
-                        self.session = session
-                        await self._discover_tools()
-                        self._ready.set()
-                        # Session is live again: clear any breaker state from
-                        # a prior outage so the first call after recovery
-                        # isn't gated on a stale failure count (#16788).
-                        _reset_server_error(self.name)
-                        self._reconnect_retries = 0
-                        reason = await self._wait_for_lifecycle_event()
-                        if reason == "reconnect":
-                            logger.info(
-                                "MCP server '%s': reconnect requested — "
-                                "tearing down HTTP session", self.name,
+            try:
+                async with httpx.AsyncClient(**client_kwargs) as http_client:
+                    async with streamable_http_client(url, http_client=http_client) as (
+                        read_stream, write_stream, _get_session_id,
+                    ):
+                        async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
+                            # Bound the handshake (#59349) — see stdio path.
+                            self.initialize_result = await asyncio.wait_for(
+                                session.initialize(), timeout=float(connect_timeout)
                             )
+                            self.session = session
+                            await self._discover_tools()
+                            self._ready.set()
+                            # Session is live again: clear any breaker state from
+                            # a prior outage so the first call after recovery
+                            # isn't gated on a stale failure count (#16788).
+                            _reset_server_error(self.name)
+                            # Unproven until keepalive/tool-call success (#62212).
+                            self._session_proven = False
+                            reason = await self._wait_for_lifecycle_event()
+                            if reason == "reconnect":
+                                logger.info(
+                                    "MCP server '%s': reconnect requested — "
+                                    "tearing down HTTP session", self.name,
+                                )
+            except BaseExceptionGroup as _eg:
+                # Streamable-HTTP transport TaskGroup dropped: reconnect
+                # immediately instead of backoff/park (#66092).
+                reason = self._reconnect_or_reraise_group(_eg)
             return reason
         else:
             # Deprecated API (mcp < 1.24.0): manages httpx client internally.
@@ -2735,28 +2931,34 @@ class MCPServerTask:
             }
             if _oauth_auth is not None:
                 _http_kwargs["auth"] = _oauth_auth
-            async with streamablehttp_client(url, **_http_kwargs) as (
-                read_stream, write_stream, _get_session_id,
-            ):
-                async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                    # Bound the handshake (#59349) — see stdio path.
-                    self.initialize_result = await asyncio.wait_for(
-                        session.initialize(), timeout=float(connect_timeout)
-                    )
-                    self.session = session
-                    await self._discover_tools()
-                    self._ready.set()
-                    # Session is live again: clear any breaker state from a
-                    # prior outage so the first call after recovery isn't
-                    # gated on a stale consecutive-failure count (#16788).
-                    _reset_server_error(self.name)
-                    self._reconnect_retries = 0
-                    reason = await self._wait_for_lifecycle_event()
-                    if reason == "reconnect":
-                        logger.info(
-                            "MCP server '%s': reconnect requested — "
-                            "tearing down legacy HTTP session", self.name,
+            try:
+                async with streamablehttp_client(url, **_http_kwargs) as (
+                    read_stream, write_stream, _get_session_id,
+                ):
+                    async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
+                        # Bound the handshake (#59349) — see stdio path.
+                        self.initialize_result = await asyncio.wait_for(
+                            session.initialize(), timeout=float(connect_timeout)
                         )
+                        self.session = session
+                        await self._discover_tools()
+                        self._ready.set()
+                        # Session is live again: clear any breaker state from a
+                        # prior outage so the first call after recovery isn't
+                        # gated on a stale consecutive-failure count (#16788).
+                        _reset_server_error(self.name)
+                        # Unproven until keepalive/tool-call success (#62212).
+                        self._session_proven = False
+                        reason = await self._wait_for_lifecycle_event()
+                        if reason == "reconnect":
+                            logger.info(
+                                "MCP server '%s': reconnect requested — "
+                                "tearing down legacy HTTP session", self.name,
+                            )
+            except BaseExceptionGroup as _eg:
+                # Legacy Streamable-HTTP transport TaskGroup dropped: reconnect
+                # immediately instead of backoff/park (#66092).
+                reason = self._reconnect_or_reraise_group(_eg)
             return reason
 
     async def _discover_tools(self):
@@ -2794,14 +2996,18 @@ class MCPServerTask:
         """Re-register tools after a post-ready reconnect if needed.
 
         Initial registration is performed by ``_discover_and_register_server``
-        after ``start()`` completes. During a later reconnect, however,
-        ``_ready`` remains set; if outage handling previously deregistered
-        stale tools (parking calls ``_deregister_tools``), a successful
-        revival must publish the freshly discovered tools again — otherwise
-        the transport comes back alive with zero registered tools.
+        after ``start()`` completes. During a later reconnect, outage handling
+        may clear ``_ready`` before discovery and may deregister stale tools.
+        A managed server can still be identified by its entry in ``_servers``;
+        publish its freshly discovered tools before transport readiness is
+        restored so a successful revival cannot come back with zero tools.
         """
-        if not self._ready.is_set() or self._registered_tool_names:
+        if self._registered_tool_names:
             return
+        if not self._ready.is_set():
+            with _lock:
+                if _servers.get(self.name) is not self:
+                    return
         self._registered_tool_names = _register_server_tools(
             self.name, self, self._config
         )
@@ -2828,7 +3034,7 @@ class MCPServerTask:
         # Set up elicitation handler if enabled and SDK types are available.
         # Servers use elicitation/create to ask the client for structured
         # input mid-tool-call (e.g. payment authorization). The handler
-        # routes those requests through Hades' approval system.
+        # routes those requests through Hermes' approval system.
         elicitation_config = config.get("elicitation", {})
         if elicitation_config.get("enabled", True) and _MCP_ELICITATION_TYPES:
             self._elicitation = ElicitationHandler(self.name, elicitation_config, owner=self)
@@ -2914,20 +3120,57 @@ class MCPServerTask:
                         break
                     self._reconnect_event.clear()
                     continue
-                logger.info(
+                # Per-cycle reconnect chatter — DEBUG. In the flapping case
+                # this fires on every rebuild; the WARNINGs live on the
+                # state transitions.
+                logger.debug(
                     "MCP server '%s': reconnecting (OAuth recovery or "
                     "manual refresh)",
                     self.name,
                 )
-                # A clean transport return only happens after a session was
-                # successfully established and then asked to rebuild (auth
-                # recovery / manual refresh / breaker-driven reconnect). That
-                # is proof the server is reachable, so clear the consecutive-
-                # failure budget — otherwise transient drops accumulated over
-                # a long-lived session would eventually exhaust it and
-                # permanently kill an otherwise-healthy server.
-                self._reconnect_retries = 0
-                backoff = 1.0
+                # A clean transport return means a session was established and
+                # then asked to rebuild (auth recovery / manual refresh /
+                # keepalive failure / transport TaskGroup drop). That alone is
+                # NOT proof of health: a flapping transport handshakes fine and
+                # drops moments later, and resetting the budget here let such
+                # servers respawn forever (#62212 — 6212 spawns in 63h).
+                # Only clear the consecutive-failure budget once the session
+                # PROVED healthy — survived >=1 full keepalive interval or
+                # served >=1 successful tool call (_mark_session_proven).
+                if self._session_proven:
+                    self._reconnect_retries = 0
+                    backoff = 1.0
+                else:
+                    # Unproven session: charge the rapid-drop budget so a
+                    # flapping transport still reaches the park.
+                    self._reconnect_retries += 1
+                    if self._reconnect_retries > _MAX_RECONNECT_RETRIES:
+                        logger.warning(
+                            "MCP server '%s': %d consecutive reconnects "
+                            "without a healthy session (rapid-drop budget "
+                            "exhausted), parking; will self-probe every %ds "
+                            "until it recovers (state: degraded → parked)",
+                            self.name, _MAX_RECONNECT_RETRIES,
+                            _PARKED_RETRY_INTERVAL,
+                        )
+                        self._was_parked = True
+                        self._deregister_tools()
+                        self._reconnect_event.clear()
+                        parked = await self._wait_for_reconnect_or_shutdown(
+                            timeout=_PARKED_RETRY_INTERVAL
+                        )
+                        if parked == "shutdown":
+                            break
+                        logger.debug(
+                            "MCP server '%s': attempting revival from parked "
+                            "state (self-probe or explicit reconnect request); "
+                            "rebuilding transport.",
+                            self.name,
+                        )
+                        # One probe attempt per wake — see the exception-path
+                        # park below.
+                        self._reconnect_retries = _MAX_RECONNECT_RETRIES
+                        backoff = 1.0
                 # Reset the session reference and readiness; _run_http/_run_stdio
                 # will repopulate both on successful re-entry.  Leaving
                 # _ready set here lets handler-side recovery mistake the stale
@@ -2949,11 +3192,19 @@ class MCPServerTask:
                 raise
             except Exception as exc:
                 self.session = None
+                # Unwrap anyio TaskGroup wrappers first: str(exc) on a
+                # BaseExceptionGroup is "unhandled errors in a TaskGroup
+                # (N sub-exceptions)" — useless in logs, and it hides the
+                # root cause from the auth/permanence classification below.
+                # Empty dead-pipe errors still get a name this way
+                # (e.g. "BrokenPipeError: ").
+                root = _unwrap_exception_group(exc)
+                failure_class = _classify_mcp_failure(root)
                 if self._is_recycled_stdio():
                     logger.warning(
                         "MCP server '%s': lazy reconnect after stdio recycle "
-                        "failed, marking unavailable while retrying: %s",
-                        self.name, exc,
+                        "failed, marking unavailable while retrying: %s: %s",
+                        self.name, type(root).__name__, root,
                     )
                     self._recycled_reason = None
 
@@ -2962,25 +3213,30 @@ class MCPServerTask:
                 # should not permanently kill the server.
                 # (Ported from Kilo Code's MCP resilience fix.)
                 if not self._ready.is_set():
-                    if _is_auth_error(exc):
+                    if _is_auth_error(root):
                         logger.warning(
                             "MCP server '%s' failed initial OAuth authentication, "
-                            "not retrying automatically: %s",
-                            self.name, exc,
+                            "not retrying automatically: %s: %s",
+                            self.name, type(root).__name__, root,
                         )
                         self._error = exc
                         self._ready.set()
                         return
 
-                    initial_retries += 1
-                    if initial_retries > _MAX_INITIAL_CONNECT_RETRIES:
+                    if failure_class == "permanent":
+                        # Deterministic failure (bad command, non-MCP URL,
+                        # 401/403): every retry hits the same wall. Park
+                        # immediately instead of burning the retry ladder
+                        # and spamming N identical warnings (#65673).
                         logger.warning(
-                            "MCP server '%s' failed initial connection after "
-                            "%d attempts, parking until a reconnect is requested: %s",
-                            self.name, _MAX_INITIAL_CONNECT_RETRIES, exc,
+                            "MCP server '%s' failed initial connection with a "
+                            "permanent error, parking without retries "
+                            "(state: connecting → parked): %s: %s",
+                            self.name, type(root).__name__, root,
                         )
                         self._error = exc
                         self._ready.set()
+                        self._was_parked = True
                         self._deregister_tools()
                         self._reconnect_event.clear()
                         parked = await self._wait_for_reconnect_or_shutdown(
@@ -2988,7 +3244,39 @@ class MCPServerTask:
                         )
                         if parked == "shutdown":
                             return
-                        logger.info(
+                        logger.debug(
+                            "MCP server '%s': attempting revival after "
+                            "permanent initial failure (self-probe or explicit "
+                            "reconnect request); rebuilding transport.",
+                            self.name,
+                        )
+                        initial_retries = 0
+                        self._reconnect_retries = 0
+                        backoff = 1.0
+                        self._error = None
+                        self._ready.clear()
+                        continue
+
+                    initial_retries += 1
+                    if initial_retries > _MAX_INITIAL_CONNECT_RETRIES:
+                        logger.warning(
+                            "MCP server '%s' failed initial connection after "
+                            "%d attempts, parking until a reconnect is "
+                            "requested (state: connecting → parked): %s: %s",
+                            self.name, _MAX_INITIAL_CONNECT_RETRIES,
+                            type(root).__name__, root,
+                        )
+                        self._error = exc
+                        self._ready.set()
+                        self._was_parked = True
+                        self._deregister_tools()
+                        self._reconnect_event.clear()
+                        parked = await self._wait_for_reconnect_or_shutdown(
+                            timeout=_PARKED_RETRY_INTERVAL
+                        )
+                        if parked == "shutdown":
+                            return
+                        logger.debug(
                             "MCP server '%s': attempting revival after initial "
                             "connection failures (self-probe or explicit "
                             "reconnect request); rebuilding transport.",
@@ -3001,13 +3289,14 @@ class MCPServerTask:
                         self._ready.clear()
                         continue
 
-                    logger.warning(
+                    logger.debug(
                         "MCP server '%s' initial connection failed "
-                        "(attempt %d/%d), retrying in %.0fs: %s",
+                        "(attempt %d/%d), retrying in %.0fs: %s: %s",
                         self.name, initial_retries,
-                        _MAX_INITIAL_CONNECT_RETRIES, backoff, exc,
+                        _MAX_INITIAL_CONNECT_RETRIES, backoff,
+                        type(root).__name__, root,
                     )
-                    await asyncio.sleep(backoff)
+                    await asyncio.sleep(_jittered(backoff))
                     backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
 
                     # Check if shutdown was requested during the sleep
@@ -3020,18 +3309,50 @@ class MCPServerTask:
                 # If shutdown was requested, don't reconnect
                 if self._shutdown_event.is_set():
                     logger.debug(
-                        "MCP server '%s' disconnected during shutdown: %s",
-                        self.name, exc,
+                        "MCP server '%s' disconnected during shutdown: %s: %s",
+                        self.name, type(root).__name__, root,
                     )
                     return
+
+                if failure_class == "permanent":
+                    # A previously-working server now fails deterministically
+                    # (revoked credentials, URL now serving a web page, stdio
+                    # binary uninstalled). Retrying can't help — park
+                    # immediately without burning the retry ladder.
+                    logger.warning(
+                        "MCP server '%s' hit a permanent error, parking "
+                        "without retries; will self-probe every %ds "
+                        "(state: connected → parked): %s: %s",
+                        self.name, _PARKED_RETRY_INTERVAL,
+                        type(root).__name__, root,
+                    )
+                    self._was_parked = True
+                    self._deregister_tools()
+                    self._reconnect_event.clear()
+                    parked = await self._wait_for_reconnect_or_shutdown(
+                        timeout=_PARKED_RETRY_INTERVAL
+                    )
+                    if parked == "shutdown":
+                        return
+                    logger.debug(
+                        "MCP server '%s': attempting revival from parked state "
+                        "(permanent error; self-probe or explicit reconnect "
+                        "request); rebuilding transport.",
+                        self.name,
+                    )
+                    self._reconnect_retries = _MAX_RECONNECT_RETRIES
+                    backoff = 1.0
+                    continue
 
                 self._reconnect_retries += 1
                 if self._reconnect_retries > _MAX_RECONNECT_RETRIES:
                     logger.warning(
                         "MCP server '%s' failed after %d reconnection attempts, "
-                        "parking; will self-probe every %ds until it recovers: %s",
+                        "parking; will self-probe every %ds until it recovers "
+                        "(state: degraded → parked): %s: %s",
                         self.name, _MAX_RECONNECT_RETRIES,
-                        _PARKED_RETRY_INTERVAL, exc,
+                        _PARKED_RETRY_INTERVAL,
+                        type(root).__name__, root,
                     )
                     # Do NOT return — exiting the task orphans the server:
                     # nothing would ever listen for _reconnect_event again
@@ -3044,6 +3365,7 @@ class MCPServerTask:
                     # we wake and attempt one reconnect ourselves (#57129).
                     # An explicit _reconnect_event.set() (OAuth recovery,
                     # manual /mcp refresh) still wakes us immediately.
+                    self._was_parked = True
                     self._deregister_tools()
                     self._reconnect_event.clear()
                     parked = await self._wait_for_reconnect_or_shutdown(
@@ -3051,7 +3373,7 @@ class MCPServerTask:
                     )
                     if parked == "shutdown":
                         return
-                    logger.info(
+                    logger.debug(
                         "MCP server '%s': attempting revival from parked state "
                         "(self-probe or explicit reconnect request); "
                         "rebuilding transport.",
@@ -3064,13 +3386,16 @@ class MCPServerTask:
                     backoff = 1.0
                     continue
 
-                logger.warning(
+                # Per-attempt retry chatter stays at DEBUG; state transitions
+                # (connected->degraded, degraded->parked, parked->revived)
+                # carry the WARNINGs — one line per transition, not per try.
+                logger.debug(
                     "MCP server '%s' connection lost (attempt %d/%d), "
-                    "reconnecting in %.0fs: %s",
+                    "reconnecting in %.0fs: %s: %s",
                     self.name, self._reconnect_retries, _MAX_RECONNECT_RETRIES,
-                    backoff, exc,
+                    backoff, type(root).__name__, root,
                 )
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(_jittered(backoff))
                 backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
 
                 # Check again after sleeping
@@ -3170,6 +3495,61 @@ class MCPServerTask:
 _servers: Dict[str, MCPServerTask] = {}
 _server_connecting: set[str] = set()
 _server_connect_errors: Dict[str, str] = {}
+
+# Connection-retry cooldown (per-server isolation against restart storms).
+#
+# A single stdio MCP server that fails to spawn (bad PATH, ``exec: not
+# found``, crash-on-start) is never recorded in ``_servers`` -- ``start()``
+# raises and ``_discover_and_register_server`` aborts before the
+# ``_servers[name] = server`` line. Without a cooldown, EVERY subsequent
+# ``discover_mcp_tools()`` (one per agent worker session, i.e. every few
+# seconds) sees the server as "not connected" and re-spawns it from
+# scratch. That is the restart storm in #50394: the failing server is
+# re-attempted on the shared MCP event loop on every worker session, the
+# subprocesses pile up unreaped, and the churn destabilises the healthy
+# co-located servers (their tools intermittently surface as
+# "Unknown tool").
+#
+# Fix: after a failed connection attempt, stamp a monotonic
+# ``retry_after`` deadline with exponential backoff. ``register_mcp_servers``
+# skips a server whose cooldown has not elapsed, so a chronically failing
+# server is retried on a backoff schedule instead of on every worker
+# session -- isolating it from the rest of the bridge. A successful
+# connection clears the state.
+_server_connect_retry_after: Dict[str, float] = {}   # name -> monotonic deadline
+_server_connect_failures: Dict[str, int] = {}        # name -> consecutive failures
+_CONNECT_RETRY_BASE_BACKOFF_SEC = 30.0
+_CONNECT_RETRY_MAX_BACKOFF_SEC = 600.0
+
+
+def _record_connect_failure(server_name: str) -> None:
+    """Stamp an exponential-backoff cooldown after a failed connect.
+
+    Called (under ``_lock``) when a server fails its discovery/connect
+    attempt. The cooldown grows geometrically with the consecutive
+    failure count and is capped at :data:`_CONNECT_RETRY_MAX_BACKOFF_SEC`,
+    so a permanently-broken server settles into infrequent retries
+    rather than a tight respawn loop.
+    """
+    n = _server_connect_failures.get(server_name, 0) + 1
+    _server_connect_failures[server_name] = n
+    backoff = min(
+        _CONNECT_RETRY_BASE_BACKOFF_SEC * (2 ** (n - 1)),
+        _CONNECT_RETRY_MAX_BACKOFF_SEC,
+    )
+    _server_connect_retry_after[server_name] = time.monotonic() + backoff
+
+
+def _clear_connect_failure(server_name: str) -> None:
+    """Clear the connect-cooldown state after a successful connection."""
+    _server_connect_failures.pop(server_name, None)
+    _server_connect_retry_after.pop(server_name, None)
+
+
+def _connect_cooldown_active(server_name: str) -> bool:
+    """Return True if ``server_name`` is still within its retry cooldown."""
+    deadline = _server_connect_retry_after.get(server_name)
+    return deadline is not None and time.monotonic() < deadline
 
 # Circuit breaker: consecutive error counts per server.  After
 # _CIRCUIT_BREAKER_THRESHOLD consecutive failures, the handler returns
@@ -3502,7 +3882,7 @@ def _handle_auth_error_and_retry(
         "error": (
             f"MCP server '{server_name}' requires re-authentication. "
             f"Run `hermes mcp login {server_name}` (or delete the tokens "
-            f"file under ~/.hades/mcp-tokens/ and restart). Do NOT retry "
+            f"file under ~/.hermes/mcp-tokens/ and restart). Do NOT retry "
             f"this tool — ask the user to re-authenticate."
         ),
         "needs_reauth": True,
@@ -3529,6 +3909,15 @@ _SESSION_EXPIRED_MARKERS: tuple = (
     "end of file",
 )
 
+# Upper bound on exception-graph nodes inspected by
+# ``_is_session_expired_error``. The visited-identity set already breaks
+# cycles across ``exceptions`` / ``__cause__`` / ``__context__``; the
+# budget additionally bounds pathological acyclic graphs (e.g. deeply
+# chained retries) so classification always terminates promptly. Kept
+# comfortably above ``sys.getrecursionlimit()`` so legitimately deep
+# wrapper stacks (task-group nesting) are still fully scanned.
+_EXC_TRAVERSAL_MAX_NODES = 10_000
+
 
 def _is_session_expired_error(exc: BaseException) -> bool:
     """Return True if ``exc`` looks like an MCP transport session expiry.
@@ -3544,16 +3933,63 @@ def _is_session_expired_error(exc: BaseException) -> bool:
     ``streamablehttp_client`` + ``ClientSession`` pair, which is
     exactly what ``MCPServerTask._reconnect_event`` triggers.
     """
-    if isinstance(exc, InterruptedError):
-        return False
-    # Exception messages vary across SDK versions + server
-    # implementations, so match on a small allow-list of stable
-    # substrings rather than exception type.  Kept narrow to avoid
-    # false positives on unrelated server errors.
-    msg = str(exc).lower()
-    if not msg:
-        return False
-    return any(marker in msg for marker in _SESSION_EXPIRED_MARKERS)
+    # AnyIO's stream exceptions are commonly message-less. In particular,
+    # ``str(ClosedResourceError()) == ""``, so marker matching alone misses the
+    # exact failure emitted by both MCP stdio and HTTP transports.
+    try:
+        from anyio import BrokenResourceError, ClosedResourceError, EndOfStream
+
+        transport_error_types = (
+            BrokenResourceError,
+            ClosedResourceError,
+            EndOfStream,
+        )
+    except ImportError:  # pragma: no cover - AnyIO is supplied by the MCP SDK
+        transport_error_types = ()
+
+    # ExceptionGroup trees can be arbitrarily deep or even cyclic when custom
+    # exceptions expose ``exceptions``, and chained exceptions
+    # (``raise X from Y`` / implicit ``__context__``) can likewise form
+    # cycles when handlers re-raise previously seen exceptions. Traverse
+    # once, iteratively, with an identity-visited set AND a bounded node
+    # budget so classification can never spin, and inspect every reachable
+    # node so user interruption always overrides transport markers or types
+    # found elsewhere in the graph. The chain traversal matters for real
+    # failures: SDK wrappers often raise a generic RuntimeError *from* the
+    # message-less ClosedResourceError, leaving the transport signal only
+    # reachable via ``__cause__``.
+    stack: "list[BaseException | None]" = [exc]
+    seen: set[int] = set()
+    transport_error_found = False
+    budget = _EXC_TRAVERSAL_MAX_NODES
+    while stack and budget > 0:
+        current = stack.pop()
+        if current is None:
+            continue
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        budget -= 1
+
+        if isinstance(current, InterruptedError):
+            return False
+        if isinstance(current, transport_error_types):
+            transport_error_found = True
+
+        # Exception messages vary across SDK versions + server
+        # implementations, so match on a small allow-list of stable
+        # substrings rather than exception type. Kept narrow to avoid
+        # false positives on unrelated server errors.
+        msg = str(current).lower()
+        if msg and any(marker in msg for marker in _SESSION_EXPIRED_MARKERS):
+            transport_error_found = True
+
+        stack.extend(getattr(current, "exceptions", ()))
+        stack.append(getattr(current, "__cause__", None))
+        stack.append(getattr(current, "__context__", None))
+
+    return transport_error_found
 
 
 def _handle_session_expired_and_retry(
@@ -3623,10 +4059,10 @@ def _handle_session_expired_and_retry(
         try:
             parsed = json.loads(result)
             if "error" not in parsed:
-                _server_error_counts[server_name] = 0
+                _reset_server_error(server_name)
                 return result
         except (json.JSONDecodeError, TypeError):
-            _server_error_counts[server_name] = 0
+            _reset_server_error(server_name)
             return result
     except Exception as retry_exc:
         logger.warning(
@@ -3793,7 +4229,7 @@ def _ensure_mcp_loop():
 
 
 def _wrap_with_home_override(coro: "Coroutine") -> "Coroutine":
-    """Carry the caller's context-local HADES_HOME override into ``coro``.
+    """Carry the caller's context-local HERMES_HOME override into ``coro``.
 
     Returns ``coro`` unchanged when no override is active. Otherwise wraps
     it so the override is set inside the coroutine's own (task-local)
@@ -3801,24 +4237,24 @@ def _wrap_with_home_override(coro: "Coroutine") -> "Coroutine":
     carrying different scopes don't interfere.
     """
     try:
-        from hades_constants import (
-            get_hades_home_override,
-            reset_hades_home_override,
-            set_hades_home_override,
+        from hermes_constants import (
+            get_hermes_home_override,
+            reset_hermes_home_override,
+            set_hermes_home_override,
         )
 
-        home_override = get_hades_home_override()
+        home_override = get_hermes_home_override()
     except Exception:
         return coro
     if not home_override:
         return coro
 
     async def _scoped():
-        token = set_hades_home_override(home_override)
+        token = set_hermes_home_override(home_override)
         try:
             return await coro
         finally:
-            reset_hades_home_override(token)
+            reset_hermes_home_override(token)
 
     return _scoped()
 
@@ -3867,12 +4303,12 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
 
     coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
 
-    # Propagate the context-local HADES_HOME override onto the MCP loop.
+    # Propagate the context-local HERMES_HOME override onto the MCP loop.
     # Tasks scheduled via run_coroutine_threadsafe are created INSIDE the
     # loop thread, so they copy the loop thread's context — not the
     # scheduling thread's. A per-request profile scope (the dashboard's
     # ?profile= endpoints, e.g. the MCP "Test server" probe) would silently
-    # vanish here: OAuth token stores and any other get_hades_home()
+    # vanish here: OAuth token stores and any other get_hermes_home()
     # resolution inside the coroutine would read the process home instead
     # of the selected profile's. Re-establish the override inside the
     # task's own context (task-local — concurrent calls carrying different
@@ -3910,6 +4346,13 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
         try:
             return future.result(timeout=wait_timeout)
         except concurrent.futures.TimeoutError:
+            # On supported Python versions, concurrent.futures.TimeoutError
+            # aliases the built-in TimeoutError, so result(timeout=...) also
+            # raises it for a coroutine's own timeout.
+            # Resolve a done future without a timeout to propagate its stored
+            # outcome, including completion racing with this polling timeout.
+            if future.done():
+                return future.result()
             continue
 
 
@@ -3952,7 +4395,7 @@ def _interpolate_env_vars(value):
 def _filter_suspicious_mcp_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
     """Drop exfiltration-shaped MCP configs before any stdio spawn path."""
     try:
-        from hades_cli.mcp_security import validate_mcp_server_entry as _validate_mcp_server_entry
+        from hermes_cli.mcp_security import validate_mcp_server_entry as _validate_mcp_server_entry
     except Exception:
         _validate_mcp_server_entry: Callable[[str, dict[str, Any]], list[str]] | None = None
 
@@ -3977,7 +4420,7 @@ def _filter_suspicious_mcp_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
 
 
 def _load_mcp_config() -> Dict[str, dict]:
-    """Read ``mcp_servers`` from the Hades config file.
+    """Read ``mcp_servers`` from the Hermes config file.
 
     Returns a dict of ``{server_name: server_config}`` or empty dict.
     Server config can contain either ``command``/``args``/``env`` for stdio
@@ -3985,10 +4428,10 @@ def _load_mcp_config() -> Dict[str, dict]:
     ``timeout``, ``connect_timeout``, and ``auth`` overrides.
 
     ``${ENV_VAR}`` placeholders in string values are resolved from
-    ``os.environ`` (which includes ``~/.hades/.env`` loaded at startup).
+    ``os.environ`` (which includes ``~/.hermes/.env`` loaded at startup).
     """
     try:
-        from hades_cli.config import load_config
+        from hermes_cli.config import load_config
         from utils import env_var_enabled as _env_enabled
 
         if _env_enabled("HERMES_SAFE_MODE"):
@@ -3999,7 +4442,7 @@ def _load_mcp_config() -> Dict[str, dict]:
             return {}
         # Ensure .env vars are available for interpolation
         try:
-            from hades_cli.env_loader import load_hermes_dotenv
+            from hermes_cli.env_loader import load_hermes_dotenv
             load_hermes_dotenv()
         except Exception:
             pass
@@ -4177,6 +4620,12 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     result = await server.session.call_tool(tool_name, arguments=args)
                 finally:
                     server._pending_call_context = None
+            # The RPC round-trip completed — the session is demonstrably
+            # healthy at the transport level (even if the tool itself
+            # returned isError). Clear the rapid-drop budget (#62212).
+            _mark_proven = getattr(server, "_mark_session_proven", None)
+            if _mark_proven is not None:
+                _mark_proven()
             # MCP CallToolResult has .content (list of content blocks) and .isError
             if result.isError:
                 error_text = ""
@@ -4199,13 +4648,13 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             # Collect text from content blocks. MCP tool results can also
             # include ImageContent blocks (screenshot / Blockbench / Playwright
             # etc.); cache those via the gateway's image-cache helper so they
-            # flow through Hades' MEDIA: tag convention and out to messaging
+            # flow through Hermes' MEDIA: tag convention and out to messaging
             # adapters that render images natively. Without this, image blocks
             # were silently dropped and the agent got an empty response.
             #
             # Distilled from #17915 (c3115644151) and #10848 (gnanirahulnutakki),
             # both too stale to cherry-pick. #10848's approach (integrate with
-            # Hades' MEDIA tag + cache_image_from_bytes) was the cleaner of
+            # Hermes' MEDIA tag + cache_image_from_bytes) was the cleaner of
             # the two — plugs into existing infrastructure.
             parts: List[str] = []
             for block in (result.content or []):
@@ -4735,7 +5184,7 @@ def _normalize_mcp_input_schema(schema: dict | None) -> dict:
 def sanitize_mcp_name_component(value: str) -> str:
     """Return an MCP name component safe for tool and prefix generation.
 
-    Preserves Hades's historical behavior of converting hyphens to
+    Preserves Hermes's historical behavior of converting hyphens to
     underscores, and also replaces any other character outside
     ``[A-Za-z0-9_]`` with ``_`` so generated tool names are compatible with
     provider validation rules.
@@ -4765,7 +5214,7 @@ def mcp_prefixed_tool_name(server_name: str, tool_name: str) -> str:
 
 
 def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
-    """Convert an MCP tool listing to the Hades registry schema format.
+    """Convert an MCP tool listing to the Hermes registry schema format.
 
     Args:
         server_name: The logical server name for prefixing.
@@ -5180,7 +5629,15 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
         new_servers = {
             k: v
             for k, v in servers.items()
-            if k not in _servers and _parse_boolish(v.get("enabled", True), default=True)
+            if k not in _servers
+            and _parse_boolish(v.get("enabled", True), default=True)
+            # Skip a server still serving its post-failure backoff. Without
+            # this, a server that fails to connect (and is therefore never
+            # recorded in ``_servers``) would be re-spawned on every worker
+            # session's discovery pass -- the #50394 restart storm. The
+            # cooldown is cleared automatically on the next successful
+            # connect or by a manual /mcp refresh.
+            and not _connect_cooldown_active(k)
         }
         # Cached entries with no live session are parked or mid-reconnect.
         # Their tools are deregistered, so nothing else can reach
@@ -5229,6 +5686,11 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
                 with _lock:
                     _server_connecting.discard(name)
                     _server_connect_errors[name] = message
+                    # Arm the per-server backoff so the next discovery pass
+                    # doesn't immediately re-spawn this failing server
+                    # (#50394). Isolated to this server -- healthy servers
+                    # in the same batch are unaffected.
+                    _record_connect_failure(name)
                 logger.warning(
                     "Failed to connect to MCP server '%s'%s: %s",
                     name,
@@ -5239,6 +5701,7 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
                 with _lock:
                     _server_connecting.discard(name)
                     _server_connect_errors.pop(name, None)
+                    _clear_connect_failure(name)
 
     # Per-server timeouts are handled inside _discover_and_register_server.
     # The outer timeout is generous: 120s total for parallel discovery.
@@ -5425,7 +5888,7 @@ def probe_mcp_server_tools() -> Dict[str, List[tuple]]:
 
     Designed for ``hermes tools`` interactive configuration — connects to each
     enabled server, grabs tool names and descriptions, then disconnects.
-    Does NOT register tools in the Hades registry.
+    Does NOT register tools in the Hermes registry.
 
     Returns:
         Dict mapping server name to list of (tool_name, description) tuples.
@@ -5705,8 +6168,16 @@ def shutdown_mcp_servers():
     with _lock:
         servers_snapshot = list(_servers.values())
 
-    # Fast path: nothing to shut down.
+    # Fast path: nothing to shut down. The connect-cooldown maps can still
+    # be populated here — a server that failed to connect is never recorded
+    # in ``_servers`` (that is the very premise of the #50394 cooldown), so
+    # "no live servers" is the MOST likely state in which stale backoff
+    # entries exist. Clear them so a post-shutdown restart re-attempts every
+    # configured server immediately.
     if not servers_snapshot:
+        with _lock:
+            _server_connect_retry_after.clear()
+            _server_connect_failures.clear()
         _stop_mcp_loop()
         return
 
@@ -5722,6 +6193,11 @@ def shutdown_mcp_servers():
                 )
         with _lock:
             _servers.clear()
+            # Drop connect-retry cooldowns too: a full shutdown/restart
+            # should re-attempt every server immediately, not honour a
+            # stale per-server backoff from before the restart (#50394).
+            _server_connect_retry_after.clear()
+            _server_connect_failures.clear()
 
     with _lock:
         loop = _mcp_loop
@@ -5737,6 +6213,14 @@ def shutdown_mcp_servers():
                 future.result(timeout=15)
             except BaseException as exc:
                 logger.debug("Error during MCP shutdown: %s", exc)
+
+    # Unconditional final sweep: whether the async ``_shutdown`` ran,
+    # timed out, or was never scheduled (loop already stopped), a full
+    # shutdown must leave no stale connect-cooldown state behind — the
+    # next start should re-attempt every server immediately (#50394).
+    with _lock:
+        _server_connect_retry_after.clear()
+        _server_connect_failures.clear()
 
     _stop_mcp_loop()
 

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import logging
 import os
-from hades_constants import env_get
 import threading
 import time
 from dataclasses import dataclass, field
@@ -51,7 +50,7 @@ _STDERR_TAIL_LINES = 12
 
 
 # Permission profile mapping mirrors the docstring in PR proposal:
-# Hades' tools.terminal.security_mode → Codex's permissions profile id.
+# Hermes' tools.terminal.security_mode → Codex's permissions profile id.
 # Defaults if config is missing → workspace-write (matches Codex's own default).
 _HERMES_TO_CODEX_PERMISSION_PROFILE = {
     "auto": "workspace-write",
@@ -91,6 +90,79 @@ class TurnResult:
 # items when an interrupt or upstream error tears the turn down before the
 # normal completion path fires. Mirrors openclaw beta.8 fix.
 _TURN_ABORTED_MARKERS = ("<turn_aborted>", "<turn_aborted/>")
+
+
+def _notification_scope_ids(
+    note: dict,
+) -> tuple[Optional[str], Optional[str]]:
+    """Extract the thread/turn identity carried by a notification."""
+    if not isinstance(note, dict):
+        return None, None
+    params = note.get("params") or {}
+    if not isinstance(params, dict):
+        return None, None
+
+    nested_turn = params.get("turn") or {}
+    nested_item = params.get("item") or {}
+
+    observed_thread_id = params.get("threadId") or params.get("thread_id")
+    if observed_thread_id is None and isinstance(nested_turn, dict):
+        observed_thread_id = (
+            nested_turn.get("threadId")
+            or nested_turn.get("thread_id")
+        )
+    if observed_thread_id is None and isinstance(nested_item, dict):
+        observed_thread_id = (
+            nested_item.get("threadId")
+            or nested_item.get("thread_id")
+        )
+
+    observed_turn_id = params.get("turnId") or params.get("turn_id")
+    if observed_turn_id is None and isinstance(nested_turn, dict):
+        observed_turn_id = nested_turn.get("id") or nested_turn.get("turnId")
+    if observed_turn_id is None and isinstance(nested_item, dict):
+        observed_turn_id = (
+            nested_item.get("turnId")
+            or nested_item.get("turn_id")
+        )
+
+    return observed_thread_id, observed_turn_id
+
+
+def _notification_belongs_to_turn(
+    note: dict,
+    *,
+    thread_id: Optional[str],
+    turn_id: Optional[str],
+) -> bool:
+    """Return whether a multiplexed notification belongs to this turn.
+
+    Codex app-server can carry parent and hosted subagent threads over one
+    JSON-RPC connection.  An explicitly foreign child or
+    stale-turn event must not mutate the active parent's transcript or mark
+    its turn complete.  Unscoped notifications remain accepted for protocol
+    compatibility.
+    """
+    if not isinstance(note, dict):
+        return False
+
+    observed_thread_id, observed_turn_id = _notification_scope_ids(note)
+
+    if (
+        thread_id is not None
+        and observed_thread_id is not None
+        and str(observed_thread_id) != str(thread_id)
+    ):
+        return False
+
+    if (
+        turn_id is not None
+        and observed_turn_id is not None
+        and str(observed_turn_id) != str(turn_id)
+    ):
+        return False
+
+    return True
 
 
 def _coerce_turn_input_text(user_input: Any) -> str:
@@ -216,7 +288,7 @@ class CodexAppServerSession:
         self._codex_home = codex_home
         self._permission_profile = (
             permission_profile or _HERMES_TO_CODEX_PERMISSION_PROFILE.get(
-                env_get("HADES_TERMINAL_SECURITY_MODE", "auto"),
+                os.environ.get("HERMES_TERMINAL_SECURITY_MODE", "auto"),
                 "workspace-write",
             )
         )
@@ -228,9 +300,6 @@ class CodexAppServerSession:
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
         self._interrupt_event = threading.Event()
-        # Lifecycle lock: ensure_started / close / run_turn entry must not race
-        # when interrupt/close arrives from another thread (audit L2-07).
-        self._lifecycle_lock = threading.RLock()
         # Pending file-change items, keyed by item id. Populated on
         # item/started for fileChange items; consumed by the approval
         # bridge when codex sends item/fileChange/requestApproval. The
@@ -245,77 +314,73 @@ class CodexAppServerSession:
         """Spawn the subprocess, do the initialize handshake, and start a
         thread. Returns the codex thread id. Idempotent — repeated calls
         return the same thread id."""
-        with self._lifecycle_lock:
-            if self._closed:
-                raise RuntimeError("codex app-server session is closed")
-            if self._thread_id is not None:
-                return self._thread_id
-            if self._client is None:
-                self._client = self._client_factory(
-                    codex_bin=self._codex_bin, codex_home=self._codex_home
-                )
-            self._client.initialize(
-                client_name="hermes",
-                client_title="Hades Agent",
-                client_version=_get_hermes_version(),
-            )
-            # Permission selection is intentionally NOT sent on thread/start.
-            # Two reasons (live-tested against codex 0.130.0):
-            #   1. `thread/start.permissions` is gated behind the experimentalApi
-            #      capability on this codex version — we'd have to opt in during
-            #      initialize and accept the unstable surface.
-            #   2. Even with experimentalApi declared and the correct shape
-            #      (`{"type": "profile", "id": "..."}`, not `{"profileId": ...}`),
-            #      codex requires a matching `[permissions]` table in
-            #      ~/.codex/config.toml or it fails the request with
-            #      'default_permissions requires a [permissions] table'.
-            # Letting codex pick its default (`:read-only` unless the user has
-            # configured otherwise in their codex config.toml) is the standard
-            # codex CLI workflow and avoids fighting codex's own validation.
-            # Users who want a write-capable profile configure it in their
-            # ~/.codex/config.toml the same way they would for any codex usage.
-            params: dict[str, Any] = {"cwd": self._cwd}
-            result = self._client.request("thread/start", params, timeout=15)
-            # Cross-fill thread.id/sessionId — different codex versions have
-            # serialized this under either key. Mirrors openclaw beta.8's
-            # tolerance fix so future codex drops/renames don't KeyError us
-            # at handshake time.
-            thread_obj = result.get("thread") or {}
-            thread_id = (
-                thread_obj.get("id")
-                or thread_obj.get("sessionId")
-                or result.get("sessionId")
-                or result.get("threadId")
-            )
-            if not thread_id:
-                raise CodexAppServerError(
-                    code=-32603,
-                    message=(
-                        "codex thread/start returned no thread id "
-                        f"(payload keys: {sorted(result.keys())})"
-                    ),
-                )
-            self._thread_id = thread_id
-            logger.info(
-                "codex app-server thread started: id=%s profile=%s cwd=%s",
-                self._thread_id[:8],
-                self._permission_profile,
-                self._cwd,
-            )
+        if self._thread_id is not None:
             return self._thread_id
+        if self._client is None:
+            self._client = self._client_factory(
+                codex_bin=self._codex_bin, codex_home=self._codex_home
+            )
+        self._client.initialize(
+            client_name="hermes",
+            client_title="Hermes Agent",
+            client_version=_get_hermes_version(),
+        )
+        # Permission selection is intentionally NOT sent on thread/start.
+        # Two reasons (live-tested against codex 0.130.0):
+        #   1. `thread/start.permissions` is gated behind the experimentalApi
+        #      capability on this codex version — we'd have to opt in during
+        #      initialize and accept the unstable surface.
+        #   2. Even with experimentalApi declared and the correct shape
+        #      (`{"type": "profile", "id": "..."}`, not `{"profileId": ...}`),
+        #      codex requires a matching `[permissions]` table in
+        #      ~/.codex/config.toml or it fails the request with
+        #      'default_permissions requires a [permissions] table'.
+        # Letting codex pick its default (`:read-only` unless the user has
+        # configured otherwise in their codex config.toml) is the standard
+        # codex CLI workflow and avoids fighting codex's own validation.
+        # Users who want a write-capable profile configure it in their
+        # ~/.codex/config.toml the same way they would for any codex usage.
+        params: dict[str, Any] = {"cwd": self._cwd}
+        result = self._client.request("thread/start", params, timeout=15)
+        # Cross-fill thread.id/sessionId — different codex versions have
+        # serialized this under either key. Mirrors openclaw beta.8's
+        # tolerance fix so future codex drops/renames don't KeyError us
+        # at handshake time.
+        thread_obj = result.get("thread") or {}
+        thread_id = (
+            thread_obj.get("id")
+            or thread_obj.get("sessionId")
+            or result.get("sessionId")
+            or result.get("threadId")
+        )
+        if not thread_id:
+            raise CodexAppServerError(
+                code=-32603,
+                message=(
+                    "codex thread/start returned no thread id "
+                    f"(payload keys: {sorted(result.keys())})"
+                ),
+            )
+        self._thread_id = thread_id
+        logger.info(
+            "codex app-server thread started: id=%s profile=%s cwd=%s",
+            self._thread_id[:8],
+            self._permission_profile,
+            self._cwd,
+        )
+        return self._thread_id
 
     def close(self) -> None:
-        with self._lifecycle_lock:
-            if self._closed:
-                return
-            self._closed = True
-            if self._client is not None:
-                try:
-                    self._client.close()
-                except Exception:  # pragma: no cover - best-effort cleanup
-                    pass
-                self._client = None
-            self._thread_id = None
+        if self._closed:
+            return
+        self._closed = True
+        if self._client is not None:
+            try:
+                self._client.close()
+            except Exception:  # pragma: no cover - best-effort cleanup
+                pass
+            self._client = None
+        self._thread_id = None
 
     def __enter__(self) -> "CodexAppServerSession":
         return self
@@ -381,7 +446,7 @@ class CodexAppServerSession:
     ) -> TurnResult:
         """Send a user message and block until turn/completed, while
         forwarding server-initiated approval requests and projecting items
-        into Hades' messages shape.
+        into Hermes' messages shape.
 
         post_tool_quiet_timeout: if codex emits a tool completion and then
         goes quiet for this many seconds without emitting another item or
@@ -414,7 +479,7 @@ class CodexAppServerSession:
         user_input_text = _coerce_turn_input_text(user_input)
 
         # Send turn/start with the user input. Text-only for now (codex
-        # supports rich content but Hades' text path is the common case).
+        # supports rich content but Hermes' text path is the common case).
         try:
             ts = self._client.request(
                 "turn/start",
@@ -513,6 +578,17 @@ class CodexAppServerSession:
                     pending = self._client.take_notification(timeout=0)
                     if pending is None:
                         break
+                    if not _notification_belongs_to_turn(
+                        pending,
+                        thread_id=self._thread_id,
+                        turn_id=result.turn_id,
+                    ):
+                        logger.debug(
+                            "ignoring foreign codex notification while draining "
+                            "server request: method=%s",
+                            pending.get("method"),
+                        )
+                        continue
                     # Mirror the main notification-handling block below so
                     # display events surface and stay in step with projector
                     # state. Without this, item/started / item/completed
@@ -558,6 +634,16 @@ class CodexAppServerSession:
                 continue
 
             method = note.get("method", "")
+            if not _notification_belongs_to_turn(
+                note,
+                thread_id=self._thread_id,
+                turn_id=result.turn_id,
+            ):
+                logger.debug(
+                    "ignoring foreign codex notification: method=%s", method
+                )
+                continue
+
             if self._on_event is not None:
                 try:
                     self._on_event(note)
@@ -745,6 +831,48 @@ class CodexAppServerSession:
                 continue
 
             method = note.get("method", "")
+            observed_thread_id, observed_turn_id = _notification_scope_ids(note)
+            if result.turn_id is None:
+                if method == "turn/started":
+                    if (
+                        observed_thread_id is not None
+                        and str(observed_thread_id) != str(self._thread_id)
+                    ):
+                        logger.debug(
+                            "ignoring foreign compact turn/started: thread=%s",
+                            observed_thread_id,
+                        )
+                        continue
+                    if observed_turn_id is None:
+                        logger.debug(
+                            "ignoring compact turn/started without a turn id"
+                        )
+                        continue
+                    result.turn_id = str(observed_turn_id)
+                elif observed_turn_id is not None or method in {
+                    "item/completed",
+                    "turn/completed",
+                }:
+                    # thread/compact/start does not return a turn id. Until the
+                    # new turn/started arrives, any terminal/projectable event
+                    # is stale or cannot be safely attributed to this compaction.
+                    logger.debug(
+                        "ignoring codex notification before compact turn start: "
+                        "method=%s",
+                        method,
+                    )
+                    continue
+
+            if not _notification_belongs_to_turn(
+                note,
+                thread_id=self._thread_id,
+                turn_id=result.turn_id,
+            ):
+                logger.debug(
+                    "ignoring foreign codex notification: method=%s", method
+                )
+                continue
+
             if self._on_event is not None:
                 try:
                     self._on_event(note)
@@ -823,7 +951,7 @@ class CodexAppServerSession:
             logger.warning("turn/interrupt timed out")
 
     def _handle_server_request(self, req: dict) -> None:
-        """Translate a codex server request (approval) into Hades' approval
+        """Translate a codex server request (approval) into Hermes' approval
         flow, then send the response.
 
         Method names verified live against codex 0.130.0 (Apr 2026):
@@ -855,45 +983,18 @@ class CodexAppServerSession:
         elif method == "mcpServer/elicitation/request":
             # Codex's MCP layer asks the user for structured input on
             # behalf of an MCP server (e.g. tool-call confirmation,
-            # OAuth, form data). Prefer the interactive approval_callback
-            # when present (audit L2-02 soft). For hermes-tools with no
-            # callback (cron / non-interactive), keep auto-accept so
-            # workers still complete, but log a warning. Other MCP
-            # servers always decline.
+            # OAuth, form data). For our own hermes-tools callback we
+            # auto-accept — the user already approved Hermes' tools
+            # by enabling the runtime, and we never expose anything
+            # codex's built-in shell can't already do. For other MCP
+            # servers we decline so the user explicitly opts in via
+            # codex's own auth flow.
             server_name = params.get("serverName") or ""
             if server_name == "hermes-tools":
-                if self._approval_callback is not None:
-                    description = (
-                        params.get("message")
-                        or params.get("reason")
-                        or "Codex hermes-tools elicitation request"
-                    )
-                    try:
-                        choice = self._approval_callback(
-                            f"mcp-elicitation:{server_name}",
-                            str(description),
-                            allow_permanent=False,
-                        )
-                        decision = _approval_choice_to_codex_decision(choice)
-                        action = "accept" if decision == "accept" else "decline"
-                    except Exception:
-                        logger.exception(
-                            "approval_callback raised on hermes-tools elicitation"
-                        )
-                        action = "decline"
-                    self._client.respond(
-                        rid,
-                        {"action": action, "content": None, "_meta": None},
-                    )
-                else:
-                    logger.warning(
-                        "hermes-tools MCP elicitation auto-accepted "
-                        "(no interactive approval_callback; non-interactive path)"
-                    )
-                    self._client.respond(
-                        rid,
-                        {"action": "accept", "content": None, "_meta": None},
-                    )
+                self._client.respond(
+                    rid,
+                    {"action": "accept", "content": None, "_meta": None},
+                )
             else:
                 self._client.respond(
                     rid,
@@ -1116,6 +1217,6 @@ def _get_hermes_version() -> str:
     try:
         from importlib.metadata import version
 
-        return version("hades-agent")
+        return version("hermes-agent")
     except Exception:  # pragma: no cover
         return "0.0.0"

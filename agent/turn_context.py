@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
 from agent.conversation_compression import conversation_history_after_compression
@@ -210,6 +211,23 @@ def _compression_made_progress(
     return orig_tokens > 0 and new_tokens < orig_tokens * 0.95
 
 
+def _compression_warrants_another_preflight_pass(
+    orig_tokens: int, new_tokens: int, threshold_tokens: int
+) -> bool:
+    """Whether an over-threshold request merits another immediate summary.
+
+    Row-count progress is enough to prove that a compression boundary was real,
+    but not enough to justify another expensive pass before trying the provider.
+    Continue only when the request remains over threshold *and* the previous pass
+    materially reduced its estimated token pressure (>5%).
+    """
+    return (
+        new_tokens >= threshold_tokens
+        and orig_tokens > 0
+        and new_tokens < orig_tokens * 0.95
+    )
+
+
 def _should_run_preflight_estimate(
     messages: List[Dict[str, Any]],
     protect_first_n: int,
@@ -238,6 +256,40 @@ def _should_run_preflight_estimate(
     return estimate_messages_tokens_rough(messages) >= threshold_tokens
 
 
+def _should_idle_compact(
+    *,
+    enabled: bool,
+    idle_after_seconds: int,
+    idle_gap_seconds: float,
+    tokens: int,
+    floor_tokens: int,
+    cooldown_active: bool,
+) -> bool:
+    """Decide whether an idle-triggered compaction should run this turn.
+
+    Idle compaction is opt-in (``idle_after_seconds <= 0`` disables it). It
+    fires when a session resumes after a wall-clock gap of at least
+    ``idle_after_seconds`` since its last activity, so a long-lived thread
+    that is paused and later resumed compacts its accumulated history up
+    front instead of re-reading it on every subsequent turn.
+
+    It is orthogonal to the token-threshold trigger: it does NOT require the
+    context to exceed ``threshold_tokens``. It still skips work when the
+    context is at or below ``floor_tokens`` (the size compaction would reduce
+    *to*), so a small idle thread never pays for a summarisation that saves
+    nothing, and it defers to an active compression-failure cooldown.
+
+    Pure predicate so the policy is unit-testable without a live agent.
+    """
+    if not enabled or idle_after_seconds <= 0:
+        return False
+    if idle_gap_seconds < idle_after_seconds:
+        return False
+    if cooldown_active:
+        return False
+    return tokens > floor_tokens
+
+
 @dataclass
 class TurnContext:
     """Values produced by the turn prologue and consumed by the turn loop."""
@@ -263,6 +315,12 @@ class TurnContext:
     plugin_user_context: str = ""
     # External-memory prefetch result, reused across loop iterations.
     ext_prefetch_cache: str = ""
+    # Per-turn token/cost baseline, captured at the prologue's turn-start
+    # boundary so ``build_turn_outcome_record`` can compute end-minus-start
+    # deltas instead of leaking the cumulative session totals.
+    token_cost_snapshot: Dict[str, Any] = field(default_factory=dict)
+    # Turn-start preflight already proved an immediate retry ineffective.
+    preflight_compression_blocked: bool = False
 
 
 def build_turn_context(
@@ -301,7 +359,7 @@ def build_turn_context(
     # null; rebuilding from scratch" warning and a needless first-turn prefix
     # cache miss. (Issue #45499.)
 
-    # Tag log records on this thread with the session ID for ``hades logs``.
+    # Tag log records on this thread with the session ID for ``hermes logs``.
     set_session_context(agent.session_id)
 
     # Bind the skill write-origin ContextVar for this thread.
@@ -375,6 +433,35 @@ def build_turn_context(
     # interleave transcript writes. Cleared in _persist_session.
     from agent.agent_runtime_helpers import note_turn_start
     note_turn_start(agent, turn_id)
+
+    # Capture the per-turn token/cost baseline so ``build_turn_outcome_record``
+    # can compute end-minus-start deltas. Without this snapshot, every turn
+    # would report its cumulative-session totals as the per-turn cost —
+    # overstating spend and corrupting downstream learning analytics.
+    # Missing/invalid counters fall back to 0/0.0 so arithmetic stays clean.
+    def _snapshot_int(name: str) -> int:
+        try:
+            return int(getattr(agent, name, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _snapshot_float(name: str) -> float:
+        try:
+            return float(getattr(agent, name, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    token_cost_snapshot = {
+        "session_input_tokens": _snapshot_int("session_input_tokens"),
+        "session_output_tokens": _snapshot_int("session_output_tokens"),
+        "session_cache_read_tokens": _snapshot_int("session_cache_read_tokens"),
+        "session_estimated_cost_usd": _snapshot_float("session_estimated_cost_usd"),
+    }
+    # Stash on the agent so the existing
+    # ``build_turn_outcome_record`` fallback (``agent._turn_token_cost_snapshot``)
+    # works without threading ``turn_context`` everywhere; finalizers that DO
+    # receive the context still prefer ``turn_context.token_cost_snapshot``.
+    agent._turn_token_cost_snapshot = token_cost_snapshot
 
     # Reset retry counters and iteration budget at the start of each turn.
     agent._invalid_tool_retries = 0
@@ -560,11 +647,89 @@ def build_turn_context(
         if not isinstance(pending_cli_message, dict) or pending_cli_message.get("_db_persisted"):
             agent._pending_cli_user_message = None
 
+    # Conservative session lease (Task4): first turn claims, subsequent
+    # turns extend. Best-effort — never raises; lease is informational.
+    _claim_or_touch_session_lease = getattr(agent, "_claim_or_touch_session_lease", None)
+    if callable(_claim_or_touch_session_lease):
+        _claim_or_touch_session_lease()
+
+    # ── Idle-triggered compaction (opt-in; ``idle_compact_after_seconds``) ──
+    # When a session resumes after a long idle gap, compact the accumulated
+    # history up front so the rest of the conversation does not keep re-reading
+    # a large stale context on every turn. This fires on elapsed wall-clock time
+    # rather than size, so it complements (does not replace) the token-threshold
+    # preflight below. ``_last_activity_ts`` is the last time this turn loop did
+    # work; nothing has touched it yet this turn, so it measures the gap since
+    # the previous turn finished. The cheap gap pre-check gates the (more
+    # expensive) token estimate, mirroring ``_should_run_preflight_estimate``.
+    _idle_after = getattr(agent, "compression_idle_compact_after_seconds", 0)
+    if agent.compression_enabled and _idle_after > 0 and messages:
+        _idle_gap = time.time() - getattr(agent, "_last_activity_ts", time.time())
+        if _idle_gap >= _idle_after:
+            _compressor = agent.context_compressor
+            _idle_tokens = estimate_request_tokens_rough(
+                messages,
+                system_prompt=active_system_prompt or "",
+                tools=agent.tools or None,
+            )
+            # Post-compression target size: don't summarise a thread already
+            # below what compaction would reduce it to.
+            _idle_floor = int(
+                _compressor.threshold_tokens * _compressor.summary_target_ratio
+            )
+            _idle_cooldown = getattr(
+                _compressor, "get_active_compression_failure_cooldown", lambda: None
+            )()
+            if _should_idle_compact(
+                enabled=agent.compression_enabled,
+                idle_after_seconds=_idle_after,
+                idle_gap_seconds=_idle_gap,
+                tokens=_idle_tokens,
+                floor_tokens=_idle_floor,
+                cooldown_active=bool(_idle_cooldown),
+            ):
+                logger.info(
+                    "Idle compaction: %ss idle >= %ss, ~%s tokens > %s floor "
+                    "(session %s)",
+                    int(_idle_gap),
+                    _idle_after,
+                    f"{_idle_tokens:,}",
+                    f"{_idle_floor:,}",
+                    agent.session_id or "none",
+                )
+                agent._emit_status(
+                    f"💤 Resumed after {int(_idle_gap)}s idle — compacting "
+                    f"~{_idle_tokens:,} tokens before continuing."
+                )
+                _idle_input = messages
+                messages, active_system_prompt = agent._compress_context(
+                    messages, system_message, approx_tokens=_idle_tokens,
+                    task_id=effective_task_id,
+                )
+                # ``_compress_context`` returns the INPUT list object when it
+                # skips (per-session lock held by another path, failure
+                # cooldown, anti-thrash breaker, codex-native routing). Only
+                # re-baseline + re-anchor after a real compaction — a skip
+                # must leave the turn's flush baseline and user-message index
+                # untouched.
+                if messages is not _idle_input:
+                    conversation_history = conversation_history_after_compression(
+                        agent, messages
+                    )
+                    # Compaction rebuilt the list, so the index of this turn's
+                    # just-appended user message is stale — re-anchor it the
+                    # same way the preflight path does below.
+                    current_turn_user_idx = reanchor_current_turn_user_idx(
+                        messages, user_message
+                    )
+                    agent._persist_user_message_idx = current_turn_user_idx
+
     # ── Preflight context compression ──
     # Gate the (expensive) full token estimate behind a cheap pre-check.
     # See ``_should_run_preflight_estimate`` for the OR semantics that fix
     # issue #27405 (a few very large messages slipping past the count gate).
     _preflight_compressed = False
+    _preflight_compression_blocked = False
     if agent.compression_enabled and _should_run_preflight_estimate(
         messages,
         agent.context_compressor.protect_first_n,
@@ -584,7 +749,7 @@ def build_turn_context(
         )
         _preflight_deferred = _defer_preflight(_preflight_tokens)
         # Codex app-server threads are compacted by the codex agent itself;
-        # Hades only initiates compaction in "hades" mode (#36801).
+        # Hermes only initiates compaction in "hermes" mode (#36801).
         _codex_native_auto = (
             getattr(agent, "api_mode", None) == "codex_app_server"
             and str(
@@ -627,8 +792,8 @@ def build_turn_context(
             )
         elif _codex_native_auto:
             logger.info(
-                "Skipping Hades preflight compression for codex app-server "
-                "(mode=%s); Hades will not start thread compaction here.",
+                "Skipping Hermes preflight compression for codex app-server "
+                "(mode=%s); Hermes will not start thread compaction here.",
                 getattr(agent, "codex_app_server_auto_compaction", "native"),
             )
         elif _compressor.should_compress(_preflight_tokens):
@@ -645,7 +810,13 @@ def build_turn_context(
                 f">= {_compressor.threshold_tokens:,} threshold. "
                 "This may take a moment."
             )
-            for _pass in range(3):
+            # Preflight passes honor the same configured per-turn cap
+            # (compression.max_attempts) as the loop's compression sites;
+            # default 3 preserves the prior hardcoded behavior.
+            _max_preflight_passes = max(
+                1, int(getattr(agent, "max_compression_attempts", 3) or 3)
+            )
+            for _pass in range(_max_preflight_passes):
                 _orig_len = len(messages)
                 _orig_tokens = _preflight_tokens
                 messages, active_system_prompt = agent._compress_context(
@@ -664,6 +835,7 @@ def build_turn_context(
                 if not _compression_made_progress(
                     _orig_len, len(messages), _orig_tokens, _preflight_tokens
                 ):
+                    _preflight_compression_blocked = True
                     break  # Cannot compress further: neither rows nor tokens moved
                 conversation_history = conversation_history_after_compression(
                     agent, messages
@@ -674,6 +846,19 @@ def build_turn_context(
                 agent._last_content_tools_all_housekeeping = False
                 agent._mute_post_response = False
                 if not _compressor.should_compress(_preflight_tokens):
+                    break
+                if not _compression_warrants_another_preflight_pass(
+                    _orig_tokens,
+                    _preflight_tokens,
+                    _compressor.threshold_tokens,
+                ):
+                    _preflight_compression_blocked = True
+                    logger.warning(
+                        "Preflight compression made insufficient progress: "
+                        "~%s -> ~%s request tokens; skipping additional passes",
+                        f"{_orig_tokens:,}",
+                        f"{_preflight_tokens:,}",
+                    )
                     break
 
     if _preflight_compressed:
@@ -692,7 +877,7 @@ def build_turn_context(
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""
     try:
-        from hades_cli.plugins import invoke_hook as _invoke_hook
+        from hermes_cli.plugins import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
             "pre_llm_call",
             session_id=agent.session_id,
@@ -770,6 +955,7 @@ def build_turn_context(
     agent._turn_file_mutation_paths = set()
     agent._verification_stop_nudges = 0
     agent._pre_verify_nudges = 0
+    agent._turn_verification_status = None
 
     # Record the execution thread so interrupt()/clear_interrupt() can scope
     # the tool-level interrupt signal to THIS agent's thread only.
@@ -899,4 +1085,6 @@ def build_turn_context(
         should_review_memory=should_review_memory,
         plugin_user_context=plugin_user_context,
         ext_prefetch_cache=ext_prefetch_cache,
+        token_cost_snapshot=token_cost_snapshot,
+        preflight_compression_blocked=_preflight_compression_blocked,
     )

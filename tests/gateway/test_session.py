@@ -299,6 +299,49 @@ class TestBuildSessionContextPrompt:
         assert "pin" in prompt.lower()
         assert "current message's slack block/attachment payload" in prompt.lower()
 
+    def test_shared_slack_prompt_warns_against_guessed_self_mentions(self):
+        """Shared Slack threads must instruct the agent to bind mention
+        targets to the current turn's sender prefix (#17916)."""
+        config = GatewayConfig(
+            platforms={
+                Platform.SLACK: PlatformConfig(enabled=True, token="fake"),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.SLACK,
+            chat_id="C123",
+            chat_name="team-channel",
+            chat_type="group",
+            user_id="U123",
+            user_name="Alice",
+            thread_id="171.000",
+        )
+        ctx = build_session_context(source, config)
+        prompt = build_session_context_prompt(ctx)
+
+        assert "current turn's sender prefix" in prompt
+        assert "Do not guess or reuse `<@U...>` mentions" in prompt
+
+    def test_non_shared_slack_prompt_omits_self_mention_guidance(self):
+        """1:1 Slack DMs are single-user: the shared-thread mention guidance
+        must not appear."""
+        config = GatewayConfig(
+            platforms={
+                Platform.SLACK: PlatformConfig(enabled=True, token="fake"),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.SLACK,
+            chat_id="D123",
+            chat_type="dm",
+            user_id="U123",
+            user_name="Alice",
+        )
+        ctx = build_session_context(source, config)
+        prompt = build_session_context_prompt(ctx)
+
+        assert "current turn's sender prefix" not in prompt
+
     def test_discord_prompt_with_channel_topic(self):
         """Channel topic should appear in the session context prompt."""
         config = GatewayConfig(
@@ -357,7 +400,7 @@ class TestBuildSessionContextPrompt:
         assert "Local" in prompt
         assert "machine running this agent" in prompt
 
-    def test_local_delivery_path_uses_display_hades_home(self):
+    def test_local_delivery_path_uses_display_hermes_home(self):
         config = GatewayConfig()
         source = SessionSource(
             platform=Platform.LOCAL, chat_id="cli",
@@ -365,10 +408,10 @@ class TestBuildSessionContextPrompt:
         )
         ctx = build_session_context(source, config)
 
-        with patch("hades_constants.display_hades_home", return_value="~/.hades/profiles/coder"):
+        with patch("hermes_constants.display_hermes_home", return_value="~/.hermes/profiles/coder"):
             prompt = build_session_context_prompt(ctx)
 
-        assert "~/.hades/profiles/coder/cron/output/" in prompt
+        assert "~/.hermes/profiles/coder/cron/output/" in prompt
 
     def test_whatsapp_prompt(self):
         config = GatewayConfig(
@@ -678,7 +721,7 @@ class TestSessionStoreRewriteTranscript:
 
     @pytest.fixture()
     def store(self, tmp_path, monkeypatch):
-        import hades_state
+        import hermes_state
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig()
         s = SessionStore(sessions_dir=tmp_path, config=config)
@@ -722,7 +765,7 @@ class TestLoadTranscriptDBOnly:
     """After spec 002, load_transcript reads only from state.db."""
 
     def test_db_only_returns_empty_for_nonexistent(self, tmp_path, monkeypatch):
-        import hades_state
+        import hermes_state
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig()
         store = SessionStore(sessions_dir=tmp_path, config=config)
@@ -730,7 +773,7 @@ class TestLoadTranscriptDBOnly:
         assert result == []
 
     def test_db_only_returns_messages(self, tmp_path, monkeypatch):
-        import hades_state
+        import hermes_state
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig()
         store = SessionStore(sessions_dir=tmp_path, config=config)
@@ -749,7 +792,7 @@ class TestSessionStoreSwitchSession:
     """Regression coverage for gateway /resume session switching semantics."""
 
     def test_switch_session_reopens_target_session_in_db(self, tmp_path):
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
@@ -839,7 +882,7 @@ class TestWhatsAppSessionKeyConsistency:
             json.dumps("15551234567@s.whatsapp.net"),
             encoding="utf-8",
         )
-        monkeypatch.setenv("HADES_HOME", str(tmp_home))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_home))
 
         lid_source = SessionSource(
             platform=Platform.WHATSAPP,
@@ -868,7 +911,7 @@ class TestWhatsAppSessionKeyConsistency:
             json.dumps("15551234567@s.whatsapp.net"),
             encoding="utf-8",
         )
-        monkeypatch.setenv("HADES_HOME", str(tmp_home))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_home))
 
         lid_source = SessionSource(
             platform=Platform.WHATSAPP,
@@ -1197,7 +1240,7 @@ class TestWhatsAppIdentifierPublicHelpers:
 
     def test_canonical_without_mapping_returns_normalized(self, tmp_path, monkeypatch):
         """With no bridge mapping files, the normalized input is returned."""
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         assert canonical_whatsapp_identifier("60123456789@lid") == "60123456789"
 
     def test_canonical_walks_lid_mapping(self, tmp_path, monkeypatch):
@@ -1208,14 +1251,14 @@ class TestWhatsAppIdentifierPublicHelpers:
             json.dumps("15551234567@s.whatsapp.net"),
             encoding="utf-8",
         )
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         canonical = canonical_whatsapp_identifier("999999999999999@lid")
         assert canonical == "15551234567"
         assert canonical_whatsapp_identifier("15551234567@s.whatsapp.net") == "15551234567"
 
     def test_canonical_empty_input(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HADES_HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         assert canonical_whatsapp_identifier("") == ""
 
 
@@ -1571,11 +1614,96 @@ class TestLastPromptTokens:
         store.update_session("k1", last_prompt_tokens=0)
         assert entry.last_prompt_tokens == 0
 
+
+class TestSessionMetadata:
+    """SessionEntry metadata should persist arbitrary lightweight state."""
+
+    def test_session_entry_metadata_roundtrip(self):
+        from gateway.session import SessionEntry
+        from datetime import datetime
+
+        entry = SessionEntry(
+            session_key="test",
+            session_id="s1",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            metadata={"slack_thread_watermark:C123:123.000": "123.456"},
+        )
+
+        restored = SessionEntry.from_dict(entry.to_dict())
+        assert restored.metadata == {"slack_thread_watermark:C123:123.000": "123.456"}
+
+    def test_store_session_metadata_get_set(self, tmp_path):
+        """set/get_session_metadata round-trips through the store and
+        persists via _save (restart survival is provided by the routing
+        index — state.db gateway_routing + sessions.json mirror)."""
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._loaded = True
+        store._db = None
+        store._save = MagicMock()
+
+        from gateway.session import SessionEntry
+        from datetime import datetime
+        entry = SessionEntry(
+            session_key="k1",
+            session_id="s1",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        store._entries = {"k1": entry}
+
+        assert store.set_session_metadata(
+            "k1", "slack_thread_watermark:C123:123.000", "123.456"
+        )
+        store._save.assert_called_once()
+        assert (
+            store.get_session_metadata("k1", "slack_thread_watermark:C123:123.000")
+            == "123.456"
+        )
+        # Missing entry / missing key fall back safely.
+        assert store.set_session_metadata("missing", "k", "v") is False
+        assert store.get_session_metadata("missing", "k", "dflt") == "dflt"
+        assert store.get_session_metadata("k1", "other", "dflt") == "dflt"
+
+    def test_session_metadata_survives_reload(self, tmp_path):
+        """Metadata written through the store must survive a full reload
+        from disk (simulated gateway restart)."""
+        config = GatewayConfig()
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._db = None  # force sessions.json path
+        source = SessionSource(
+            platform=Platform.SLACK,
+            chat_id="C123",
+            chat_type="group",
+            user_id="U123",
+            thread_id="123.000",
+        )
+
+        entry = store.get_or_create_session(source)
+        assert store.set_session_metadata(
+            entry.session_key,
+            "slack_thread_watermark:C123:123.000",
+            "123.456",
+        )
+
+        reloaded = SessionStore(sessions_dir=tmp_path, config=config)
+        reloaded._db = None
+        assert (
+            reloaded.get_session_metadata(
+                entry.session_key,
+                "slack_thread_watermark:C123:123.000",
+            )
+            == "123.456"
+        )
+
+
 class TestRewriteTranscriptPreservesReasoning:
     """rewrite_transcript must not drop reasoning fields from SQLite."""
 
     def test_reasoning_survives_rewrite(self, tmp_path):
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB(db_path=tmp_path / "test.db")
         session_id = "reasoning-test"
@@ -1617,7 +1745,7 @@ class TestRewriteTranscriptPreservesReasoning:
         assert after[0].get("codex_reasoning_items") == [{"id": "r1", "type": "reasoning"}]
 
     def test_db_rewrite_is_atomic_on_insert_failure(self, tmp_path, monkeypatch):
-        from hades_state import SessionDB
+        from hermes_state import SessionDB
 
         db = SessionDB(db_path=tmp_path / "test.db")
         session_id = "atomic-rewrite-test"
@@ -1908,7 +2036,7 @@ class TestGatewayRoutingTable:
         # Each test gets its own state.db — DEFAULT_DB_PATH is module-level
         # and would otherwise be shared by every SessionDB() in this file's
         # subprocess, leaking gateway_routing rows between tests.
-        import hades_state
+        import hermes_state
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
 
     def _source(self, chat_id="chat-1", user_id="user-1"):
@@ -1963,8 +2091,8 @@ class TestGatewayRoutingTable:
         store._db.close()
 
         # Simulate a pre-migration DB: routing table empty, JSON present.
-        import hades_state
-        db = hades_state.SessionDB()
+        import hermes_state
+        db = hermes_state.SessionDB()
         db._conn.execute("DELETE FROM gateway_routing")
         db._conn.commit()
         db.close()

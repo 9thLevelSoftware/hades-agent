@@ -20,13 +20,13 @@ Usage:
     response = agent.run_conversation("Tell me about the latest Python updates")
 """
 
-# IMPORTANT: hades_bootstrap must be the very first import — UTF-8 stdio
-# on Windows.  No-op on POSIX.  See hades_bootstrap.py for full rationale.
+# IMPORTANT: hermes_bootstrap must be the very first import — UTF-8 stdio
+# on Windows.  No-op on POSIX.  See hermes_bootstrap.py for full rationale.
 try:
-    import hades_bootstrap  # noqa: F401
+    import hermes_bootstrap  # noqa: F401
 except ModuleNotFoundError:
-    # Graceful fallback when hades_bootstrap isn't registered in the venv
-    # yet — happens during partial ``hades update`` where git-reset landed
+    # Graceful fallback when hermes_bootstrap isn't registered in the venv
+    # yet — happens during partial ``hermes update`` where git-reset landed
     # new code but ``uv pip install -e .`` didn't finish.  Missing bootstrap
     # means UTF-8 stdio setup is skipped on Windows; POSIX is unaffected.
     pass
@@ -62,14 +62,18 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from hades_constants import get_hades_home, env_get, env_set
+from hermes_constants import get_hermes_home
+# Imported at module scope so _flush_messages_to_session_db can catch
+# SessionDBClosedError explicitly (and drop _session_db on the first
+# closed-handle failure) without paying an inline import per flush.
+from hermes_state import SessionDBClosedError  # noqa: F401
 
 
 def _launch_cwd_for_session(source: str) -> Optional[str]:
     """Working directory to stamp on a new session row, or None.
 
     Only local CLI sessions get a recorded cwd: the directory the process was
-    launched from is meaningful for ``hades -c`` / ``--resume`` (relaunch
+    launched from is meaningful for ``hermes -c`` / ``--resume`` (relaunch
     where you left off). Gateway/cron/remote-backend sessions have no stable
     host cwd to restore, so they record nothing.
 
@@ -93,9 +97,9 @@ def _session_source_for_agent(platform: Optional[str]) -> str:
     try:
         from gateway.session_context import get_session_env
 
-        source = get_session_env("HADES_SESSION_SOURCE", "")
+        source = get_session_env("HERMES_SESSION_SOURCE", "")
     except Exception:
-        source = env_get("HADES_SESSION_SOURCE", "")
+        source = os.environ.get("HERMES_SESSION_SOURCE", "")
     source = str(source or "").strip()
     if source:
         return source
@@ -116,17 +120,15 @@ from agent.process_bootstrap import (
 from agent.iteration_budget import IterationBudget
 
 
-from hades_cli.env_loader import load_hermes_dotenv
-from hades_cli.timeouts import (
+from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli.timeouts import (
     get_provider_request_timeout,
     get_provider_stale_timeout,
 )
 
-_hades_home = get_hades_home()
-# Backward-compat alias — agent_init.py references _ra()._hermes_home
-_hermes_home = _hades_home
+_hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / '.env'
-_loaded_env_paths = load_hermes_dotenv(hermes_home=_hades_home, project_env=_project_env)
+_loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
 if _loaded_env_paths:
     for _env_path in _loaded_env_paths:
         logger.info("Loaded environment variables from %s", _env_path)
@@ -309,10 +311,10 @@ _QWEN_CODE_VERSION = "0.14.1"
 
 def _routermint_headers() -> dict:
     """Return the User-Agent RouterMint needs to avoid Cloudflare 1010 blocks."""
-    from hades_cli import __version__ as _HADES_VERSION
+    from hermes_cli import __version__ as _HERMES_VERSION
 
     return {
-        "User-Agent": f"HadesAgent/{_HADES_VERSION}",
+        "User-Agent": f"HermesAgent/{_HERMES_VERSION}",
     }
 
 
@@ -358,8 +360,8 @@ def _safe_session_filename_component(session_id: str) -> str:
     """Return a stable, path-safe filename component for a session ID.
 
     Session IDs can originate from untrusted input (e.g. the
-    ``X-Hades-Session-Id`` API header) and are otherwise interpolated raw
-    into on-disk artifact filenames under ``~/.hades/sessions/``.  Without
+    ``X-Hermes-Session-Id`` API header) and are otherwise interpolated raw
+    into on-disk artifact filenames under ``~/.hermes/sessions/``.  Without
     sanitization, a traversal-shaped ID such as ``../../../../etc/pwned``
     would let a caller write the session snapshot / request dump outside the
     sessions directory.  This collapses every non ``[A-Za-z0-9_-]`` character
@@ -427,7 +429,7 @@ class AIAgent:
     """
 
     _TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER = (
-        "[hades-agent: tool call arguments were corrupted in this session and "
+        "[hermes-agent: tool call arguments were corrupted in this session and "
         "have been dropped to keep the conversation alive. See issue #15236.]"
     )
 
@@ -516,9 +518,6 @@ class AIAgent:
         pass_session_id: bool = False,
         suppress_status_output: bool = False,
         owns_session_db: bool = False,
-        runtime_routing_context: Any = None,
-        prepared_agent_runtime: Any = None,
-        **kwargs,
     ):
         """Forwarder — see ``agent.agent_init.init_agent``."""
         from agent.agent_init import init_agent
@@ -586,6 +585,7 @@ class AIAgent:
             load_soul_identity=load_soul_identity,
             skip_memory=skip_memory,
             session_db=session_db,
+            owns_session_db=owns_session_db,
             parent_session_id=parent_session_id,
             iteration_budget=iteration_budget,
             fallback_model=fallback_model,
@@ -596,10 +596,6 @@ class AIAgent:
             checkpoint_max_file_size_mb=checkpoint_max_file_size_mb,
             pass_session_id=pass_session_id,
             suppress_status_output=suppress_status_output,
-            owns_session_db=owns_session_db,
-            runtime_routing_context=runtime_routing_context,
-            prepared_agent_runtime=prepared_agent_runtime,
-            **kwargs,
         )
 
     def _get_session_db_for_recall(self):
@@ -619,9 +615,10 @@ class AIAgent:
         if self._session_db is not None:
             return self._session_db
         try:
-            from hades_state import SessionDB
+            from hermes_state import SessionDB
 
             self._session_db = SessionDB()
+            self._owns_session_db = True
             return self._session_db
         except Exception as exc:
             logger.debug("SessionDB unavailable for recall", exc_info=True)
@@ -636,7 +633,7 @@ class AIAgent:
         source = _session_source_for_agent(self.platform)
         try:
             try:
-                from hades_cli.profiles import get_active_profile_name
+                from hermes_cli.profiles import get_active_profile_name
                 _profile_for_session = get_active_profile_name()
                 if _profile_for_session == "default":
                     _profile_for_session = None
@@ -659,6 +656,74 @@ class AIAgent:
             # _session_db_created stays False so next run_conversation() retries.
             logger.warning(
                 "Session DB creation failed (will retry next turn): %s", e
+            )
+
+    # ── Session lease (Task4) ──────────────────────────────────────────────
+    # Conservative ownership claim on the session row. The lease is
+    # informational — agents touch it on every turn prologue, close()
+    # releases it, and reconciliation (separate caller, no background
+    # thread) ends expired rows + marks their sessions abandoned.
+    def _lease_owner_id_for(self) -> str:
+        """Stable owner id for this agent process.
+
+        Lazily built on first use so non-session-DB agents never pay for
+        it. Format mirrors _compression_lock_holder (pid:tid:agent-instance)
+        so the two locking systems share an identifiable owner shape.
+        """
+        owner = getattr(self, "_lease_owner_id", None)
+        if owner:
+            return owner
+        import os
+        import threading
+        owner = (
+            f"pid={os.getpid()}"
+            f":tid={threading.get_ident()}"
+            f":agent={id(self):x}"
+        )
+        self._lease_owner_id = owner
+        return owner
+
+    def _claim_or_touch_session_lease(self) -> None:
+        """First-turn claim; subsequent turns touch. Never raises.
+
+        Best-effort — the lease is informational. A failed claim (someone
+        else owns the lease) or DB error leaves the existing owner in
+        place; we don't compete, we just note our presence.
+        """
+        if getattr(self, "_persist_disabled", False):
+            return
+        db = getattr(self, "_session_db", None)
+        sid = getattr(self, "session_id", None)
+        if db is None or not sid:
+            return
+        try:
+            from agent.agent_init import SESSION_LEASE_TTL_SECONDS
+            owner = self._lease_owner_id_for()
+            # Try touch first; if that fails (no lease yet, or someone else
+            # owns it), fall back to claim. Order matters: subsequent
+            # turns almost always hit the touch path and skip the claim's
+            # DELETE-expired round-trip.
+            if not db.touch_session_lease(sid, owner, SESSION_LEASE_TTL_SECONDS):
+                db.claim_session_lease(sid, owner, SESSION_LEASE_TTL_SECONDS)
+        except Exception as exc:
+            logger.debug(
+                "session lease claim/touch skipped for %s: %s", sid, exc,
+            )
+
+    def _release_session_lease(self) -> None:
+        """Best-effort release on close. Never raises."""
+        if getattr(self, "_persist_disabled", False):
+            return
+        db = getattr(self, "_session_db", None)
+        sid = getattr(self, "session_id", None)
+        owner = getattr(self, "_lease_owner_id", None)
+        if db is None or not sid or not owner:
+            return
+        try:
+            db.release_session_lease(sid, owner)
+        except Exception as exc:
+            logger.debug(
+                "session lease release skipped for %s: %s", sid, exc,
             )
 
     def _transition_context_engine_session(
@@ -815,7 +880,7 @@ class AIAgent:
             return
         try:
             from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
-            from hades_cli.models import ensure_lmstudio_model_loaded
+            from hermes_cli.models import ensure_lmstudio_model_loaded
             if config_context_length is None:
                 config_context_length = getattr(self, "_config_context_length", None)
             target_ctx = max(config_context_length or 0, MINIMUM_CONTEXT_LENGTH)
@@ -878,7 +943,7 @@ class AIAgent:
         all non-forced output is suppressed.
 
         ``suppress_status_output`` is a stricter CLI automation mode used by
-        parseable single-query flows such as ``hades chat -q``. In that mode,
+        parseable single-query flows such as ``hermes chat -q``. In that mode,
         all status/diagnostic prints routed through ``_vprint`` are suppressed
         so stdout stays machine-readable.
         """
@@ -1292,19 +1357,19 @@ class AIAgent:
         Priority:
           1. ``providers.<id>.models.<model>.timeout_seconds`` (per-model override)
           2. ``providers.<id>.request_timeout_seconds`` (provider-wide)
-          3. ``HADES_API_TIMEOUT`` env var (legacy escape hatch)
+          3. ``HERMES_API_TIMEOUT`` env var (legacy escape hatch)
           4. 1800.0s default
 
         Used by OpenAI-wire chat completions (streaming and non-streaming) so
         the per-provider config knob wins over the 1800s default.  Without this
-        helper, the hardcoded ``HADES_API_TIMEOUT`` fallback would always be
+        helper, the hardcoded ``HERMES_API_TIMEOUT`` fallback would always be
         passed as a per-call ``timeout=`` kwarg, overriding the client-level
         timeout the AIAgent.__init__ path configured.
         """
         cfg = get_provider_request_timeout(self.provider, self.model)
         if cfg is not None:
             return cfg
-        return env_float("HADES_API_TIMEOUT", 1800.0)
+        return env_float("HERMES_API_TIMEOUT", 1800.0)
 
     def _resolved_api_call_stale_timeout_base(self) -> tuple[float, bool]:
         """Resolve the base non-stream stale timeout and whether it is implicit.
@@ -1312,7 +1377,7 @@ class AIAgent:
         Priority:
           1. ``providers.<id>.models.<model>.stale_timeout_seconds``
           2. ``providers.<id>.stale_timeout_seconds``
-          3. ``HADES_API_CALL_STALE_TIMEOUT`` env var
+          3. ``HERMES_API_CALL_STALE_TIMEOUT`` env var
           4. 90.0s default (time-to-first-byte for non-streaming / Codex
              internal-streaming requests; lowered from 300s in May 2026 so
              fallback providers kick in faster when upstream providers
@@ -1328,7 +1393,7 @@ class AIAgent:
         if cfg is not None:
             return cfg, False
 
-        env_timeout = env_get("HADES_API_CALL_STALE_TIMEOUT")
+        env_timeout = os.getenv("HERMES_API_CALL_STALE_TIMEOUT")
         if env_timeout is not None:
             return float(env_timeout), False
 
@@ -1381,7 +1446,7 @@ class AIAgent:
         This helper substitutes an actionable hint into the stale-timeout
         warning when the request matches a known silent-reject pattern.
         Currently flagged: ``gpt-5.5`` family on the Codex backend.  See
-        hades-agent #21444 for the symptom history.  The upstream backend
+        hermes-agent #21444 for the symptom history.  The upstream backend
         behavior has historically come and gone with ChatGPT entitlement
         changes — the heuristic stays in place as future-proofing even when
         the symptom is dormant.
@@ -1417,7 +1482,7 @@ class AIAgent:
             "Workaround: try `gpt-5.4` on the same OAuth profile, or `gpt-5.3-codex`, "
             "or switch to a different model/provider in your fallback chain. "
             "Some ChatGPT Codex accounts do not support `gpt-5.4-codex`. "
-            "See hades-agent#21444 for symptom history."
+            "See hermes-agent#21444 for symptom history."
         )
 
     def _is_openrouter_url(self) -> bool:
@@ -1477,7 +1542,7 @@ class AIAgent:
             return False
         if normalized_provider == "copilot":
             try:
-                from hades_cli.models import _should_use_copilot_responses_api
+                from hermes_cli.models import _should_use_copilot_responses_api
                 return _should_use_copilot_responses_api(model)
             except Exception:
                 # Fall back to the generic GPT-5 rule if Copilot-specific
@@ -1686,7 +1751,6 @@ class AIAgent:
         keep working.
         """
         from agent.background_review import spawn_background_review_thread
-        from agent.reflection_triggers import release_review_flight
         from tools.thread_context import propagate_context_to_thread
         target, _prompt = spawn_background_review_thread(
             self,
@@ -1696,20 +1760,10 @@ class AIAgent:
         )
         # Carry the active profile into the review thread so MEMORY.md / skill
         # review writes land in the right profile (#54937).
-        # If Thread construction/start fails after should_trigger_review set
-        # in_flight, clear the flag so future reviews are not permanently blocked
-        # (audit L4-01).
-        try:
-            t = threading.Thread(
-                target=propagate_context_to_thread(target), daemon=True, name="bg-review"
-            )
-            t.start()
-        except Exception:
-            try:
-                release_review_flight(self)
-            except Exception:
-                self._background_review_in_flight = False
-            raise
+        t = threading.Thread(
+            target=propagate_context_to_thread(target), daemon=True, name="bg-review"
+        )
+        t.start()
 
     def _build_memory_write_metadata(
         self,
@@ -2080,6 +2134,7 @@ class AIAgent:
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                    effect_disposition=msg.get("effect_disposition"),
                     timestamp=_row_timestamp,
                     api_content=_row_api_content,
                 )
@@ -2089,6 +2144,15 @@ class AIAgent:
             # allocated next turn at a recycled address.
             self._flushed_db_message_ids = set()
             self._last_flushed_db_idx = len(messages)
+        except SessionDBClosedError:
+            # Handle was closed mid-flush (gateway disconnect, profile
+            # switch, explicit shutdown). Drop the reference so subsequent
+            # turns degrade cleanly via `if not self._session_db:` instead
+            # of repeatedly tripping the closed handle. Transient sqlite
+            # errors stay in the `except Exception` branch and keep the
+            # handle alive for next-turn retry.
+            self._session_db = None
+            logger.warning("Session DB closed mid-flush; disabling _session_db")
         except Exception as e:
             logger.warning("Session DB append_message failed: %s", e)
 
@@ -2233,7 +2297,7 @@ class AIAgent:
         That body covers several real causes we cannot distinguish without
         more info from xAI.  The most common (and least obvious) one is
         that **X Premium+ does NOT include API access** — only standalone
-        SuperGrok subscribers can use Hades against xai-oauth.  Lots of
+        SuperGrok subscribers can use Hermes against xai-oauth.  Lots of
         users see Grok in their X app, assume it works here too, and hit
         this 403 with no idea why.  Lead the hint with that.
 
@@ -2436,7 +2500,7 @@ class AIAgent:
 
     @staticmethod
     def _hook_payload_max_chars() -> int:
-        raw = env_get("HADES_PLUGIN_PAYLOAD_MAX_CHARS", "50000")
+        raw = os.getenv("HERMES_PLUGIN_PAYLOAD_MAX_CHARS", "50000")
         try:
             return max(1000, int(raw))
         except (TypeError, ValueError):
@@ -2644,11 +2708,11 @@ class AIAgent:
         reason: Optional[str] = None,
     ) -> None:
         # Lazy module import (not from-import) so tests that
-        # ``monkeypatch.setattr("hades_cli.plugins.has_hook", ...)`` still
+        # ``monkeypatch.setattr("hermes_cli.plugins.has_hook", ...)`` still
         # take effect on this call site. After first call the import is a
         # ``sys.modules`` dict lookup, so retries don't repay any real cost.
         try:
-            from hades_cli import plugins as _plugins
+            from hermes_cli import plugins as _plugins
 
             if not _plugins.has_hook("api_request_error"):
                 return
@@ -2713,7 +2777,7 @@ class AIAgent:
         parts. Image / binary parts are left untouched; only text fields are
         passed through ``redact_sensitive_text``.
 
-        Respects ``HADES_REDACT_SECRETS`` via ``redact_sensitive_text`` —
+        Respects ``HERMES_REDACT_SECRETS`` via ``redact_sensitive_text`` —
         when disabled the helper is effectively a no-op.
         """
         if content is None:
@@ -2738,7 +2802,7 @@ class AIAgent:
 
         Gated by ``sessions.write_json_snapshots`` (default False).  state.db
         is the canonical message store; this writer exists only for users
-        whose external tooling consumes ``~/.hades/sessions/session_{sid}.json``
+        whose external tooling consumes ``~/.hermes/sessions/session_{sid}.json``
         directly.  When the flag is off this is a fast no-op.
 
         When enabled, rewrites the snapshot after every persistence point with
@@ -2758,7 +2822,7 @@ class AIAgent:
         # session-id changes land in the right file without any re-point
         # bookkeeping at the call sites.  Sanitize the session ID into a
         # single traversal-free path segment — session IDs can come from
-        # untrusted input (X-Hades-Session-Id header) and must not escape
+        # untrusted input (X-Hermes-Session-Id header) and must not escape
         # the sessions directory.
         try:
             safe_sid = _safe_session_filename_component(self.session_id)
@@ -2779,7 +2843,7 @@ class AIAgent:
                 # Defence-in-depth: redact credentials from every message
                 # content before persistence. Catches PATs / API keys / Bearer
                 # tokens that may have leaked into assistant responses, tool
-                # output, or user paste. Respects HADES_REDACT_SECRETS via
+                # output, or user paste. Respects HERMES_REDACT_SECRETS via
                 # redact_sensitive_text — no-op when disabled. (#19798, #19845)
                 if "content" in msg:
                     msg = dict(msg)
@@ -3005,6 +3069,20 @@ class AIAgent:
         state dict hasn't been initialised yet (e.g. a tool dispatched
         outside ``run_conversation``).
         """
+        try:
+            parsed_result = json.loads(result) if isinstance(result, str) else result
+            evidence = (
+                parsed_result.get("verification_evidence")
+                if isinstance(parsed_result, dict)
+                else None
+            )
+            if isinstance(evidence, dict):
+                self._turn_verification_status = (
+                    evidence if evidence.get("status") == "passed" else None
+                )
+        except (TypeError, ValueError):
+            pass
+
         if tool_name not in _FILE_MUTATING_TOOLS:
             return
         state = getattr(self, "_turn_failed_file_mutations", None)
@@ -3015,6 +3093,7 @@ class AIAgent:
             return
         landed = file_mutation_result_landed(tool_name, result)
         if landed:
+            self._turn_verification_status = None
             changed = getattr(self, "_turn_file_mutation_paths", None)
             if changed is not None:
                 changed.update(_extract_landed_file_mutation_paths(tool_name, args, result))
@@ -3037,19 +3116,19 @@ class AIAgent:
         """Check whether the per-turn file-mutation verifier footer is on.
 
         Config path: ``display.file_mutation_verifier`` (bool, default True).
-        ``HADES_FILE_MUTATION_VERIFIER`` env var overrides config.  Exposed
+        ``HERMES_FILE_MUTATION_VERIFIER`` env var overrides config.  Exposed
         as a method so tests can patch a single seam without reaching into
         the private ``_turn_failed_file_mutations`` state dict.
         """
         try:
             import os as _os
-            env = env_get("HADES_FILE_MUTATION_VERIFIER")
+            env = _os.environ.get("HERMES_FILE_MUTATION_VERIFIER")
             if env is not None:
                 return env.strip().lower() not in {"0", "false", "no", "off"}
             # Read from the persisted config.yaml so gateway and CLI share
             # the same setting.  Import lazily to avoid a startup-time cycle.
             try:
-                from hades_cli.config import load_config as _load_config
+                from hermes_cli.config import load_config as _load_config
                 _cfg = _load_config() or {}
             except Exception:
                 _cfg = {}
@@ -3101,7 +3180,7 @@ class AIAgent:
         path and any path echoed inside the tool's error preview — is
         backtick-wrapped via ``_neutralize_footer_paths`` so the gateway's
         bare-path media extractor can never auto-attach a protected file
-        (e.g. ``~/.hades/config.yaml``) to a messaging channel (#35584).
+        (e.g. ``~/.hermes/config.yaml``) to a messaging channel (#35584).
         """
         if not failed:
             return ""
@@ -3134,19 +3213,19 @@ class AIAgent:
         """Check whether the end-of-turn completion explainer footer is on.
 
         Config path: ``display.turn_completion_explainer`` (bool, default
-        True).  ``HADES_TURN_COMPLETION_EXPLAINER`` env var overrides
+        True).  ``HERMES_TURN_COMPLETION_EXPLAINER`` env var overrides
         config.  Exposed as a method so tests can patch a single seam,
         mirroring ``_file_mutation_verifier_enabled``.
         """
         try:
             import os as _os
-            env = env_get("HADES_TURN_COMPLETION_EXPLAINER")
+            env = _os.environ.get("HERMES_TURN_COMPLETION_EXPLAINER")
             if env is not None:
                 return env.strip().lower() not in {"0", "false", "no", "off"}
             # Read from the persisted config.yaml so gateway and CLI share
             # the same setting.  Import lazily to avoid a startup-time cycle.
             try:
-                from hades_cli.config import load_config as _load_config
+                from hermes_cli.config import load_config as _load_config
                 _cfg = _load_config() or {}
             except Exception:
                 _cfg = {}
@@ -3259,14 +3338,14 @@ class AIAgent:
         """Update the last-activity timestamp and description (thread-safe).
 
         Also bridges to the kanban board's heartbeat fields when this
-        process is a dispatcher-spawned worker (HADES_KANBAN_TASK set),
+        process is a dispatcher-spawned worker (HERMES_KANBAN_TASK set),
         so the dispatcher watchdog doesn't reclaim an actively-running
         worker as stale (#31752). Bridge is rate-limited (60s) and
         best-effort — it never raises into the agent loop.
         """
         self._last_activity_ts = time.time()
         self._last_activity_desc = desc
-        if env_get("HADES_KANBAN_TASK"):
+        if os.environ.get("HERMES_KANBAN_TASK"):
             try:
                 from tools.kanban_tools import heartbeat_current_worker_from_env
                 heartbeat_current_worker_from_env()
@@ -3308,7 +3387,7 @@ class AIAgent:
         EVALUATION/EMIT is a SEPARATE block that WARNS on failure (R1-M2): a bug in the
         depletion-notice path must not vanish silently under the parse swallow.
         """
-        # Dev test fixture (HADES_DEV_CREDITS_FIXTURE): inject a chosen notice state
+        # Dev test fixture (HERMES_DEV_CREDITS_FIXTURE): inject a chosen notice state
         # each turn for repeatable testing, bypassing real headers. Throwaway scaffolding.
         try:
             from agent.credits_tracker import dev_fixture_credits_state
@@ -3325,7 +3404,7 @@ class AIAgent:
             _used = _fixture.used_fraction
             logger.info(
                 "credits ▸ [FIXTURE] remaining=%d (%s) · paid=%s · denom=%s · used=%s "
-                "(real headers bypassed — `echo clear` / unset HADES_DEV_CREDITS_FIXTURE to restore)",
+                "(real headers bypassed — `echo clear` / unset HERMES_DEV_CREDITS_FIXTURE to restore)",
                 _fixture.remaining_micros,
                 _fixture.remaining_usd or "?",
                 _fixture.paid_access,
@@ -3339,7 +3418,7 @@ class AIAgent:
         headers = getattr(http_response, "headers", None)
         if not headers:
             return
-        _dev = is_truthy_value(env_get("HADES_DEV_CREDITS"))
+        _dev = is_truthy_value(os.environ.get("HERMES_DEV_CREDITS"))
 
         # ── Parse (fail-open → miss; never overwrite good state with None) ──
         try:
@@ -3361,8 +3440,8 @@ class AIAgent:
         if self._credits_session_start_micros is None:
             self._credits_session_start_micros = state.remaining_micros
         if _dev:
-            # HADES_DEV_CREDITS: stream each capture to agent.log — watch live with
-            # `hades logs -f` (grep 'credits ▸'). Dev-only; silent for normal users.
+            # HERMES_DEV_CREDITS: stream each capture to agent.log — watch live with
+            # `hermes logs -f` (grep 'credits ▸'). Dev-only; silent for normal users.
             spent = self.get_credits_spent_micros()
             used = state.used_fraction
             logger.info(
@@ -3431,7 +3510,7 @@ class AIAgent:
             return cached
         enabled = True
         try:
-            from hades_cli.config import load_config as _load_config
+            from hermes_cli.config import load_config as _load_config
             _cfg = _load_config() or {}
             _display = _cfg.get("display") if isinstance(_cfg, dict) else None
             if isinstance(_display, dict) and "credits_notices" in _display:
@@ -3737,14 +3816,58 @@ class AIAgent:
         # must leave it open). end_session() is first-reason-wins and no-ops on
         # an already-ended row, so this never clobbers a 'compression' /
         # 'cron_complete' / 'cli_close' reason set by an earlier terminal path.
-        try:
-            if getattr(self, "_end_session_on_close", True):
-                session_db = getattr(self, "_session_db", None)
-                session_id = getattr(self, "session_id", None)
-                if session_db and session_id:
+        session_db = getattr(self, "_session_db", None)
+        session_id = getattr(self, "session_id", None)
+        session_db_close_lock = getattr(self, "_session_db_close_lock", None)
+        if session_db_close_lock is None:
+            session_db_close_lock = threading.Lock()
+            self._session_db_close_lock = session_db_close_lock
+        with session_db_close_lock:
+            session_end_failed = False
+            if (
+                getattr(self, "_end_session_on_close", True)
+                and not getattr(self, "_session_end_called", False)
+                and session_db is not None
+                and session_id
+            ):
+                try:
                     session_db.end_session(session_id, "agent_close")
-        except Exception:
-            pass
+                except Exception:
+                    session_end_failed = True
+                else:
+                    self._session_end_called = True
+
+            # Session lease release (Task4): after end_session so the
+            # lease is the last thing we touch on the row in this
+            # process. Best-effort and never raises (helper swallows).
+            if (
+                not session_end_failed
+                and session_db is not None
+                and session_id
+            ):
+                try:
+                    self._release_session_lease()
+                except Exception:
+                    pass
+
+            if (
+                getattr(self, "_owns_session_db", False)
+                and not getattr(self, "_session_db_closed", False)
+                and session_db is not None
+            ):
+                # ponytail: detect partial close after raise — close() may
+                # have torn down _conn and then raised; treat the observed
+                # state as authoritative so a non-idempotent DB isn't
+                # closed twice on a follow-up agent.close(). The DB is
+                # considered closed if close() returned without raising OR
+                # if its observed _conn is None post-attempt.
+                close_raised = False
+                try:
+                    session_db.close()
+                except Exception:
+                    close_raised = True
+                if not close_raised or not getattr(session_db, "is_open", False):
+                    self._session_db_closed = True
 
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:
         """
@@ -4139,7 +4262,7 @@ class AIAgent:
         preserves OS TCP defaults (including ``TCP_NODELAY``).
 
         ``verify`` carries per-provider ``ssl_ca_cert`` / ``ssl_verify`` and
-        ``HADES_CA_BUNDLE`` settings.  It is passed on the client AND on
+        ``HERMES_CA_BUNDLE`` settings.  It is passed on the client AND on
         the plain no-proxy mounts (a mounted transport owns the SSL context
         for its scheme).
         """
@@ -4300,7 +4423,7 @@ class AIAgent:
         return any(_contains_image(item) for item in candidates)
 
     def _copilot_headers_for_request(self, *, is_vision: bool) -> dict:
-        from hades_cli.copilot_auth import copilot_request_headers
+        from hermes_cli.copilot_auth import copilot_request_headers
 
         return copilot_request_headers(is_agent_turn=True, is_vision=is_vision)
 
@@ -4482,7 +4605,7 @@ class AIAgent:
         # Guard against silent account swap.
         #
         # When an agent is using a non-singleton credential — e.g. a manual
-        # pool entry (``hades auth add xai-oauth``) whose tokens belong to
+        # pool entry (``hermes auth add xai-oauth``) whose tokens belong to
         # a different account than the device_code singleton, or an agent
         # constructed with an explicit ``api_key=`` arg — force-refreshing
         # the singleton here and adopting its tokens silently re-routes the
@@ -4493,13 +4616,13 @@ class AIAgent:
         # MUST only fire when the agent really is on singleton tokens.
         try:
             if self.provider == "openai-codex":
-                from hades_cli.auth import resolve_codex_runtime_credentials
+                from hermes_cli.auth import resolve_codex_runtime_credentials
 
                 singleton_now = resolve_codex_runtime_credentials(
                     refresh_if_expiring=False,
                 )
             else:
-                from hades_cli.auth import resolve_xai_oauth_runtime_credentials
+                from hermes_cli.auth import resolve_xai_oauth_runtime_credentials
 
                 singleton_now = resolve_xai_oauth_runtime_credentials(
                     refresh_if_expiring=False,
@@ -4521,11 +4644,11 @@ class AIAgent:
 
         try:
             if self.provider == "openai-codex":
-                from hades_cli.auth import resolve_codex_runtime_credentials
+                from hermes_cli.auth import resolve_codex_runtime_credentials
 
                 creds = resolve_codex_runtime_credentials(force_refresh=force)
             else:
-                from hades_cli.auth import resolve_xai_oauth_runtime_credentials
+                from hermes_cli.auth import resolve_xai_oauth_runtime_credentials
 
                 creds = resolve_xai_oauth_runtime_credentials(force_refresh=force)
         except Exception as exc:
@@ -4558,10 +4681,10 @@ class AIAgent:
             return False
 
         try:
-            from hades_cli.auth import resolve_nous_runtime_credentials
+            from hermes_cli.auth import resolve_nous_runtime_credentials
 
             creds = resolve_nous_runtime_credentials(
-                timeout_seconds=env_float("HADES_NOUS_TIMEOUT_SECONDS", 15),
+                timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15),
                 force_refresh=force,
             )
         except Exception as exc:
@@ -4636,7 +4759,7 @@ class AIAgent:
             return False
 
         try:
-            from hades_cli.copilot_auth import resolve_copilot_token
+            from hermes_cli.copilot_auth import resolve_copilot_token
 
             new_token, token_source = resolve_copilot_token()
         except Exception as exc:
@@ -4710,7 +4833,12 @@ class AIAgent:
         self._is_anthropic_oauth = _is_oauth_token(new_token) if self.provider == "anthropic" else False
         return True
 
-    def _apply_client_headers_for_base_url(self, base_url: str) -> None:
+    def _apply_client_headers_for_base_url(
+        self,
+        base_url: str,
+        *,
+        apply_user_headers: bool = True,
+    ) -> None:
         from agent.auxiliary_client import (
             build_nvidia_nim_headers,
             build_or_headers,
@@ -4723,7 +4851,7 @@ class AIAgent:
         elif base_url_host_matches(base_url, "api.routermint.com"):
             self._client_kwargs["default_headers"] = _routermint_headers()
         elif base_url_host_matches(base_url, "githubcopilot.com"):
-            from hades_cli.models import copilot_default_headers
+            from hermes_cli.models import copilot_default_headers
 
             self._client_kwargs["default_headers"] = copilot_default_headers()
         elif base_url_host_matches(base_url, "api.kimi.com"):
@@ -4750,10 +4878,10 @@ class AIAgent:
             else:
                 self._client_kwargs.pop("default_headers", None)
 
-        # User-configured overrides win over URL/profile defaults — keep them
-        # applied across credential swaps and client rebuilds, not just at
-        # first construction.
-        self._apply_user_default_headers()
+        # User-configured overrides win over URL/profile defaults for the same
+        # route. A credential swap to another endpoint must not inherit them.
+        if apply_user_headers:
+            self._apply_user_default_headers()
 
         # Per-provider extra HTTP headers (providers.<name>.extra_headers /
         # custom_providers[].extra_headers) — applied last so the most
@@ -4761,7 +4889,7 @@ class AIAgent:
         # SECURITY: values may carry credentials — never log them.
         if self.api_mode not in ("anthropic_messages", "bedrock_converse"):
             try:
-                from hades_cli.config import (
+                from hermes_cli.config import (
                     apply_custom_provider_extra_headers_to_client_kwargs,
                 )
 
@@ -4804,6 +4932,11 @@ class AIAgent:
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
+        from hermes_cli.route_identity import normalize_route_base_url
+
+        route_changed = normalize_route_base_url(self.base_url) != normalize_route_base_url(
+            runtime_base
+        )
 
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, _is_oauth_token
@@ -4814,21 +4947,43 @@ class AIAgent:
                 pass
 
             self._anthropic_api_key = runtime_key
-            self._anthropic_base_url = runtime_base
+            self._anthropic_base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
             self._anthropic_client = build_anthropic_client(
-                runtime_key, runtime_base,
+                runtime_key, self._anthropic_base_url,
                 timeout=get_provider_request_timeout(self.provider, self.model),
             )
             self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
             self.api_key = runtime_key
-            self.base_url = runtime_base
+            self.base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
             return
 
         self.api_key = runtime_key
         self.base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
-        self._apply_client_headers_for_base_url(self.base_url)
+        self._client_kwargs.pop("ssl_verify", None)
+        self._client_kwargs.pop("ssl_ca_cert", None)
+        try:
+            from hermes_cli.config import (
+                apply_custom_provider_tls_to_client_kwargs,
+                get_compatible_custom_providers,
+                load_config_readonly,
+            )
+
+            apply_custom_provider_tls_to_client_kwargs(
+                self._client_kwargs,
+                str(self.base_url or ""),
+                get_compatible_custom_providers(load_config_readonly()),
+            )
+        except Exception:
+            logger.debug(
+                "custom-provider TLS resolution skipped on credential rotation",
+                exc_info=True,
+            )
+        self._apply_client_headers_for_base_url(
+            self.base_url,
+            apply_user_headers=not route_changed,
+        )
         self._replace_primary_openai_client(reason="credential_rotation")
 
     def _recover_with_credential_pool(
@@ -5456,7 +5611,7 @@ class AIAgent:
         misclassified as non-vision and have their images stripped.
         """
         try:
-            from hades_cli.config import load_config
+            from hermes_cli.config import load_config
             from agent.image_routing import _lookup_supports_vision
             cfg = load_config()
             provider = (getattr(self, "provider", "") or "").strip()
@@ -5886,7 +6041,7 @@ class AIAgent:
             or base_url_host_matches(self._base_url_lower, "githubcopilot.com")
         ):
             try:
-                from hades_cli.models import github_model_reasoning_efforts
+                from hermes_cli.models import github_model_reasoning_efforts
 
                 return bool(github_model_reasoning_efforts(self.model))
             except Exception:
@@ -5945,7 +6100,7 @@ class AIAgent:
             if opts or (_time.monotonic() - ts) < 60:
                 return opts
         try:
-            from hades_cli.models import lmstudio_model_reasoning_options
+            from hermes_cli.models import lmstudio_model_reasoning_options
             opts = lmstudio_model_reasoning_options(
                 self.model, self.base_url, getattr(self, "api_key", ""),
             )
@@ -5976,7 +6131,7 @@ class AIAgent:
             if supported is not None or (_time.monotonic() - ts) < 60:
                 return bool(supported)
         try:
-            from hades_cli.models import ollama_model_supports_thinking
+            from hermes_cli.models import ollama_model_supports_thinking
             supported = ollama_model_supports_thinking(
                 self.model, self.base_url, getattr(self, "api_key", "")
             )
@@ -6001,7 +6156,7 @@ class AIAgent:
     def _github_models_reasoning_extra_body(self) -> dict | None:
         """Format reasoning payload for GitHub Models/OpenAI-compatible routes."""
         try:
-            from hades_cli.models import github_model_reasoning_efforts
+            from hermes_cli.models import github_model_reasoning_efforts
         except Exception:
             return None
 
@@ -6184,7 +6339,17 @@ class AIAgent:
         """
         return self.api_mode != "codex_responses"
 
-    def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None, force: bool = False) -> tuple:
+    def _compress_context(
+        self,
+        messages: list,
+        system_message: str,
+        *,
+        approx_tokens: int = None,
+        task_id: str = "default",
+        focus_topic: str = None,
+        force: bool = False,
+        defer_context_engine_notification: bool = False,
+    ) -> tuple:
         """Forwarder — see ``agent.conversation_compression.compress_context``.
 
         ``force=True`` is passed by the manual ``/compress`` slash command
@@ -6197,6 +6362,7 @@ class AIAgent:
             self, messages, system_message,
             approx_tokens=approx_tokens, task_id=task_id, focus_topic=focus_topic,
             force=force,
+            defer_context_engine_notification=defer_context_engine_notification,
         )
 
     def _set_tool_guardrail_halt(self, decision: ToolGuardrailDecision) -> None:
@@ -6217,10 +6383,10 @@ class AIAgent:
         self,
         tool_name: str,
         function_args: dict,
-        function_result: str,
+        function_result: Any,
         *,
         failed: bool,
-    ) -> str:
+    ) -> Any:
         decision = self._tool_guardrails.after_call(
             tool_name,
             function_args,
@@ -6228,7 +6394,19 @@ class AIAgent:
             failed=failed,
         )
         if decision.action in {"warn", "halt"}:
-            function_result = append_toolguard_guidance(function_result, decision)
+            if _is_multimodal_tool_result(function_result):
+                function_result = dict(function_result)
+                content = list(function_result.get("content") or [])
+                summary = append_toolguard_guidance(
+                    _multimodal_text_summary(function_result), decision,
+                )
+                function_result["text_summary"] = summary
+                function_result["content"] = [
+                    {"type": "text", "text": summary},
+                    *content,
+                ]
+            else:
+                function_result = append_toolguard_guidance(function_result, decision)
         if decision.should_halt:
             self._set_tool_guardrail_halt(decision)
         return function_result

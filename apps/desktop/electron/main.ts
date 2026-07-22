@@ -39,6 +39,7 @@ import { waitForDashboardPortAnnouncement } from './backend-ready'
 import { shouldLatchBackendStartFailure } from './backend-start-failure'
 import { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } from './bootstrap-platform'
 import { runBootstrap } from './bootstrap-runner'
+import { applyConnectionChange, resolveTerminalConnection } from './connection-apply'
 import {
   authModeFromStatus,
   buildGatewayWsUrl,
@@ -49,16 +50,23 @@ import {
   cookiesHaveSession,
   gatewayTicketFailure,
   gatewayWsUrlIpcResult,
+  hostLabelFromBaseUrl,
+  localProfileEntry,
   modeIsRemoteLike,
   normalizeRemoteBaseUrl,
+  normalizeSshConfig,
   normAuthMode,
   pathWithGlobalRemoteProfile,
+  profileHasRemoteConnection,
   profileRemoteOverride,
+  profileSshOverride,
   resolveAuthMode,
   resolveTestWsUrl,
+  savedProfileSsh,
   tokenPreview
 } from './connection-config'
 import { adoptServedDashboardToken } from './dashboard-token'
+import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import {
   buildPosixCleanupScript,
   buildWindowsCleanupScript,
@@ -108,9 +116,19 @@ import {
 } from './hardening'
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
 import { ensureMainWindow } from './main-window-lifecycle'
+import { oauthSessionIsLive, resolveJsonBody, resolveOauthRestAuth } from './native-auth-decisions'
+import {
+  nativeRefreshUrl,
+  type NativeTokenSet,
+  parseTokenResponse,
+  resolveLoginStrategy,
+  tokenNeedsRefresh
+} from './native-oauth'
+import { runNativeLogin } from './native-oauth-login'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { createKeepAwake } from './power-save'
 import { decideProfileDeleteAction, profileNameFromDeleteRequest, resolveRouteProfile } from './profile-delete-routing'
+import * as remoteLifecycle from './remote-lifecycle'
 import { RemoteLivenessTracker, RemoteRevalidationCoordinator, revalidateRemoteConnection } from './remote-liveness'
 import {
   buildSessionWindowUrl,
@@ -121,6 +139,15 @@ import {
   SESSION_WINDOW_MIN_WIDTH
 } from './session-windows'
 import { ensureSpawnHelperExecutable } from './spawn-helper-perms'
+import { createBootstrapCoordinator, sshConfigFingerprint } from './ssh-bootstrap-coordinator'
+import { collectSshConfigHosts, parseSshGOutput } from './ssh-config'
+import {
+  buildInteractiveSshArgs,
+  createSshProbeConnection,
+  pickLocalPort,
+  redactSecrets,
+  SshConnection
+} from './ssh-connection'
 import { nativeOverlayWidth as computeNativeOverlayWidth, macTitleBarOverlayHeight } from './titlebar-overlay-width'
 import { resolveBehindCount, shouldCountCommits } from './update-count'
 import { readLiveUpdateMarker, writeUpdateMarker } from './update-marker'
@@ -151,6 +178,12 @@ import {
   getVenvSitePackagesEntries,
   resolveVenvHermesCommand
 } from './windows-hermes-path'
+import {
+  buildWindowsInteractiveCommand,
+  connectWindowsRemote,
+  detectRemotePlatform,
+  helper
+} from './windows-remote-lifecycle'
 import {
   alreadyHasNoSandbox,
   buildNoSandboxRelaunchArgs,
@@ -415,24 +448,24 @@ if (INSTALL_STAMP) {
   )
 }
 
-// HADES_HOME — the user-facing root for everything Hermes-related. Mirrors
-// scripts/install.ps1's $HermesHome and scripts/install.sh's $HADES_HOME.
+// HERMES_HOME — the user-facing root for everything Hermes-related. Mirrors
+// scripts/install.ps1's $HermesHome and scripts/install.sh's $HERMES_HOME.
 //
 // Defaults:
 //   Windows: %LOCALAPPDATA%\hermes (matches install.ps1)
-//   macOS / Linux: ~/.hades (matches install.sh)
+//   macOS / Linux: ~/.hermes (matches install.sh)
 //
-// Special case for Windows: if the user has a legacy ~/.hades directory
+// Special case for Windows: if the user has a legacy ~/.hermes directory
 // (e.g., from a prior pip install or a manual setup) AND no
 // %LOCALAPPDATA%\hermes yet, prefer the legacy path so we don't orphan their
 // existing config / sessions / .env. New installs go to %LOCALAPPDATA%.
 //
 // HERMES_DESKTOP_USER_DATA_DIR (used by test:desktop:fresh) puts the sandbox
-// HADES_HOME beneath the throwaway userData dir so a fresh-install run never
-// touches the user's real ~/.hades / %LOCALAPPDATA%\hermes.
+// HERMES_HOME beneath the throwaway userData dir so a fresh-install run never
+// touches the user's real ~/.hermes / %LOCALAPPDATA%\hermes.
 function resolveHermesHome() {
-  if (process.env.HADES_HOME) {
-    return normalizeHermesHomeRoot(process.env.HADES_HOME)
+  if (process.env.HERMES_HOME) {
+    return normalizeHermesHomeRoot(process.env.HERMES_HOME)
   }
 
   if (USER_DATA_OVERRIDE) {
@@ -441,12 +474,12 @@ function resolveHermesHome() {
 
   if (IS_WINDOWS) {
     // A GUI app launched from Explorer inherits the environment block captured
-    // at login, so a HADES_HOME set via `setx` AFTER login is invisible in
+    // at login, so a HERMES_HOME set via `setx` AFTER login is invisible in
     // process.env even though the CLI (a fresh shell) sees it. Without this the
     // backend silently falls back to %LOCALAPPDATA%\hermes and reports "No
     // inference provider configured" despite a valid configured home (#45471).
     // Consult the live User-scoped registry value before the default below.
-    const fromRegistry = readWindowsUserEnvVar('HADES_HOME')
+    const fromRegistry = readWindowsUserEnvVar('HERMES_HOME')
 
     if (fromRegistry) {
       return normalizeHermesHomeRoot(fromRegistry)
@@ -454,11 +487,11 @@ function resolveHermesHome() {
   }
 
   if (IS_WINDOWS && process.env.LOCALAPPDATA) {
-    const localappdata = path.join(process.env.LOCALAPPDATA, 'hades')
-    const legacy = path.join(app.getPath('home'), '.hades')
+    const localappdata = path.join(process.env.LOCALAPPDATA, 'hermes')
+    const legacy = path.join(app.getPath('home'), '.hermes')
 
     // Migrate transparently to LOCALAPPDATA, but honour an existing legacy
-    // ~/.hades setup (no LOCALAPPDATA install yet) so users don't lose state.
+    // ~/.hermes setup (no LOCALAPPDATA install yet) so users don't lose state.
     if (!directoryExists(localappdata) && directoryExists(legacy)) {
       return legacy
     }
@@ -466,16 +499,16 @@ function resolveHermesHome() {
     return localappdata
   }
 
-  return path.join(app.getPath('home'), '.hades')
+  return path.join(app.getPath('home'), '.hermes')
 }
 
-const HADES_HOME = resolveHermesHome()
+const HERMES_HOME = resolveHermesHome()
 
 function hermesManagedNodePathEntries() {
   // NOTE: keep this ordering in sync with iter_hermes_node_dirs() in
   // hermes_constants.py — this Node main process cannot import the Python
   // module, so the platform-ordering rule is mirrored here.
-  const root = path.join(HADES_HOME, 'node')
+  const root = path.join(HERMES_HOME, 'node')
   const bin = path.join(root, 'bin')
   const entries = IS_WINDOWS ? [root, bin] : [bin, root]
 
@@ -489,7 +522,7 @@ function pathWithHermesManagedNode(...entries) {
 // ACTIVE_HERMES_ROOT — the canonical mutable Hermes install. Same path
 // install.ps1 / install.sh use, so a desktop-only user and a CLI-only user end
 // up with identical layouts and can share one install.
-const ACTIVE_HERMES_ROOT = path.join(HADES_HOME, 'hermes-agent')
+const ACTIVE_HERMES_ROOT = path.join(HERMES_HOME, 'hermes-agent')
 // VENV_ROOT — venv lives inside the repo, exactly like install.ps1 does it.
 const VENV_ROOT = path.join(ACTIVE_HERMES_ROOT, 'venv')
 // BOOTSTRAP_COMPLETE_MARKER — written by the first-launch bootstrap runner
@@ -507,26 +540,27 @@ const BOOTSTRAP_COMPLETE_MARKER = path.join(ACTIVE_HERMES_ROOT, '.hermes-bootstr
 const BOOTSTRAP_MARKER_SCHEMA_VERSION = 1
 
 const DESKTOP_CONNECTION_CONFIG_PATH = path.join(app.getPath('userData'), 'connection.json')
+const DESKTOP_INSTALLATION_PATH = path.join(app.getPath('userData'), 'desktop-installation.json')
 const DESKTOP_UPDATE_CONFIG_PATH = path.join(app.getPath('userData'), 'updates.json')
 const DESKTOP_WINDOW_STATE_PATH = path.join(app.getPath('userData'), 'window-state.json')
 // active-profile.json records which Hermes profile the desktop launches its
 // local backend as. When set, startHermes() passes `hermes --profile <name>
-// dashboard …`, which deterministically pins HADES_HOME (see
-// _apply_profile_override in hades_cli/main.py) and bypasses the sticky
-// ~/.hades/active_profile file. Unset (null) preserves the legacy behavior:
+// dashboard …`, which deterministically pins HERMES_HOME (see
+// _apply_profile_override in hermes_cli/main.py) and bypasses the sticky
+// ~/.hermes/active_profile file. Unset (null) preserves the legacy behavior:
 // no --profile flag, so the backend honors active_profile / default.
 const DESKTOP_PROFILE_CONFIG_PATH = path.join(app.getPath('userData'), 'active-profile.json')
-// Mirrors hades_cli.profiles._PROFILE_ID_RE so we never hand the backend a
+// Mirrors hermes_cli.profiles._PROFILE_ID_RE so we never hand the backend a
 // value its profile resolver would reject and exit on.
 const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 // Branch we track for self-update. The GUI work has merged to main, so this
 // tracks main. User can also override at runtime via
 // hermesDesktop.updates.setBranch().
 const DEFAULT_UPDATE_BRANCH = 'main'
-// desktop.log lives under HADES_HOME/logs/ so it sits next to agent.log,
+// desktop.log lives under HERMES_HOME/logs/ so it sits next to agent.log,
 // errors.log, gateway.log produced by hermes_logging.setup_logging — one log
 // directory per user, regardless of which UI surface produced the line.
-const DESKTOP_LOG_PATH = path.join(HADES_HOME, 'logs', 'desktop.log')
+const DESKTOP_LOG_PATH = path.join(HERMES_HOME, 'logs', 'desktop.log')
 const DESKTOP_LOG_FLUSH_MS = 120
 const DESKTOP_LOG_BUFFER_MAX_CHARS = 64 * 1024
 // Bound desktop.log on disk. It is an append-only forensic log, so a boot loop
@@ -561,7 +595,7 @@ const BOOT_FAKE_STEP_MS = (() => {
   return Math.max(120, raw)
 })()
 
-const APP_NAME = process.env.HERMES_DESKTOP_APP_NAME || 'Hades'
+const APP_NAME = process.env.HERMES_DESKTOP_APP_NAME || 'Hermes'
 const TITLEBAR_HEIGHT = 34
 const MACOS_TRAFFIC_LIGHTS_HEIGHT = 14
 
@@ -1478,7 +1512,7 @@ function directoryExists(filePath) {
 }
 
 // --- in-app update mutual exclusion (#50238) -------------------------------
-// The Tauri updater writes HADES_HOME/.hades-update-in-progress for the whole
+// The Tauri updater writes HERMES_HOME/.hermes-update-in-progress for the whole
 // duration of an `--update` run (see update.rs UpdateMarkerGuard). If the user
 // relaunches the desktop mid-update — because the window vanished with no
 // progress and looks crashed — a fresh instance must NOT spawn its own local
@@ -1508,7 +1542,7 @@ const UPDATE_HANDOFF_DWELL_MS = 2500
 // Emits a boot-progress phase so the renderer shows "Update in progress…"
 // rather than a frozen splash. Returns true if it parked at all.
 async function waitForUpdateToFinish() {
-  let marker = readLiveUpdateMarker(HADES_HOME)
+  let marker = readLiveUpdateMarker(HERMES_HOME)
 
   if (!marker) {
     return false
@@ -1524,7 +1558,7 @@ async function waitForUpdateToFinish() {
       12
     )
     await new Promise(r => setTimeout(r, UPDATE_WAIT_POLL_MS))
-    marker = readLiveUpdateMarker(HADES_HOME)
+    marker = readLiveUpdateMarker(HERMES_HOME)
   }
 
   if (marker) {
@@ -1596,7 +1630,7 @@ function unwrapWindowsVenvHermesCommand(command, backendArgs) {
     getVenvPython,
     getVenvSitePackagesEntries,
     buildDesktopBackendEnv,
-    hermesHome: HADES_HOME,
+    hermesHome: HERMES_HOME,
     resolvePath: (...segments) => path.resolve(...segments),
     dirname: p => path.dirname(p),
     basename: p => path.basename(p),
@@ -1631,7 +1665,7 @@ function backendSupportsServe(backend) {
 
   if (backend.root) {
     try {
-      const src = fs.readFileSync(path.join(backend.root, 'hades_cli', 'subcommands', 'dashboard.py'), 'utf8')
+      const src = fs.readFileSync(path.join(backend.root, 'hermes_cli', 'subcommands', 'dashboard.py'), 'utf8')
       supported = sourceDeclaresServe(src)
     } catch {
       supported = null // source unreadable — fall through to the probe
@@ -1643,7 +1677,7 @@ function backendSupportsServe(backend) {
       const prefix = backend.args && backend.args[0] === '-m' ? backend.args.slice(0, 2) : []
       execFileSync(backend.command, [...prefix, 'serve', '--help'], {
         cwd: backend.root || undefined,
-        env: { ...process.env, HADES_HOME, ...(backend.env || {}) },
+        env: { ...process.env, HERMES_HOME, ...(backend.env || {}) },
         timeout: 15000,
         stdio: 'ignore',
         windowsHide: true
@@ -1713,7 +1747,7 @@ function looksLikeDesktopAppBinary(commandPath) {
 }
 
 function isHermesSourceRoot(root) {
-  return directoryExists(root) && fileExists(path.join(root, 'hades_cli', 'main.py'))
+  return directoryExists(root) && fileExists(path.join(root, 'hermes_cli', 'main.py'))
 }
 
 function findPythonForRoot(root) {
@@ -1881,7 +1915,7 @@ function findSystemPython() {
   return null
 }
 
-// findGitBash — locate bash.exe on Windows. Hades' terminal tool requires
+// findGitBash — locate bash.exe on Windows. Hermes' terminal tool requires
 // bash (POSIX shell), and on Windows that's almost always Git for Windows'
 // bundled Git Bash. We check the same set of locations tools/environments/
 // local.py:_find_bash() checks at runtime, so a positive result here means
@@ -2351,7 +2385,7 @@ let updateInFlight = false
 let isQuittingForHandoff = false
 
 // Resolve the staged updater binary. The Tauri installer copies itself to
-// HADES_HOME/hermes-setup.exe on a successful install (see
+// HERMES_HOME/hermes-setup.exe on a successful install (see
 // apps/bootstrap-installer paths::copy_self_to_hermes_home). That binary owns
 // ALL repo mutation — running `hermes update` + rebuilding the desktop — so
 // the desktop never touches its own bits while running. Returns null when the
@@ -2359,7 +2393,7 @@ let isQuittingForHandoff = false
 // installer); callers degrade gracefully.
 function resolveUpdaterBinary() {
   const name = IS_WINDOWS ? 'hermes-setup.exe' : 'hermes-setup'
-  const candidate = path.join(HADES_HOME, name)
+  const candidate = path.join(HERMES_HOME, name)
 
   return fileExists(candidate) ? candidate : null
 }
@@ -2601,7 +2635,7 @@ async function applyUpdates(opts = {}) {
     if (!updater) {
       // No staged updater binary — this is a CLI-installed user (they ran
       // `hermes desktop`, never the Tauri installer that self-copies
-      // hermes-setup.exe into HADES_HOME). They DO have a working `hermes`
+      // hermes-setup.exe into HERMES_HOME). They DO have a working `hermes`
       // on PATH / in the venv, so the correct path is the one-liner in their
       // native medium. We show the EXACT command, branch-pinned to the
       // checkout they're on — bare `hermes update` defaults to main and would
@@ -2665,7 +2699,7 @@ async function applyUpdates(opts = {}) {
       // user close the holder and retry. Restart our own backend so the app
       // keeps working after the failed attempt.
       const message =
-        'Update aborted: another process is holding the Hades install open ' +
+        'Update aborted: another process is holding the Hermes install open ' +
         '(a second Hermes window or a terminal running hermes?). Close it and retry.'
 
       emitUpdateProgress({ stage: 'error', message, percent: null })
@@ -2677,10 +2711,10 @@ async function applyUpdates(opts = {}) {
     // Detached so the updater outlives this process — it needs us GONE before
     // `hermes update` will run (the venv shim is locked while we live).
     const child = spawnUpdaterProcess(updater, updaterArgs, {
-      cwd: HADES_HOME,
+      cwd: HERMES_HOME,
       env: {
         ...process.env,
-        HADES_HOME,
+        HERMES_HOME,
         PATH: pathWithHermesManagedNode(venvBin)
       },
       detached: true,
@@ -2695,7 +2729,7 @@ async function applyUpdates(opts = {}) {
     // waitForUpdateToFinish() gate sees a live update and parks instead.
     // The updater overwrites this with its own PID later; same format.
     if (Number.isInteger(child.pid)) {
-      writeUpdateMarker(HADES_HOME, child.pid)
+      writeUpdateMarker(HERMES_HOME, child.pid)
     }
 
     rememberLog(`[updates] launched updater: ${updater} ${updaterArgs.join(' ')}; exiting desktop to release venv shim`)
@@ -2752,10 +2786,10 @@ async function handOffWindowsBootstrapRecovery(reason) {
   await releaseBackendLockForUpdate(updateRoot)
 
   const child = spawnUpdaterProcess(updater, updaterArgs, {
-    cwd: HADES_HOME,
+    cwd: HERMES_HOME,
     env: {
       ...process.env,
-      HADES_HOME,
+      HERMES_HOME,
       PATH: pathWithHermesManagedNode(venvBin)
     },
     detached: true,
@@ -2766,7 +2800,7 @@ async function handOffWindowsBootstrapRecovery(reason) {
   // hand-off has the same window where the renderer can respawn a backend
   // before the updater writes its own marker.
   if (Number.isInteger(child.pid)) {
-    writeUpdateMarker(HADES_HOME, child.pid)
+    writeUpdateMarker(HERMES_HOME, child.pid)
   }
 
   rememberLog(
@@ -2867,7 +2901,7 @@ async function applyUpdatesPosixInApp(opts: any) {
     return { ok: true, manual: true, command: 'hermes update', hermesRoot: updateRoot }
   }
 
-  // Put the Hades-managed Node and the venv on PATH so `hermes desktop`'s
+  // Put the Hermes-managed Node and the venv on PATH so `hermes desktop`'s
   // npm build can find them on a machine with no system Node. Windows portable
   // Node lives directly under %LOCALAPPDATA%\hermes\node, not node\bin.
   // PYTHONUNBUFFERED: `hermes update` writes to a pipe here, so CPython
@@ -2875,7 +2909,7 @@ async function applyUpdatesPosixInApp(opts: any) {
   // multi-GB archives for minutes) stream nothing to the progress UI — users
   // read the silence as a hang and cancel a healthy update.
   const env: Record<string, string> = {
-    HADES_HOME,
+    HERMES_HOME,
     PYTHONUNBUFFERED: '1',
     PATH: pathWithHermesManagedNode(path.join(updateRoot, 'venv', 'bin'))
   }
@@ -3048,7 +3082,7 @@ async function applyUpdatesPosixInApp(opts: any) {
         stage: 'guiSkew',
         message:
           'Backend updated, but the desktop app package was not changed. ' +
-          'Update or reinstall the Hades desktop app to match.',
+          'Update or reinstall the Hermes desktop app to match.',
         percent: 100
       })
       rememberLog(
@@ -3413,9 +3447,9 @@ function createPythonBackend(root, label, backendArgs, options: any = {}) {
     kind: 'python',
     label,
     command,
-    args: ['-m', 'hades_cli.main', ...backendArgs],
+    args: ['-m', 'hermes_cli.main', ...backendArgs],
     env: buildDesktopBackendEnv({
-      hermesHome: HADES_HOME,
+      hermesHome: HERMES_HOME,
       pythonPathEntries: [root, ...getVenvSitePackagesEntries(venvRoot)],
       venvRoot
     }),
@@ -3437,9 +3471,9 @@ function createActiveBackend(backendArgs) {
     kind: 'python',
     label: `Hermes at ${ACTIVE_HERMES_ROOT}`,
     command,
-    args: ['-m', 'hades_cli.main', ...backendArgs],
+    args: ['-m', 'hermes_cli.main', ...backendArgs],
     env: buildDesktopBackendEnv({
-      hermesHome: HADES_HOME,
+      hermesHome: HERMES_HOME,
       pythonPathEntries: [ACTIVE_HERMES_ROOT, ...getVenvSitePackagesEntries(VENV_ROOT)],
       venvRoot: VENV_ROOT
     }),
@@ -3475,7 +3509,7 @@ function resolveHermesBackend(backendArgs) {
   }
 
   // 3. Bootstrap-complete ACTIVE_HERMES_ROOT -- the canonical install at
-  //    %LOCALAPPDATA%\hermes\hermes-agent (Windows) or ~/.hades/hermes-agent.
+  //    %LOCALAPPDATA%\hermes\hermes-agent (Windows) or ~/.hermes/hermes-agent.
   //    The bootstrap marker means install.ps1 stages finished and the user
   //    completed initial configuration; we trust the install and go straight
   //    to spawning hermes. Updates flow through the in-app update path
@@ -3509,7 +3543,7 @@ function resolveHermesBackend(backendArgs) {
 
     if (hermesCommand) {
       if (looksLikeDesktopAppBinary(hermesCommand)) {
-        rememberLog(`Ignoring desktop app executable on PATH while resolving Hades CLI: ${hermesCommand}`)
+        rememberLog(`Ignoring desktop app executable on PATH while resolving Hermes CLI: ${hermesCommand}`)
         hermesCommand = null
       }
     }
@@ -3533,7 +3567,7 @@ function resolveHermesBackend(backendArgs) {
       if (verifyHermesCli(hermesCommand, { shell: shellForProbe })) {
         return (
           unwrapWindowsVenvHermesCommand(hermesCommand, backendArgs) || {
-            label: `existing Hades CLI at ${hermesCommand}`,
+            label: `existing Hermes CLI at ${hermesCommand}`,
             command: hermesCommand,
             args: backendArgs,
             bootstrap: false,
@@ -3545,12 +3579,12 @@ function resolveHermesBackend(backendArgs) {
       }
 
       rememberLog(
-        `Ignoring existing Hades CLI at ${hermesCommand}: --version probe failed; falling through to bootstrap.`
+        `Ignoring existing Hermes CLI at ${hermesCommand}: --version probe failed; falling through to bootstrap.`
       )
     }
   }
 
-  // 5. Last-ditch: pip-installed hades_cli module via system Python.
+  // 5. Last-ditch: pip-installed hermes_cli module via system Python.
   //    Same rationale as #4 -- the user installed this; we use it but don't
   //    take ownership.
   const python = findSystemPython()
@@ -3558,7 +3592,7 @@ function resolveHermesBackend(backendArgs) {
   if (python) {
     // Same smoke-test rationale as step 4: a system Python in the
     // SUPPORTED_VERSIONS range can be registered (PEP 514) without
-    // having hades_cli installed -- common on dev boxes that have
+    // having hermes_cli installed -- common on dev boxes that have
     // a python.org install from prior unrelated work. Returning that
     // backend hands the spawn step a guaranteed ModuleNotFoundError.
     // Verify the import works before trusting the candidate; on
@@ -3567,16 +3601,16 @@ function resolveHermesBackend(backendArgs) {
     if (canImportHermesCli(python)) {
       return {
         kind: 'python',
-        label: `installed hades_cli module via ${python}`,
+        label: `installed hermes_cli module via ${python}`,
         command: python,
-        args: ['-m', 'hades_cli.main', ...backendArgs],
+        args: ['-m', 'hermes_cli.main', ...backendArgs],
         bootstrap: false,
         env: {},
         shell: false
       }
     }
 
-    rememberLog(`Ignoring system Python ${python}: hades_cli is not importable; falling through to bootstrap.`)
+    rememberLog(`Ignoring system Python ${python}: hermes_cli is not importable; falling through to bootstrap.`)
   }
 
   // 6. Nothing usable yet -- signal the bootstrap runner that we need to
@@ -3591,7 +3625,7 @@ function resolveHermesBackend(backendArgs) {
   //    is a recoverable state the GUI can drive through.
   return {
     kind: 'bootstrap-needed',
-    label: 'Hades Agent not installed yet; bootstrap required',
+    label: 'Hermes Agent not installed yet; bootstrap required',
     command: null,
     args: backendArgs,
     bootstrap: true,
@@ -3626,7 +3660,7 @@ async function ensureRuntime(backend) {
 
     if (await handOffWindowsBootstrapRecovery('bootstrap-needed')) {
       const handoffError: Error & { isBootstrapFailure?: boolean; bootstrapHandedOff?: boolean } = new Error(
-        'Hermes recovery was handed off to Hades Setup. The desktop will restart when recovery completes.'
+        'Hermes recovery was handed off to Hermes Setup. The desktop will restart when recovery completes.'
       )
 
       handoffError.isBootstrapFailure = true
@@ -3657,8 +3691,8 @@ async function ensureRuntime(backend) {
       installStamp: backend.installStamp,
       activeRoot: backend.activeRoot,
       sourceRepoRoot: SOURCE_REPO_ROOT,
-      hermesHome: HADES_HOME,
-      logRoot: path.join(HADES_HOME, 'logs'),
+      hermesHome: HERMES_HOME,
+      logRoot: path.join(HERMES_HOME, 'logs'),
       abortSignal: bootstrapAbortController.signal,
       onEvent: ev => {
         // Tee every bootstrap event to (a) the desktop log for forensics
@@ -3694,7 +3728,7 @@ async function ensureRuntime(backend) {
       const bootstrapError = new Error(
         `Hermes bootstrap failed${bootstrapResult.failedStage ? ` at stage '${bootstrapResult.failedStage}'` : ''}: ` +
           `${bootstrapResult.error || 'unknown error'}. ` +
-          `Check ${path.join(HADES_HOME, 'logs', 'desktop.log')} for the full transcript.`
+          `Check ${path.join(HERMES_HOME, 'logs', 'desktop.log')} for the full transcript.`
       ) as any
 
       bootstrapError.isBootstrapFailure = true
@@ -3726,7 +3760,7 @@ async function ensureRuntime(backend) {
     )
   }
 
-  // On Windows, preflight Git Bash. Hades' terminal tool calls bash.exe
+  // On Windows, preflight Git Bash. Hermes' terminal tool calls bash.exe
   // directly (tools/environments/local.py); without it the agent can't run
   // terminal commands. install.ps1's Stage-Git puts PortableGit at
   // %LOCALAPPDATA%\hermes\git\, which findGitBash() picks up, so for any
@@ -3734,7 +3768,7 @@ async function ensureRuntime(backend) {
   // here via an external `hermes` on PATH, this check still helps.
   if (IS_WINDOWS && !findGitBash()) {
     throw new Error(
-      'Git for Windows is required for Hades on Windows (provides Git Bash, ' +
+      'Git for Windows is required for Hermes on Windows (provides Git Bash, ' +
         "which the agent's terminal tool uses). Install it from " +
         'https://git-scm.com/download/win or run `winget install -e --id Git.Git`, ' +
         'then relaunch Hermes.'
@@ -3760,7 +3794,7 @@ async function ensureRuntime(backend) {
   backend.label = `Hermes at ${ACTIVE_HERMES_ROOT} (venv: ${VENV_ROOT})`
   updateBootProgress({
     phase: 'runtime.ready',
-    message: 'Hades runtime is ready',
+    message: 'Hermes runtime is ready',
     progress: 82,
     running: true,
     error: null
@@ -3803,7 +3837,7 @@ function fetchJson(url, token, options: any = {}) {
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hades backend URL protocol: ${parsed.protocol}`))
+      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
 
       return
     }
@@ -3815,6 +3849,12 @@ function fetchJson(url, token, options: any = {}) {
         headers: {
           'Content-Type': contentType,
           'X-Hermes-Session-Token': token,
+          // RFC 8252 native flow authenticates the gated gateway with a bearer
+          // token instead of the loopback session-token header. When
+          // ``options.bearer`` is set we send Authorization: Bearer <token>;
+          // the gateway's OAuth gate verifies it via the provider stack with
+          // no cookie involved.
+          ...(options.bearer ? { Authorization: `Bearer ${options.bearer}` } : {}),
           ...(body ? { 'Content-Length': String(body.length) } : {})
         }
       },
@@ -3848,7 +3888,7 @@ function fetchJson(url, token, options: any = {}) {
             reject(
               new Error(
                 `Expected JSON from ${url} but got HTML (status ${res.statusCode}). ` +
-                  'The endpoint is likely missing on the Hades backend.'
+                  'The endpoint is likely missing on the Hermes backend.'
               )
             )
 
@@ -3866,7 +3906,7 @@ function fetchJson(url, token, options: any = {}) {
 
     req.on('error', reject)
     req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Timed out connecting to Hades backend after ${timeoutMs}ms`))
+      req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
     })
 
     if (body) {
@@ -3899,7 +3939,7 @@ function fetchPublicJson(url, options: any = {}) {
     const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hades backend URL protocol: ${parsed.protocol}`))
+      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
 
       return
     }
@@ -3938,7 +3978,7 @@ function fetchPublicJson(url, options: any = {}) {
             reject(
               new Error(
                 `Expected JSON from ${url} but got HTML (status ${res.statusCode}). ` +
-                  'The endpoint is likely missing on the Hades backend.'
+                  'The endpoint is likely missing on the Hermes backend.'
               )
             )
 
@@ -3956,7 +3996,7 @@ function fetchPublicJson(url, options: any = {}) {
 
     req.on('error', reject)
     req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error(`Timed out connecting to Hades backend after ${timeoutMs}ms`))
+      req.destroy(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
     })
 
     if (body) {
@@ -4590,22 +4630,40 @@ function closePreviewWatchers() {
   }
 }
 
-async function waitForHermes(baseUrl, token) {
+async function waitForHermes(baseUrl, token, signal?) {
   const deadline = Date.now() + 45_000
   let lastError = null
 
   while (Date.now() < deadline) {
+    if (signal?.aborted) {
+      const error: any = new Error('SSH bootstrap was superseded by newer connection settings.')
+      error.kind = 'superseded'
+      throw error
+    }
+
     try {
       await fetchJson(`${baseUrl}/api/status`, token)
 
       return
     } catch (error) {
       lastError = error
-      await new Promise(resolve => setTimeout(resolve, 500))
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 500)
+        signal?.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer)
+            const aborted: any = new Error('SSH bootstrap was superseded by newer connection settings.')
+            aborted.kind = 'superseded'
+            reject(aborted)
+          },
+          { once: true }
+        )
+      })
     }
   }
 
-  throw new Error(`Hades backend did not become ready: ${lastError?.message || 'timeout'}`)
+  throw new Error(`Hermes backend did not become ready: ${lastError?.message || 'timeout'}`)
 }
 
 function getWindowButtonPosition() {
@@ -4936,7 +4994,9 @@ function setAndPersistZoomLevel(window, zoomLevel) {
   // downgrade or JSON read failure still finds a sane value).
   window.webContents
     .executeJavaScript(
-      `try { localStorage.setItem(${JSON.stringify(ZOOM_STORAGE_KEY)}, ${JSON.stringify(String(next))}) } catch {}`
+      `try { localStorage.setItem(${JSON.stringify(ZOOM_STORAGE_KEY)}, ${JSON.stringify(String(next))}) } catch {
+      void 0
+    }`
     )
     .catch(error => rememberLog(`[zoom] persist failed: ${error?.message || error}`))
 }
@@ -5466,7 +5526,7 @@ function openOauthLoginWindow(baseUrl, { silent = false } = {}) {
       win = new BrowserWindow({
         width: 520,
         height: 720,
-        title: silent ? 'Connecting to Hades Cloud agent…' : 'Sign in to Hades gateway',
+        title: silent ? 'Connecting to Hermes Cloud agent…' : 'Sign in to Hermes gateway',
         autoHideMenuBar: true,
         // Silent cascade: start HIDDEN. The auto-SSO 302 chain completes in
         // well under a second, so the window normally never needs to show. We
@@ -5557,7 +5617,7 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
     }
 
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hades backend URL protocol: ${parsed.protocol}`))
+      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
 
       return
     }
@@ -5586,7 +5646,7 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
         // already finished
       }
 
-      reject(new Error(`Timed out connecting to Hades backend after ${timeoutMs}ms`))
+      reject(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
     }, timeoutMs)
 
     request.on('response', res => {
@@ -5648,10 +5708,188 @@ function fetchJsonViaOauthSession(url, options: any = {}) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// RFC 8252 native-app tokens (system-browser + loopback + PKCE).
+//
+// Unlike the cookie flow, the native flow hands the desktop opaque bearer
+// tokens it holds itself: the access token authenticates REST via
+// ``Authorization: Bearer`` (which the gateway gate now accepts) and mints WS
+// tickets the same way, so NO browser session cookie or embedded webview is
+// involved. Tokens are persisted encrypted at rest via Electron ``safeStorage``
+// (OS keychain) keyed by gateway base URL, and refreshed via
+// ``/auth/native/refresh`` before expiry. This is the desktop half of the
+// feature; the server half lives in hermes_cli/dashboard_auth/native_flow.py.
+// ---------------------------------------------------------------------------
+
+// In-memory cache of decrypted native tokens, keyed by normalized base URL.
+// Backed by the encrypted on-disk store so it survives restarts.
+const _nativeTokens = new Map<string, NativeTokenSet>()
+
+function _nativeTokenStorePath() {
+  // Co-located with the connection config under userData; one JSON file mapping
+  // baseUrl → { encoding, value } safeStorage payloads.
+  return path.join(app.getPath('userData'), 'native-oauth-tokens.json')
+}
+
+function _readNativeTokenStore(): Record<string, any> {
+  try {
+    const raw = fs.readFileSync(_nativeTokenStorePath(), 'utf8')
+    const parsed = JSON.parse(raw)
+
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function _persistNativeTokens(baseUrl: string, tokens: NativeTokenSet | null) {
+  const store = _readNativeTokenStore()
+
+  if (tokens) {
+    // Encrypt the whole token set as one blob so the refresh token never
+    // lands in plaintext on disk. Reuse the hardened encrypt helper.
+    const secret = encryptDesktopSecret(JSON.stringify(tokens))
+    store[baseUrl] = secret
+  } else {
+    delete store[baseUrl]
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(_nativeTokenStorePath()), { recursive: true })
+    fs.writeFileSync(_nativeTokenStorePath(), JSON.stringify(store), { mode: 0o600 })
+  } catch (error) {
+    rememberLog(`[native-oauth] failed to persist tokens: ${(error as Error).message}`)
+  }
+}
+
+function _loadNativeTokens(baseUrl: string): NativeTokenSet | null {
+  const cached = _nativeTokens.get(baseUrl)
+
+  if (cached) {
+    return cached
+  }
+
+  const store = _readNativeTokenStore()
+  const secret = store[baseUrl]
+
+  if (!secret) {
+    return null
+  }
+
+  try {
+    const plaintext = decryptDesktopSecret(secret)
+
+    if (!plaintext) {
+      return null
+    }
+
+    const tokens = parseTokenResponse(JSON.parse(plaintext))
+    _nativeTokens.set(baseUrl, tokens)
+
+    return tokens
+  } catch {
+    return null
+  }
+}
+
+function _storeNativeTokens(baseUrl: string, tokens: NativeTokenSet) {
+  _nativeTokens.set(baseUrl, tokens)
+  _persistNativeTokens(baseUrl, tokens)
+}
+
+function _clearNativeTokens(baseUrl: string) {
+  _nativeTokens.delete(baseUrl)
+  _persistNativeTokens(baseUrl, null)
+}
+
+// True when we hold native bearer tokens for this gateway (the native-flow
+// analogue of hasLiveOauthSession's cookie check).
+function hasNativeSession(baseUrl: string): boolean {
+  return _loadNativeTokens(baseUrl) !== null
+}
+
+// POST JSON WITHOUT the OAuth cookie partition — used for the native token +
+// refresh exchanges, which are cookieless by design. Thin wrapper over
+// fetchJson (no token) so it shares timeout/JSON handling.
+function postJsonNoAuth(url: string, body: unknown, opts: any = {}) {
+  // resolveJsonBody passes the object through UNCHANGED — fetchJson owns
+  // JSON.stringify. Pre-stringifying here double-encodes the body (a JSON
+  // string inside a JSON string), which the gateway's Pydantic model rejects
+  // with a 422 "Input should be a valid dictionary" (the native
+  // /auth/native/token + /auth/native/refresh legs both go through here).
+  return fetchJson(url, null, { method: 'POST', body: resolveJsonBody(body), ...opts })
+}
+
+// Return a valid native access token for baseUrl, refreshing via
+// /auth/native/refresh if the stored one is at/near expiry. Returns null when
+// there are no tokens or the refresh is terminally rejected (caller re-logins).
+async function ensureNativeAccessToken(baseUrl: string): Promise<string | null> {
+  const tokens = _loadNativeTokens(baseUrl)
+
+  if (!tokens) {
+    return null
+  }
+
+  if (!tokenNeedsRefresh(tokens, Math.floor(Date.now() / 1000))) {
+    return tokens.accessToken
+  }
+
+  if (!tokens.refreshToken) {
+    // Access token expired and no RT to rotate — force re-login.
+    _clearNativeTokens(baseUrl)
+
+    return null
+  }
+
+  try {
+    const body = await postJsonNoAuth(
+      nativeRefreshUrl(baseUrl),
+      { refresh_token: tokens.refreshToken, provider: tokens.provider },
+      { timeoutMs: 10_000 }
+    )
+
+    const rotated = parseTokenResponse(body)
+    _storeNativeTokens(baseUrl, rotated)
+
+    return rotated.accessToken
+  } catch (error: any) {
+    // A 401 means the RT is dead (session_expired) — drop tokens so the UI
+    // prompts a fresh native login. A 503/transient keeps them for a retry.
+    if (error && error.statusCode === 401) {
+      _clearNativeTokens(baseUrl)
+
+      return null
+    }
+
+    throw error
+  }
+}
+
 // Mint a single-use WS ticket for a gated gateway. Returns the ticket string.
+// Prefers a native bearer token (cookieless RFC 8252 flow) when present,
+// falling back to the OAuth cookie partition otherwise.
 // Throws (with statusCode 401) if the session cookie is missing/expired —
 // callers treat that as "needs re-login".
 async function mintGatewayWsTicket(baseUrl) {
+  // Native flow: mint the ticket with the bearer token, no cookie involved.
+  const nativeAt = await ensureNativeAccessToken(baseUrl).catch(() => null)
+
+  if (nativeAt) {
+    const body = (await fetchJson(`${baseUrl}/api/auth/ws-ticket`, null, {
+      method: 'POST',
+      timeoutMs: 8_000,
+      bearer: nativeAt
+    })) as any
+
+    const ticket = body?.ticket
+
+    if (!ticket || typeof ticket !== 'string') {
+      throw new Error('Gateway did not return a WS ticket.')
+    }
+
+    return ticket
+  }
+
   const body = (await fetchJsonViaOauthSession(`${baseUrl}/api/auth/ws-ticket`, {
     method: 'POST',
     timeoutMs: 8_000
@@ -5706,7 +5944,7 @@ async function freshGatewayWsUrl(profile) {
 //     its own PKCE exchange; SSO removes the human click, not a security check.
 
 // Canonical Nous portal base URL, overridable for staging/dev. Mirrors the CLI
-// convention (hades_cli/auth.py DEFAULT_NOUS_PORTAL_URL + the same env names)
+// convention (hermes_cli/auth.py DEFAULT_NOUS_PORTAL_URL + the same env names)
 // so a single override flips every Hermes surface to the same portal.
 const DEFAULT_NOUS_PORTAL_URL = 'https://portal.nousresearch.com'
 
@@ -5718,7 +5956,7 @@ function resolvePortalBaseUrl() {
 
 // Whether the OAuth partition currently holds a live Nous portal session — the
 // credential that powers both discovery and the silent cascade. The portal
-// authenticates via PRIVY, not the Hades gateway session cookies, so this
+// authenticates via PRIVY, not the Hermes gateway session cookies, so this
 // checks for the `privy-token` cookie on the portal host (NOT
 // hasLiveOauthSession, which looks for hermes_session_at/rt that the portal
 // never sets). See connection-config.ts cookiesHavePrivySession.
@@ -5757,7 +5995,7 @@ function openPortalLoginWindow() {
 
   return new Promise((resolve, reject) => {
     if (!app.isReady()) {
-      reject(new Error('Desktop is not ready to start a Hades Cloud sign-in.'))
+      reject(new Error('Desktop is not ready to start a Hermes Cloud sign-in.'))
 
       return
     }
@@ -5815,7 +6053,7 @@ function openPortalLoginWindow() {
       win = new BrowserWindow({
         width: 520,
         height: 720,
-        title: 'Sign in to Hades Cloud',
+        title: 'Sign in to Hermes Cloud',
         autoHideMenuBar: true,
         webPreferences: {
           contextIsolation: true,
@@ -5863,7 +6101,7 @@ async function discoverCloudAgents(org?: string) {
 
   if (!(await hasLivePortalSession())) {
     const err = new Error(
-      'You are not signed in to Hades Cloud. Open Settings → Gateway, choose Hermes Cloud, and sign in.'
+      'You are not signed in to Hermes Cloud. Open Settings → Gateway, choose Hermes Cloud, and sign in.'
     ) as any
 
     err.needsCloudLogin = true
@@ -5987,7 +6225,7 @@ async function cloudAgentSilentSignIn(dashboardUrl) {
   // interactive prompt rather than a silent cascade. Discovery already gates on
   // this, but a selection can arrive after the session lapsed.
   if (!(await hasLivePortalSession())) {
-    const err = new Error('Your Hermes Cloud session has expired. Sign in to Hades Cloud again.') as any
+    const err = new Error('Your Hermes Cloud session has expired. Sign in to Hermes Cloud again.') as any
     err.needsCloudLogin = true
     throw err
   }
@@ -6042,14 +6280,37 @@ function sanitizeConnectionProfiles(raw: Record<string, any>) {
       continue
     }
 
+    if (entry.mode === 'ssh') {
+      const ssh = normalizeSshConfig(entry)
+
+      if (ssh) {
+        if (entry.token && typeof entry.token === 'object') {
+          ssh.token = entry.token
+        }
+
+        out[name] = ssh
+      }
+
+      continue
+    }
+
     const cleaned: {
       mode: 'remote' | 'local' | 'cloud'
       url?: string
       authMode?: string
       token?: object
       org?: string
+      savedSsh?: object
     } = {
       mode: modeIsRemoteLike(entry.mode) ? entry.mode : 'local'
+    }
+
+    if (cleaned.mode === 'local') {
+      const savedSsh = normalizeSshConfig(entry.savedSsh)
+
+      if (savedSsh) {
+        cleaned.savedSsh = savedSsh
+      }
     }
 
     const url = String(entry.url || '').trim()
@@ -6064,7 +6325,7 @@ function sanitizeConnectionProfiles(raw: Record<string, any>) {
       cleaned.token = entry.token
     }
 
-    // Preserve the Hades Cloud org tag on cloud-mode entries so Settings can
+    // Preserve the Hermes Cloud org tag on cloud-mode entries so Settings can
     // reopen into the same org for a per-profile cloud connection.
     if (cleaned.mode === 'cloud') {
       const org = String(entry.org || '').trim()
@@ -6109,7 +6370,7 @@ function readDesktopConnectionConfig() {
       // backward compatibility with configs written before OAuth support.
       remote.authMode = remote.authMode === 'oauth' ? 'oauth' : 'token'
       config = {
-        mode: modeIsRemoteLike(parsed.mode) ? parsed.mode : 'local',
+        mode: parsed.mode === 'ssh' ? 'ssh' : modeIsRemoteLike(parsed.mode) ? parsed.mode : 'local',
         remote,
         // Per-profile remote overrides: each profile may point at its own
         // backend (local spawn or its own remote URL). Preserved verbatim so
@@ -6135,7 +6396,7 @@ function writeDesktopConnectionConfig(config) {
 }
 
 // Returns the desktop's chosen profile name, or null when unset. "default" is
-// a valid stored value (pins the root HADES_HOME explicitly); null means "no
+// a valid stored value (pins the root HERMES_HOME explicitly); null means "no
 // preference" and preserves the legacy launch (no --profile flag).
 function readActiveDesktopProfile() {
   try {
@@ -6176,15 +6437,15 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
   const block = key ? scoped || {} : config.remote || {}
 
   const envOverride = key ? false : Boolean(process.env.HERMES_DESKTOP_REMOTE_URL)
+  const savedMode = key ? scoped?.mode : config.mode
+  const ssh = savedMode === 'ssh' ? normalizeSshConfig(block) : null
+
+  const savedSsh = savedMode === 'local' ? (key ? savedProfileSsh(config, key) : normalizeSshConfig(block)) : null
 
   const remoteToken = decryptDesktopSecret(block.token)
   const authMode = normAuthMode(block.authMode)
   const remoteUrl = envOverride ? String(process.env.HERMES_DESKTOP_REMOTE_URL || '') : String(block.url || '')
-  // The env override forces a plain remote connection. Otherwise reflect the
-  // saved mode, preserving 'cloud' (a Hades Cloud connection — Q6) so the UI
-  // reopens into the cloud picker; any non-remote-like value collapses to local.
-  const savedMode = key ? scoped?.mode : config.mode
-  const mode = envOverride ? 'remote' : modeIsRemoteLike(savedMode) ? savedMode : 'local'
+  const mode = envOverride ? 'remote' : savedMode === 'ssh' ? 'ssh' : modeIsRemoteLike(savedMode) ? savedMode : 'local'
 
   let remoteOauthConnected = false
 
@@ -6192,9 +6453,11 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
     try {
       // Display signal: treat a live RT cookie as "connected" even if the AT
       // cookie has lapsed — the gateway refreshes the AT on the next request,
-      // so the session is still usable. The authoritative liveness check is
-      // the ws-ticket mint in resolveRemoteBackend at actual connect time.
-      remoteOauthConnected = await hasLiveOauthSession(remoteUrl)
+      // so the session is still usable. A stored native bearer token (cookieless
+      // RFC 8252 flow) counts as connected too — otherwise a completed native
+      // sign-in shows "not connected" in Settings. The authoritative liveness
+      // check is the ws-ticket mint in resolveRemoteBackend at actual connect time.
+      remoteOauthConnected = oauthSessionIsLive(hasNativeSession(remoteUrl), await hasLiveOauthSession(remoteUrl))
     } catch {
       remoteOauthConnected = false
     }
@@ -6212,6 +6475,11 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
     cloudOrg: mode === 'cloud' ? String(block.org || '') : '',
     remoteTokenPreview: tokenPreview(remoteToken),
     remoteTokenSet: Boolean(remoteToken),
+    sshHost: (ssh || savedSsh)?.host || '',
+    sshUser: (ssh || savedSsh)?.user || '',
+    sshPort: (ssh || savedSsh)?.port || null,
+    sshKeyPath: (ssh || savedSsh)?.keyPath || '',
+    sshRemoteHermesPath: (ssh || savedSsh)?.remoteHermesPath || '',
     // The env override only forces the global/primary connection; a per-profile
     // scope is never overridden by HERMES_DESKTOP_REMOTE_URL.
     envOverride
@@ -6221,7 +6489,7 @@ async function sanitizeDesktopConnectionConfig(config = readDesktopConnectionCon
 // Build + validate a `{ url, authMode, token }` remote block. OAuth gateways
 // authenticate via the login-window session cookie (verified at connect time in
 // resolveRemoteBackend), so only token-auth remotes require a saved token.
-// `org` (optional) is the Hades Cloud org slug/id the instance was discovered
+// `org` (optional) is the Hermes Cloud org slug/id the instance was discovered
 // under — persisted so Settings can reopen into the same org; omitted from the
 // block when empty so plain remote connections stay unchanged.
 function buildRemoteBlock(remoteUrl, authMode, token, org?: string) {
@@ -6250,7 +6518,7 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
   // 'cloud' and 'remote' both persist a remote-shaped block; 'cloud' is
   // remembered as its own provenance (Q6) and resolves to remote downstream.
   // Anything else collapses to local.
-  const mode = modeIsRemoteLike(input.mode) ? input.mode : 'local'
+  const mode = input.mode === 'ssh' ? 'ssh' : modeIsRemoteLike(input.mode) ? input.mode : 'local'
   const remoteLike = modeIsRemoteLike(mode)
 
   // The block being edited: a per-profile entry or the global remote block.
@@ -6263,7 +6531,8 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
   // block. (remote↔local toggles still preserve a real remote URL as before.)
   const existingMode = key ? existing.profiles?.[key]?.mode : existing.mode
   const leavingCloud = existingMode === 'cloud' && mode !== 'cloud'
-  const existingBlock = leavingCloud ? {} : rawExistingBlock
+  const leavingSsh = rawExistingBlock.mode === 'ssh' && mode !== 'ssh' && mode !== 'local'
+  const existingBlock = leavingCloud || leavingSsh ? {} : rawExistingBlock
   const remoteUrl = String(input.remoteUrl ?? existingBlock.url ?? '').trim()
   // authMode: explicit input wins; otherwise inherit the saved value, default 'token'.
   const authMode = resolveAuthMode(input.remoteAuthMode, existingBlock.authMode)
@@ -6279,6 +6548,22 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
       : { encoding: 'plain', value: incomingToken }
     : existingBlock.token
 
+  if (mode === 'ssh') {
+    const sshBlock = buildSshBlock(input, savedProfileSsh(existing, key) || rawExistingBlock)
+
+    if (key) {
+      const profiles = { ...(existing.profiles || {}), [key]: sshBlock }
+
+      return {
+        mode: existing.mode === 'ssh' || modeIsRemoteLike(existing.mode) ? existing.mode : 'local',
+        remote: existing.remote || {},
+        profiles
+      }
+    }
+
+    return { mode: 'ssh', remote: sshBlock, profiles: existing.profiles || {} }
+  }
+
   if (key) {
     // Per-profile scope: a remote/cloud entry pins this profile to its own
     // backend; a local entry clears the override so the profile inherits the
@@ -6288,11 +6573,17 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
     if (remoteLike) {
       profiles[key] = { mode, ...buildRemoteBlock(remoteUrl, authMode, nextToken, cloudOrg) }
     } else {
-      delete profiles[key]
+      const localEntry = localProfileEntry(rawExistingBlock)
+
+      if (localEntry) {
+        profiles[key] = localEntry
+      } else {
+        delete profiles[key]
+      }
     }
 
     return {
-      mode: modeIsRemoteLike(existing.mode) ? existing.mode : 'local',
+      mode: existing.mode === 'ssh' || modeIsRemoteLike(existing.mode) ? existing.mode : 'local',
       remote: existing.remote || {},
       profiles
     }
@@ -6300,10 +6591,41 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
 
   const nextRemote = remoteLike
     ? buildRemoteBlock(remoteUrl, authMode, nextToken, cloudOrg)
-    : { url: remoteUrl ? normalizeRemoteBaseUrl(remoteUrl) : remoteUrl, authMode, token: nextToken }
+    : existingMode === 'ssh'
+      ? rawExistingBlock
+      : { url: remoteUrl ? normalizeRemoteBaseUrl(remoteUrl) : remoteUrl, authMode, token: nextToken }
 
   // Preserve per-profile overrides when saving the global connection.
   return { mode, remote: nextRemote, profiles: existing.profiles || {} }
+}
+
+// Build an SSH connection block from a save payload, preserving an
+// already-adopted dashboard token from the existing block (the token is minted
+// + reconciled at bootstrap, never user-entered). `mode: 'ssh'` is stamped so
+// normalizeSshConfig/profileSshOverride recognize it.
+function buildSshBlock(input: any, existingBlock: any = {}) {
+  // `??` (not `||`) so an explicit '' (user CLEARED the field) wins over the
+  // saved value; only a truly absent (undefined) field inherits.
+  const merged = normalizeSshConfig({
+    mode: 'ssh',
+    host: input.sshHost ?? existingBlock.host,
+    user: input.sshUser ?? existingBlock.user,
+    port: input.sshPort ?? existingBlock.port,
+    keyPath: input.sshKeyPath ?? existingBlock.keyPath,
+    remoteHermesPath: input.sshRemoteHermesPath ?? existingBlock.remoteHermesPath
+  })
+
+  if (!merged) {
+    throw new Error('SSH host is required.')
+  }
+
+  // Carry forward an already-adopted dashboard token unless the host changed
+  // (a different host invalidates the old dashboard's token).
+  if (existingBlock.token && existingBlock.host === merged.host) {
+    merged.token = existingBlock.token
+  }
+
+  return merged
 }
 
 // Build a remote backend connection descriptor from an already-resolved remote
@@ -6311,19 +6633,38 @@ function coerceDesktopConnectionConfig(input: any = {}, existing = readDesktopCo
 // and is shared by the per-profile, env, and global resolution paths. `token`
 // is the DECRYPTED static token (or null in OAuth mode). `source` is a label
 // for diagnostics ('profile' | 'env' | 'settings').
-async function buildRemoteConnection(rawUrl, authMode, token, source) {
+async function buildRemoteConnection(
+  rawUrl,
+  authMode,
+  token,
+  source,
+  remoteHost?,
+  remoteKind = 'url',
+  remoteIdentity?
+) {
   const baseUrl = normalizeRemoteBaseUrl(rawUrl)
+  // For token/oauth remotes the meaningful host is the real backend URL; for
+  // SSH remotes the caller passes the entered/resolved host explicitly (the
+  // baseUrl is a 127.0.0.1 tunnel and would be useless in the pill).
+  const host = remoteHost || hostLabelFromBaseUrl(baseUrl)
 
   if (authMode === 'oauth') {
-    // OAuth gateway: auth comes from the session cookies in the OAuth
-    // partition. Liveness is NOT "is the access-token cookie present?" —
-    // Portal issues a 24h rotating refresh token (hermes #37247), and the
-    // gateway middleware transparently rotates a fresh ~15-min access token
-    // from it on the next authenticated request. So a session with an expired
-    // AT cookie but a live RT cookie is still perfectly connectable. We
-    // early-out only when neither cookie is present, then mint a ws-ticket as
-    // the authoritative liveness check.
-    if (!(await hasLiveOauthSession(baseUrl))) {
+    // OAuth gateway: auth comes from EITHER a native bearer token (cookieless
+    // RFC 8252 flow) OR the session cookies in the OAuth partition. Liveness is
+    // NOT "is the access-token cookie present?" — Portal issues a 24h rotating
+    // refresh token (hermes #37247), and the gateway middleware transparently
+    // rotates a fresh ~15-min access token from it on the next authenticated
+    // request. So a session with an expired AT cookie but a live RT cookie is
+    // still perfectly connectable. We early-out only when NEITHER a native
+    // token NOR any cookie is present, then mint a ws-ticket (which itself
+    // prefers the native bearer) as the authoritative liveness check.
+    //
+    // The native-token check is essential: the native login stores bearer
+    // tokens (no cookie is ever set), so gating solely on hasLiveOauthSession
+    // here would reject a freshly-completed native sign-in and loop the UI back
+    // into "not signed in" even though mintGatewayWsTicket would succeed with
+    // the stored bearer.
+    if (!oauthSessionIsLive(hasNativeSession(baseUrl), await hasLiveOauthSession(baseUrl))) {
       const err = new Error(
         'Remote Hermes gateway uses OAuth, but you are not signed in. ' +
           'Open Settings → Gateway and click "Sign in", or switch back to Local.'
@@ -6350,6 +6691,9 @@ async function buildRemoteConnection(rawUrl, authMode, token, source) {
       mode: 'remote',
       source,
       authMode: 'oauth',
+      remoteHost: host || undefined,
+      remoteIdentity,
+      remoteKind,
       // No static token in OAuth mode; REST is cookie-authed via the partition.
       token: null,
       wsUrl: buildGatewayWsUrlWithTicket(baseUrl, ticket)
@@ -6368,8 +6712,285 @@ async function buildRemoteConnection(rawUrl, authMode, token, source) {
     mode: 'remote',
     source,
     authMode: 'token',
+    remoteHost: host || undefined,
+    remoteIdentity,
+    remoteKind,
     token,
     wsUrl: buildGatewayWsUrl(baseUrl, token)
+  }
+}
+
+const sshConnections = new Map<string, any>()
+const desktopInstallationId = loadOrCreateInstallationId(DESKTOP_INSTALLATION_PATH)
+
+const sshBootstrapCoordinator = createBootstrapCoordinator()
+
+let sshQuitTeardownDone = false
+
+function sshScopeKey(profile) {
+  return connectionScopeKey(profile) || ''
+}
+
+function sshOwnershipKey(profile) {
+  return sshOwnershipId(desktopInstallationId, sshScopeKey(profile))
+}
+
+function sshRememberLog(chunk) {
+  rememberLog(redactSecrets(String(chunk == null ? '' : chunk)))
+}
+
+async function sshProbeReuseProof(baseUrl, token, spawnNonce) {
+  try {
+    const proof: any = await fetchJson(`${baseUrl}/api/ssh/ownership`, token)
+
+    return proof?.ok === true && proof.sshOwnerNonce === spawnNonce && proof.protocolVersion === 1
+      ? 'authenticated-ok'
+      : 'authenticated-stale'
+  } catch (error: any) {
+    if (/^(401|403|404):/.test(String(error?.message || ''))) {
+      return 'authenticated-stale'
+    }
+
+    throw error
+  }
+}
+
+async function teardownSshConnection(profile) {
+  const scope = sshScopeKey(profile)
+  const state = sshConnections.get(scope)
+
+  if (!state) {
+    return
+  }
+
+  sshConnections.delete(scope)
+
+  for (const [id, info] of [...terminalSessions.entries()]) {
+    if (info.sshScope === scope) {
+      disposeTerminalSession(id)
+    }
+  }
+
+  try {
+    if (state.localPort && state.remotePort) {
+      await state.ssh.cancelForward(state.localPort, state.remotePort)
+    }
+  } catch {
+    // best effort
+  }
+
+  try {
+    await state.ssh.close()
+  } catch {
+    // best effort
+  }
+}
+
+// CRITICAL: this must mirror resolveRemoteBackend's precedence, not just return
+// any cached SSH state. A per-profile token/OAuth override wins over a global
+// SSH connection — so if the active profile resolves to a NON-SSH backend, the
+// terminal must NOT fall through to a global SSH host.
+function activeSshTerminalTarget() {
+  const profile = primaryProfileKey()
+  const config = readDesktopConnectionConfig()
+
+  if (profileSshOverride(config, profile)) {
+    const scope = sshScopeKey(profile)
+    const state = sshConnections.get(scope)
+
+    return state && state.ssh ? { ssh: state.ssh, scope } : 'pending'
+  }
+
+  if (profileRemoteOverride(config, profile)) {
+    return null
+  }
+
+  if (process.env.HERMES_DESKTOP_REMOTE_URL) {
+    return null
+  }
+
+  if (config.mode === 'ssh') {
+    const state = sshConnections.get('')
+
+    return state && state.ssh ? { ssh: state.ssh, scope: '' } : 'pending'
+  }
+
+  return null
+}
+
+function effectiveSshConfigFingerprint(sshConfig) {
+  const ssh =
+    process.platform === 'win32'
+      ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe')
+      : 'ssh'
+
+  const args = ['-G']
+
+  if (sshConfig.port) {
+    args.push('-p', String(sshConfig.port))
+  }
+
+  if (sshConfig.keyPath) {
+    args.push('-i', sshConfig.keyPath)
+  }
+
+  args.push('--', sshConfig.user ? `${sshConfig.user}@${sshConfig.host}` : sshConfig.host)
+  const output = execFileSync(ssh, args, { encoding: 'utf8', timeout: 10_000, windowsHide: true })
+
+  return crypto.createHash('sha256').update(output).digest('hex')
+}
+
+async function bootstrapSshConnection(profile, sshConfig, reuseToken, source) {
+  const scope = sshScopeKey(profile)
+  const effectiveConfigFingerprint = effectiveSshConfigFingerprint(sshConfig)
+  const resolvedConfig = { ...sshConfig, effectiveConfigFingerprint }
+  const fingerprint = sshConfigFingerprint(scope, resolvedConfig)
+
+  return sshBootstrapCoordinator.start(scope, fingerprint, lease =>
+    bootstrapSshConnectionInner(profile, resolvedConfig, reuseToken, source, fingerprint, lease)
+  )
+}
+
+async function bootstrapSshConnectionInner(profile, sshConfig, reuseToken, source, fingerprint, lease) {
+  const scope = sshScopeKey(profile)
+  const hostLabel = sshConfig.user ? `${sshConfig.user}@${sshConfig.host}` : sshConfig.host
+  const existing = sshConnections.get(scope)
+
+  if (existing && existing.fingerprint !== fingerprint) {
+    await teardownSshConnection(profile)
+  }
+
+  let ssh = sshConnections.get(scope)?.ssh
+
+  if (ssh && !(await ssh.isAlive())) {
+    try {
+      await ssh.close()
+    } catch {
+      void 0
+    }
+
+    ssh = null
+    sshConnections.delete(scope)
+  }
+
+  const created = !ssh
+
+  let removeForceCleanup = () => {}
+
+  if (created) {
+    ssh = new SshConnection(
+      { host: sshConfig.host, user: sshConfig.user, port: sshConfig.port, keyPath: sshConfig.keyPath },
+      {
+        rememberLog: sshRememberLog,
+        ownershipId: sshOwnershipKey(profile),
+        scope,
+        effectiveConfigFingerprint: sshConfig.effectiveConfigFingerprint
+      }
+    )
+    removeForceCleanup = lease.onForceCleanup(() => ssh.close())
+    await ssh.open()
+  }
+
+  let result
+
+  try {
+    const platform = await detectRemotePlatform(ssh, sshConfig.remoteHermesPath || '')
+    const lifecycle = platform.os === 'Windows' ? connectWindowsRemote : remoteLifecycle.connect
+    result = await lifecycle({
+      ssh,
+      profile: connectionScopeKey(profile) || '',
+      remoteHermesPath: sshConfig.remoteHermesPath || '',
+      ownershipId: sshOwnershipKey(profile),
+      reuseToken: reuseToken || '',
+      forward: (localPort, remotePort) => ssh.forward(localPort, remotePort),
+      cancelForward: (localPort, remotePort) => ssh.cancelForward(localPort, remotePort),
+      pickLocalPort,
+      waitForHermes: (baseUrl, token) => waitForHermes(baseUrl, token, lease.signal),
+      probeReuseProof: sshProbeReuseProof,
+      adoptServedToken: adoptServedDashboardToken,
+      rememberLog: sshRememberLog,
+      signal: lease.signal
+    })
+  } catch (error: any) {
+    if (created) {
+      try {
+        await ssh.close()
+      } catch {
+        void 0
+      }
+    }
+
+    const err = new Error(error.message) as any
+    err.sshError = error.kind || 'unknown'
+    err.isSshBootstrap = true
+    throw err
+  }
+
+  try {
+    lease.assertCurrent()
+  } catch (error) {
+    try {
+      await ssh.cancelForward(result.localPort, result.remotePort)
+      await ssh.close()
+    } catch {
+      void 0
+    }
+
+    throw error
+  }
+
+  persistSshConnectionToken(profile, source, result.token)
+
+  removeForceCleanup()
+  sshConnections.set(scope, {
+    ssh,
+    fingerprint,
+    localPort: result.localPort,
+    remotePort: result.remotePort,
+    pid: result.pid,
+    host: sshConfig.host,
+    hostLabel,
+    hermesVersion: result.hermesVersion || '',
+    remotePlatform: result.platform?.os || '',
+    reused: result.reused
+  })
+
+  sshRememberLog(
+    `[ssh] connection ${result.reused ? 'REUSED' : 'spawned'} dashboard: ` +
+      `${result.hermesVersion || 'hermes (version unknown)'} at ${result.hermesPath || '?'}`
+  )
+
+  const connection = await buildRemoteConnection(
+    result.baseUrl,
+    'token',
+    result.token,
+    source,
+    hostLabel,
+    'ssh',
+    result.ownershipId
+  )
+
+  return { ...connection, remoteHermesVersion: result.hermesVersion || '' }
+}
+
+function persistSshConnectionToken(profile, source, token) {
+  try {
+    const config = readDesktopConnectionConfig()
+    const encrypted = encryptDesktopSecret(token)
+
+    if (source === 'profile') {
+      const key = connectionScopeKey(profile)
+
+      if (key && config.profiles?.[key]?.mode === 'ssh') {
+        config.profiles[key].token = encrypted
+        writeDesktopConnectionConfig(config)
+      }
+    } else if (config.mode === 'ssh' && config.remote) {
+      config.remote.token = encrypted
+      writeDesktopConnectionConfig(config)
+    }
+  } catch (error: any) {
+    sshRememberLog(`[ssh] could not persist served token: ${error.message}`)
   }
 }
 
@@ -6386,12 +7007,27 @@ async function resolveRemoteBackend(profile) {
   // 1. Per-profile override — "a profile with its own remote host". Wins even
   //    over the env override so an explicitly-configured profile always
   //    reaches its intended backend.
+  const sshOverride = profileSshOverride(config, profile)
+
+  if (sshOverride) {
+    const reuseToken = decryptDesktopSecret(config.profiles?.[connectionScopeKey(profile)]?.token)
+
+    return bootstrapSshConnection(profile, sshOverride, reuseToken, 'profile')
+  }
+
   const override = profileRemoteOverride(config, profile)
 
   if (override) {
     const token = override.authMode === 'oauth' ? null : decryptDesktopSecret(override.token)
 
-    return buildRemoteConnection(override.url, override.authMode, token, 'profile')
+    return buildRemoteConnection(
+      override.url,
+      override.authMode,
+      token,
+      'profile',
+      undefined,
+      config.profiles?.[connectionScopeKey(profile)]?.mode === 'cloud' ? 'cloud' : 'url'
+    )
   }
 
   // 2. Env override (global, token-auth only).
@@ -6402,14 +7038,27 @@ async function resolveRemoteBackend(profile) {
     if (!rawEnvToken) {
       throw new Error(
         'HERMES_DESKTOP_REMOTE_URL is set but HERMES_DESKTOP_REMOTE_TOKEN is not. ' +
-          'Both must be provided to connect to a remote Hades backend.'
+          'Both must be provided to connect to a remote Hermes backend.'
       )
     }
 
     return buildRemoteConnection(rawEnvUrl, 'token', rawEnvToken, 'env')
   }
 
-  // 3. Global remote (or cloud — cloud resolves to a remote backend, Q6).
+  // 3. Global remote.
+  if (config.mode === 'ssh') {
+    const ssh = normalizeSshConfig({ mode: 'ssh', ...(config.remote || {}) })
+
+    if (!ssh) {
+      throw new Error('SSH remote mode is selected but no host is configured.')
+    }
+
+    const reuseToken = decryptDesktopSecret(config.remote?.token)
+
+    return bootstrapSshConnection(null, ssh, reuseToken, 'settings')
+  }
+
+  // Cloud resolves through the existing URL/OAuth path.
   if (!modeIsRemoteLike(config.mode)) {
     return null
   }
@@ -6417,7 +7066,14 @@ async function resolveRemoteBackend(profile) {
   const authMode = normAuthMode(config.remote?.authMode)
   const token = authMode === 'oauth' ? null : decryptDesktopSecret(config.remote?.token)
 
-  return buildRemoteConnection(config.remote?.url, authMode, token, 'settings')
+  return buildRemoteConnection(
+    config.remote?.url,
+    authMode,
+    token,
+    'settings',
+    undefined,
+    config.mode === 'cloud' ? 'cloud' : 'url'
+  )
 }
 
 // A remote profile's sessions live on its remote host's state.db, not on a local
@@ -6425,13 +7081,13 @@ async function resolveRemoteBackend(profile) {
 // not the local-disk fast path. These three helpers drive that (see
 // interceptSessionReadForRemote).
 function profileHasRemoteOverride(profile) {
-  return Boolean(profileRemoteOverride(readDesktopConnectionConfig(), profile))
+  return profileHasRemoteConnection(readDesktopConnectionConfig(), profile)
 }
 
 function configuredRemoteProfileNames() {
   const config = readDesktopConnectionConfig()
 
-  return Object.keys(config.profiles || {}).filter(name => profileRemoteOverride(config, name))
+  return Object.keys(config.profiles || {}).filter(name => profileHasRemoteConnection(config, name))
 }
 
 // True when the app is in app-global remote mode (Settings → "All profiles" →
@@ -6443,7 +7099,9 @@ function globalRemoteActive() {
     return true
   }
 
-  return modeIsRemoteLike(readDesktopConnectionConfig().mode)
+  const mode = readDesktopConnectionConfig().mode
+
+  return modeIsRemoteLike(mode) || mode === 'ssh'
 }
 
 // True when the PRIMARY profile's backend resolves to a remote/cloud host —
@@ -6467,7 +7125,19 @@ async function requestJsonForProfile(profile: string, path: string, method: stri
   const url = `${conn.baseUrl}${path}`
   const opts = { method, body, timeoutMs: DEFAULT_FETCH_TIMEOUT_MS }
 
-  return conn.authMode === 'oauth' ? fetchJsonViaOauthSession(url, opts) : fetchJson(url, conn.token, opts)
+  if (conn.authMode === 'oauth') {
+    // Native RFC 8252 flow: authenticate with the bearer token (cookieless)
+    // when we hold one for this gateway; otherwise use the cookie partition.
+    const nativeAt = await ensureNativeAccessToken(conn.baseUrl).catch(() => null)
+
+    if (nativeAt) {
+      return fetchJson(url, null, { ...opts, bearer: nativeAt })
+    }
+
+    return fetchJsonViaOauthSession(url, opts)
+  }
+
+  return fetchJson(url, conn.token, opts)
 }
 
 async function probeRemoteAuthMode(rawUrl) {
@@ -6538,6 +7208,90 @@ async function probeRemoteAuthMode(rawUrl) {
 }
 
 async function testDesktopConnectionConfig(input: any = {}) {
+  if (input.mode === 'ssh') {
+    const sshConfig = normalizeSshConfig({
+      mode: 'ssh',
+      host: input.sshHost,
+      user: input.sshUser,
+      port: input.sshPort,
+      keyPath: input.sshKeyPath,
+      remoteHermesPath: input.sshRemoteHermesPath
+    })
+
+    if (!sshConfig) {
+      return { reachable: false, sshError: 'unreachable', error: 'SSH host is required.' }
+    }
+
+    const ssh = createSshProbeConnection(
+      { host: sshConfig.host, user: sshConfig.user, port: sshConfig.port, keyPath: sshConfig.keyPath },
+      { rememberLog: sshRememberLog }
+    )
+
+    try {
+      // One bounded retry on TIMEOUT only: a cold Windows backend's first
+      // PowerShell exec can exceed the budget (observed live), and a timeout is
+      // indeterminate — unlike auth/host-key/unreachable, which are verdicts.
+      let attempt = 0
+
+      for (;;) {
+        try {
+          await ssh.open()
+          const platform: any = await detectRemotePlatform(ssh, sshConfig.remoteHermesPath || '')
+          let hermesPath
+          let hermesVersion
+          let supported
+
+          if (platform.os === 'Windows') {
+            const runtime = platform
+            hermesPath = runtime.hermesPath
+            const inspection = await helper(ssh, runtime, 'inspect', [runtime.hermesPath])
+            hermesVersion = inspection.version
+            supported = inspection.supported
+          } else {
+            hermesPath = await remoteLifecycle.locateHermes(ssh, sshConfig.remoteHermesPath || '')
+            hermesVersion = await remoteLifecycle.probeHermesVersion(ssh, hermesPath)
+            supported = await remoteLifecycle.remoteSupportsSshOwnership(ssh, hermesPath)
+          }
+
+          if (!supported) {
+            return {
+              reachable: false,
+              sshError: 'update-required',
+              error: 'Update Hermes on the remote host before connecting with Desktop SSH.'
+            }
+          }
+
+          return {
+            reachable: true,
+            sshError: null,
+            error: null,
+            remotePlatform: `${platform.os}/${platform.arch}`,
+            remoteHermesPath: hermesPath,
+            remoteHermesVersion: hermesVersion,
+            host: sshConfig.user ? `${sshConfig.user}@${sshConfig.host}` : sshConfig.host
+          }
+        } catch (error: any) {
+          if (error?.kind === 'timeout' && attempt === 0) {
+            attempt += 1
+            sshRememberLog('[ssh] test probe timed out once; retrying')
+
+            continue
+          }
+
+          throw error
+        }
+      }
+    } catch (error: any) {
+      return { reachable: false, sshError: error.kind || 'unknown', error: error.message }
+    } finally {
+      try {
+        await ssh.close()
+      } catch {
+        void 0
+      }
+    }
+  }
+
   const config = coerceDesktopConnectionConfig(input, readDesktopConnectionConfig(), { persistToken: false })
   const key = connectionScopeKey(input.profile)
   // The block under test: a per-profile entry or the global remote. Coerce has
@@ -6576,7 +7330,7 @@ async function testDesktopConnectionConfig(input: any = {}) {
   // connects — a separate transport with separate server-side guards (Host/
   // Origin, ws-ticket/token auth). Validating only the HTTP side produced a
   // false-positive "reachable" while the real boot still failed with "Could not
-  // connect to Hades gateway". Mirror the renderer's connect here so the test
+  // connect to Hermes gateway". Mirror the renderer's connect here so the test
   // reflects the full path the app actually uses.
   const wsUrl = await resolveTestWsUrl(baseUrl, authMode, token, { mintTicket: mintGatewayWsTicket })
 
@@ -6835,8 +7589,8 @@ async function spawnPoolBackend(profile, entry) {
   }
 
   const token = crypto.randomBytes(32).toString('base64url')
-  // --profile wins over the inherited HADES_HOME env (see _apply_profile_override
-  // step 3 in hades_cli/main.py), so the child re-homes to this profile.
+  // --profile wins over the inherited HERMES_HOME env (see _apply_profile_override
+  // step 3 in hermes_cli/main.py), so the child re-homes to this profile.
   // --port 0: the OS assigns an ephemeral port; the child announces it on stdout.
   const backendArgs = ['--profile', profile, 'serve', '--host', '127.0.0.1', '--port', '0']
   const backend = await ensureRuntime(resolveHermesBackend(backendArgs))
@@ -6846,7 +7600,7 @@ async function spawnPoolBackend(profile, entry) {
   const webDist = resolveWebDist()
   const readyFile = backend.readyFile ? makeDashboardReadyFile() : null
 
-  rememberLog(`Starting Hades backend for profile "${profile}" via ${backend.label}`)
+  rememberLog(`Starting Hermes backend for profile "${profile}" via ${backend.label}`)
 
   const child = spawn(
     backend.command,
@@ -6855,7 +7609,7 @@ async function spawnPoolBackend(profile, entry) {
       cwd: hermesCwd,
       env: {
         ...process.env,
-        HADES_HOME,
+        HERMES_HOME,
         ...backend.env,
         // Pin the gateway's tool/terminal cwd to the same directory we chose for
         // the child process. Inherited TERMINAL_CWD (or a stale config bridge)
@@ -6887,17 +7641,17 @@ async function spawnPoolBackend(profile, entry) {
   })
 
   child.once('error', error => {
-    rememberLog(`Hades backend for profile "${profile}" failed to start: ${error.message}`)
+    rememberLog(`Hermes backend for profile "${profile}" failed to start: ${error.message}`)
     backendPool.delete(profile)
     rejectStart?.(error)
   })
   child.once('exit', (code, signal) => {
-    rememberLog(`Hades backend for profile "${profile}" exited (${signal || code})`)
+    rememberLog(`Hermes backend for profile "${profile}" exited (${signal || code})`)
     backendPool.delete(profile)
 
     if (!ready) {
       rejectStart?.(
-        new Error(`Hades backend for profile "${profile}" exited before it became ready (${signal || code}).`)
+        new Error(`Hermes backend for profile "${profile}" exited before it became ready (${signal || code}).`)
       )
     }
   })
@@ -6917,7 +7671,7 @@ async function spawnPoolBackend(profile, entry) {
 
   const authToken = await adoptServedDashboardToken(baseUrl, token, {
     childAlive: () => child.exitCode === null && !child.killed,
-    label: `Hades backend for profile "${profile}"`,
+    label: `Hermes backend for profile "${profile}"`,
     rememberLog
   })
 
@@ -7019,7 +7773,7 @@ async function startHermes() {
   // E2E: simulate a boot failure without breaking the real backend. The boot
   // progresses a few steps, then fails with the given error message.
   if (BOOT_FAKE_ERROR) {
-    await advanceBootProgress('backend.resolve', 'Resolving Hades backend', 8)
+    await advanceBootProgress('backend.resolve', 'Resolving Hermes backend', 8)
     const error = new Error(BOOT_FAKE_ERROR) as any
     error.isBootstrapFailure = true
     bootstrapFailure = error
@@ -7040,7 +7794,7 @@ async function startHermes() {
   let attemptedRemote = primaryBackendIsRemote()
 
   const connectionPromise = (async () => {
-    await advanceBootProgress('backend.resolve', 'Resolving Hades backend', 8)
+    await advanceBootProgress('backend.resolve', 'Resolving Hermes backend', 8)
     // Resolve for the desktop's primary profile so a per-profile remote
     // override on the active profile is honored (falls back to env / global).
     // Re-read once resolved so the classification tracks the value actually used.
@@ -7048,11 +7802,11 @@ async function startHermes() {
     const remote = await resolveRemoteBackend(primaryProfileKey())
 
     if (remote) {
-      await advanceBootProgress('backend.remote', `Connecting to remote Hades backend at ${remote.baseUrl}`, 24)
+      await advanceBootProgress('backend.remote', `Connecting to remote Hermes backend at ${remote.baseUrl}`, 24)
       await waitForHermes(remote.baseUrl, remote.token)
       updateBootProgress({
         phase: 'backend.ready',
-        message: 'Remote Hades backend is ready',
+        message: 'Remote Hermes backend is ready',
         progress: 94,
         running: true,
         error: null
@@ -7063,6 +7817,9 @@ async function startHermes() {
         mode: 'remote',
         source: remote.source,
         authMode: remote.authMode || 'token',
+        remoteHost: remote.remoteHost,
+        remoteKind: remote.remoteKind,
+        remoteHermesVersion: remote.remoteHermesVersion,
         token: remote.token,
         wsUrl: remote.wsUrl,
         logs: hermesLog.slice(-80),
@@ -7082,8 +7839,8 @@ async function startHermes() {
     // --port 0: the OS assigns an ephemeral port; the child announces it on stdout.
     const backendArgs = ['serve', '--host', '127.0.0.1', '--port', '0']
     // Pin the desktop's chosen profile via the global --profile flag. This is
-    // deterministic (it wins over the sticky ~/.hades/active_profile file) and
-    // resolves HADES_HOME the same way `hermes -p <name>` does on the CLI. An
+    // deterministic (it wins over the sticky ~/.hermes/active_profile file) and
+    // resolves HERMES_HOME the same way `hermes -p <name>` does on the CLI. An
     // unset preference keeps the legacy launch so existing installs are
     // unaffected.
     const activeProfile = readActiveDesktopProfile()
@@ -7092,7 +7849,7 @@ async function startHermes() {
       backendArgs.unshift('--profile', activeProfile)
     }
 
-    await advanceBootProgress('backend.runtime', 'Resolving Hades runtime', 28)
+    await advanceBootProgress('backend.runtime', 'Resolving Hermes runtime', 28)
     const backend = await ensureRuntime(resolveHermesBackend(backendArgs))
     // Route old runtimes (no `serve`) through the legacy `dashboard --no-open`.
     backend.args = getBackendArgsForRuntime(backend)
@@ -7100,8 +7857,8 @@ async function startHermes() {
     const webDist = resolveWebDist()
     const readyFile = backend.readyFile ? makeDashboardReadyFile() : null
 
-    await advanceBootProgress('backend.spawn', `Starting Hades backend via ${backend.label}`, 84)
-    rememberLog(`Starting Hades backend via ${backend.label}`)
+    await advanceBootProgress('backend.spawn', `Starting Hermes backend via ${backend.label}`, 84)
+    rememberLog(`Starting Hermes backend via ${backend.label}`)
 
     const hermesProcess = spawn(
       backend.command,
@@ -7110,15 +7867,15 @@ async function startHermes() {
         cwd: hermesCwd,
         env: {
           ...process.env,
-          // Explicitly pin HADES_HOME for the child so Python's get_hermes_home()
+          // Explicitly pin HERMES_HOME for the child so Python's get_hermes_home()
           // resolves to the SAME location our resolveHermesHome() picked. Without
-          // this pin, Python falls back to ~/.hades on every platform — fine on
+          // this pin, Python falls back to ~/.hermes on every platform — fine on
           // mac/linux (where our default matches), but on Windows our default is
           // %LOCALAPPDATA%\hermes, which differs from C:\Users\<u>\.hermes.
           // Mismatch would split config / sessions / .env / logs across two
-          // directories. install.ps1 sets HADES_HOME via setx; the desktop
+          // directories. install.ps1 sets HERMES_HOME via setx; the desktop
           // can't reliably do that, so we set it inline for every spawn.
-          HADES_HOME,
+          HERMES_HOME,
           ...backend.env,
           TERMINAL_CWD: hermesCwd,
           HERMES_DASHBOARD_SESSION_TOKEN: token,
@@ -7137,7 +7894,7 @@ async function startHermes() {
 
     if (!processOwner) {
       stopBackendChild(hermesProcess)
-      throw new Error('Hades backend start was superseded by a newer connection attempt.')
+      throw new Error('Hermes backend start was superseded by a newer connection attempt.')
     }
 
     hermesProcess.stdout.on('data', rememberLog)
@@ -7151,17 +7908,17 @@ async function startHermes() {
 
     hermesProcess.once('error', error => {
       if (!backendConnectionState.clearForCurrentProcess(processOwner)) {
-        rememberLog(`Ignoring stale Hades backend error: ${error.message}`)
-        rejectBackendStart?.(new Error('Hades backend start was superseded by a newer connection attempt.'))
+        rememberLog(`Ignoring stale Hermes backend error: ${error.message}`)
+        rejectBackendStart?.(new Error('Hermes backend start was superseded by a newer connection attempt.'))
 
         return
       }
 
-      rememberLog(`Hades backend failed to start: ${error.message}`)
+      rememberLog(`Hermes backend failed to start: ${error.message}`)
       updateBootProgress(
         {
           error: error.message,
-          message: `Hades backend failed to start: ${error.message}`,
+          message: `Hermes backend failed to start: ${error.message}`,
           phase: 'backend.error',
           running: false
         },
@@ -7172,20 +7929,20 @@ async function startHermes() {
     })
     hermesProcess.once('exit', (code, signal) => {
       if (!backendConnectionState.clearForCurrentProcess(processOwner)) {
-        rememberLog(`Ignoring stale Hades backend exit (${signal || code})`)
+        rememberLog(`Ignoring stale Hermes backend exit (${signal || code})`)
 
         if (!backendReady) {
-          rejectBackendStart?.(new Error('Hades backend start was superseded by a newer connection attempt.'))
+          rejectBackendStart?.(new Error('Hermes backend start was superseded by a newer connection attempt.'))
         }
 
         return
       }
 
-      rememberLog(`Hades backend exited (${signal || code})`)
+      rememberLog(`Hermes backend exited (${signal || code})`)
       sendBackendExit({ code, signal })
 
       if (!backendReady) {
-        const message = `Hades backend exited before it became ready (${signal || code}).`
+        const message = `Hermes backend exited before it became ready (${signal || code}).`
         updateBootProgress(
           {
             error: message,
@@ -7197,13 +7954,13 @@ async function startHermes() {
         )
         rejectBackendStart?.(
           new Error(
-            `Hades backend exited before it became ready (${signal || code}). Log: ${DESKTOP_LOG_PATH}\n${recentHermesLog()}`
+            `Hermes backend exited before it became ready (${signal || code}). Log: ${DESKTOP_LOG_PATH}\n${recentHermesLog()}`
           )
         )
       }
     })
 
-    await advanceBootProgress('backend.port', 'Waiting for Hades backend to launch', 86)
+    await advanceBootProgress('backend.port', 'Waiting for Hermes backend to launch', 86)
 
     // Discover the ephemeral port the child bound to
     const port = await Promise.race([
@@ -7216,7 +7973,7 @@ async function startHermes() {
     }
 
     const baseUrl = `http://127.0.0.1:${port}`
-    await advanceBootProgress('backend.wait', 'Waiting for Hades backend to become ready', 90)
+    await advanceBootProgress('backend.wait', 'Waiting for Hermes backend to become ready', 90)
     await Promise.race([waitForHermes(baseUrl, token), backendStartFailed])
     backendReady = true
     backendStartFailure = null
@@ -7228,7 +7985,7 @@ async function startHermes() {
 
     updateBootProgress({
       phase: 'backend.ready',
-      message: 'Hades backend is ready. Finalizing desktop startup',
+      message: 'Hermes backend is ready. Finalizing desktop startup',
       progress: 94,
       running: true,
       error: null
@@ -7351,7 +8108,7 @@ function spawnSecondaryWindow({ sessionId, watch }: { sessionId?: string; watch?
     height: SESSION_WINDOW_MIN_HEIGHT,
     minWidth: SESSION_WINDOW_MIN_WIDTH,
     minHeight: SESSION_WINDOW_MIN_HEIGHT,
-    title: 'Hades',
+    title: 'Hermes',
     titleBarStyle: 'hidden',
     titleBarOverlay: getTitleBarOverlayOptions(),
     trafficLightPosition: IS_MAC ? WINDOW_BUTTON_POSITION : undefined,
@@ -7434,7 +8191,7 @@ function createInstanceWindow() {
     ...nextInstanceBounds(),
     minWidth: WINDOW_MIN_WIDTH,
     minHeight: WINDOW_MIN_HEIGHT,
-    title: 'Hades',
+    title: 'Hermes',
     titleBarStyle: 'hidden',
     titleBarOverlay: getTitleBarOverlayOptions(),
     trafficLightPosition: IS_MAC ? WINDOW_BUTTON_POSITION : undefined,
@@ -7522,7 +8279,7 @@ function spawnPetOverlayWindow(bounds) {
     hiddenInMissionControl: IS_MAC,
     // Non-activating: the overlay must never become the app's key/main window,
     // or it (a frameless, taskbar-skipping panel) becomes the app's switcher
-    // anchor and the Hades icon drops out of cmd/alt-tab — especially when the
+    // anchor and the Hermes icon drops out of cmd/alt-tab — especially when the
     // main window is minimized. We flip this on only while the composer needs
     // the keyboard (see hermes:pet-overlay:set-focusable).
     focusable: false,
@@ -7626,7 +8383,7 @@ function createWindow() {
     ...computeWindowOptions(savedWindowState, screen.getAllDisplays()),
     minWidth: WINDOW_MIN_WIDTH,
     minHeight: WINDOW_MIN_HEIGHT,
-    title: 'Hades',
+    title: 'Hermes',
     // Frameless title bar on every platform so the renderer can paint the
     // "hide sidebar" button (and other left-side titlebar tools) flush with
     // the top edge — matching the macOS layout where the traffic lights sit
@@ -7864,8 +8621,8 @@ ipcMain.handle('hermes:connection:revalidate', async () => {
   // Main and every session pop-out have their own renderer reconnect loop but
   // share this primary connection. Coalesce simultaneous requests so one outage
   // produces one failure observation rather than exhausting the whole streak.
-  return remoteRevalidation.run(connectionPromise, () =>
-    revalidateRemoteConnection({
+  return remoteRevalidation.run(connectionPromise, async () => {
+    const result = await revalidateRemoteConnection({
       connectionPromise,
       currentConnectionPromise: () => backendConnectionState.getPromise(),
       log: rememberLog,
@@ -7873,7 +8630,22 @@ ipcMain.handle('hermes:connection:revalidate', async () => {
       resetConnection: resetHermesConnection,
       tracker: remoteLiveness
     })
-  )
+
+    // A rebuilt SSH connection must also tear down its tunnel/master before the
+    // renderer re-dials (which only happens after this handler resolves), so the
+    // fresh bootstrap can't reattach to a dying transport.
+    if (result.rebuilt) {
+      const conn = await connectionPromise.catch(() => null)
+
+      if (conn?.remoteKind === 'ssh') {
+        const profile = primaryProfileKey()
+        await sshBootstrapCoordinator.cancelAndWait(sshScopeKey(profile))
+        await teardownSshConnection(profile)
+      }
+    }
+
+    return result
+  })
 })
 ipcMain.handle('hermes:backend:touch', async (_event, profile) => {
   touchPoolBackend(profile)
@@ -8103,14 +8875,97 @@ ipcMain.handle('hermes:bootstrap:get', async () => getBootstrapState())
 ipcMain.handle('hermes:connection-config:get', async (_event, profile) =>
   sanitizeDesktopConnectionConfig(readDesktopConnectionConfig(), profile)
 )
+ipcMain.handle('hermes:ssh-config:hosts', async () => ({ hosts: collectSshConfigHosts() }))
+ipcMain.handle('hermes:ssh-config:resolve', async (_event, host) => {
+  const value = String(host || '').trim()
+
+  if (!value) {
+    throw new Error('SSH host is required.')
+  }
+
+  const ssh =
+    process.platform === 'win32'
+      ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe')
+      : 'ssh'
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(ssh, ['-G', '--', value], hiddenWindowsChildOptions({ stdio: ['ignore', 'pipe', 'pipe'] }))
+    let stdout = ''
+    let stderr = ''
+
+    const timer = setTimeout(() => {
+      child.kill()
+      reject(new Error('SSH config resolution timed out.'))
+    }, 10_000)
+
+    child.stdout.on('data', chunk => {
+      stdout += String(chunk)
+    })
+    child.stderr.on('data', chunk => {
+      stderr += String(chunk)
+    })
+    child.once('error', error => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    child.once('close', code => {
+      clearTimeout(timer)
+
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || 'Could not resolve SSH host.'))
+      } else {
+        resolve(parseSshGOutput(stdout))
+      }
+    })
+  })
+})
 ipcMain.handle('hermes:connection-config:test', async (_event, payload) => testDesktopConnectionConfig(payload))
 ipcMain.handle('hermes:connection-config:probe', async (_event, rawUrl) => probeRemoteAuthMode(rawUrl))
 ipcMain.handle('hermes:connection-config:oauth-login', async (_event, rawUrl) => {
-  // Open the gateway's OAuth login window and wait for the session cookie to
-  // land in the OAuth partition. The caller (settings UI) typically saves the
-  // remote config with authMode='oauth' first, then calls this. We normalize
-  // the URL defensively so a login can be driven from a raw URL too.
+  // Capability-gated login (RFC 8252). Probe the gateway's public /api/status:
+  //   - advertises "native_pkce" in auth_flows → run the system-browser +
+  //     loopback + PKCE flow. No embedded webview, tokens held by the app
+  //     (encrypted keychain), REST/WS authenticated by bearer — no cookies.
+  //   - older gateway without native_pkce → fall back to the legacy embedded
+  //     BrowserWindow cookie flow, preserving compatibility.
+  // This is the "observable ladder + compatibility fallback tied to an
+  // identified older runtime" the desktop guide requires.
   const baseUrl = normalizeRemoteBaseUrl(rawUrl)
+
+  let statusBody: any = null
+
+  try {
+    statusBody = await fetchPublicJson(`${baseUrl}/api/status`, { timeoutMs: 8_000 })
+  } catch {
+    // Can't read status — fall through to the embedded flow, which has its
+    // own error handling and works against any gated gateway.
+  }
+
+  const strategy = resolveLoginStrategy(statusBody)
+
+  if (strategy === 'native') {
+    try {
+      const tokens = await runNativeLogin(baseUrl, {
+        openExternal: url => shell.openExternal(url),
+        postJson: (url, body, opts) => postJsonNoAuth(url, body, opts),
+        rememberLog
+      })
+
+      _storeNativeTokens(baseUrl, tokens)
+
+      return { ok: true, baseUrl, connected: true }
+    } catch (error) {
+      rememberLog(
+        `[native-oauth] native login failed (${
+          error instanceof Error ? error.message : String(error)
+        }); falling back to embedded flow`
+      )
+      // Fall through to the embedded flow so a native-flow hiccup (blocked
+      // loopback, user closed the browser) still lets the user sign in.
+    }
+  }
+
+  // Legacy embedded-webview cookie flow.
   await openOauthLoginWindow(baseUrl)
 
   return { ok: true, baseUrl, connected: await hasOauthSessionCookie(baseUrl) }
@@ -8119,10 +8974,18 @@ ipcMain.handle('hermes:connection-config:oauth-logout', async (_event, rawUrl) =
   const baseUrl = rawUrl ? normalizeRemoteBaseUrl(rawUrl) : ''
   await clearOauthSession(baseUrl || undefined)
 
+  // Also drop any native (RFC 8252) bearer tokens for this gateway so a
+  // logout clears BOTH auth shapes.
+  if (baseUrl) {
+    _clearNativeTokens(baseUrl)
+  }
+
   // Report against the SAME liveness notion the Settings indicator uses
-  // (AT-or-RT) so a logout that left any session cookie behind is reflected
-  // as still-connected rather than silently signed-out.
-  return { ok: true, connected: baseUrl ? await hasLiveOauthSession(baseUrl) : false }
+  // (AT-or-RT cookie, or a native token) so a logout that left any session
+  // behind is reflected as still-connected rather than silently signed-out.
+  const connected = baseUrl ? (await hasLiveOauthSession(baseUrl)) || hasNativeSession(baseUrl) : false
+
+  return { ok: true, connected }
 })
 
 // --- Hermes Cloud (cloud-auto-discovery Phase 3) ---
@@ -8164,19 +9027,17 @@ ipcMain.handle('hermes:connection-config:apply', async (_event, payload) => {
   writeDesktopConnectionConfig(config)
 
   const key = connectionScopeKey(payload?.profile)
+  const scope = key || ''
 
-  if (key && key !== primaryProfileKey()) {
-    // Editing a NON-primary profile's connection: don't disturb the window's
-    // primary backend. Drop the profile's pooled backend so the next switch
-    // re-resolves against the new remote/local target.
-    stopPoolBackend(key)
-  } else {
-    // Global / primary connection: soft re-home. Tear down the window backend
-    // without resetting boot UI or reloading — the shell stays, the renderer
-    // wipes session lists (skeletons) and re-dials on hermes:connection:applied.
-    await teardownPrimaryBackendAndWait({ soft: true })
-    sendConnectionApplied()
-  }
+  await applyConnectionChange({
+    cancelAndWait: value => sshBootstrapCoordinator.cancelAndWait(value),
+    isPrimary: !key || key === primaryProfileKey(),
+    scope,
+    sendApplied: sendConnectionApplied,
+    stopPool: stopPoolBackend,
+    teardownPrimary: () => teardownPrimaryBackendAndWait({ soft: true }),
+    teardownSsh: value => teardownSshConnection(value || null)
+  })
 
   return sanitizeDesktopConnectionConfig(config, payload?.profile)
 })
@@ -8186,7 +9047,7 @@ ipcMain.handle('hermes:profile:set', async (_event, name) => {
   const next = writeActiveDesktopProfile(name)
 
   // Switching profiles is a backend re-home: relaunch the dashboard under the
-  // new HADES_HOME. Pool backends keep their own homes, so only the primary
+  // new HERMES_HOME. Pool backends keep their own homes, so only the primary
   // is torn down.
   await teardownPrimaryBackendAndWait()
   mainWindow?.reload()
@@ -8481,15 +9342,34 @@ ipcMain.handle('hermes:api', async (_event, request) => {
 
   const url = `${connection.baseUrl}${requestPath}`
 
-  // OAuth gateways authenticate REST via the HttpOnly session cookie held in
-  // the OAuth partition — route through Electron's net stack bound to that
-  // session so the cookie attaches automatically. Token/local modes keep using
-  // the static session-token header.
+  // OAuth gateways authenticate REST via EITHER a native bearer token
+  // (cookieless RFC 8252 flow) OR the HttpOnly session cookie held in the OAuth
+  // partition. Prefer the native bearer when present (mirroring
+  // mintGatewayWsTicket): the native flow never sets a cookie, so routing an
+  // oauth-mode REST call through the cookie-only path returns 401 no_cookie even
+  // though a valid bearer is held. Cookie mode rides Electron's net stack bound
+  // to the OAuth partition so the cookie attaches automatically. Token/local
+  // modes keep using the static session-token header.
   if (connection.authMode === 'oauth') {
     // The OAuth path rides electron.net with JSON headers; multipart isn't
     // wired there. Fail loudly rather than corrupting the upload.
     if (request?.upload) {
       throw new Error('File uploads are not supported against OAuth-gated remote backends yet.')
+    }
+
+    // Native bearer first (cookieless). ensureNativeAccessToken transparently
+    // refreshes a near-expiry AT via /auth/native/refresh; a null return means
+    // no native session (resolveOauthRestAuth then selects the cookie path).
+    const nativeAt = await ensureNativeAccessToken(connection.baseUrl).catch(() => null)
+    const restAuth = resolveOauthRestAuth(nativeAt)
+
+    if (restAuth.kind === 'bearer') {
+      return fetchJson(url, null, {
+        method: request?.method,
+        body: request?.body,
+        timeoutMs,
+        bearer: restAuth.token
+      })
     }
 
     return fetchJsonViaOauthSession(url, {
@@ -8534,7 +9414,7 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
   const actions = Array.isArray(payload?.actions) ? payload.actions : []
 
   const notification = new Notification({
-    title: payload?.title || 'Hades',
+    title: payload?.title || 'Hermes',
     body: payload?.body || '',
     silent: Boolean(payload?.silent),
     actions: actions.map(action => ({ type: 'button', text: String(action?.text || '') }))
@@ -8945,7 +9825,7 @@ function terminalShellEnv() {
 
   // Strip color/theme-detection vars that ride along when Electron is launched
   // from a non-tty agent shell (Cursor's runner sets NO_COLOR/FORCE_COLOR=0
-  // /TERM=dumb; some terminals set COLORFGBG which would flip Hades' TUI into
+  // /TERM=dumb; some terminals set COLORFGBG which would flip Hermes' TUI into
   // light-mode). Our PTY is a real xterm-compat terminal — force truecolor.
   delete env.NO_COLOR
   delete env.FORCE_COLOR
@@ -8954,7 +9834,7 @@ function terminalShellEnv() {
   env.COLORTERM = 'truecolor'
   env.LC_CTYPE = env.LC_CTYPE || 'UTF-8'
   env.TERM = 'xterm-256color'
-  env.TERM_PROGRAM = 'Hades'
+  env.TERM_PROGRAM = 'Hermes'
   env.TERM_PROGRAM_VERSION = app.getVersion()
 
   // Let a hermes/--tui launched in this pane know it's embedded in the desktop
@@ -9254,15 +10134,30 @@ ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
   const cols = Math.max(2, Number.parseInt(String(payload?.cols || 80), 10) || 80)
   const rows = Math.max(2, Number.parseInt(String(payload?.rows || 24), 10) || 24)
 
-  const ptyProcess = nodePty.spawn(command, args, {
-    cols,
-    cwd,
-    env: terminalShellEnv(),
-    name: 'xterm-256color',
-    rows
-  })
+  const sshTarget = await resolveTerminalConnection(activeSshTerminalTarget, () => ensureBackend(primaryProfileKey()))
+  const remote = Boolean(sshTarget)
+  const remoteState = remote ? sshConnections.get(sshTarget.scope) : null
 
-  terminalSessions.set(id, { pty: ptyProcess, webContentsId: event.sender.id })
+  const remoteCommand =
+    remoteState?.remotePlatform === 'Windows'
+      ? buildWindowsInteractiveCommand(String(payload?.cwd || '').trim())
+      : undefined
+
+  const ptyProcess = remote
+    ? nodePty.spawn(
+        process.platform === 'win32'
+          ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe')
+          : 'ssh',
+        buildInteractiveSshArgs(sshTarget.ssh, String(payload?.cwd || '').trim(), undefined, remoteCommand),
+        { cols, cwd: app.getPath('home'), env: terminalShellEnv(), name: 'xterm-256color', rows }
+      )
+    : nodePty.spawn(command, args, { cols, cwd, env: terminalShellEnv(), name: 'xterm-256color', rows })
+
+  terminalSessions.set(id, {
+    pty: ptyProcess,
+    webContentsId: event.sender.id,
+    ...(remote ? { sshScope: sshTarget.scope, remoteCwd: String(payload?.cwd || '') } : {})
+  })
 
   const send = (suffix, payload) => {
     if (event.sender.isDestroyed()) {
@@ -9279,7 +10174,7 @@ ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
   })
   event.sender.once('destroyed', () => disposeTerminalSession(id))
 
-  return { cwd, id, shell: name }
+  return { cwd: remote ? null : cwd, id, shell: remote ? 'ssh' : name }
 })
 
 ipcMain.handle('hermes:terminal:write', (_event, id, data) => {
@@ -9315,7 +10210,7 @@ ipcMain.handle('hermes:terminal:cwd', async (_event, id) => {
     return null
   }
 
-  return readProcessCwd(sessionInfo.pty.pid)
+  return sessionInfo.sshScope !== undefined ? null : readProcessCwd(sessionInfo.pty.pid)
 })
 
 ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
@@ -9348,14 +10243,14 @@ ipcMain.handle('hermes:updates:branch:set', async (_event, name) => {
 })
 
 // Resolve the canonical Hermes version (the one `release.py` bumps in
-// hades_cli/__init__.py + pyproject.toml) so the desktop About panel shows the
+// hermes_cli/__init__.py + pyproject.toml) so the desktop About panel shows the
 // real Hermes version instead of the Electron app's own package.json version,
 // which historically drifted (stuck at 0.0.2). Falls back to app.getVersion()
 // when the source tree can't be read (e.g. a packaged build without the repo).
 function resolveHermesVersion() {
   try {
     const root = resolveUpdateRoot()
-    const initPath = path.join(root, 'hades_cli', '__init__.py')
+    const initPath = path.join(root, 'hermes_cli', '__init__.py')
 
     if (fileExists(initPath)) {
       const raw = fs.readFileSync(initPath, 'utf8')
@@ -9401,7 +10296,7 @@ ipcMain.handle('hermes:version', async () => ({
 // CLI exactly: GUI only, Lite (keep user data), Full. We ask the agent to do
 // the actual removal via `hermes uninstall …` so the cross-platform PATH /
 // registry / service / node-symlink cleanup all lives in one place
-// (hades_cli/uninstall.py + hades_cli/gui_uninstall.py).
+// (hermes_cli/uninstall.py + hermes_cli/gui_uninstall.py).
 //
 // getUninstallSummary() shells out to `--gui-summary` (a fast, no-side-effect
 // JSON probe) so the UI can gate options on what's actually installed — and
@@ -9419,7 +10314,7 @@ async function getUninstallSummary() {
   // Fast JS-side fallback used when the agent venv is gone (lite client) or the
   // probe fails — the renderer still needs *something* to render options from.
   const fallback = () => ({
-    hermes_home: HADES_HOME,
+    hermes_home: HERMES_HOME,
     agent_installed: isHermesSourceRoot(agentRoot) && fileExists(py),
     gui_installed: true,
     source_built_artifacts: [],
@@ -9450,10 +10345,10 @@ async function getUninstallSummary() {
     try {
       const child = spawn(
         py,
-        ['-m', 'hades_cli.main', 'uninstall', '--gui-summary'],
+        ['-m', 'hermes_cli.main', 'uninstall', '--gui-summary'],
         hiddenWindowsChildOptions({
           cwd: agentRoot,
-          env: { ...process.env, HADES_HOME, NO_COLOR: '1' },
+          env: { ...process.env, HERMES_HOME, NO_COLOR: '1' },
           stdio: ['ignore', 'pipe', 'ignore']
         })
       )
@@ -9508,7 +10403,7 @@ async function runDesktopUninstall(mode) {
   // Interpreter choice (Finding 3): lite/full rmtree the venv that holds the
   // running python.exe. On Windows a running .exe is mandatory-locked, so the
   // rmtree must NOT be driven by the venv's own interpreter — use a system
-  // Python with PYTHONPATH=<agentRoot> so `import hades_cli` resolves from
+  // Python with PYTHONPATH=<agentRoot> so `import hermes_cli` resolves from
   // source while the venv is torn down. gui-only doesn't touch the venv, so the
   // venv python is fine there. If no system Python exists (the Windows edge
   // case), fall back to the venv python — gui-only is unaffected; lite/full may
@@ -9553,7 +10448,7 @@ async function runDesktopUninstall(mode) {
     agentRoot: ACTIVE_HERMES_ROOT,
     uninstallArgs,
     appPath: removeBundle,
-    hermesHome: HADES_HOME
+    hermesHome: HERMES_HOME
   }
 
   let scriptPath
@@ -9808,7 +10703,24 @@ function configureSpellChecker() {
   }
 }
 
-app.on('before-quit', () => {
+app.on('before-quit', event => {
+  if ((sshConnections.size > 0 || sshBootstrapCoordinator.promises().length > 0) && !sshQuitTeardownDone) {
+    event.preventDefault()
+    sshBootstrapCoordinator.cancelAll()
+    const scopes = [...sshConnections.keys()]
+
+    const pending = Promise.allSettled([
+      ...scopes.map(scope => teardownSshConnection(scope || null)),
+      ...sshBootstrapCoordinator.promises()
+    ])
+
+    void Promise.race([pending, new Promise(resolve => setTimeout(resolve, 4_000))]).then(async () => {
+      await sshBootstrapCoordinator.forceCleanupAll()
+      sshQuitTeardownDone = true
+      app.quit()
+    })
+  }
+
   // Clean quit mid-boot should not trip next-launch --no-sandbox (#38216).
   // FATAL GPU aborts skip before-quit, leaving the `booting` marker in place.
   // Keyed on sticky (not active): a manual --no-sandbox run still records a

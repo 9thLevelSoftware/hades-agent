@@ -259,8 +259,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     # Quiet mode: keep Hades' own banners off stdout (which is the MCP wire).
-    if not env_is_set("HERMES_QUIET"):
-        env_set("HERMES_QUIET", "1")
+    if not env_is_set("HADES_QUIET"):
+        env_set("HADES_QUIET", "1")
     if not env_is_set("HERMES_REDACT_SECRETS"):
         env_set("HERMES_REDACT_SECRETS", "true")
 

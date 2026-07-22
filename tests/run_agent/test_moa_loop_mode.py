@@ -13,7 +13,7 @@ def _response(content="done", *, tool_calls=None):
 
 
 def test_moa_virtual_provider_aggregator_is_actor(monkeypatch, tmp_path):
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     home.mkdir()
     (home / "config.yaml").write_text(
         """
@@ -30,7 +30,7 @@ moa:
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
     calls = []
 
     def fake_call_llm(**kwargs):
@@ -72,7 +72,7 @@ moa:
 
 
 def test_moa_runtime_provider_uses_virtual_endpoint():
-    from hades_cli.runtime_provider import resolve_runtime_provider
+    from hermes_cli.runtime_provider import resolve_runtime_provider
 
     runtime = resolve_runtime_provider(requested="moa", target_model="review")
 
@@ -89,7 +89,7 @@ def test_moa_does_not_cap_output_tokens(monkeypatch, tmp_path):
     omits the parameter and each model uses its real maximum. Regression for
     the "no limit on MoA models" fix.
     """
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     home.mkdir()
     (home / "config.yaml").write_text(
         """
@@ -107,7 +107,7 @@ moa:
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
     calls = []
 
     def fake_call_llm(**kwargs):
@@ -163,7 +163,7 @@ def test_moa_slots_routed_through_resolve_runtime_provider(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "hades_cli.runtime_provider.resolve_runtime_provider", fake_resolve
+        "hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve
     )
 
     rt = moa_loop._slot_runtime({"provider": "minimax", "model": "MiniMax-M2"})
@@ -195,7 +195,7 @@ def test_moa_codex_slot_preserves_provider_identity(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "hades_cli.runtime_provider.resolve_runtime_provider", fake_resolve
+        "hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve
     )
 
     rt = moa_loop._slot_runtime({"provider": "openai-codex", "model": "gpt-5.5"})
@@ -244,7 +244,7 @@ def test_moa_provider_backed_slot_survives_aux_resolution(monkeypatch, provider)
         }
 
     monkeypatch.setattr(
-        "hades_cli.runtime_provider.resolve_runtime_provider", fake_resolve
+        "hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve
     )
 
     rt = moa_loop._slot_runtime({"provider": provider, "model": "test-model"})
@@ -270,7 +270,7 @@ def test_moa_slot_runtime_falls_back_on_resolution_error(monkeypatch):
         raise RuntimeError("unknown provider")
 
     monkeypatch.setattr(
-        "hades_cli.runtime_provider.resolve_runtime_provider", boom
+        "hermes_cli.runtime_provider.resolve_runtime_provider", boom
     )
 
     rt = moa_loop._slot_runtime({"provider": "mystery", "model": "x"})
@@ -460,7 +460,7 @@ def test_run_reference_prepends_advisory_system_prompt(monkeypatch):
 
 
 def test_moa_facade_references_get_trimmed_messages(monkeypatch, tmp_path):
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     home.mkdir()
     (home / "config.yaml").write_text(
         """
@@ -477,7 +477,7 @@ moa:
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
     calls = []
 
     def fake_call_llm(**kwargs):
@@ -525,7 +525,7 @@ moa:
 
 
 def test_moa_disabled_preset_skips_references(monkeypatch, tmp_path):
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     home.mkdir()
     (home / "config.yaml").write_text(
         """
@@ -543,7 +543,7 @@ moa:
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
     calls = []
 
     def fake_call_llm(**kwargs):
@@ -639,9 +639,9 @@ moa:
 def test_moa_facade_emits_reference_then_aggregating(monkeypatch, tmp_path):
     """The facade reports each reference's output, then an aggregating signal,
     so frontends can render reference blocks before the aggregator acts."""
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     _ref_config(home)
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
 
     def fake_call_llm(**kwargs):
         if kwargs["task"] == "moa_reference":
@@ -677,9 +677,9 @@ def test_moa_facade_reruns_references_on_new_tool_result(monkeypatch, tmp_path):
     references — but a redundant create() call with the SAME state is a cache
     HIT (no re-run, no re-emit), so we don't fire on a pure no-op re-call.
     """
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     _ref_config(home)
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
 
     ref_runs = []
 
@@ -717,9 +717,9 @@ def test_moa_facade_reruns_references_on_new_tool_result(monkeypatch, tmp_path):
 
 def test_moa_facade_reruns_references_on_new_turn(monkeypatch, tmp_path):
     """A genuinely new user message invalidates the cache and re-runs refs."""
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     _ref_config(home)
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
 
     ref_runs = []
 
@@ -762,7 +762,7 @@ def test_slot_runtime_anthropic_oauth_routes_through_provider_branch(monkeypatch
         }
 
     monkeypatch.setattr(
-        "hades_cli.runtime_provider.resolve_runtime_provider", fake_resolve
+        "hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve
     )
 
     # _slot_runtime forwards the resolved endpoint for anthropic like any slot.
@@ -852,7 +852,7 @@ def test_references_parallel_sum_and_consume(monkeypatch, tmp_path):
     additional advisor spend (otherwise advisor cost multiplies by iteration
     count).
     """
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     home.mkdir()
     (home / "config.yaml").write_text(
         """
@@ -871,7 +871,7 @@ moa:
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
 
     def fake_call_llm(**kwargs):
         if kwargs["task"] == "moa_reference":
@@ -936,7 +936,7 @@ def test_moa_full_trace_written_when_enabled(monkeypatch, tmp_path):
     """
     import json
 
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     home.mkdir()
     (home / "config.yaml").write_text(
         """
@@ -956,7 +956,7 @@ moa:
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
 
     def fake_call_llm(**kwargs):
         if kwargs["task"] == "moa_reference":
@@ -1017,7 +1017,7 @@ moa:
 
 def test_moa_trace_not_written_when_disabled(monkeypatch, tmp_path):
     """Default (save_traces off) writes nothing."""
-    home = tmp_path / ".hades"
+    home = tmp_path / ".hermes"
     home.mkdir()
     (home / "config.yaml").write_text(
         """
@@ -1034,7 +1034,7 @@ moa:
 """.strip(),
         encoding="utf-8",
     )
-    monkeypatch.setenv("HADES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home))
 
     def fake_call_llm(**kwargs):
         if kwargs["task"] == "moa_reference":
@@ -1265,3 +1265,117 @@ def test_reference_messages_drops_whitespace_only_string_user_turn():
     assert view[0] == {"role": "assistant", "content": "a"}
     assert view[-1] == {"role": "user", "content": "real"}
     assert all(str(m["content"]).strip() for m in view)
+
+def test_moa_pre_api_compression_includes_reference_guidance(monkeypatch, tmp_path):
+    """The aggregator must not receive guidance that pushes it past compression.
+
+    The normal pre-API check sees only the persisted conversation.  MoA adds
+    reference guidance later, inside ``MoAChatCompletions.create()``, so this
+    regression drives a raw request just below the threshold and makes the
+    injected guidance cross it.  Compression must occur before the aggregator
+    request and leave the rebuilt request below the threshold.
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        """
+moa:
+  default_preset: review
+  presets:
+    review:
+      reference_models:
+        - provider: openrouter
+          model: advisor
+      aggregator:
+        provider: openrouter
+        model: aggregator
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    events = []
+    compression_inputs = []
+    aggregator_request_tokens = []
+
+    def fake_estimate(messages, *args, **kwargs):
+        rendered = str(messages)
+        raw_tokens = 80 if "PRE_COMPACTION_HISTORY" in rendered else 20
+        guidance_tokens = 40 if "Mixture of Agents reference context" in rendered else 0
+        return raw_tokens + guidance_tokens
+
+    def fake_call_llm(**kwargs):
+        if kwargs["task"] == "moa_reference":
+            events.append("reference")
+            return _response("advisor guidance")
+        events.append("aggregator")
+        aggregator_request_tokens.append(fake_estimate(kwargs["messages"]))
+        return _response("aggregator acted")
+
+    monkeypatch.setattr("agent.moa_loop.call_llm", fake_call_llm)
+    monkeypatch.setattr("agent.turn_context.estimate_request_tokens_rough", fake_estimate)
+    monkeypatch.setattr("agent.conversation_loop.estimate_request_tokens_rough", fake_estimate)
+
+    agent = AIAgent(
+        api_key="moa-virtual-provider",
+        base_url="moa://local",
+        model="review",
+        provider="moa",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        enabled_toolsets=["file"],
+        max_iterations=3,
+    )
+    compressor = getattr(agent, "context_compressor")
+    compressor.threshold_tokens = 100
+
+    def fake_compress(messages, *_args, **_kwargs):
+        events.append("compress")
+        compression_inputs.append(messages)
+        return ([{"role": "user", "content": "SUMMARY"}], "system")
+
+    monkeypatch.setattr(agent, "_compress_context", fake_compress)
+
+    result = agent.run_conversation(
+        "PRE_COMPACTION_HISTORY",
+        conversation_history=[{"role": "assistant", "content": "prior response"}],
+    )
+
+    assert result["final_response"] == "aggregator acted"
+    assert events.index("compress") < events.index("aggregator")
+    assert events.count("reference") == 1
+    assert all("Mixture of Agents reference context" not in str(item) for item in compression_inputs)
+    assert aggregator_request_tokens == [60]
+
+
+def test_prepared_aggregator_preserves_reasoning_config(monkeypatch):
+    """Prepared MoA requests retain the acting aggregator reasoning policy."""
+    from agent import moa_loop
+
+    captured = {}
+    expected_reasoning = {"enabled": True, "effort": "high"}
+
+    def fake_call_llm(**kwargs):
+        captured.update(kwargs)
+        return _response("aggregator acted")
+
+    monkeypatch.setattr(moa_loop, "call_llm", fake_call_llm)
+    monkeypatch.setattr(moa_loop, "_aggregator_reasoning_config", lambda _slot: expected_reasoning)
+    monkeypatch.setattr(
+        moa_loop,
+        "_slot_runtime",
+        lambda slot: {"provider": slot["provider"], "model": slot["model"]},
+    )
+
+    facade = moa_loop.MoAChatCompletions("review")
+    facade._call_prepared_aggregator(
+        {
+            "messages": [{"role": "user", "content": "question"}],
+            "aggregator": {"provider": "openrouter", "model": "aggregator"},
+            "aggregator_temperature": None,
+        },
+        {},
+    )
+
+    assert captured["reasoning_config"] == expected_reasoning

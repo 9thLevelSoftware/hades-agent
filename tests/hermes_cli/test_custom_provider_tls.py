@@ -1,6 +1,6 @@
 """Tests for per-provider TLS settings in custom_providers config."""
 
-from hades_cli.config import (
+from hermes_cli.config import (
     apply_custom_provider_tls_to_client_kwargs,
     get_custom_provider_tls_settings,
 )
@@ -68,5 +68,19 @@ def test_get_custom_provider_tls_settings_no_substring_bypass():
     # A different host that shares a prefix must not pick up ssl_verify:false.
     assert get_custom_provider_tls_settings(
         "https://ollama.example.com.attacker.test/v1",
+        custom_providers=providers,
+    ) == {}
+
+
+def test_get_custom_provider_tls_settings_preserves_extra_path_segment():
+    providers = [
+        {
+            "base_url": "https://ollama.example.com/v1//",
+            "ssl_verify": False,
+        }
+    ]
+
+    assert get_custom_provider_tls_settings(
+        "https://ollama.example.com/v1",
         custom_providers=providers,
     ) == {}

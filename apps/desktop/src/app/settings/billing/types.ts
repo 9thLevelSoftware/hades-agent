@@ -9,11 +9,12 @@ import type {
   BillingRefusalCode,
   BillingStateResponse,
   ChargeFailureReason,
+  SubscriptionPreviewResponse,
   SubscriptionStateResponse,
   SubscriptionTierOption,
   UsageBarData,
   UsageModelData
-} from '@hades/shared/billing'
+} from '@hermes/shared/billing'
 
 export type {
   BillingAutoReload,
@@ -26,6 +27,7 @@ export type {
   BillingRefusalCode,
   BillingStateResponse,
   ChargeFailureReason,
+  SubscriptionPreviewResponse,
   SubscriptionStateResponse,
   SubscriptionTierOption,
   UsageBarData,

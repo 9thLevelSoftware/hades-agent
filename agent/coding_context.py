@@ -55,13 +55,12 @@ import json
 import logging
 import os
 import re
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from hades_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+from hades_cli._subprocess_compat import bounded_git_probe
 
 logger = logging.getLogger("hermes.coding_context")
 
@@ -214,7 +213,7 @@ def _edit_format_line(model: Optional[str]) -> str:
 
 # Operating brief for the coding posture. Tool names referenced here (read_file,
 # search_files, patch, write_file, terminal, todo) are in the coding toolset and
-# in _HADES_CORE_TOOLS, so they're present on every surface this fires on.
+# in _HERMES_CORE_TOOLS, so they're present on every surface this fires on.
 CODING_AGENT_GUIDANCE = (
     "You are a coding agent pairing with the user inside their codebase. "
     "Operate like a careful senior engineer.\n"
@@ -338,7 +337,7 @@ def _coding_mode(config: Optional[dict[str, Any]]) -> str:
     """Return the normalized ``agent.coding_context`` mode (auto/focus/on/off)."""
     if config is None:
         try:
-            from hades_cli.config import load_config
+            from hermes_cli.config import load_config
 
             config = load_config()
         except Exception:
@@ -366,7 +365,7 @@ def _coding_instructions(config: Optional[dict[str, Any]]) -> str:
     """
     if config is None:
         try:
-            from hades_cli.config import load_config
+            from hermes_cli.config import load_config
 
             config = load_config()
         except Exception:
@@ -671,8 +670,8 @@ def _enabled_mcp_servers(config: Optional[dict[str, Any]]) -> list[str]:
     of the coding workflow, not noise to strip.
     """
     try:
-        from hades_cli.config import read_raw_config
-        from hades_cli.tools_config import _parse_enabled_flag
+        from hermes_cli.config import read_raw_config
+        from hermes_cli.tools_config import _parse_enabled_flag
 
         servers = read_raw_config().get("mcp_servers") or {}
         return [
@@ -689,18 +688,14 @@ def _enabled_mcp_servers(config: Optional[dict[str, Any]]) -> list[str]:
 
 
 def _git(cwd: Path, *args: str) -> str:
-    _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT,
-            **_popen_kwargs,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return out.stdout.strip() if out.returncode == 0 else ""
+    """``git -C <cwd> <args>`` → stripped stdout, or ``""`` on any failure.
+
+    Uses the shared :func:`bounded_git_probe` so the post-kill cleanup is bounded
+    on Windows — a plain ``subprocess.run(timeout=...)`` here deadlocked the agent
+    turn inside ``build_coding_workspace_block`` when a killed git left a suspended
+    descendant holding the pipe handles (issue #66037).
+    """
+    return bounded_git_probe(["git", "-C", str(cwd), *args], timeout=_GIT_TIMEOUT)
 
 
 def _parse_status(porcelain: str) -> tuple[dict[str, str], dict[str, int]]:

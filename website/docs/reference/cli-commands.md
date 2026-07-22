@@ -56,10 +56,12 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes status` | Show agent, auth, and platform status. |
 | `hermes cron` | Inspect and tick the cron scheduler. |
 | `hermes kanban` | Multi-profile collaboration board (tasks, links, dispatcher). |
+| `hermes workflow` | Workflow graph definitions, validation, deployment, and executions. |
 | `hermes project` | Manage named, multi-folder workspaces (projects). Anchors desktop session grouping and, when bound to a kanban board, gives tasks a deterministic worktree + branch convention. State is per-profile. |
 | `hermes webhook` | Manage dynamic webhook subscriptions for event-driven activation. |
 | `hermes hooks` | Inspect, approve, or remove shell-script hooks declared in `config.yaml`. |
 | `hermes doctor` | Diagnose config and dependency issues. |
+| `hermes reliability check` | Offline harness fault matrix — runs eight end-state scenarios and exits 0/1/2 on pass/fail/usage-error. |
 | `hermes security audit` | On-demand supply-chain audit (OSV.dev) for the venv, plugin requirements, and pinned MCP servers. |
 | `hermes dump` | Copy-pasteable setup summary for support/debugging. |
 | `hermes prompt-size` | Show a byte breakdown of the system prompt + tool schemas (skills index, memory, profile). Runs offline. |
@@ -431,7 +433,8 @@ Pull API keys from an external secret manager at process startup instead of stor
 | Subcommand | Description |
 |------------|-------------|
 | `setup` | Interactive wizard: install the pinned `bws` binary, store an access token, and pick a project. Accepts `--project-id`, `--access-token`, and `--server-url` for non-interactive use. |
-| `status` | Show current config, binary path/version, and last fetch info. |
+| `status` | Show current config, binary path/version, and token validation status. |
+| `token` | Rotate the access token: validates the new token against Bitwarden before storing it in `.env` (a rejected token changes nothing). Accepts `--access-token` for non-interactive use and `--no-verify` to skip the probe. |
 | `sync` | Fetch secrets now and report what changed. Add `--apply` to actually export the secrets into the current shell's environment (default is dry-run). |
 | `install` | Download and verify the pinned `bws` binary. `--force` re-downloads even if a managed copy already exists. |
 | `disable` | Turn off the Bitwarden integration. |
@@ -627,6 +630,42 @@ All actions are also available as a slash command in the gateway (`/kanban …`)
 
 For the full design — comparison with Cline Kanban / Paperclip / NanoClaw / Gemini Enterprise, eight collaboration patterns, four user stories, concurrency correctness proof — see `docs/hermes-kanban-v1-spec.pdf` in the repository or the [Kanban user guide](/user-guide/features/kanban).
 
+## `hermes workflow`
+
+```bash
+hermes workflow <action> [options]
+```
+
+Named, versioned workflow graphs with branching, waits, fan-out, and Kanban-backed `agent_task` steps. Definitions are stored in `~/.hermes/workflows.db` after deploy. The command is singular today (`workflow`, not `workflows`).
+
+| Action | Purpose |
+|--------|---------|
+| `init` | Create `workflows.db` if missing. Idempotent. |
+| `validate <file.yaml>` | Validate a workflow YAML/JSON file without deploying. |
+| `deploy <file.yaml>` | Validate and deploy a workflow definition. `--json` for machine output. |
+| `list` | List deployed workflow definitions. `--json` for machine output. |
+| `show <workflow_id>` | Show the latest deployed definition for a workflow id. `--json` includes the full spec. |
+| `run <workflow_id>` | Start a manual execution. `--input <input.json>` supplies a JSON object (defaults to `{}`). `--json` prints the new execution id and status. |
+| `executions list` | List workflow executions. `--workflow <workflow_id>` filters to one definition. `--json` for machine output. |
+| `executions show <execution_id>` | Show one execution's status, input, and context. `--json` for machine output. |
+| `executions cancel <execution_id>` | Cancel a non-terminal execution and block any linked Kanban agent tasks. |
+| `tick` | Advance queued workflow executions locally. `--limit N` (default `10`). `--json` prints `{"processed": N}`. |
+| `status` | Show dispatcher config and execution counts. `--json` for machine output. |
+
+Examples:
+
+```bash
+hermes workflow validate examples/workflows/research-triage.yaml
+hermes workflow deploy examples/workflows/research-triage.yaml
+hermes workflow run research-triage --input ./input.json --json
+hermes workflow tick --limit 10
+hermes workflow executions show wfexec_abc123 --json
+```
+
+**Dispatcher note:** `workflow.dispatch_in_gateway` defaults to `true`, matching Kanban. A running gateway advances scheduled triggers, waits, retries, completed `agent_task` nodes, and ready input-feed items automatically. To opt out and require manual ticks, run `hermes config set workflow.dispatch_in_gateway false` and restart the gateway; roll back with `hermes config set workflow.dispatch_in_gateway true` plus another gateway restart.
+
+For the schema, condition DSL, template rules, dashboard builder, and Kanban integration details, see the [Workflows user guide](/user-guide/features/workflows).
+
 ## `hermes project`
 
 ```bash
@@ -693,6 +732,53 @@ hermes doctor [--fix]
 | Option | Description |
 |--------|-------------|
 | `--fix` | Attempt automatic repairs where possible. |
+
+## `hermes reliability check`
+
+```bash
+hermes reliability check [--json]
+```
+
+Offline harness fault matrix. Runs the eight deterministic end-state
+scenarios from `agent.reliability_scenarios` against in-process
+`OperationJournal`, `FakeDelivery`, and `FakeDBHandle` fixtures — no
+model providers, no network, no wall clock. Designed for CI: every run
+is byte-identical because the fixtures only advance when explicitly
+told.
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | All eight scenarios passed. |
+| `1` | At least one scenario failed or recorded a wrong side effect. |
+| `2` | Invalid usage (missing subcommand, unknown flag). |
+
+| Option | Description |
+|--------|-------------|
+| `--json` | Emit `{summary, scenarios}` JSON instead of the human table. `summary` is the dict produced by `agent.reliability_report.summarize_scenarios()`. |
+
+The eight scenarios exercise:
+
+1. **timeout-before-dispatch** — journal ends at `cancelled`/`none`.
+2. **timeout-after-dispatch** — journal ends at `unknown`/`unknown`.
+3. **late-tool-completion** — a `FakeFuture.cancel()` then `complete()` flip flags a late effect; the terminal `unknown` row must not be overwritten.
+4. **rate-limit-fallback** — two `FakeProvider` 429s then a success, clock advances exactly twice by `retry_after`.
+5. **process-restart** — exactly one in-flight delegation reconciled to `unknown`, the acked delegation stays at `confirmed`.
+6. **closed-db-handle-isolation** — closing one `FakeDBHandle` disables that op but not the forked child.
+7. **changed-approval-arguments** — a SHA-256 payload hash mismatch refuses to dispatch; unknown approval id is fail-closed.
+8. **duplicate-delivery-ack** — `DedupingDelivery` ensures one idempotency key crosses the external boundary on a lost-ack retry.
+
+Run from the repo root after `pip install -e .` (or `uv sync`):
+
+```bash
+hermes reliability check            # human table, exit 0
+hermes reliability check --json      # machine-readable, exits 0/1/2
+```
+
+`hermes reliability check` is hermetic to the local checkout; it never
+calls the model gateway, never touches `~/.hermes/`, and runs in well
+under a second. Use it in CI as a regression gate before merging changes
+that touch `agent/operation_journal.py`, `agent.reliability_report`, the
+dispatcher, or the delivery/approval surfaces.
 
 ## `hermes dump`
 

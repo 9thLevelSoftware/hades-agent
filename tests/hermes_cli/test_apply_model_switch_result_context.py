@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from hades_cli.model_switch import ModelSwitchResult
+from hermes_cli.model_switch import ModelSwitchResult
 
 
 class _FakeModelInfo:
@@ -42,19 +42,13 @@ class _StubCLI:
     api_mode = ""
     _pending_model_switch_note = ""
 
-    def __init__(self):
-        self.manual_transition_sources = []
-
-    def _record_manual_runtime_transition(self, *, source):
-        self.manual_transition_sources.append(source)
-
 
 def _run_display(monkeypatch, result):
     import cli as cli_mod
 
     captured: list[str] = []
     monkeypatch.setattr(cli_mod, "_cprint", lambda s, *a, **k: captured.append(str(s)))
-    # Avoid writing to ~/.hades/config.yaml during the test.
+    # Avoid writing to ~/.hermes/config.yaml during the test.
     monkeypatch.setattr(cli_mod, "save_config_value", lambda *a, **k: None)
     cli_mod.HermesCLI._apply_model_switch_result(_StubCLI(), result, False)
     return captured
@@ -126,33 +120,6 @@ def test_picker_path_shows_vendor_value_when_no_provider_cap(monkeypatch):
     )
 
 
-def test_successful_picker_switch_records_durable_cli_manual_pin(monkeypatch):
-    import cli as cli_mod
-
-    monkeypatch.setattr(cli_mod, "_cprint", lambda *_a, **_k: None)
-    monkeypatch.setattr(cli_mod, "save_config_value", lambda *_a, **_k: None)
-    result = ModelSwitchResult(
-        success=True,
-        new_model="openai/gpt-5.5",
-        target_provider="openrouter",
-        provider_changed=True,
-        api_key="secret",
-        base_url="https://openrouter.ai/api/v1",
-        api_mode="chat_completions",
-        warning_message="",
-        provider_label="OpenRouter",
-        resolved_via_alias=False,
-        capabilities=None,
-        model_info=None,
-        is_global=False,
-    )
-    shell = _StubCLI()
-
-    cli_mod.HermesCLI._apply_model_switch_result(shell, result, False)
-
-    assert shell.manual_transition_sources == ["cli_model_command"]
-
-
 def test_picker_path_falls_back_to_model_info_when_resolver_empty(monkeypatch):
     """If ``get_model_context_length`` returns nothing (rare — truly unknown
     endpoint), the display still surfaces ``ModelInfo.context_window`` so the
@@ -183,3 +150,54 @@ def test_picker_path_falls_back_to_model_info_when_resolver_empty(monkeypatch):
     assert "1,050,000" in ctx_line, (
         f"resolver-empty path should fall back to ModelInfo, got: {ctx_line!r}"
     )
+
+
+def test_global_switch_clears_context_pin_owned_by_previous_route(monkeypatch):
+    import cli as cli_mod
+
+    writes = []
+    monkeypatch.setattr(cli_mod, "_cprint", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "save_config_value",
+        lambda key, value: writes.append((key, value)),
+    )
+    cli = _StubCLI()
+    cli.model = "shared-model"
+    cli.provider = "custom"
+    # Runtime may already diverge from persisted config through a session override.
+    cli.base_url = "https://small.example/v1"
+    result = ModelSwitchResult(
+        success=True,
+        new_model="shared-model",
+        target_provider="custom",
+        provider_changed=False,
+        api_key="",
+        base_url="https://small.example/v1",
+        api_mode="chat_completions",
+        warning_message="",
+        provider_label="Custom",
+        resolved_via_alias=False,
+        capabilities=None,
+        model_info=_FakeModelInfo(),
+        is_global=True,
+    )
+
+    configured = {
+        "model": {
+            "default": "shared-model",
+            "provider": "custom",
+            "base_url": "https://large.example/v1",
+            "context_length": 1_048_576,
+        }
+    }
+    with (
+        patch(
+            "agent.model_metadata.get_model_context_length",
+            return_value=256_000,
+        ),
+        patch("hermes_cli.config.load_config_readonly", return_value=configured),
+    ):
+        cli_mod.HermesCLI._apply_model_switch_result(cli, result, True)
+
+    assert ("model.context_length", None) in writes

@@ -2,14 +2,14 @@
 
 import logging
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from gateway.session import SessionSource, build_session_key
 from gateway.run import GatewayRunner
 from gateway.profile_routing import ProfileRoute
-from gateway.config import Platform
+from gateway.config import GatewayConfig, Platform
 from gateway.platforms.base import BasePlatformAdapter
 
 
@@ -59,9 +59,9 @@ class TestResolutionOrder:
         """source.profile should be used even if routing would match."""
         discord_source.profile = "from-source"
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="active"):
-            with patch("hades_cli.profiles.get_profile_dir") as mock_get_dir:
-                with patch("hades_cli.profiles.profile_exists", return_value=True):
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
+            with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
+                with patch("hermes_cli.profiles.profile_exists", return_value=True):
                     mock_get_dir.return_value = Path("/hermes/profiles/from-source")
                     result = mock_runner._resolve_profile_home_for_source(discord_source)
                     
@@ -73,9 +73,9 @@ class TestResolutionOrder:
         discord_source.profile = None
         
         # Mock routing to return a profile
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="active"):
-            with patch("hades_cli.profiles.get_profile_dir") as mock_get_dir:
-                with patch("hades_cli.profiles.profile_exists", return_value=True):
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
+            with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
+                with patch("hermes_cli.profiles.profile_exists", return_value=True):
                     mock_get_dir.return_value = Path("/hermes/profiles/routed")
                     
                     # Manually set routing to return a profile
@@ -90,8 +90,8 @@ class TestResolutionOrder:
         """When source.profile and routing both return None, active profile is used."""
         discord_source.profile = None
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="active"):
-            with patch("hades_cli.profiles.get_profile_dir") as mock_get_dir:
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
+            with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
                 mock_get_dir.return_value = Path("/hermes/profiles/active")
                 
                 # No routing match
@@ -106,8 +106,8 @@ class TestResolutionOrder:
         """When even active profile is None, 'default' is used."""
         discord_source.profile = None
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value=None):
-            with patch("hades_cli.profiles.get_profile_dir") as mock_get_dir:
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value=None):
+            with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
                 mock_get_dir.return_value = Path("/hermes")
                 
                 mock_runner._profile_name_for_source = MagicMock(return_value=None)
@@ -125,15 +125,15 @@ class TestMissingProfileWarning:
         """When source.profile points to a nonexistent profile, log a WARNING."""
         discord_source.profile = "nonexistent"
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="active"):
-            with patch("hades_cli.profiles.get_profile_dir") as mock_get_dir:
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
+            with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
                 mock_get_dir.return_value = Path("/hermes/profiles/nonexistent")
-                with patch("hades_cli.profiles.profile_exists", return_value=False):
-                    with patch("hades_constants.get_hades_home", return_value=Path("/hermes")):
+                with patch("hermes_cli.profiles.profile_exists", return_value=False):
+                    with patch("hermes_constants.get_hermes_home", return_value=Path("/hermes")):
                         with caplog.at_level(logging.WARNING):
                             result = mock_runner._resolve_profile_home_for_source(discord_source)
                             
-                            # Should fall back to global HADES_HOME
+                            # Should fall back to global HERMES_HOME
                             assert result == Path("/hermes")
                             
                             # Should have logged a warning
@@ -148,18 +148,18 @@ class TestMissingProfileWarning:
         """When routing returns a nonexistent profile, log a WARNING."""
         discord_source.profile = None
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="active"):
-            with patch("hades_cli.profiles.get_profile_dir") as mock_get_dir:
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
+            with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
                 mock_get_dir.return_value = Path("/hermes/profiles/routed")
-                with patch("hades_cli.profiles.profile_exists", return_value=False):
-                    with patch("hades_constants.get_hades_home", return_value=Path("/hermes")):
+                with patch("hermes_cli.profiles.profile_exists", return_value=False):
+                    with patch("hermes_constants.get_hermes_home", return_value=Path("/hermes")):
                         # Routing returns a profile that doesn't exist
                         mock_runner._profile_name_for_source = MagicMock(return_value="routed")
                         
                         with caplog.at_level(logging.WARNING):
                             result = mock_runner._resolve_profile_home_for_source(discord_source)
                             
-                            # Should fall back to global HADES_HOME
+                            # Should fall back to global HERMES_HOME
                             assert result == Path("/hermes")
                             
                             # Should have logged a warning
@@ -170,10 +170,10 @@ class TestMissingProfileWarning:
         """When source.profile is empty, silent fallback to active profile (no warning)."""
         discord_source.profile = None
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="active"):
-            with patch("hades_cli.profiles.get_profile_dir") as mock_get_dir:
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
+            with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
                 mock_get_dir.return_value = Path("/hermes/profiles/active")
-                with patch("hades_cli.profiles.profile_exists", return_value=True):
+                with patch("hermes_cli.profiles.profile_exists", return_value=True):
                     with caplog.at_level(logging.WARNING):
                         mock_runner._profile_name_for_source = MagicMock(return_value=None)
                         
@@ -189,10 +189,10 @@ class TestMissingProfileWarning:
         """When the profile exists, no warning should be logged."""
         discord_source.profile = "existing"
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="active"):
-            with patch("hades_cli.profiles.get_profile_dir") as mock_get_dir:
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
+            with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
                 mock_get_dir.return_value = Path("/hermes/profiles/existing")
-                with patch("hades_cli.profiles.profile_exists", return_value=True):
+                with patch("hermes_cli.profiles.profile_exists", return_value=True):
                     with caplog.at_level(logging.WARNING):
                         result = mock_runner._resolve_profile_home_for_source(discord_source)
                         
@@ -209,13 +209,13 @@ class TestExceptionHandling:
         """When get_profile_dir raises an exception, log a WARNING with context."""
         discord_source.profile = "bad-profile"
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="active"):
-            with patch("hades_cli.profiles.get_profile_dir", side_effect=ValueError("Invalid profile name")):
-                with patch("hades_constants.get_hades_home", return_value=Path("/hermes")):
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
+            with patch("hermes_cli.profiles.get_profile_dir", side_effect=ValueError("Invalid profile name")):
+                with patch("hermes_constants.get_hermes_home", return_value=Path("/hermes")):
                     with caplog.at_level(logging.WARNING):
                         result = mock_runner._resolve_profile_home_for_source(discord_source)
                         
-                        # Should fall back to global HADES_HOME
+                        # Should fall back to global HERMES_HOME
                         assert result == Path("/hermes")
                         
                         # Should have logged a warning with exception info
@@ -228,9 +228,9 @@ class TestExceptionHandling:
         """Exception when no profile was set should still log a warning."""
         discord_source.profile = None
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value=None):
-            with patch("hades_cli.profiles.get_profile_dir", side_effect=RuntimeError("Filesystem error")):
-                with patch("hades_constants.get_hades_home", return_value=Path("/hermes")):
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value=None):
+            with patch("hermes_cli.profiles.get_profile_dir", side_effect=RuntimeError("Filesystem error")):
+                with patch("hermes_constants.get_hermes_home", return_value=Path("/hermes")):
                     mock_runner._profile_name_for_source = MagicMock(return_value=None)
                     
                     with caplog.at_level(logging.WARNING):
@@ -249,8 +249,8 @@ class TestRoutingConsultation:
         """_profile_name_for_source should be called when source.profile is empty."""
         discord_source.profile = None
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="active"):
-            with patch("hades_cli.profiles.get_profile_dir") as mock_get_dir:
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
+            with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
                 mock_get_dir.return_value = Path("/hermes/profiles/routed")
                 
                 mock_runner._profile_name_for_source = MagicMock(return_value="routed")
@@ -264,8 +264,8 @@ class TestRoutingConsultation:
         """_profile_name_for_source should NOT be called when source.profile is set."""
         discord_source.profile = "from-source"
         
-        with patch("hades_cli.profiles.get_active_profile_name", return_value="active"):
-            with patch("hades_cli.profiles.get_profile_dir") as mock_get_dir:
+        with patch("hermes_cli.profiles.get_active_profile_name", return_value="active"):
+            with patch("hermes_cli.profiles.get_profile_dir") as mock_get_dir:
                 mock_get_dir.return_value = Path("/hermes/profiles/from-source")
                 
                 mock_runner._profile_name_for_source = MagicMock(return_value="routed")
@@ -400,10 +400,36 @@ class TestAdapterToSessionKeyIntegration:
             chat_id="-1001234567890", chat_type="group", user_id="u1",
         )
         assert source.profile == "ops"
+        assert source._transport_adapter_ref() is adapter
 
         key = build_session_key(source, profile=source.profile)
         assert key.startswith("agent:ops:"), key
         assert key != build_session_key(source, profile=None)
+
+    @pytest.mark.asyncio
+    async def test_chat_route_keeps_shared_adapter_for_delivery(self):
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig(
+            multiplex_profiles=True,
+            profile_routes=self._routes(),
+        )
+        runner._profile_adapters = {"ops": {}}
+        adapter = _stub_adapter(Platform.TELEGRAM, runner)
+        adapter.send = AsyncMock()
+        runner.adapters = {Platform.TELEGRAM: adapter}
+
+        source = adapter.build_source(
+            chat_id="-1001234567890", chat_type="group", user_id="u1",
+        )
+
+        assert source.profile == "ops"
+        assert runner._adapter_for_source(source) is adapter
+        await runner._deliver_platform_notice(source, "routed reply")
+        adapter.send.assert_awaited_once_with(
+            "-1001234567890",
+            "routed reply",
+            metadata=None,
+        )
 
     def test_adapter_without_runner_falls_back_to_default_namespace(self, mock_runner):
         """Regression anchor: with no ``gateway_runner`` injected (the pre-fix
