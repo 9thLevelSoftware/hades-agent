@@ -5690,14 +5690,8 @@ _EXTRA_KNOWN_ROOT_KEYS = {
     "require_mention",       # top-level convenience form honored by the gateway (#3979)
     "unauthorized_dm_behavior",  # top-level form read by gateway/config.py
     "signal",            # Signal settings bridged to env vars by gateway/config.py
-# Fields that are valid at root level of config.yaml
-_KNOWN_ROOT_KEYS = {
-    "_config_version", "model", "providers", "fallback_model",
-    "fallback_providers", "credential_pool_strategies", "toolsets",
-    "agent", "terminal", "code_execution", "display", "compression", "delegation",
-    "auxiliary", "moa", "custom_providers", "context", "memory", "gateway",
-    "sessions", "streaming", "updates", "mcp_servers",
 }
+# Fields that are valid at root level of config.yaml
 _KNOWN_ROOT_KEYS = frozenset(DEFAULT_CONFIG.keys()) | _EXTRA_KNOWN_ROOT_KEYS
 
 # Valid fields inside a custom_providers list entry
