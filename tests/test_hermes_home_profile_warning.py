@@ -23,7 +23,7 @@ def fresh_constants(monkeypatch, tmp_path):
     """Import hermes_constants fresh and reset the one-shot warn flag."""
     import importlib
     import hades_constants
-    importlib.reload(hermes_constants)
+    importlib.reload(hades_constants)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.delenv("HADES_HOME", raising=False)
     return hermes_constants

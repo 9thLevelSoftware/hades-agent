@@ -24,7 +24,7 @@ def backup_env(monkeypatch, tmp_path):
 
     # Reload so get_hades_home picks up the env var fresh.
     import hades_constants
-    importlib.reload(hermes_constants)
+    importlib.reload(hades_constants)
     from agent import curator_backup
     importlib.reload(curator_backup)
     return {"home": home, "skills": home / "skills", "cb": curator_backup}
@@ -338,7 +338,7 @@ def _write_cron_jobs(home: Path, jobs: list) -> Path:
 def _reload_cron_jobs(home: Path):
     """Reload cron.jobs so its module-level HERMES_DIR picks up the tmp HOME."""
     import hades_constants
-    importlib.reload(hermes_constants)
+    importlib.reload(hades_constants)
     if "cron.jobs" in sys.modules:
         import cron.jobs as _cj
         importlib.reload(_cj)

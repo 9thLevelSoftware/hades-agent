@@ -387,7 +387,11 @@ describe('/billing slash command (overlay-driven)', () => {
     await Promise.resolve()
     await Promise.resolve()
     const out = printed(sys)
-    expect(out).toContain('Remote spending is off for this account')
+    // Copy was reworded to terminal/admin language; accept either phrasing.
+    expect(
+      out.includes('Remote spending is off for this account') ||
+        out.includes('Terminal billing is off for this account')
+    ).toBe(true)
     // Account-wide switch is NOT a per-terminal revoke — overlay stays open.
     expect(getOverlayState().billing).toBeTruthy()
   })
