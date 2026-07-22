@@ -22,7 +22,7 @@ JPEG = b"\xff\xd8\xff" + b"\x00" * 64
 def _reload(monkeypatch, hermes_home: Path):
     monkeypatch.setenv("HADES_HOME", str(hermes_home))
     import hades_constants
-    importlib.reload(hermes_constants)
+    importlib.reload(hades_constants)
     import tools.image_source as isrc
     importlib.reload(isrc)
     return isrc

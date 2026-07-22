@@ -32,7 +32,7 @@ def hermes_env(tmp_path, monkeypatch):
     # Reload modules that cache get_hades_home() at import time.
     import importlib
     import hades_constants
-    importlib.reload(hermes_constants)
+    importlib.reload(hades_constants)
     import cron.jobs
     importlib.reload(cron.jobs)
     import cron.scheduler

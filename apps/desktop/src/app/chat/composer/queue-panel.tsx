@@ -14,13 +14,26 @@ interface QueuePanelProps {
   entries: QueuedPromptEntry[]
   onDelete: (id: string) => void
   onEdit: (entry: QueuedPromptEntry) => void
+  /** Resume a parked queue (optional — park UI may be absent). */
+  onResume?: () => void
   onSendNow: (id: string) => void
+  /** When true, auto-drain is halted; show parked affordance if present. */
+  parked?: boolean
 }
 
 const entryPreview = (entry: QueuedPromptEntry, c: Translations['composer']) =>
   entry.text.trim() || (entry.attachments.length > 0 ? c.attachmentOnly : c.emptyTurn)
 
-export function QueuePanel({ busy, editingId, entries, onDelete, onEdit, onSendNow }: QueuePanelProps) {
+export function QueuePanel({
+  busy,
+  editingId,
+  entries,
+  onDelete,
+  onEdit,
+  onResume,
+  onSendNow,
+  parked = false
+}: QueuePanelProps) {
   const { t } = useI18n()
   const c = t.composer
 
@@ -30,8 +43,24 @@ export function QueuePanel({ busy, editingId, entries, onDelete, onEdit, onSendN
 
   return (
     <StatusSection
+      accessory={
+        parked && onResume ? (
+          <Tip label="Resume queue">
+            <Button
+              aria-label="Resume queue"
+              className="size-5 rounded-md"
+              onClick={() => onResume()}
+              size="icon-xs"
+              type="button"
+              variant="ghost"
+            >
+              <ArrowUp className={iconSize.xs} />
+            </Button>
+          </Tip>
+        ) : undefined
+      }
       icon={<Codicon className="text-muted-foreground/70" name="layers" size="0.8rem" />}
-      label={c.queued(entries.length)}
+      label={parked ? `${c.queued(entries.length)} · parked` : c.queued(entries.length)}
     >
       {entries.map(entry => {
         const isEditing = editingId === entry.id

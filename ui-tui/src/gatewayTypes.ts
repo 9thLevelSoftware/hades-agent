@@ -654,6 +654,7 @@ export type GatewayEvent =
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.progress' }
   | { payload: SubagentEventPayload; session_id?: string; type: 'subagent.complete' }
   | { payload: { rendered?: string; text?: string }; session_id?: string; type: 'message.delta' }
+  | { payload?: { text?: string }; session_id?: string; type: 'message.interim' }
   | {
       payload: { already_streamed?: boolean; text: string }
       session_id?: string

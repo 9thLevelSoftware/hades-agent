@@ -47,5 +47,7 @@ jobs:
       - uses: ./.github/actions/retry
         with:
           command: npm ci
+      # ``check`` = typecheck + tests. Do not run ``fix`` here — most
+      # workspaces do not define it, and autofix belongs in a dedicated
+      # workflow (removed: org policy blocks Actions-created PRs).
       - run: npm run --prefix ${{ matrix.package }} check
-      - run: npm run --prefix ${{ matrix.package }} fix

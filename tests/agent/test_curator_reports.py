@@ -25,7 +25,7 @@ def curator_env(tmp_path, monkeypatch):
 
     import importlib
     import hades_constants
-    importlib.reload(hermes_constants)
+    importlib.reload(hades_constants)
     from agent import curator
     importlib.reload(curator)
     from tools import skill_usage
