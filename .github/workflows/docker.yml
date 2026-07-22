@@ -1,6 +1,9 @@
 name: Docker Build, Test, and Publish
 
 on:
+  # Manual only until Docker Hub secrets + publish process are configured.
+  # CI no longer workflow_calls this on every PR (too slow / not required).
+  workflow_dispatch:
   release:
     types: [published]
   workflow_call:
@@ -17,7 +20,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  IMAGE_NAME: nousresearch/hermes-agent
+  # Fork image name — do not push to the upstream NousResearch registry.
+  IMAGE_NAME: 9thlevelsoftware/hades-agent
 
 jobs:
   # Build, test, and optionally push the image for each architecture.
