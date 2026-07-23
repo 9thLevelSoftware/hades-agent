@@ -82,11 +82,19 @@ def test_suppression_env_var_silences_warning(monkeypatch, var):
     assert stream.getvalue() == ""
 
 
-def test_no_pip_install_hermes_agent_strings_remain():
-    """No user-facing remediation may still tell users to pip install the
-    upstream hermes-agent distribution (it clobbers our hermes shims)."""
+def test_no_upstream_install_hints_remain():
+    """No user-facing remediation may direct users to upstream Hermes.
+
+    The wording is intentionally broader than only ``pip install``: startup
+    errors commonly say ``Install hermes-agent[...]`` without repeating the
+    package manager.  An uninstall command and compatibility prose are not
+    installation hints and therefore remain valid legacy references.
+    """
     repo_root = Path(__file__).resolve().parent.parent
-    pattern = re.compile(r"pip install ['\"]?hermes-agent")
+    pattern = re.compile(
+        r"\b(?:pip\s+)?install(?:\s+--[^\s]+)*\s+['\"]?hermes-agent(?:\[|\b)",
+        re.IGNORECASE,
+    )
     offenders = []
     for top in ("tools", "hades_cli", "agent", "gateway", "cron",
                  "plugins", "providers", "acp_adapter", "acp_registry",
@@ -105,5 +113,23 @@ def test_no_pip_install_hermes_agent_strings_remain():
                 if pattern.search(line):
                     offenders.append(f"{py_file.relative_to(repo_root)}:{lineno}: {line.strip()}")
     assert not offenders, (
-        "Found stale upstream pip-install remediation strings:\n" + "\n".join(offenders)
+        "Found stale upstream install remediation strings:\n" + "\n".join(offenders)
     )
+
+
+@pytest.mark.parametrize(
+    ("line", "is_hint"),
+    [
+        ("Install hermes-agent[google_chat].", True),
+        ("pip install 'hermes-agent[messaging]'", True),
+        ("pip install --force-reinstall hermes-agent", True),
+        ("pip uninstall hermes-agent", False),
+        ("Legacy hermes-agent[all] compatibility remains supported.", False),
+    ],
+)
+def test_upstream_install_hint_pattern_ignores_compatibility_and_uninstall(line, is_hint):
+    pattern = re.compile(
+        r"\b(?:pip\s+)?install(?:\s+--[^\s]+)*\s+['\"]?hermes-agent(?:\[|\b)",
+        re.IGNORECASE,
+    )
+    assert bool(pattern.search(line)) is is_hint

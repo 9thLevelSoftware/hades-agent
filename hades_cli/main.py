@@ -7916,25 +7916,43 @@ def _install_python_dependencies_with_optional_fallback(
     _verify_console_scripts_installed(install_cmd_prefix, env=env)
 
 
+_CONSOLE_SCRIPT_FALLBACK = (
+    "hades",
+    "hades-agent",
+    "hades-acp",
+    "hermes",
+    "hermes-agent",
+    "hermes-acp",
+)
+
+
 def _load_console_script_names() -> list[str]:
-    """Return ``[project.scripts]`` entry-point names from pyproject.toml."""
+    """Return declared entry points, including aliases when metadata is absent.
+
+    Updates normally run from a source checkout with ``pyproject.toml``.  The
+    repair path can also run from an installed or partially extracted tree,
+    where that metadata is unavailable precisely when Windows launcher repair
+    is most needed.  Keep the six shipped Hades/Hermes compatibility aliases
+    as a stable fallback; ``_hermes_exe_shims`` adds its separate gateway shim.
+    """
     try:
         import tomllib  # Python 3.11+
     except ImportError:  # pragma: no cover
-        return []
+        return list(_CONSOLE_SCRIPT_FALLBACK)
 
     pyproject = PROJECT_ROOT / "pyproject.toml"
     if not pyproject.is_file():
-        return []
+        return list(_CONSOLE_SCRIPT_FALLBACK)
 
     try:
         with open(pyproject, "rb") as f:
             data = tomllib.load(f)
         scripts = data.get("project", {}).get("scripts", {}) or {}
-        return [str(name) for name in scripts if name]
+        names = [str(name) for name in scripts if name]
+        return names or list(_CONSOLE_SCRIPT_FALLBACK)
     except Exception as e:
         logger.debug("console script verification: failed to read pyproject.toml: %s", e)
-        return []
+        return list(_CONSOLE_SCRIPT_FALLBACK)
 
 
 def _verify_console_scripts_installed(

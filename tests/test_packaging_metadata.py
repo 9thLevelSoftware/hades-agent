@@ -1,7 +1,11 @@
 import ast
 import fnmatch
 import re
+import shutil
+import subprocess
+import tarfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -197,6 +201,62 @@ def test_distribution_metadata_includes_plugin_skills():
         "plugin SKILL.md files omitted from sdist manifest: "
         f"{sorted(str(path) for path in on_disk - sdist_matches)}"
     )
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(300)
+def test_built_artifacts_contain_direct_and_nested_plugin_skills(tmp_path):
+    """Wheel and sdist both retain plugin discovery instructions.
+
+    Package-data and MANIFEST declarations are useful fast checks, but they
+    don't prove what setuptools actually emitted.  Exercise the two packaging
+    channels in an isolated output directory and inspect the published member
+    paths, including a direct skill and one nested below a plugin subdirectory.
+    """
+    required = {
+        "plugins/google_meet/SKILL.md",
+        "plugins/auto_routing/skills/auto-routing/SKILL.md",
+    }
+    # setuptools writes ``*.egg-info`` beside its input source tree.  Build a
+    # disposable source copy so this verification never leaves generated
+    # metadata in a developer checkout or dirties a release branch.
+    source = tmp_path / "source"
+    source_egg_info_before = set(REPO_ROOT.glob("*.egg-info"))
+    shutil.copytree(
+        REPO_ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git", ".venv", "venv", "node_modules", "build", "dist",
+            "*.egg-info", "__pycache__", "*.pyc",
+        ),
+    )
+    output = tmp_path / "dist"
+    build = subprocess.run(
+        ["uv", "build", "--out-dir", str(output), "."],
+        cwd=source,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert build.returncode == 0, f"uv build failed:\n{build.stderr}"
+
+    wheels = list(output.glob("*.whl"))
+    tarballs = list(output.glob("*.tar.gz"))
+    assert len(wheels) == 1, f"expected one wheel, found: {wheels}"
+    assert len(tarballs) == 1, f"expected one sdist, found: {tarballs}"
+
+    with zipfile.ZipFile(wheels[0]) as archive:
+        wheel_members = set(archive.namelist())
+    missing_wheel = sorted(required - wheel_members)
+    assert not missing_wheel, f"wheel omitted plugin skills: {missing_wheel}"
+
+    with tarfile.open(tarballs[0]) as archive:
+        sdist_members = set(archive.getnames())
+    missing_sdist = sorted(
+        path for path in required if not any(member.endswith(f"/{path}") for member in sdist_members)
+    )
+    assert not missing_sdist, f"sdist omitted plugin skills: {missing_sdist}"
+    assert set(REPO_ROOT.glob("*.egg-info")) == source_egg_info_before
 
 
 # Minimum non-vulnerable Starlette: CVE-2026-48710 ("BadHost") was fixed in
