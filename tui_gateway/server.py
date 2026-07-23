@@ -13542,7 +13542,7 @@ _AUTONOMY_MAX_ARGV_BYTES = 65_536  # 64 KiB total UTF-8
 
 _NATIVE_MAX_OUTPUT_CHARS = 16_384
 _NATIVE_OUTPUT_TRUNCATION_SUFFIX = "... [truncated]"
-_NATIVE_MAX_RESULT_BYTES = 1_048_576  # 1 MiB UTF-8 JSON
+_NATIVE_MAX_RESULT_BYTES = 1_048_576  # 1 MiB UTF-8 default JSON-RPC frame + newline
 _TRANSACTION_MAX_PREVIEW_NODES = 256
 
 
@@ -13598,20 +13598,19 @@ def _cap_native_output(value: Any, *, method: str) -> str:
 
 
 def _native_success(rid, response: dict, *, method: str, code: int) -> dict:
-    """Bound and rehydrate a native success envelope before JSON-RPC output."""
+    """Bound the complete default-serialized JSON-RPC frame before output."""
     try:
+        envelope = _ok(rid, response)
         encoded = json.dumps(
-            response,
+            envelope,
             ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
         ).encode("utf-8")
-        if len(encoded) > _NATIVE_MAX_RESULT_BYTES:
-            raise ValueError("native result exceeds wire bound")
+        if len(encoded) + 1 > _NATIVE_MAX_RESULT_BYTES:
+            raise ValueError("native JSON-RPC frame exceeds wire bound")
         normalized = json.loads(encoded)
         if type(normalized) is not dict:
-            raise ValueError("native result did not normalize to a dict")
-        return _ok(rid, normalized)
+            raise ValueError("native JSON-RPC frame did not normalize to a dict")
+        return normalized
     except Exception as exc:
         logger.warning("%s success envelope rejected (%s)", method, type(exc).__name__)
         return _native_internal_error(rid, method=method, code=code)
@@ -13634,6 +13633,233 @@ def _autonomy_contract_doc(payload: dict) -> dict | None:
     for key in ("profile_id", "mode"):
         if payload.get(key) is not None:
             doc[key] = payload[key]
+    return doc
+
+
+def _autonomy_rule_doc(row: Any) -> dict | None:
+    """Construct the UI rule document without forwarding producer fields."""
+    if type(row) is not dict:
+        return None
+    required = ("rule_id", "source", "state", "effect")
+    if any(key not in row or type(row[key]) is not str for key in required):
+        return None
+    doc: dict[str, Any] = {
+        "rule_id": row["rule_id"],
+        "source": row["source"],
+        "state": row["state"],
+        "effect": row["effect"],
+    }
+    string_lists = (
+        "action_classes",
+        "data_classes",
+        "recipient_classes",
+    )
+    optional_strings = ("description", "edit_command", "provenance")
+    optional_ints = ("confidence_ppm", "expires_at_ms", "max_uses", "remaining_uses")
+    for key in string_lists:
+        if key in row:
+            value = row[key]
+            if type(value) is not list or not all(type(item) is str for item in value):
+                return None
+            doc[key] = list(value)
+    for key in optional_strings:
+        if key in row:
+            value = row[key]
+            if type(value) is not str:
+                return None
+            doc[key] = value
+    for key in optional_ints:
+        if key in row:
+            value = row[key]
+            if value is not None and type(value) is not int:
+                return None
+            doc[key] = value
+    return doc
+
+
+def _autonomy_rule_rows(value: Any) -> list[dict]:
+    if type(value) is not list:
+        return []
+    docs = []
+    for row in value:
+        doc = _autonomy_rule_doc(row)
+        if doc is not None:
+            docs.append(doc)
+    return docs
+
+
+def _autonomy_evidence_rows(value: Any) -> list[dict] | None:
+    if type(value) is not list:
+        return None
+    docs = []
+    for row in value:
+        if (
+            type(row) is not dict
+            or "kind" not in row
+            or "stage" not in row
+            or type(row["kind"]) is not str
+            or type(row["stage"]) is not str
+        ):
+            return None
+        docs.append({"kind": row["kind"], "stage": row["stage"]})
+    return docs
+
+
+def _autonomy_decision_doc(row: Any, *, audit: bool = False) -> dict | None:
+    """Construct an allowlisted decision, with audit-only identity fields."""
+    if type(row) is not dict:
+        return None
+    if (
+        "verdict" not in row
+        or "code" not in row
+        or type(row["verdict"]) is not str
+        or row["verdict"] not in {"allow", "ask", "deny"}
+        or type(row["code"]) is not str
+    ):
+        return None
+    doc: dict[str, Any] = {
+        "verdict": row["verdict"],
+        "code": row["code"],
+    }
+    optional_strings = (
+        "authority_hash",
+        "context_hash",
+        "reason",
+        "stage",
+    )
+    optional_ints = ("authority_version",)
+    optional_string_lists = (
+        "conflicting_rule_ids",
+        "edit_targets",
+        "matched_rule_ids",
+    )
+    for key in optional_strings:
+        if key in row:
+            value = row[key]
+            if type(value) is not str:
+                return None
+            doc[key] = value
+    for key in optional_ints:
+        if key in row:
+            value = row[key]
+            if type(value) is not int:
+                return None
+            doc[key] = value
+    for key in optional_string_lists:
+        if key in row:
+            value = row[key]
+            if type(value) is not list or not all(type(item) is str for item in value):
+                return None
+            doc[key] = list(value)
+    if "expires_at_ms" in row:
+        value = row["expires_at_ms"]
+        if value is not None and type(value) is not int:
+            return None
+        doc["expires_at_ms"] = value
+    if "required_evidence" in row:
+        evidence = _autonomy_evidence_rows(row["required_evidence"])
+        if evidence is None:
+            return None
+        doc["required_evidence"] = evidence
+    if "clarification" in row:
+        clarification = row["clarification"]
+        if clarification is None:
+            doc["clarification"] = None
+        elif type(clarification) is dict:
+            if (
+                "question" not in clarification
+                or "choices" not in clarification
+                or type(clarification["question"]) is not str
+                or type(clarification["choices"]) is not list
+                or not all(type(choice) is str for choice in clarification["choices"])
+            ):
+                return None
+            safe_clarification: dict[str, Any] = {
+                "question": clarification["question"],
+                "choices": list(clarification["choices"]),
+            }
+            if "code" in clarification:
+                if type(clarification["code"]) is not str:
+                    return None
+                safe_clarification["code"] = clarification["code"]
+            doc["clarification"] = safe_clarification
+        else:
+            return None
+    if audit:
+        for key in ("decision_id", "operation_key"):
+            if key in row:
+                value = row[key]
+                if type(value) is not str:
+                    return None
+                doc[key] = value
+        if "created_at_ms" in row:
+            value = row["created_at_ms"]
+            if type(value) is not int:
+                return None
+            doc["created_at_ms"] = value
+    return doc
+
+
+def _autonomy_audit_rows(value: Any) -> list[dict]:
+    if type(value) is not list:
+        return []
+    docs = []
+    for row in value:
+        doc = _autonomy_decision_doc(row, audit=True)
+        if doc is not None:
+            docs.append(doc)
+    return docs
+
+
+def _autonomy_preview_doc(row: Any) -> dict | None:
+    """Construct the UI preview document from its explicit fields."""
+    if type(row) is not dict or "applied" not in row or row["applied"] is not False:
+        return None
+    if (
+        "before_contract_hash" not in row
+        or "after_contract_hash" not in row
+        or type(row["before_contract_hash"]) is not str
+        or type(row["after_contract_hash"]) is not str
+    ):
+        return None
+    doc: dict[str, Any] = {
+        "applied": False,
+        "before_contract_hash": row["before_contract_hash"],
+        "after_contract_hash": row["after_contract_hash"],
+    }
+    if "profile_id" in row:
+        if type(row["profile_id"]) is not str:
+            return None
+        doc["profile_id"] = row["profile_id"]
+    for key in ("added_rule_ids", "removed_rule_ids", "changed_rule_ids", "warnings"):
+        if key in row:
+            value = row[key]
+            if type(value) is not list or not all(type(item) is str for item in value):
+                return None
+            doc[key] = list(value)
+    return doc
+
+
+def _autonomy_applied_doc(row: Any) -> dict | None:
+    """Construct the UI applied document from its explicit fields."""
+    if type(row) is not dict or "applied" not in row or row["applied"] is not True:
+        return None
+    if (
+        "contract_version" not in row
+        or "contract_hash" not in row
+        or type(row["contract_version"]) is not int
+        or type(row["contract_hash"]) is not str
+    ):
+        return None
+    doc: dict[str, Any] = {
+        "applied": True,
+        "contract_version": row["contract_version"],
+        "contract_hash": row["contract_hash"],
+    }
+    if "config_hash" in row:
+        if type(row["config_hash"]) is not str:
+            return None
+        doc["config_hash"] = row["config_hash"]
     return doc
 
 
@@ -13718,18 +13944,19 @@ def _(rid, params: dict) -> dict:
     try:
         if exit_code == exit_ok and _native_failure_payload(payload):
             return _native_internal_error(rid, method="autonomy.exec", code=5038)
-        preview = payload if payload.get("applied") is False else None
-        applied = payload if payload.get("applied") is True else None
+        decision = _autonomy_decision_doc(payload) if "verdict" in payload else None
+        preview = _autonomy_preview_doc(payload)
+        applied = _autonomy_applied_doc(payload)
         response = {
             "ok": exit_code == exit_ok,
             "action": argv[0].strip().lower(),
             "exit_code": exit_code,
             "output": _cap_native_output(producer_output, method="autonomy.exec"),
             "contract": _autonomy_contract_doc(payload),
-            "rules": payload.get("rules") or [],
-            "suggestions": payload.get("suggestions") or [],
-            "decision": payload if "verdict" in payload else None,
-            "audit": payload.get("decisions") or [],
+            "rules": _autonomy_rule_rows(payload.get("rules")),
+            "suggestions": _autonomy_rule_rows(payload.get("suggestions")),
+            "decision": decision,
+            "audit": _autonomy_audit_rows(payload.get("decisions")),
             "preview": preview,
             "applied": applied,
             # True while an authority change awaits its explicit second step:
@@ -13880,8 +14107,6 @@ def _(rid, params: dict) -> dict:
 
 _TRANSACTION_MAX_ARGV_ENTRIES = 64
 _TRANSACTION_MAX_ARGV_BYTES = 64 * 1024
-_TRANSACTION_MAX_OUTPUT_CHARS = _NATIVE_MAX_OUTPUT_CHARS
-_TRANSACTION_OUTPUT_TRUNCATION_SUFFIX = _NATIVE_OUTPUT_TRUNCATION_SUFFIX
 
 
 @method("transaction.exec")
