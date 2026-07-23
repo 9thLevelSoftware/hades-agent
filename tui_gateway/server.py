@@ -14821,13 +14821,20 @@ def _transaction_uncertainty_response(
         fallback="command",
     )
     output = "transaction effect uncertain — do not retry; reconcile first"
-    return _transaction_response(
+    response = _transaction_response(
         payload,
         action=action,
         exit_code=exit_code,
         output=output,
         ok=False,
     )
+    transaction_id = _native_safe_domain_id(
+        argv[1] if len(argv) > 1 else None,
+        method="transaction.exec",
+    )
+    if transaction_id is not None:
+        response["transaction_id"] = transaction_id
+    return response
 
 
 @method("transaction.exec")

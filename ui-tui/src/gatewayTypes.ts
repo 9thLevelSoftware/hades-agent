@@ -221,6 +221,7 @@ export interface TransactionExecResponse {
   receipt?: TransactionReceiptDoc
   revision?: number
   status?: string
+  transaction_id?: string
   transaction?: TransactionDoc
   transactions?: TransactionDoc[]
 }

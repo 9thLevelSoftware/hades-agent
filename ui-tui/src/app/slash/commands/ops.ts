@@ -150,12 +150,13 @@ const renderTransactionResult = (action: string, r: TransactionExecResponse, ctx
 
   const statuses = [r.status ?? '', r.transaction?.status ?? '']
 
-  const uncertain = new Set(['unknown_effect', 'blocked', 'partially_compensated', 'failed', 'compensated'])
+  const uncertain = new Set(['unknown_effect', 'blocked', 'partially_compensated', 'failed'])
   if (statuses.some(status => uncertain.has(status)) || (r.counts?.['unknown'] ?? 0) > 0) {
     const status = statuses.find(item => uncertain.has(item)) ?? 'unknown_effect'
+    const transactionId = r.transaction?.transaction_id ?? r.transaction_id ?? '<tx>'
     sys(
       `warning: ${status} — do not retry; run ` +
-        `/transaction reconcile ${r.transaction?.transaction_id ?? '<tx>'} first.`
+        `/transaction reconcile ${transactionId} first.`
     )
   }
 
