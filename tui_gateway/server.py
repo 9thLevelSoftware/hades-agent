@@ -13803,13 +13803,17 @@ def _(rid, params: dict) -> dict:
     payload = result.payload or {}
     if result.exit_code == exit_validation:
         return _err(
-            rid, 4007, payload.get("error") or "transaction: validation error"
+            rid,
+            4007,
+            "transaction.exec: validation failed (details withheld; run "
+            "hades transaction in a terminal)",
         )
     if result.exit_code != exit_ok:
-        # Bounded, already-redacted error text from the shared surface.
         return _err(
-            rid, 5044, payload.get("error") or result.output
-            or "transaction: command failed",
+            rid,
+            5044,
+            "transaction.exec: command failed (details withheld; run "
+            "hades transaction in a terminal)",
         )
     response = {
         "ok": True,
