@@ -774,3 +774,97 @@ def test_valid_autonomy_denial_payload_has_fixed_safe_output(
     assert resp["result"]["output"] != result.output
     assert resp["result"]["decision"]["verdict"] == "deny"
     assert resp["result"]["decision"]["code"] == "sensitive_data_boundary"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/Volumes/Untitled/private.txt",
+        "/opt/local/secret",
+        "/etc/passwd",
+        "/root/.ssh/key",
+        "/etc",
+        "/root",
+    ],
+)
+def test_autonomy_native_redacts_generic_posix_paths_recursively(
+    rpc_raw, monkeypatch, path
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    probe = f"producer free text {path}"
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        f"producer output {probe}",
+        {
+            "ok": True,
+            "action": "evaluate",
+            "verdict": "allow",
+            "code": "explicit_allow",
+            "reason": probe,
+            "edit_targets": [probe],
+            "clarification": {
+                "question": probe,
+                "choices": [probe],
+                "code": "clarify",
+            },
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["evaluate"]})
+
+    assert "result" in resp, resp
+    assert path not in json.dumps(resp, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("exit_verdict", ["allow", "ask"])
+def test_autonomy_exit_denied_cannot_forward_allow_or_ask_decision(
+    rpc_raw, monkeypatch, exit_verdict
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_DENIED,
+        "safe producer output",
+        {"ok": True, "verdict": exit_verdict, "code": "producer_verdict"},
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["evaluate"]})
+
+    assert "error" in resp and resp["error"]["code"] == 5038, resp
+    assert "result" not in resp
+    assert exit_verdict not in json.dumps(resp, ensure_ascii=False)
+
+
+def test_autonomy_exit_ok_cannot_forward_deny_decision(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        "safe producer output",
+        {"ok": True, "verdict": "deny", "code": "explicit_deny"},
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["evaluate"]})
+
+    assert "error" in resp and resp["error"]["code"] == 5038, resp
+    assert "result" not in resp
+
+
+def test_autonomy_exit_ok_ask_decision_remains_valid(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        "safe producer output",
+        {"ok": True, "verdict": "ask", "code": "needs_confirmation"},
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["evaluate"]})
+
+    assert resp["result"]["ok"] is True
+    assert resp["result"]["decision"]["verdict"] == "ask"

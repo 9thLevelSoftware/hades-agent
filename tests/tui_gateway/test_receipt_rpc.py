@@ -776,3 +776,89 @@ def test_valid_receipt_denial_output_is_redacted(rpc, monkeypatch):
     assert secret not in wire
     assert private_path not in wire
     assert resp["error"]["code"] == 5040, resp
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/Volumes/Untitled/private.txt",
+        "/opt/local/secret",
+        "/etc/passwd",
+        "/root/.ssh/key",
+        "/etc",
+        "/root",
+    ],
+)
+def test_receipt_native_redacts_generic_posix_paths_recursively(rpc, monkeypatch, path):
+    import hades_cli.receipts as receipts_mod
+
+    probe = f"producer free text {path}"
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        f"producer output {probe}",
+        {
+            "ok": True,
+            "action": "show",
+            "warning": probe,
+            "claim_edges": [{
+                "claim_id": "claim-1",
+                "verdict": "satisfied",
+                "required": True,
+                "statement": probe,
+                "uncertainty": [probe],
+            }],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["show"]})
+
+    assert path not in json.dumps(resp, ensure_ascii=False)
+
+
+def test_receipt_claim_edge_locator_ids_are_dropped_but_safe_ids_survive(
+    rpc, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    invalid_ids = [
+        "artifact://secret/path",
+        "file:///tmp/x",
+        "/etc/passwd",
+        r"C:\\secret",
+        "../relative",
+        "id with whitespace",
+    ]
+    valid_ids = [
+        "550e8400-e29b-41d4-a716-446655440000",
+        "evidence_id",
+        "artifact.v1",
+        "sha256:abc123",
+    ]
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        "safe producer output",
+        {
+            "ok": True,
+            "action": "show",
+            "claim_edges": [{
+                "claim_id": "claim-1",
+                "verdict": "satisfied",
+                "required": True,
+                "evidence_ids": [*invalid_ids, *valid_ids],
+                "artifact_ids": [*invalid_ids, *valid_ids],
+            }],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["show"]})
+
+    edge = resp["claim_edges"][0]
+    assert edge["evidence_ids"] == valid_ids
+    assert edge["artifact_ids"] == valid_ids
+    wire = json.dumps(resp, ensure_ascii=False)
+    for invalid_id in invalid_ids:
+        assert invalid_id not in wire
+    for valid_id in valid_ids:
+        assert valid_id in wire

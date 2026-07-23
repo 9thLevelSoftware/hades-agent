@@ -512,3 +512,76 @@ def test_valid_transaction_success_payload_forwards_only_minimal_schemas(
         "can_execute", "code", "fidelity", "reason", "blockers",
         "required_cascade_node_ids"
     }
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/Volumes/Untitled/private.txt",
+        "/opt/local/secret",
+        "/etc/passwd",
+        "/root/.ssh/key",
+        "/etc",
+        "/root",
+    ],
+)
+def test_transaction_native_redacts_generic_posix_paths_recursively(
+    rpc, monkeypatch, path
+):
+    import hades_cli.transactions as transactions_mod
+
+    probe = f"producer free text {path}"
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        f"producer output {probe}",
+        {
+            "ok": True,
+            "action": "show",
+            "eligibility": {
+                "node-1": {
+                    "can_execute": False,
+                    "code": "blocked",
+                    "fidelity": "exact",
+                    "reason": probe,
+                    "blockers": [probe],
+                    "required_cascade_node_ids": ["node-2"],
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("transaction.exec", {"argv": ["show", "tx"], "session_id": "sid"})
+
+    assert path not in str(resp)
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["unknown_effect", "blocked", "partially_compensated", "failed", "compensated"],
+)
+def test_transaction_rpc_uncertainty_wins_over_exit_ok_and_payload_ok(
+    rpc, monkeypatch, status
+):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        "unsafe producer output /etc/passwd",
+        {
+            "ok": True,
+            "action": "commit",
+            "status": status,
+            "committed_nodes": ["write"],
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("transaction.exec", {"argv": ["commit", "tx"], "session_id": "sid"})
+
+    assert resp["ok"] is False, resp
+    assert resp["status"] == status
+    assert resp["output"] == (
+        f"transaction commit ended with {status}; do not retry; reconcile required"
+    )
+    assert "/etc/passwd" not in str(resp)
