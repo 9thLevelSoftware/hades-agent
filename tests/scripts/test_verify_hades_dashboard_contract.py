@@ -270,7 +270,8 @@ def test_api_complete_string_decoy_does_not_rescue_empty_live_object(
 ) -> None:
     root, cron_jobs = _make_fixture(tmp_path)
     if quote == "single":
-        decoy = f"const decoy = '{VALID_API}';"
+        escaped = VALID_API.replace("\\", "\\\\").replace("\n", "\\n").replace("'", "\\'")
+        decoy = f"const decoy = '{escaped}';"
     elif quote == "double":
         decoy = f"const decoy = {json.dumps(VALID_API)};"
     else:
@@ -294,7 +295,8 @@ def test_api_decoy_before_live_valid_declaration_is_ignored(
     if decoy == "comment":
         prefix = f"/*\n{invalid_decoy}\n*/\n"
     elif decoy == "single":
-        prefix = f"const decoy = '{invalid_decoy}';\n"
+        escaped = invalid_decoy.replace("\\", "\\\\").replace("\n", "\\n").replace("'", "\\'")
+        prefix = f"const decoy = '{escaped}';\n"
     elif decoy == "double":
         prefix = f"const decoy = {json.dumps(invalid_decoy)};\n"
     else:
@@ -316,7 +318,7 @@ def test_api_duplicate_live_declarations_fail_closed_with_actionable_diagnostic(
     failures = _messages(root, cron_jobs)
 
     assert "api" in failures.lower()
-    assert "exactly one" in failures.lower()
+    assert "exactly once" in failures.lower()
     assert "duplicate" in failures.lower()
 
 
