@@ -1300,8 +1300,9 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        ...change,
         profile: getManagementProfile() || undefined,
+        set_rules: change.set_rules,
+        remove_rule_ids: change.remove_rule_ids,
       }),
     }),
   applyAutonomyPreview: (change: AutonomyApplyRequest) =>
@@ -1309,8 +1310,10 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        ...change,
         profile: getManagementProfile() || undefined,
+        set_rules: change.set_rules,
+        remove_rule_ids: change.remove_rule_ids,
+        expected_contract_hash: change.expected_contract_hash,
       }),
     }),
   acceptAutonomySuggestion: (
@@ -1323,8 +1326,11 @@ export const api = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...body,
           profile: getManagementProfile() || undefined,
+          destination: body.destination,
+          expected_contract_hash: body.expected_contract_hash,
+          expires_in_ms: body.expires_in_ms,
+          max_uses: body.max_uses,
         }),
       },
     ),
