@@ -1429,7 +1429,7 @@ def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
 
 def _conditional_depth_delta(line: str) -> int:
     """Approximate shell ``if ... then``/``fi`` structure conservatively."""
-    stripped = line.strip()
+    stripped = line.strip(" \t")
     delta = 0
     if re.match(r"^fi(?:\s|$)", stripped):
         delta -= 1
@@ -1445,7 +1445,10 @@ def _shell_fenced_commands(prompt: str) -> _ShellScan:
     commands: list[_ShellCommand] = []
     heading_lines: list[int] = []
     errors: list[str] = []
-    lines = prompt.splitlines()
+    # Only CR/LF are command-line delimiters here.  ``str.splitlines()`` also
+    # treats vertical tab, form feed, and several Unicode separators as line
+    # boundaries, which could hide non-shell whitespace in an audited command.
+    lines = re.split(r"\r\n?|\n", prompt)
     in_block = False
     shell_block = False
     block_id = -1
@@ -1479,7 +1482,7 @@ def _shell_fenced_commands(prompt: str) -> _ShellScan:
             if candidate == delimiter:
                 pending_heredocs.pop(0)
             continue
-        if line.strip() == fence_marker:
+        if line.strip(" \t") == fence_marker:
             in_block = False
             shell_block = False
             fence_marker = ""
@@ -1488,9 +1491,10 @@ def _shell_fenced_commands(prompt: str) -> _ShellScan:
         fence_like = re.match(r"^[ \t]*(?P<marker>`{3,}|~{3,}).*$", line)
         if fence_like is not None:
             expected_line = block_start_line + 1 if block_start_line is not None else line_number
+            displayed_line = line.strip(" \t")
             errors.append(
                 f"malformed fenced block at line {expected_line}: expected closing "
-                f"{fence_marker!r}, found {line.strip()!r} at line {line_number + 1}"
+                f"{fence_marker!r}, found {displayed_line!r} at line {line_number + 1}"
             )
             in_block = False
             shell_block = False
@@ -1498,7 +1502,7 @@ def _shell_fenced_commands(prompt: str) -> _ShellScan:
             block_start_line = None
             pending_heredocs = []
             continue
-        stripped = line.strip()
+        stripped = line.strip(" \t")
         if not shell_block or not stripped or stripped.startswith("#"):
             continue
         commands.append(
@@ -1577,17 +1581,35 @@ def _is_safe_git_ref(ref: str) -> bool:
     """Accept only the bounded ref token audited for the rollout fallback."""
     if _SAFE_GIT_REF_RE.fullmatch(ref) is None:
         return False
+    if ref in {"@", "@{", ".."}:
+        return False
     if ".." in ref or ref.startswith("/") or ref.endswith("/") or "//" in ref:
         return False
-    if any(component.endswith(".lock") for component in ref.split("/")):
+    components = ref.split("/")
+    if any(
+        not component
+        or component.startswith(".")
+        or component.endswith(".")
+        or component.endswith(".lock")
+        for component in components
+    ):
         return False
-    return not any(character.isspace() or character in ";|&<>$`'\"\\()"
-                   for character in ref)
+    return not any(
+        ord(character) < 0x20
+        or character.isspace()
+        or character in ";|&<>$`'\"\\()"
+        for character in ref
+    )
+
+
+def _normalize_shell_command(line: str) -> str:
+    """Remove only shell-safe ASCII indentation at executable line edges."""
+    return line.strip(" \t")
 
 
 def _approved_verifier_block(commands: Iterable[_ShellCommand]) -> bool:
     """Match exactly one audited production or rollout verifier shell shape."""
-    normalized = tuple(command.text.strip() for command in commands)
+    normalized = tuple(_normalize_shell_command(command.text) for command in commands)
     if normalized == _PRODUCTION_VERIFIER_LINES:
         return True
     if len(normalized) != len(_ROLLOUT_VERIFIER_LINES):
