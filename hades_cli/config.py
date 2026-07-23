@@ -505,15 +505,13 @@ def stamp_install_method(method: str, project_root: Optional[Path] = None) -> No
         pass
 
 
-def is_uv_tool_install() -> bool:
-    """Return True when the *running* Hades lives in a ``uv tool`` layout.
+def uv_tool_install_distribution() -> Optional[str]:
+    """Return the installed uv-tool distribution for the running interpreter.
 
     Canonical installs live at ``.../uv/tools/hades-agent/...``. The legacy
-    ``.../uv/tools/hermes-agent/...`` layout is also accepted so an existing
-    compatibility install can update itself to the Hades distribution. Such
-    installs live outside any virtualenv, so ``uv pip install`` fails with
-    ``No virtual environment found`` and the update path must use
-    ``uv tool upgrade`` instead.
+    ``.../uv/tools/hermes-agent/...`` layout must remain distinguishable:
+    ``uv tool upgrade hades-agent`` fails when only the legacy tool name is
+    installed, so that layout needs a forced canonical install instead.
 
     Detection is intentionally restricted to properties of the running
     interpreter (``sys.prefix`` / ``sys.executable``). We deliberately do
@@ -523,18 +521,22 @@ def is_uv_tool_install() -> bool:
     also block on a subprocess call (~seconds) just to compute a
     recommendation string.
     """
-    def _has_uv_tool_marker(path: str) -> bool:
+    def _distribution_in_path(path: str) -> Optional[str]:
         normalized = "/" + path.replace("\\", "/").strip("/").casefold() + "/"
-        return any(
-            f"/uv/tools/{distribution}/" in normalized
-            for distribution in ("hades-agent", "hermes-agent")
-        )
+        for distribution in ("hades-agent", "hermes-agent"):
+            if f"/uv/tools/{distribution}/" in normalized:
+                return distribution
+        return None
 
-    if _has_uv_tool_marker(sys.prefix):
-        return True
-    if _has_uv_tool_marker(sys.executable or ""):
-        return True
-    return False
+    return (
+        _distribution_in_path(sys.prefix)
+        or _distribution_in_path(sys.executable or "")
+    )
+
+
+def is_uv_tool_install() -> bool:
+    """Return True when the running Hades lives in any supported uv-tool layout."""
+    return uv_tool_install_distribution() is not None
 
 
 def recommended_update_command_for_method(method: str) -> str:
@@ -546,8 +548,11 @@ def recommended_update_command_for_method(method: str) -> str:
     if method == "docker":
         return "docker pull nousresearch/hermes-agent:latest"
     if method == "pip":
-        if is_uv_tool_install():
+        uv_tool_distribution = uv_tool_install_distribution()
+        if uv_tool_distribution == "hades-agent":
             return "uv tool upgrade hades-agent"
+        if uv_tool_distribution == "hermes-agent":
+            return "uv tool install --force hades-agent"
         import shutil
         if shutil.which("uv"):
             return "uv pip install --upgrade hades-agent"
