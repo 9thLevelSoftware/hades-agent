@@ -5173,6 +5173,13 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
             session_db=session_db,
             owns_session_db=bool(profile_home and session_db is not None),
         )
+        # The session may have been reaped and its registry slot reused while
+        # the replacement agent was being constructed.  Do not publish any
+        # candidate config, worker, or poller for a record we no longer own;
+        # the exception path closes this agent (and its owned profile DB).
+        with _sessions_lock:
+            if _sessions.get(sid) is not session:
+                raise RuntimeError("session closed or replaced during reset")
         if _is_gateway_owned_source(source):
             _set_agent_close_policy({"_gateway_owned_session": True}, new_agent)
         candidate["agent"] = new_agent
