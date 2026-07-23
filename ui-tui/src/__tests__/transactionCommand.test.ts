@@ -144,6 +144,40 @@ describe('/transaction slash command', () => {
     expect(text).toContain('/transaction reconcile tx-1')
   })
 
+  it('renders successful compensation as normal output without an uncertainty warning', async () => {
+    const { run, sys } = buildCtx({
+      action: 'compensate',
+      compensated_nodes: ['write'],
+      ok: true,
+      output: 'compensation compensated; nodes: write',
+      status: 'compensated'
+    })
+
+    await run('compensate tx-1')
+
+    const text = printed(sys)
+    expect(text).toContain('compensation compensated')
+    expect(text).not.toContain('warning:')
+    expect(text).not.toContain('do not retry')
+    expect(text).not.toContain('/transaction reconcile')
+  })
+
+  it('uses the top-level transaction ID when an uncertain result has no nested transaction', async () => {
+    const { run, sys } = buildCtx({
+      action: 'commit',
+      ok: false,
+      output: 'transaction effect uncertain — do not retry; reconcile first',
+      status: 'unknown_effect',
+      transaction_id: 'tx:actionable'
+    })
+
+    await run('commit tx:actionable')
+
+    const text = printed(sys)
+    expect(text).toContain('/transaction reconcile tx:actionable')
+    expect(text).not.toContain('/transaction reconcile <tx>')
+  })
+
   it('drops the render when the slash flight went stale', async () => {
     const { page, run, sys } = buildCtx({}, { stale: true })
 

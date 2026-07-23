@@ -186,15 +186,16 @@ def test_transaction_rpc_redacts_nonvalidation_command_failure(rpc, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    ("status", "extra"),
+    ("action", "status", "extra"),
     [
-        ("unknown_effect", {"committed_nodes": ["write"]}),
-        ("blocked", {"committed_nodes": ["write"], "blocked_node": "publish"}),
-        ("partially_compensated", {"compensated_nodes": ["write"]}),
+        ("commit", "unknown_effect", {"committed_nodes": ["write"]}),
+        ("commit", "blocked", {"committed_nodes": ["write"], "blocked_node": "publish"}),
+        ("compensate", "partially_compensated", {"compensated_nodes": ["write"]}),
+        ("compensate", "failed", {}),
     ],
 )
 def test_transaction_rpc_preserves_safety_uncertainty_on_nonzero_exit(
-    rpc, monkeypatch, status, extra
+    rpc, monkeypatch, action, status, extra
 ):
     import hades_cli.transactions as transactions_mod
 
@@ -208,7 +209,7 @@ def test_transaction_rpc_preserves_safety_uncertainty_on_nonzero_exit(
         f"error: {details}",
         {
             "ok": False,
-            "action": "compensate",
+            "action": action,
             "status": status,
             "error": details,
             **extra,
@@ -217,16 +218,88 @@ def test_transaction_rpc_preserves_safety_uncertainty_on_nonzero_exit(
     monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: failed)
 
     resp = rpc("transaction.exec", {
-        "argv": ["compensate", "tx-partial"], "session_id": "sid",
+        "argv": [action, "tx-partial"], "session_id": "sid",
     })
     assert resp.get("ok") is False, resp
     assert resp["status"] == status
     for key, value in extra.items():
         assert resp[key] == value
+    assert resp["transaction_id"] == "tx-partial"
+    assert "transaction" not in resp
     assert secret not in str(resp)
     assert "/private/authority.yaml" not in str(resp)
     assert "Traceback" not in str(resp)
     assert resp["output"] != failed.output
+
+
+@pytest.mark.parametrize(
+    ("caller_id", "expected"),
+    [
+        ("tx:actionable", "tx:actionable"),
+        ("/private/transaction", None),
+        ("https://secrets.example/transaction", None),
+        ("Authorization: Bearer secret-token", None),
+        ("x" * 257, None),
+    ],
+)
+def test_transaction_rpc_normalizes_caller_transaction_id(
+    rpc, monkeypatch, caller_id, expected
+):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        "transaction effect uncertain — do not retry; reconcile first",
+        {
+            "ok": False,
+            "action": "commit",
+            "status": "unknown_effect",
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc(
+        "transaction.exec",
+        {"argv": ["commit", caller_id], "session_id": "sid"},
+    )
+
+    if expected is None:
+        assert "transaction_id" not in response
+        assert caller_id not in str(response)
+    else:
+        assert response["transaction_id"] == expected
+
+
+def test_transaction_rpc_keeps_nested_transaction_and_caller_identity_distinct(
+    rpc, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        "transaction effect uncertain — do not retry; reconcile first",
+        {
+            "ok": False,
+            "action": "commit",
+            "status": "unknown_effect",
+            "transaction": {
+                "current_revision": 4,
+                "receipt_id": None,
+                "status": "unknown_effect",
+                "transaction_id": "tx:nested",
+            },
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc(
+        "transaction.exec",
+        {"argv": ["commit", "tx:caller"], "session_id": "sid"},
+    )
+
+    assert response["transaction_id"] == "tx:caller"
+    assert response["transaction"]["transaction_id"] == "tx:nested"
+    assert response["transaction"]["current_revision"] == 4
 
 
 def test_transaction_rpc_keeps_unrecognized_nonzero_failure_as_fixed_error(
