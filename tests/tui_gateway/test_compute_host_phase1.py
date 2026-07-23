@@ -906,3 +906,74 @@ def test_compute_host_partial_init_does_not_overwrite_replacement(monkeypatch):
     finally:
         server._sessions.pop(sid, None)
         host.close()
+
+
+def test_compute_host_partial_init_rechecks_identity_before_fallback_publish(
+    monkeypatch,
+):
+    """A replacement racing fallback construction must remain the winner."""
+    from tui_gateway import server
+
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
+    sid = "partial-fallback-barrier"
+    replacement = {"replacement": True}
+    stop = threading.Event()
+    worker_closed = []
+
+    class _Worker:
+        def close(self):
+            worker_closed.append(True)
+
+    class _Agent:
+        model = "test/model"
+
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    agent = _Agent()
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: agent)
+
+    def _partial_init(init_sid, key, built_agent, history, **_kwargs):
+        with server._sessions_lock:
+            server._sessions[init_sid] = {
+                "agent": built_agent,
+                "session_key": key,
+                "history": list(history),
+                "history_lock": threading.Lock(),
+                "_notif_stop": stop,
+                "slash_worker": _Worker(),
+            }
+        raise RuntimeError("side machinery")
+
+    def _replace_during_fallback_build():
+        with server._sessions_lock:
+            server._sessions[sid] = replacement
+        return False
+
+    monkeypatch.setattr(server, "_init_session", _partial_init)
+    monkeypatch.setattr(server, "_load_show_reasoning", _replace_during_fallback_build)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+
+    try:
+        with pytest.raises(RuntimeError, match="replaced during session init"):
+            host._ensure_server_session(
+                server,
+                {
+                    "sid": sid,
+                    "session_key": "partial-key",
+                    "cwd": "/tmp",
+                    "history": [],
+                },
+            )
+        assert server._sessions[sid] is replacement
+        assert replacement == {"replacement": True}
+        assert agent.close_calls == 1
+        assert stop.is_set()
+        assert worker_closed == [True]
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()

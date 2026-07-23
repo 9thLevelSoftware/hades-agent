@@ -3138,6 +3138,50 @@ def test_close_agent_once_is_atomic_for_non_weakref_concurrent_agent(server):
     assert agent.close_calls == 1
 
 
+def test_close_agent_once_survives_non_weakref_slots_agent_churn(server):
+    """Close stamps on mutable non-weakref slots agents survive registry churn."""
+
+    class _Agent:
+        __slots__ = ("close_calls", "_tui_close_lock", "_tui_closed")
+
+        def __init__(self):
+            self.close_calls = 0
+            self._tui_close_lock = None
+            self._tui_closed = False
+
+        def close(self):
+            self.close_calls += 1
+
+    agents = [_Agent() for _ in range(257)]
+    for agent in agents:
+        server._close_agent_once(agent)
+
+    server._close_agent_once(agents[0])
+
+    assert [agent.close_calls for agent in agents] == [1] * len(agents)
+
+
+def test_close_agent_once_survives_immutable_nonweakref_churn(server):
+    """Stable wrappers retain close-once state without strong registry churn."""
+
+    class _Agent:
+        __slots__ = ("close_calls",)
+
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    agents = [_Agent() for _ in range(257)]
+    for agent in agents:
+        server._close_agent_once(agent)
+
+    server._close_agent_once(agents[0])
+
+    assert [agent.close_calls for agent in agents] == [1] * len(agents)
+
+
 def test_synthetic_profile_agent_closes_transferred_db(server, monkeypatch):
     """The synthetic build seam must preserve profile DB ownership."""
     db = types.SimpleNamespace(close_calls=0)
