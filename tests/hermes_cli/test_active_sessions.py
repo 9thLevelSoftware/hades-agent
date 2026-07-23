@@ -140,6 +140,36 @@ def test_transfer_active_session_reanchors_existing_lease(tmp_path, monkeypatch)
     lease.release()
 
 
+def test_active_session_lease_keeps_acquired_profile_registry_after_home_switch(
+    tmp_path, monkeypatch
+):
+    """A lease's release/transfer target is fixed at acquisition time."""
+    home_a = tmp_path / "profile-a"
+    home_b = tmp_path / "profile-b"
+    monkeypatch.setenv("HADES_HOME", str(home_a))
+
+    lease, message = active_sessions.try_acquire_active_session(
+        session_id="session-old",
+        surface="tui",
+        config={"max_concurrent_sessions": 1},
+    )
+    assert message is None
+    assert lease is not None
+
+    monkeypatch.setenv("HADES_HOME", str(home_b))
+    assert active_sessions.transfer_active_session(lease, session_id="session-new")
+    assert active_sessions.active_session_registry_snapshot() == []
+
+    monkeypatch.setenv("HADES_HOME", str(home_a))
+    assert active_sessions.active_session_registry_snapshot()[0]["session_id"] == "session-new"
+
+    monkeypatch.setenv("HADES_HOME", str(home_b))
+    lease.release()
+    assert active_sessions.active_session_registry_snapshot() == []
+    monkeypatch.setenv("HADES_HOME", str(home_a))
+    assert active_sessions.active_session_registry_snapshot() == []
+
+
 def test_pid_alive_uses_safe_pid_exists_without_signalling(monkeypatch):
     checked: list[int] = []
 
