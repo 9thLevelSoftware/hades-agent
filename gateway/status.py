@@ -341,7 +341,11 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
     has_gateway_entry = (
         "hades_cli.main" in joined
         or "hermes_cli/main.py" in joined
-        or any(t.rsplit("/", 1)[-1] in ("hermes", "hermes.exe") for t in tokens)
+        or "hades_cli/main.py" in joined
+        or any(
+            t.rsplit("/", 1)[-1] in ("hermes", "hermes.exe", "hades", "hades.exe")
+            for t in tokens
+        )
     )
     if not has_gateway_entry:
         return None
@@ -447,6 +451,7 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
             f"--profile {profile_lc}" in command_lc
             or f"-p {profile_lc}" in command_lc
             or f"hermes_home={home_lc}" in command_lc
+            or f"hades_home={home_lc}" in command_lc
         )
 
     # Default/root profile: the gateway runs with no profile flag. Accept unless
@@ -456,8 +461,9 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
     # absence is not disqualifying — only a conflicting explicit value is.
     if "--profile " in command_lc or " -p " in command_lc:
         return False
-    if "hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc:
-        return False
+    for home_prefix in ("hermes_home=", "hades_home="):
+        if home_prefix in command_lc and f"{home_prefix}{home_lc}" not in command_lc:
+            return False
     return True
 
 
