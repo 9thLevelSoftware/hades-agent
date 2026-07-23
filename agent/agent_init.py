@@ -490,6 +490,8 @@ def init_agent(
     pass_session_id: bool = False,
     suppress_status_output: bool = False,
     owns_session_db: bool = False,
+    runtime_routing_context: "AgentRuntimeContext" = None,
+    prepared_agent_runtime: "PreparedAgentRuntime" = None,
 ):
     """
     Initialize the AI Agent.
@@ -541,6 +543,118 @@ def init_agent(
             remain skipped.
     """
     _install_safe_stdio()
+
+    # Runtime routing is a pre-construction operation. Keep this before any
+    # runtime attribute assignment or provider resolution/client creation.
+    _runtime_constructor_args = {
+        "model": model,
+        "provider": provider,
+        "base_url": base_url,
+        "api_key": api_key,
+        "api_mode": api_mode,
+        "acp_command": acp_command,
+        "acp_args": acp_args,
+        "command": command,
+        "args": args,
+        "credential_pool": credential_pool,
+        "reasoning_config": reasoning_config,
+        "fallback_model": fallback_model,
+    }
+    _runtime_initial_fallback_index = None
+    if runtime_routing_context is None and prepared_agent_runtime is None:
+        # Preserve the ordinary constructor path: without an explicit handoff,
+        # do not import routing, discover plugins, or normalize runtime inputs.
+        _prepared_runtime = None
+        _runtime_binding = None
+    else:
+        from agent.runtime_routing import (
+            AgentRuntimeRequest,
+            RUNTIME_ROUTING_CONTRACT_VERSION,
+            apply_runtime_plan_to_constructor_arguments,
+            constructor_runtime_spec,
+            finalize_prepared_agent_runtime,
+            prepare_constructor_runtime,
+            resolve_ordinary_hermes_runtime,
+            validate_prepared_agent_runtime,
+        )
+
+        _constructor_runtime = constructor_runtime_spec(
+            model=model,
+            provider=provider,
+            base_url=base_url,
+            api_key=api_key,
+            api_mode=api_mode,
+            acp_command=acp_command or command,
+            acp_args=acp_args or args,
+            credential_pool=credential_pool,
+            reasoning_config=reasoning_config,
+            fallback_model=fallback_model,
+        )
+        (
+            _prepared_runtime,
+            _runtime_binding,
+            _effective_runtime,
+        ) = prepare_constructor_runtime(
+            context=runtime_routing_context,
+            prepared=prepared_agent_runtime,
+            effective_constructor_runtime=_constructor_runtime,
+            session_store=session_db,
+        )
+        if _runtime_binding is None:
+            # Context-only inherit/shadow is a two-phase handoff. Resolve the
+            # ordinary primary, then seal and validate that exact executable
+            # runtime before anything can consume it.
+            _runtime_resolution = resolve_ordinary_hermes_runtime(
+                _constructor_runtime,
+                owns_fallbacks=_prepared_runtime.plan.owns_fallbacks,
+            )
+            _effective_runtime = _runtime_resolution.runtime
+            _runtime_initial_fallback_index = (
+                _runtime_resolution.activated_fallback_index
+            )
+            _runtime_request = AgentRuntimeRequest(
+                contract_version=RUNTIME_ROUTING_CONTRACT_VERSION,
+                context=runtime_routing_context,
+                baseline=_constructor_runtime,
+            )
+            _prepared_runtime = finalize_prepared_agent_runtime(
+                _prepared_runtime,
+                _runtime_request,
+                _effective_runtime,
+            )
+            _runtime_binding = validate_prepared_agent_runtime(
+                _prepared_runtime,
+                context=runtime_routing_context,
+                effective_runtime=_effective_runtime,
+            )
+        _runtime_constructor_args = apply_runtime_plan_to_constructor_arguments(
+            _runtime_constructor_args,
+            binding=_runtime_binding,
+            effective_runtime=_effective_runtime,
+        )
+
+    # Replace every local read by the existing initializer so baseline values
+    # cannot leak through a later client, credential, or fallback seam.
+    model = _runtime_constructor_args["model"]
+    provider = _runtime_constructor_args["provider"]
+    base_url = _runtime_constructor_args["base_url"]
+    api_key = _runtime_constructor_args["api_key"]
+    api_mode = _runtime_constructor_args["api_mode"]
+    acp_command = _runtime_constructor_args["acp_command"]
+    acp_args = _runtime_constructor_args["acp_args"]
+    command = _runtime_constructor_args["command"]
+    args = _runtime_constructor_args["args"]
+    credential_pool = _runtime_constructor_args["credential_pool"]
+    reasoning_config = _runtime_constructor_args["reasoning_config"]
+    fallback_model = _runtime_constructor_args["fallback_model"]
+
+    agent._prepared_agent_runtime = _prepared_runtime
+    agent._runtime_routing_binding = _runtime_binding
+    agent._runtime_fallback_authority = (
+        "plugin"
+        if _runtime_binding is not None and _runtime_binding.owns_fallbacks
+        else "host"
+    )
 
     agent.model = model
     agent.max_iterations = max_iterations
@@ -628,8 +742,18 @@ def init_agent(
                 agent.provider,
                 base_url=agent.base_url,
             ):
+                if _runtime_binding is not None:
+                    from agent.runtime_routing import InvalidPreparedAgentRuntime
+
+                    raise InvalidPreparedAgentRuntime()
                 agent._credential_pool = None
-        except Exception:
+        except Exception as exc:
+            if _runtime_binding is not None:
+                from agent.runtime_routing import InvalidPreparedAgentRuntime
+
+                if isinstance(exc, InvalidPreparedAgentRuntime):
+                    raise
+                raise InvalidPreparedAgentRuntime() from None
             agent._credential_pool = None
 
     # Eagerly warm the transport cache so import errors surface at init,
@@ -1067,6 +1191,7 @@ def init_agent(
         # Region is extracted from the base_url or defaults to us-east-1.
         _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
         agent._bedrock_region = _region_match.group(1) if _region_match else "us-east-1"
+        agent.api_key = api_key
         # Guardrail config — read from config.yaml at init time.
         agent._bedrock_guardrail_config = None
         try:
@@ -1297,7 +1422,12 @@ def init_agent(
             logger.debug("custom-provider TLS resolution skipped", exc_info=True)
 
         agent.api_key = client_kwargs.get("api_key", "")
-        agent.base_url = client_kwargs.get("base_url", agent.base_url)
+        if _runtime_binding is not None:
+            # The SDK separates query parameters from its transport URL, while
+            # the live routing identity must remain the exact sealed endpoint.
+            agent.base_url = base_url
+        else:
+            agent.base_url = client_kwargs.get("base_url", agent.base_url)
         try:
             from agent.ssl_guard import verify_ca_bundle_with_fallback
 
@@ -1336,8 +1466,15 @@ def init_agent(
         agent._fallback_chain = [fallback_model]
     else:
         agent._fallback_chain = []
-    agent._fallback_index = 0
-    agent._fallback_activated = getattr(agent, "_fallback_activated", False)
+    if _runtime_initial_fallback_index is not None:
+        agent._fallback_index = min(
+            _runtime_initial_fallback_index + 1,
+            len(agent._fallback_chain),
+        )
+        agent._fallback_activated = True
+    else:
+        agent._fallback_index = 0
+        agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)
     agent._fallback_model = agent._fallback_chain[0] if agent._fallback_chain else None
     if agent._fallback_chain and not agent.quiet_mode:
@@ -1529,6 +1666,15 @@ def init_agent(
         "reasoning_config": reasoning_config,
         "max_tokens": max_tokens,
     }
+    if _runtime_binding is not None:
+        from agent.runtime_routing import session_runtime_metadata
+
+        agent._session_init_model_config.update(
+            session_runtime_metadata(
+                _runtime_binding.runtime,
+                manual_pin_source=_runtime_binding.manual_pin_source,
+            )
+        )
     
     # In-memory todo list for task planning (one per agent/session)
     from tools.todo_tool import TodoStore
@@ -2610,6 +2756,11 @@ def init_agent(
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
         })
+
+    if agent._runtime_routing_binding is not None:
+        from agent.runtime_routing import log_runtime_routing_event
+
+        log_runtime_routing_event(agent._runtime_routing_binding)
 
 
 
