@@ -859,3 +859,50 @@ def test_compute_host_compact_alias_routes_to_compress_mirror(monkeypatch):
     assert calls == {"focus": "focus topic"}
     assert events == ["sync", "notify"]
     assert ack["route_name"] == "slash.compress"
+
+
+def test_compute_host_partial_init_does_not_overwrite_replacement(monkeypatch):
+    """A failed init that lost its registry slot must not publish a fallback."""
+    from tui_gateway import server
+
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
+    sid = "partial-replacement"
+    replacement = {"replacement": True}
+    close_calls = []
+
+    class _Agent:
+        model = "test/model"
+
+        def close(self):
+            close_calls.append("agent")
+
+    agent = _Agent()
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: agent)
+
+    def _lost_init(*_args, **_kwargs):
+        with server._sessions_lock:
+            server._sessions[sid] = replacement
+        raise RuntimeError("init lost ownership")
+
+    monkeypatch.setattr(server, "_init_session", _lost_init)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_a: None)
+
+    try:
+        with pytest.raises(RuntimeError, match="replaced during session init"):
+            host._ensure_server_session(
+                server,
+                {
+                    "sid": sid,
+                    "session_key": "partial-key",
+                    "cwd": "/tmp",
+                    "history": [],
+                },
+            )
+        assert server._sessions[sid] is replacement
+        assert replacement == {"replacement": True}
+        assert close_calls == ["agent"]
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
