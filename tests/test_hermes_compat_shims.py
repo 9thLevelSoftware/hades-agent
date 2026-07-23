@@ -161,6 +161,32 @@ def test_python_dash_m_hermes_cli_module():
     assert proc.returncode == 0, proc.stderr
 
 
+def test_python_dash_m_legacy_main_matches_canonical_version(tmp_path):
+    """Legacy module invocation keeps the canonical CLI entrypoint behavior."""
+    env = os.environ.copy()
+    env["HADES_HOME"] = str(tmp_path / "hades-home")
+    env["HERMES_HOME"] = str(tmp_path / "hermes-home")
+
+    canonical = subprocess.run(
+        [sys.executable, "-m", "hades_cli.main", "--version"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+    )
+    legacy = subprocess.run(
+        [sys.executable, "-m", "hermes_cli.main", "--version"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+    )
+
+    assert canonical.returncode == 0, canonical.stderr
+    assert legacy.returncode == 0, legacy.stderr
+    assert legacy.stdout == canonical.stdout
+
+
 # ── Env var aliasing ─────────────────────────────────────────────────────────
 
 
