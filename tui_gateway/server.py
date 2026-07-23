@@ -1856,37 +1856,58 @@ def _session_cwd(session: dict | None) -> str:
     return _completion_cwd()
 
 
-def _native_workspace_for_session(session_id: str | None) -> Path:
-    """Resolve native CLI workspace from the registered session only.
+class _NativeSessionContext(NamedTuple):
+    """Immutable profile/workspace pair captured for one native invocation."""
 
-    Caller parameters are deliberately absent from this boundary.  An active
-    session's validated ``cwd`` wins; unknown/no-session calls use the same
-    validated gateway fallback as completion, and finally the launch cwd.
+    profile_home: str | None
+    workspace: Path
+
+
+def _native_context_for_session(session_id: str | None) -> _NativeSessionContext:
+    """Atomically snapshot native profile and workspace context for a session.
+
+    Registry membership and both session fields are copied under one lock.  The
+    copied cwd is validated only after releasing the lock, so session teardown
+    cannot turn a coherent snapshot into a mixed profile/workspace invocation,
+    and the lock is never held across native CLI execution.
     """
     session_key = session_id or ""
     with _sessions_lock:
         registered = session_id is not None and session_key in _sessions
-        raw_session = _sessions.get(session_key) if registered else None
+        if registered:
+            raw_session = _sessions[session_key]
+            if type(raw_session) is not dict:
+                raise ValueError("registered session context is invalid")
+            snapshot = dict(raw_session)
+            raw_profile_home = snapshot.get("profile_home")
+            profile_home = str(raw_profile_home) if raw_profile_home else None
+            raw_cwd = snapshot.get("cwd")
+        else:
+            profile_home = None
+            raw_cwd = None
 
     if registered:
         # A registry entry is an active session binding, not a hint.  Never
         # reinterpret a missing, malformed, or deleted cwd as the gateway's
         # launch directory: that could route native reads/writes elsewhere.
-        if type(raw_session) is not dict:
+        if type(raw_cwd) is not str or not raw_cwd.strip():
             raise ValueError("registered session workspace is invalid")
-        cwd = raw_session.get("cwd")
-        if type(cwd) is not str or not cwd.strip():
-            raise ValueError("registered session workspace is invalid")
-        return resolve_workspace_root(cwd)
+        return _NativeSessionContext(profile_home, resolve_workspace_root(raw_cwd))
 
-    # No session (or an unknown session) is allowed to use the validated
-    # gateway fallback.  This path is intentionally separate from the active
-    # registry path above so a stale session can never fall through to it.
-    candidate = _completion_cwd({"session_id": session_id})
+    # Unknown/no-session calls use launch-profile fallback only.  Do not pass
+    # the caller's session ID to completion: a same-ID session opened after
+    # this snapshot must not replace the fallback workspace generation.
+    candidate = _completion_cwd()
     try:
-        return resolve_workspace_root(candidate)
+        workspace = resolve_workspace_root(candidate)
     except ValueError:
-        return resolve_workspace_root()
+        workspace = resolve_workspace_root()
+    return _NativeSessionContext(None, workspace)
+
+
+def _native_workspace_for_session(session_id: str | None) -> Path:
+    """Compatibility wrapper for callers that only need the workspace."""
+    return _native_context_for_session(session_id).workspace
 
 
 def _heal_dead_cwd(cwd: str) -> str:
@@ -14162,19 +14183,17 @@ def _(rid, params: dict) -> dict:
     if session_id is not None and not isinstance(session_id, str):
         return _native_error(rid, 4004, "autonomy.exec: session_id must be a string")
 
-    # Profile isolation: a session resumed from another profile carries its
-    # own profile_home; bind it for the duration of the call so the shared
-    # service resolves THAT profile's config.yaml/state.db, never the launch
-    # profile's. No session (or an unknown one) means the launch profile.
-    raw_session = _sessions.get(session_id or "")
-    session = raw_session if type(raw_session) is dict else {}
-    profile_home = session.get("profile_home")
+    # Profile/workspace isolation: snapshot both fields from one registry
+    # generation before either value can be used. No session (or an unknown
+    # one) means the launch profile plus its validated fallback workspace.
     try:
-        workspace = _native_workspace_for_session(session_id)
+        native_context = _native_context_for_session(session_id)
     except Exception:
         # Workspace resolution is a security boundary.  In particular, an
         # active session whose cwd disappeared must not fall back to launch cwd.
         return _native_internal_error(rid, method="autonomy.exec", code=5038)
+    profile_home = native_context.profile_home
+    workspace = native_context.workspace
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.autonomy as _autonomy_cli
@@ -14491,17 +14510,15 @@ def _(rid, params: dict) -> dict:
     if session_id is not None and not isinstance(session_id, str):
         return _native_error(rid, 4004, "receipt.exec: session_id must be a string")
 
-    # Profile isolation: only the session registry's recorded profile_home
-    # may steer profile resolution — a caller-supplied path in params is
-    # never accepted. No session (or an unknown one) means the launch
-    # profile, exactly like autonomy.exec.
-    raw_session = _sessions.get(session_id or "")
-    session = raw_session if type(raw_session) is dict else {}
-    profile_home = session.get("profile_home")
+    # Profile/workspace isolation: snapshot both fields from one registry
+    # generation before either value can be used. Caller-supplied paths are
+    # never accepted; absent sessions use launch-profile fallback.
     try:
-        workspace = _native_workspace_for_session(session_id)
+        native_context = _native_context_for_session(session_id)
     except Exception:
         return _native_internal_error(rid, method="receipt.exec", code=5043)
+    profile_home = native_context.profile_home
+    workspace = native_context.workspace
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.receipts as _receipts_cli
@@ -14931,17 +14948,15 @@ def _(rid, params: dict) -> dict:
     if session_id is not None and not isinstance(session_id, str):
         return _native_error(rid, 4006, "transaction.exec: session_id must be a string")
 
-    # Profile isolation mirrors receipt.exec: only the session registry's
-    # recorded profile_home steers resolution; caller paths are never
-    # accepted. Mutations run in THIS live gateway process — never in a
-    # _SlashWorker subprocess.
-    raw_session = _sessions.get(session_id or "")
-    session = raw_session if type(raw_session) is dict else {}
-    profile_home = session.get("profile_home")
+    # Profile/workspace isolation: snapshot both fields from one registry
+    # generation before either value can be used. Mutations run in THIS live
+    # gateway process — never in a _SlashWorker subprocess.
     try:
-        workspace = _native_workspace_for_session(session_id)
+        native_context = _native_context_for_session(session_id)
     except Exception:
         return _native_internal_error(rid, method="transaction.exec", code=5045)
+    profile_home = native_context.profile_home
+    workspace = native_context.workspace
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.transactions as _transactions_cli
