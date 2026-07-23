@@ -303,7 +303,16 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
         owner_started_at = None
     task_payload = {
         key: record.get(key)
-        for key in ("goal", "goals", "context", "toolsets", "role", "model", "is_batch")
+        for key in (
+            "goal",
+            "goals",
+            "context",
+            "toolsets",
+            "role",
+            "model",
+            "is_batch",
+            "child_session_ids",
+        )
         if key in record
     }
     with _DB_LOCK, _connect() as conn:
@@ -420,6 +429,7 @@ def recover_abandoned_delegations() -> int:
                 "goals": task.get("goals"), "context": task.get("context"),
                 "toolsets": task.get("toolsets"), "role": task.get("role"),
                 "model": task.get("model"), "is_batch": bool(task.get("is_batch")),
+                "child_session_ids": task.get("child_session_ids") or [],
                 "status": "unknown", "summary": None,
                 "error": "Delegation owner exited before recording a terminal result; outcome unknown.",
                 "dispatched_at": dispatched_at, "completed_at": now,
@@ -822,6 +832,11 @@ def _new_delegation_id() -> str:
     return f"deleg_{uuid.uuid4().hex[:8]}"
 
 
+def new_delegation_id() -> str:
+    """Return a host-generated delegation operation identity."""
+    return _new_delegation_id()
+
+
 def _prune_completed_locked(home: Optional[str] = None) -> None:
     """Drop the oldest completed records beyond the per-profile retention cap.
 
@@ -1078,8 +1093,9 @@ def _emit_completion_event(
     _push_completion_event(evt)
 
 
-def dispatch_async_delegation_batch(
+def reserve_async_delegation_batch(
     *,
+    delegation_id: str,
     goals: List[str],
     context: Optional[str],
     toolsets: Optional[List[str]],
@@ -1088,36 +1104,24 @@ def dispatch_async_delegation_batch(
     session_key: str,
     parent_session_id: Optional[str] = None,
     child_session_ids: Optional[List[str]] = None,
-    runner: Callable[[], Dict[str, Any]],
     origin_ui_session_id: str = "",
-    interrupt_fn: Optional[Callable[[], None]] = None,
     max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN,
-    delegation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Dispatch a WHOLE fan-out batch as ONE background unit.
+    """Durably reserve one background operation before child construction.
 
-    Unlike ``dispatch_async_delegation`` (which backs a single subagent),
-    ``runner`` here runs the entire batch — it builds and joins on every child
-    in parallel and returns the combined ``{"results": [...],
-    "total_duration_seconds": N}`` dict that the synchronous path would have
-    returned. We occupy ONE async slot for the whole batch (the in-batch
-    parallelism is bounded separately by ``max_concurrent_children``), so a
-    single ``delegate_task`` fan-out never exhausts the async pool by itself.
-
-    When the batch finishes, a SINGLE completion event is pushed onto the
-    shared ``process_registry.completion_queue`` carrying the full per-task
-    ``results`` list, so the consolidated summaries re-enter the conversation
-    as one message once every child is done — the chat is never blocked while
-    they run.
-
-    Returns ``{"status": "dispatched", "delegation_id": ...}`` on success or
-    ``{"status": "rejected", "error": ...}`` when the async pool is at
-    capacity.
+    Reservation is deliberately separate from scheduling. If the process exits
+    after a route decision is committed but before ``AIAgent`` exists, startup
+    recovery observes this in-flight record and reports ``unknown``; it never
+    relaunches the child or repeats side effects.
     """
-    delegation_id = delegation_id or _new_delegation_id()
+    if not isinstance(delegation_id, str) or not delegation_id:
+        return {
+            "status": "rejected",
+            "reason": "identity",
+            "error": "A durable delegation id is required.",
+        }
     dispatched_at = time.time()
     n = len(goals)
-    # A combined goal label for status listings / the completion header.
     combined_goal = (
         goals[0] if n == 1 else f"{n} parallel subagents: " + "; ".join(g[:40] for g in goals)
     )
@@ -1141,11 +1145,18 @@ def dispatch_async_delegation_batch(
         "status": "running",
         "dispatched_at": dispatched_at,
         "completed_at": None,
-        "interrupt_fn": interrupt_fn,
+        "interrupt_fn": None,
         "is_batch": True,
+        "runner_started": False,
     }
     with _records_lock:
         _load_records_locked()
+        if delegation_id in _records:
+            return {
+                "status": "rejected",
+                "reason": "duplicate",
+                "error": "Delegation operation id is already reserved.",
+            }
         running = sum(
             1 for r in _records.values()
             if r.get("_home") == record["_home"] and r.get("status") == "running"
@@ -1180,7 +1191,121 @@ def dispatch_async_delegation_batch(
                 "error": "Could not persist the background delegation record.",
             }
 
-    _persist_dispatch(record)
+    try:
+        _persist_dispatch(record)
+    except Exception:
+        logger.warning(
+            "Could not durably reserve async delegation %s", delegation_id
+        )
+        with _records_lock:
+            _records.pop(delegation_id, None)
+            _persist_records_locked(
+                record.get("_home"), remove_ids={delegation_id}
+            )
+        try:
+            _delete_durable_delegation(delegation_id)
+        except Exception:
+            logger.debug("Failed to clean partial delegation reservation")
+        return {
+            "status": "rejected",
+            "reason": "persistence",
+            "error": "Could not persist the background delegation record.",
+        }
+    return {"status": "reserved", "delegation_id": delegation_id}
+
+
+def abort_reserved_async_delegation(
+    delegation_id: str,
+    *,
+    terminalize_operation: bool = True,
+) -> None:
+    """Release an unstarted reservation after construction/scheduling fails."""
+    home = None
+    with _records_lock:
+        record = _records.get(delegation_id)
+        if record is None or record.get("runner_started"):
+            return
+        home = record.get("_home")
+        _records.pop(delegation_id, None)
+        _persist_records_locked(home, remove_ids={delegation_id})
+    if terminalize_operation:
+        _persist_operation_completion(
+            {
+                "delegation_id": delegation_id,
+                "status": "cancelled",
+                "error": "Delegation was cancelled before its child runner started.",
+            }
+        )
+    _delete_durable_delegation(delegation_id)
+
+
+def update_reserved_async_delegation_children(
+    delegation_id: str,
+    child_session_ids: List[str],
+) -> bool:
+    """Replace provisional child ids before the reserved runner starts."""
+    normalized = [str(session_id) for session_id in child_session_ids if session_id]
+    with _records_lock:
+        record = _records.get(delegation_id)
+        if record is None or record.get("runner_started"):
+            return False
+        record["child_session_ids"] = normalized
+        _persist_records_locked(record.get("_home"))
+        task_payload = {
+            key: record.get(key)
+            for key in (
+                "goal",
+                "goals",
+                "context",
+                "toolsets",
+                "role",
+                "model",
+                "is_batch",
+                "child_session_ids",
+            )
+            if key in record
+        }
+    try:
+        with _DB_LOCK, _connect() as conn:
+            conn.execute(
+                "UPDATE async_delegations SET task_json=?, updated_at=? "
+                "WHERE delegation_id=? AND state='running'",
+                (json.dumps(task_payload), time.time(), delegation_id),
+            )
+    except Exception:
+        logger.debug(
+            "Could not update reserved delegation child identities",
+            exc_info=True,
+        )
+    return True
+
+
+def start_reserved_async_delegation_batch(
+    *,
+    delegation_id: str,
+    runner: Callable[[], Dict[str, Any]],
+    interrupt_fn: Optional[Callable[[], None]] = None,
+    max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN,
+) -> Dict[str, Any]:
+    """Attach a runner to an existing durable reservation and schedule it."""
+    with _records_lock:
+        record = _records.get(delegation_id)
+        if record is None or record.get("status") != "running":
+            return {
+                "status": "rejected",
+                "reason": "reservation",
+                "error": "Background delegation reservation is unavailable.",
+            }
+        if record.get("runner_started"):
+            return {
+                "status": "rejected",
+                "reason": "duplicate",
+                "error": "Background delegation runner was already started.",
+            }
+        record["interrupt_fn"] = interrupt_fn
+        record["runner_started"] = True
+
+    dispatched_at = float(record["dispatched_at"])
     executor = _get_executor(max_async_children)
 
     def _worker() -> None:
@@ -1188,7 +1313,6 @@ def dispatch_async_delegation_batch(
         status = "error"
         try:
             combined = runner() or {}
-            # Batch status: completed unless every child errored/was interrupted.
             child_results = combined.get("results") or []
             if child_results and all(
                 (r.get("status") not in ("completed", "success"))
@@ -1209,15 +1333,13 @@ def dispatch_async_delegation_batch(
             _finalize_batch(delegation_id, combined, status)
 
     try:
-        # Propagate the dispatching profile to the detached batch children.
         executor.submit(propagate_context_to_thread(_worker))
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  # pragma: no cover - pool submit failure is rare
         with _records_lock:
-            _records.pop(delegation_id, None)
-            _persist_records_locked(
-                record.get("_home"), remove_ids={delegation_id}
-            )
-        _delete_durable_delegation(delegation_id)
+            failed = _records.get(delegation_id)
+            if failed is not None:
+                failed["runner_started"] = False
+        abort_reserved_async_delegation(delegation_id)
         return {
             "status": "rejected",
             "reason": "schedule",
@@ -1226,9 +1348,64 @@ def dispatch_async_delegation_batch(
 
     logger.info(
         "Dispatched async delegation batch %s (%d task(s), session_key=%s)",
-        delegation_id, n, session_key or "<cli>",
+        delegation_id,
+        len(record.get("goals") or []),
+        record.get("session_key") or "<cli>",
     )
     return {"status": "dispatched", "delegation_id": delegation_id}
+
+
+def dispatch_async_delegation_batch(
+    *,
+    goals: List[str],
+    context: Optional[str],
+    toolsets: Optional[List[str]],
+    role: str,
+    model: Optional[str],
+    session_key: str,
+    parent_session_id: Optional[str] = None,
+    child_session_ids: Optional[List[str]] = None,
+    runner: Callable[[], Dict[str, Any]],
+    origin_ui_session_id: str = "",
+    interrupt_fn: Optional[Callable[[], None]] = None,
+    max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN,
+    delegation_id: Optional[str] = None,
+    pre_reserved: bool = False,
+) -> Dict[str, Any]:
+    """Dispatch a whole fan-out batch as one background unit.
+
+    A pre-reserved call only attaches and schedules its runner. Other callers
+    retain the prior one-shot API: reserve durably, then start.
+    """
+    durable_id = delegation_id or new_delegation_id()
+    if pre_reserved:
+        return start_reserved_async_delegation_batch(
+            delegation_id=durable_id,
+            runner=runner,
+            interrupt_fn=interrupt_fn,
+            max_async_children=max_async_children,
+        )
+    reservation = reserve_async_delegation_batch(
+        delegation_id=durable_id,
+        goals=goals,
+        context=context,
+        toolsets=toolsets,
+        role=role,
+        model=model,
+        session_key=session_key,
+        parent_session_id=parent_session_id,
+        child_session_ids=child_session_ids,
+        origin_ui_session_id=origin_ui_session_id,
+        max_async_children=max_async_children,
+    )
+    if reservation.get("status") != "reserved":
+        return reservation
+    return start_reserved_async_delegation_batch(
+        delegation_id=durable_id,
+        runner=runner,
+        interrupt_fn=interrupt_fn,
+        max_async_children=max_async_children,
+    )
 
 
 def _finalize_batch(
