@@ -22,6 +22,7 @@ from typing import Any, Literal, Optional, Sequence
 import yaml
 
 from hades_constants import get_hades_home
+from hades_cli.workspace_context import resolve_workspace_root
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -76,6 +77,8 @@ def _configured_mode() -> str:
 
 def _load_bounded_yaml(path_value: str, label: str) -> dict:
     path = Path(path_value)
+    if not path.is_absolute():
+        path = resolve_workspace_root() / path
     if not path.is_file():
         raise _usage(f"{label} file not found: {path}")
     raw = path.read_bytes()
@@ -104,13 +107,14 @@ class _Services:
         from agent.operation_journal import OperationJournal
         from hades_state import SessionDB
 
+        workspace_root = resolve_workspace_root()
         self.db = SessionDB(get_hades_home() / "state.db")
         self.store = TransactionStore(self.db)
         self.journal = OperationJournal(self.db)
         self.adapters = EffectAdapterRegistry()
         register_builtin_adapters(
             self.adapters,
-            workspace_root=Path.cwd(),
+            workspace_root=workspace_root,
             transaction_lookup=self.store.get_effect_by_operation_id,
         )
         self.adapters.register(MessageOutboxAdapter(db_factory=lambda: self.db))

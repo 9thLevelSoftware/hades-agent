@@ -41,6 +41,206 @@ export interface SlashExecResponse {
   warning?: string
 }
 
+// ── Autonomy (Preferences & Autonomy Center) ─────────────────────────
+// Native `autonomy.exec` RPC: the bounded structured envelope over the
+// shared `hades autonomy ...` parser/service. Mutating /autonomy verbs
+// must use this route, never slash.exec.
+
+export interface AutonomyRuleDoc {
+  action_classes?: string[]
+  confidence_ppm?: number
+  data_classes?: string[]
+  description?: string
+  edit_command?: string
+  effect: string
+  expires_at_ms?: null | number
+  max_uses?: null | number
+  provenance?: string
+  recipient_classes?: string[]
+  remaining_uses?: null | number
+  rule_id: string
+  source: string
+  state: string
+}
+
+export interface AutonomyDecisionDoc {
+  authority_hash?: string
+  authority_version?: number
+  clarification?: null | { choices: string[]; code?: string; question: string }
+  code: string
+  conflicting_rule_ids?: string[]
+  context_hash?: string
+  edit_targets?: string[]
+  expires_at_ms?: null | number
+  matched_rule_ids?: string[]
+  reason?: string
+  required_evidence?: { kind: string; stage: string }[]
+  stage?: string
+  verdict: 'allow' | 'ask' | 'deny'
+}
+
+export interface AutonomyPreviewDoc {
+  added_rule_ids?: string[]
+  after_contract_hash: string
+  applied: false
+  before_contract_hash: string
+  changed_rule_ids?: string[]
+  profile_id?: string
+  removed_rule_ids?: string[]
+  warnings?: string[]
+}
+
+export interface AutonomyAppliedDoc {
+  applied: true
+  config_hash?: string
+  contract_hash: string
+  contract_version: number
+}
+
+export interface AutonomyContractDoc {
+  hash?: string
+  mode?: string
+  profile_id?: string
+  version?: number
+}
+
+export interface AutonomyExecResponse {
+  action: string
+  applied: AutonomyAppliedDoc | null
+  approval_pending: boolean
+  audit: Record<string, unknown>[]
+  contract: AutonomyContractDoc | null
+  decision: AutonomyDecisionDoc | null
+  exit_code: number
+  ok: boolean
+  output: string
+  preview: AutonomyPreviewDoc | null
+  rules: AutonomyRuleDoc[]
+  suggestions: AutonomyRuleDoc[]
+}
+
+// ── Verified outcome & artifact receipts (native /receipt) ───────────
+
+export interface ReceiptSummary {
+  content_hash: string
+  decided_at: string
+  receipt_id: string
+  scorer_id: string
+  scorer_version: string
+  session_id?: null | string
+  status: string
+  subject_id: string
+  subject_kind: string
+}
+
+export interface ReceiptDetail {
+  artifact_count?: number
+  claim_count?: number
+  content_hash: string
+  decided_at: string
+  evidence_count?: number
+  mission_id?: null | string
+  observation_count?: number
+  receipt_id: string
+  scorer_id: string
+  scorer_version: string
+  session_id?: null | string
+  status: string
+  subject_id: string
+  subject_kind: string
+  transaction_id?: null | string
+  turn_id?: null | string
+  uncertainty?: string[]
+}
+
+export interface ReceiptObservationDetail {
+  content_hash?: string
+  observation_id: string
+  observed_at: string
+  previous_observation_id?: null | string
+  receipt_id: string
+  scorer_id?: string
+  scorer_version?: string
+  status: string
+  uncertainty?: string[]
+}
+
+/** Every reviewed claim→evidence→artifact edge as one structured record. */
+export interface ReceiptClaimEdge {
+  artifact_ids?: string[]
+  claim_id: string
+  claim_kind?: string
+  evidence_ids?: string[]
+  required: boolean
+  statement?: string
+  uncertainty?: string[]
+  verdict: string
+}
+
+export interface TransactionDoc {
+  current_revision: number
+  receipt_id?: null | string
+  status: string
+  transaction_id: string
+}
+
+export interface TransactionEligibility {
+  blockers: string[]
+  can_execute: boolean
+  code: string
+  fidelity: string
+  reason: string
+  required_cascade_node_ids: string[]
+}
+
+export interface TransactionReceiptDoc {
+  content_hash: string
+  receipt_id: string
+  status: string
+}
+
+export interface TransactionObservationDoc {
+  content_hash?: string
+  observation_id: string
+  status: string
+}
+
+export interface TransactionExecResponse {
+  action: string
+  blocked_node?: string
+  committed_nodes?: string[]
+  compensated_nodes?: string[]
+  counts?: Record<string, number>
+  eligibility?: Record<string, TransactionEligibility>
+  exit_code: number
+  nodes?: Array<{ fidelity: null | string; node_id: string; requires_approval: boolean }>
+  observation?: TransactionObservationDoc
+  ok: boolean
+  output: string
+  preview_hash?: string
+  receipt?: TransactionReceiptDoc
+  revision?: number
+  status?: string
+  transaction_id?: string
+  transaction?: TransactionDoc
+  transactions?: TransactionDoc[]
+}
+
+export interface ReceiptExecResponse {
+  action: string
+  claim_edges?: ReceiptClaimEdge[]
+  exit_code: number
+  exported?: true
+  observations?: ReceiptObservationDetail[]
+  ok: boolean
+  /** Forced-redacted text rendering from hades_cli.receipts. */
+  output: string
+  receipt?: ReceiptDetail
+  receipts?: ReceiptSummary[]
+  retention_plan_hash?: string
+  warning?: string
+}
+
 // ── Remote Spending (Phase 2b) ───────────────────────────────────────
 
 // Wire shapes now live in @hermes/shared for reuse by TypeScript clients.

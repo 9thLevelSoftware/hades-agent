@@ -1,12 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api } from "./api";
+import {
+  api,
+  setManagementProfile,
+  type AutonomyApplyRequest,
+  type AutonomyChangeRequest,
+  type AutonomySuggestionAcceptRequest,
+} from "./api";
 
 const SESSION_HEADER = "X-Hermes-Session-Token";
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  setManagementProfile("");
 });
 
 function jsonFetchMock(body: unknown = { ok: true }) {
@@ -102,5 +109,241 @@ describe("api OAuth helpers", () => {
       expect(init.credentials).toBe("include");
       expect((init.headers as Headers).has(SESSION_HEADER)).toBe(false);
     }
+  });
+});
+
+describe("Hades management API contract", () => {
+  it("requests filtered autonomy rules within the active management profile", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({ rules: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    await api.getAutonomyRules({ source: "user_assertion", effective: true });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0];
+    const requestUrl = new URL(String(url), "http://test");
+    expect(requestUrl.pathname).toBe("/api/autonomy/rules");
+    expect(requestUrl.searchParams.get("source")).toBe("user_assertion");
+    expect(requestUrl.searchParams.get("effective")).toBe("true");
+    expect(requestUrl.searchParams.get("profile")).toBe("alpha");
+  });
+
+  it("requests filtered receipts within the active management profile", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({ receipts: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    await api.getReceipts({ status: "verified", limit: 10 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0];
+    const requestUrl = new URL(String(url), "http://test");
+    expect(requestUrl.pathname).toBe("/api/receipts");
+    expect(requestUrl.searchParams.get("status")).toBe("verified");
+    expect(requestUrl.searchParams.get("limit")).toBe("10");
+    expect(requestUrl.searchParams.get("profile")).toBe("alpha");
+  });
+
+  it("does not let a preview caller override the active management profile", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({});
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    const change = {
+      set_rules: [{ rule_id: "rule-new" }],
+      remove_rule_ids: ["rule-old"],
+      profile: "beta",
+    };
+    await api.previewAutonomyChange(change);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    const requestUrl = new URL(String(url), "http://test");
+    expect(requestUrl.pathname).toBe("/api/autonomy/preview");
+    expect(requestUrl.searchParams.get("profile")).toBe("alpha");
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    const requestBody = JSON.parse(String(init?.body));
+    expect(requestBody.profile).toBe("alpha");
+    expect(requestBody.set_rules).toEqual(change.set_rules);
+    expect(requestBody.remove_rule_ids).toEqual(change.remove_rule_ids);
+  });
+
+  it("does not let an apply caller override the active management profile", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({});
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    const change = {
+      remove_rule_ids: ["rule-old"],
+      expected_contract_hash: "contract-hash",
+      profile: "beta",
+    };
+    await api.applyAutonomyPreview(change);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    const requestUrl = new URL(String(url), "http://test");
+    expect(requestUrl.pathname).toBe("/api/autonomy/apply");
+    expect(requestUrl.searchParams.get("profile")).toBe("alpha");
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    const requestBody = JSON.parse(String(init?.body));
+    expect(requestBody.profile).toBe("alpha");
+    expect(requestBody.remove_rule_ids).toEqual(change.remove_rule_ids);
+    expect(requestBody.expected_contract_hash).toBe(
+      change.expected_contract_hash,
+    );
+  });
+
+  it("does not let an accept caller override the active management profile", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({});
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    const body = {
+      destination: "mandate" as const,
+      expected_contract_hash: "contract-hash",
+      profile: "beta",
+    };
+    await api.acceptAutonomySuggestion("suggestion-1", body);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    const requestUrl = new URL(String(url), "http://test");
+    expect(requestUrl.pathname).toBe(
+      "/api/autonomy/suggestions/suggestion-1/accept",
+    );
+    expect(requestUrl.searchParams.get("profile")).toBe("alpha");
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    const requestBody = JSON.parse(String(init?.body));
+    expect(requestBody.profile).toBe("alpha");
+    expect(requestBody.destination).toBe(body.destination);
+    expect(requestBody.expected_contract_hash).toBe(
+      body.expected_contract_hash,
+    );
+  });
+
+  it("does not let a preview caller toJSON override the request payload", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({});
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    const toJSON = vi.fn(() => ({
+      profile: "beta",
+      remove_rule_ids: ["attacker-rule"],
+    }));
+    const change: AutonomyChangeRequest & {
+      profile: string;
+      toJSON: () => unknown;
+    } = {
+      set_rules: [{ rule_id: "rule-new" }],
+      remove_rule_ids: ["rule-old"],
+      profile: "beta",
+      toJSON,
+    };
+    await api.previewAutonomyChange(change);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0];
+    const requestBody = JSON.parse(String(init?.body));
+    expect.soft(requestBody.profile).toBe("alpha");
+    expect.soft(requestBody.set_rules).toEqual(change.set_rules);
+    expect.soft(requestBody.remove_rule_ids).toEqual(change.remove_rule_ids);
+    expect.soft(toJSON).not.toHaveBeenCalled();
+  });
+
+  it("does not let an apply caller toJSON override the request payload", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({});
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    const toJSON = vi.fn(() => ({
+      profile: "beta",
+      set_rules: [{ rule_id: "attacker-rule" }],
+      expected_contract_hash: "attacker-hash",
+    }));
+    const change: AutonomyApplyRequest & {
+      profile: string;
+      toJSON: () => unknown;
+    } = {
+      set_rules: [{ rule_id: "rule-new" }],
+      remove_rule_ids: ["rule-old"],
+      expected_contract_hash: "contract-hash",
+      profile: "beta",
+      toJSON,
+    };
+    await api.applyAutonomyPreview(change);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0];
+    const requestBody = JSON.parse(String(init?.body));
+    expect.soft(requestBody.profile).toBe("alpha");
+    expect.soft(requestBody.set_rules).toEqual(change.set_rules);
+    expect.soft(requestBody.remove_rule_ids).toEqual(change.remove_rule_ids);
+    expect.soft(requestBody.expected_contract_hash).toBe(
+      change.expected_contract_hash,
+    );
+    expect.soft(toJSON).not.toHaveBeenCalled();
+  });
+
+  it("does not let an accept caller toJSON override the request payload", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({});
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    const toJSON = vi.fn(() => ({
+      profile: "beta",
+      destination: "stable",
+      expected_contract_hash: "attacker-hash",
+    }));
+    const body: AutonomySuggestionAcceptRequest & {
+      profile: string;
+      toJSON: () => unknown;
+    } = {
+      destination: "mandate",
+      expected_contract_hash: "contract-hash",
+      expires_in_ms: 60_000,
+      max_uses: 3,
+      profile: "beta",
+      toJSON,
+    };
+    await api.acceptAutonomySuggestion("suggestion-1", body);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0];
+    const requestBody = JSON.parse(String(init?.body));
+    expect.soft(requestBody.profile).toBe("alpha");
+    expect.soft(requestBody.destination).toBe(body.destination);
+    expect.soft(requestBody.expected_contract_hash).toBe(
+      body.expected_contract_hash,
+    );
+    expect.soft(requestBody.expires_in_ms).toBe(body.expires_in_ms);
+    expect.soft(requestBody.max_uses).toBe(body.max_uses);
+    expect.soft(toJSON).not.toHaveBeenCalled();
   });
 });

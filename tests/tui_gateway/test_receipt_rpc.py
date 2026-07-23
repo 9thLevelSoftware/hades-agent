@@ -23,6 +23,7 @@ Real-path invariants against the per-test ``HADES_HOME``:
 from __future__ import annotations
 
 import importlib
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -217,6 +218,25 @@ def test_receipt_rpc_rejects_oversized_argv_without_secret_echo(rpc):
     assert "x" * 100 not in result["error"]["message"]
 
 
+@pytest.mark.parametrize(
+    ("method", "code"),
+    [
+        ("autonomy.exec", 4033),
+        ("receipt.exec", 4004),
+        ("transaction.exec", 4006),
+    ],
+)
+@pytest.mark.parametrize("rid", ["r" * 1_100_000, object()])
+def test_native_validation_errors_bound_oversized_or_non_json_ids(
+    server, method, code, rid
+):
+    resp = server._methods[method](rid, {"argv": []})
+
+    assert resp["error"]["code"] == code
+    assert resp["id"] is None
+    assert len((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")) <= 1_048_576
+
+
 # =========================================================================
 # Structured, profile-local success paths
 # =========================================================================
@@ -309,8 +329,43 @@ def test_session_profile_home_override_is_honored(rpc, server, tmp_path):
     result = rpc(
         "receipt.exec", {"session_id": "sid-other", "argv": ["list"]}
     )
-    assert result["profile_home"] == str(other_home)
+    assert "profile_home" not in result
     assert [s["receipt_id"] for s in result["receipts"]] == [other.receipt_id]
+
+
+def test_receipt_rpc_binds_session_workspace_for_native_run_argv(
+    rpc, server, tmp_path, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+    from hades_cli.workspace_context import get_workspace_root
+
+    launch = tmp_path / "gateway-launch"
+    workspace = tmp_path / "session-workspace"
+    launch.mkdir()
+    workspace.mkdir()
+    server._sessions["sid-receipt-workspace"] = {
+        "session_key": "tui-receipt-workspace",
+        "cwd": str(workspace),
+    }
+    captured: list[Path] = []
+
+    def run(argv, **kwargs):
+        captured.append(get_workspace_root())
+        return receipts_mod.ReceiptCommandResult(
+            receipts_mod.EXIT_OK,
+            "safe",
+            {"ok": True, "action": "list", "receipts": []},
+        )
+
+    monkeypatch.setattr(receipts_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    result = rpc("receipt.exec", {
+        "session_id": "sid-receipt-workspace", "argv": ["list"],
+    })
+
+    assert result["ok"] is True
+    assert captured == [workspace.resolve()]
+    assert Path.cwd() == launch
 
 
 def test_caller_supplied_profile_path_is_never_accepted(rpc, home, tmp_path, seeded_receipt):
@@ -327,7 +382,7 @@ def test_caller_supplied_profile_path_is_never_accepted(rpc, home, tmp_path, see
     )
     assert result["ok"] is True
     # Only the session registry may steer profile resolution.
-    assert result["profile_home"] == str(home)
+    assert "profile_home" not in result
     assert [s["receipt_id"] for s in result["receipts"]] == [
         seeded_receipt.receipt_id
     ]
@@ -342,6 +397,14 @@ def test_argv_must_be_a_nonempty_list_of_strings(rpc):
     for bad in ("list", None, [], [1, 2], [["list"]], {"a": 1}):
         resp = rpc("receipt.exec", {"session_id": "sid", "argv": bad})
         assert resp["error"]["code"] == 4004, resp
+
+
+def test_invalid_session_id_type_is_rejected_without_traceback(rpc):
+    resp = rpc("receipt.exec", {"session_id": {}, "argv": ["list"]})
+
+    assert resp["error"]["code"] == 4004
+    assert "Traceback" not in resp["error"]["message"]
+    assert "{}" not in resp["error"]["message"]
 
 
 def test_argv_entry_count_is_bounded_to_64(rpc):
@@ -410,3 +473,728 @@ def test_unexpected_failures_map_to_5xxx_and_are_redacted(rpc, monkeypatch):
     assert "secret-token-xyz" not in resp["error"]["message"]
     assert "C:/private" not in resp["error"]["message"]
     assert "Traceback" not in resp["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("exit_name", "error_code", "expected_message"),
+    [
+        (
+            "EXIT_VALIDATION",
+            4005,
+            "receipt.exec: validation failed (details withheld; run hades receipt in terminal)",
+        ),
+        (
+            "EXIT_UNAVAILABLE",
+            5041,
+            "receipt.exec: signing provider unavailable (details withheld; run hades receipt in terminal)",
+        ),
+        (
+            "EXIT_STORAGE",
+            5040,
+            "receipt.exec: storage failure (details withheld; run hades receipt list in terminal)",
+        ),
+    ],
+)
+def test_cli_failure_payload_error_is_not_forwarded(
+    rpc, monkeypatch, exit_name, error_code, expected_message
+):
+    import hades_cli.receipts as receipts_mod
+
+    secret = "receipt-wire-secret-token"
+    path = "/private/receipts/secret.db"
+    details = f"{secret} {path}\nTraceback (most recent call last)"
+
+    def failed(argv, **kwargs):
+        return receipts_mod.ReceiptCommandResult(
+            getattr(receipts_mod, exit_name),
+            f"producer output: {details}",
+            {"ok": False, "error": details, "code": "producer_failure"},
+        )
+
+    monkeypatch.setattr(receipts_mod, "run_argv", failed)
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+    error = resp["error"]
+    message = str(error["message"])
+
+    assert error["code"] == error_code
+    assert message == expected_message
+    assert len(message) <= 256
+    assert secret not in str(resp)
+    assert path not in str(resp)
+    assert "Traceback" not in str(resp)
+
+
+def test_exit_ok_false_payload_is_a_bounded_command_error(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    secret = "receipt-false-success-secret"
+    path = "/private/receipts/false-success.db"
+    details = f"{secret} {path}\nTraceback (most recent call last)"
+    failed = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        f"producer output: {details}",
+        {"ok": False, "error": details},
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: failed)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5040
+    assert secret not in str(resp)
+    assert path not in str(resp)
+    assert "Traceback" not in str(resp)
+
+
+def test_exit_ok_failure_only_payload_error_is_a_bounded_command_error(
+    rpc, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    secret = "receipt-failure-only-secret"
+    failed = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK, secret, {"error": secret}
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: failed)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5040
+    assert secret not in str(resp)
+
+
+@pytest.mark.parametrize("payload", ["not-a-dict", ["not", "a", "dict"]])
+def test_malformed_payload_is_a_fixed_error(rpc, monkeypatch, payload):
+    import hades_cli.receipts as receipts_mod
+
+    result = receipts_mod.ReceiptCommandResult(receipts_mod.EXIT_OK, "safe", payload)
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5043
+    assert "-32000" not in str(resp)
+
+
+def test_payload_dict_subclass_get_exception_is_not_on_wire(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    secret = "receipt-malicious-get-secret"
+
+    class MaliciousPayload(dict):
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError(f"{secret} /private/receipts\nTraceback")
+
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK, "safe", MaliciousPayload(ok=True)
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5043
+    assert secret not in str(resp)
+    assert "/private/receipts" not in str(resp)
+    assert "Traceback" not in str(resp)
+
+
+def test_success_output_is_bounded_with_deterministic_suffix(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    suffix = "... [truncated]"
+    output = "receipt output\n" + ("x" * 20_000)
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK, output, {"ok": True, "action": "list"}
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["output"] == output[: 16_384 - len(suffix)] + suffix
+    assert len(resp["output"]) <= 16_384
+
+
+def test_success_envelope_is_bounded(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        "short",
+        {"ok": True, "receipts": [{"receipt_id": "r", "detail": "x" * 1_100_000}]},
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5043
+    assert len(str(resp)) < 2_000
+
+
+def test_success_frame_bound_includes_default_rpc_envelope_and_newline(
+    rpc, home, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    rows = [{
+        "receipt_id": f"r{i:05d}",
+        "status": "verified",
+        "subject_id": f"s{i}",
+        "subject_kind": "turn",
+        "decided_at": "2026-07-10T00:00:00Z",
+        "content_hash": f"sha256:{i}",
+        "scorer_id": "scorer",
+        "scorer_version": "1.0",
+    } for i in range(5_200)]
+    payload = {"ok": True, "action": "list", "receipts": rows}
+    expected_inner = {
+        "ok": True,
+        "action": "list",
+        "exit_code": receipts_mod.EXIT_OK,
+        "output": "short",
+        "receipts": rows,
+    }
+    compact_payload_bytes = len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    compact_inner_bytes = len(
+        json.dumps(expected_inner, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    expected_frame = (
+        json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "result": expected_inner},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    cap = 1_048_576
+    assert compact_payload_bytes < cap
+    assert compact_inner_bytes < cap
+    assert len(expected_frame) > cap
+
+    result = receipts_mod.ReceiptCommandResult(receipts_mod.EXIT_OK, "short", payload)
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["ok"] is True
+    assert len(resp["receipts"]) <= 256
+    final_frame = json.dumps({"jsonrpc": "2.0", "id": 1, "result": resp}, ensure_ascii=False).encode("utf-8") + b"\n"
+    assert len(final_frame) <= cap
+
+
+def test_valid_receipt_success_payload_forwards_only_minimal_nonlocator_fields(
+    rpc, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    secret = "sk-test-ReceiptValidSuccessSecret"
+    private_path = "/Users/private/receipts/result.json"
+    artifact_locator = f"artifact://private/{secret}"
+    receipt_id = "rct_" + "a" * 64
+    observation_id = "obs_" + "b" * 64
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        f"receipt output {secret} {private_path}",
+        {
+            "ok": True,
+            "action": "show",
+            "receipts": [{
+                "receipt_id": receipt_id,
+                "status": "verified",
+                "subject_id": "s1:t1",
+                "subject_kind": "turn",
+                "decided_at": "2026-07-10T00:00:00Z",
+                "content_hash": "sha256:deadbeef",
+                "scorer_id": "scorer",
+                "scorer_version": "1.0",
+                "session_id": "s1",
+                "source_ref": f"source_ref {private_path} {secret}",
+            }],
+            "receipt": {
+                "receipt_id": receipt_id,
+                "status": "verified",
+                "subject_id": "s1:t1",
+                "subject_kind": "turn",
+                "content_hash": "sha256:deadbeef",
+                "decided_at": "2026-07-10T00:00:00Z",
+                "scorer_id": "scorer",
+                "scorer_version": "1.0",
+                "session_id": "s1",
+                "requested_outcome": {
+                    "description": f"outcome {secret} {private_path}",
+                    "constraints": [f"constraint {secret}"],
+                },
+                "source_ref": f"source {private_path}",
+                "evidence": [{"source_ref": f"evidence {private_path}"}],
+                "artifacts": [{
+                    "artifact_id": "art-1",
+                    "source_ref": artifact_locator,
+                    "display_name": f"artifact {secret}",
+                }],
+                "claims": [{
+                    "claim_id": "claim-1",
+                    "statement": f"claim {secret} {private_path}",
+                    "uncertainty": [f"uncertainty {secret}"],
+                }],
+            },
+            "observations": [{
+                "observation_id": observation_id,
+                "receipt_id": receipt_id,
+                "status": "verified",
+                "observed_at": "2026-07-11T09:00:00Z",
+                "content_hash": "sha256:feedface",
+                "source_ref": f"observation {private_path}",
+                "evidence": [{"payload": secret}],
+                "artifacts": [{"locator": artifact_locator}],
+            }],
+            "claim_edges": [{
+                "claim_id": "claim-1",
+                "verdict": "satisfied",
+                "required": True,
+                "statement": f"statement {secret} {private_path}",
+                "uncertainty": [f"edge uncertainty {secret}"],
+                "evidence_ids": ["evidence-1"],
+                "artifact_ids": [artifact_locator],
+            }],
+            "export_path": private_path,
+            "warning": f"warning {secret} {private_path}",
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["show", receipt_id]})
+
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert secret not in wire
+    assert "/Users/private" not in wire
+    assert "source_ref" not in wire
+    assert "export_path" not in wire
+    assert artifact_locator not in wire
+    assert resp["output"] != result.output
+    assert set(resp["receipts"][0]) <= {
+        "receipt_id", "status", "subject_id", "subject_kind", "decided_at",
+        "content_hash", "scorer_id", "scorer_version", "session_id",
+    }
+    assert set(resp["receipt"]) <= {
+        "receipt_id", "status", "subject_id", "subject_kind", "content_hash",
+        "decided_at", "scorer_id", "scorer_version", "session_id", "transaction_id",
+        "turn_id", "mission_id", "uncertainty", "claim_count", "evidence_count",
+        "artifact_count", "observation_count",
+    }
+
+
+def test_valid_receipt_denial_output_is_redacted(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    secret = "sk-test-ReceiptValidDenialSecret"
+    private_path = "/Users/private/receipts/denied.db"
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        f"denied {secret} {private_path}",
+        {
+            "ok": False,
+            "action": "show",
+            "warning": f"denial warning {secret} {private_path}",
+            "receipt": {
+                "receipt_id": "rct_" + "c" * 64,
+                "status": "failed",
+                "uncertainty": [f"uncertainty {secret}"],
+            },
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["show", "rct_" + "c" * 64]})
+
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert secret not in wire
+    assert private_path not in wire
+    assert resp["error"]["code"] == 5040, resp
+
+
+def test_receipt_native_preserves_colon_subject_and_rfc3339_scalars(
+    rpc, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    receipt_id = "rct_" + "a" * 64
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "action": "show",
+            "receipts": [{
+                "receipt_id": receipt_id,
+                "status": "verified",
+                "subject_id": "s1:t1",
+                "subject_kind": "turn",
+                "decided_at": "2026-07-10T00:00:00Z",
+                "content_hash": "sha256:deadbeef",
+                "scorer_id": "scorer",
+                "scorer_version": "1.0",
+            }],
+            "receipt": {
+                "receipt_id": receipt_id,
+                "status": "verified",
+                "subject_id": "s1:t1",
+                "subject_kind": "turn",
+                "content_hash": "sha256:deadbeef",
+                "decided_at": "2026-07-10T00:00:00Z",
+                "scorer_id": "scorer",
+                "scorer_version": "1.0",
+            },
+            "observations": [{
+                "observation_id": "obs_" + "b" * 64,
+                "receipt_id": receipt_id,
+                "status": "verified",
+                "observed_at": "2026-07-11T09:00:00Z",
+            }],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc("receipt.exec", {"argv": ["show", receipt_id]})
+    assert response["receipts"][0]["subject_id"] == "s1:t1"
+    assert response["receipts"][0]["decided_at"] == "2026-07-10T00:00:00Z"
+    assert response["receipt"]["subject_id"] == "s1:t1"
+    assert response["receipt"]["decided_at"] == "2026-07-10T00:00:00Z"
+    assert response["observations"][0]["observed_at"] == "2026-07-11T09:00:00Z"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/Volumes/Untitled/private.txt",
+        "/opt/local/secret",
+        "/etc/passwd",
+        "/root/.ssh/key",
+        "/etc",
+        "/root",
+    ],
+)
+def test_receipt_native_redacts_generic_posix_paths_recursively(rpc, monkeypatch, path):
+    import hades_cli.receipts as receipts_mod
+
+    probe = f"producer free text {path}"
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        f"producer output {probe}",
+        {
+            "ok": True,
+            "action": "show",
+            "warning": probe,
+            "claim_edges": [{
+                "claim_id": "claim-1",
+                "verdict": "satisfied",
+                "required": True,
+                "statement": probe,
+                "uncertainty": [probe],
+            }],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["show"]})
+
+    assert path not in json.dumps(resp, ensure_ascii=False)
+
+
+def test_receipt_claim_edge_locator_ids_are_dropped_but_safe_ids_survive(
+    rpc, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    invalid_ids = [
+        "artifact://secret/path",
+        "file:///tmp/x",
+        "artifact:secret",
+        "mailto:foo",
+        "urn:foo",
+        "prefix:/etc",
+        "//etc/passwd",
+        "/etc/passwd",
+        r"C:\\secret",
+        "../relative",
+        "id..with-dotdot",
+        "id with whitespace",
+        "control\nid",
+        "sha256:not-hex",
+    ]
+    valid_ids = [
+        "550e8400-e29b-41d4-a716-446655440000",
+        "evidence_id",
+        "artifact.v1",
+        "sha256:abc12345",
+        "sha256:ABCDEF12",
+    ]
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        "safe producer output",
+        {
+            "ok": True,
+            "action": "show",
+            "claim_edges": [{
+                "claim_id": "claim-1",
+                "verdict": "satisfied",
+                "required": True,
+                "evidence_ids": [*invalid_ids, *valid_ids],
+                "artifact_ids": [*invalid_ids, *valid_ids],
+            }],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["show"]})
+
+    edge = resp["claim_edges"][0]
+    assert edge["evidence_ids"] == valid_ids
+    assert edge["artifact_ids"] == valid_ids
+    wire = json.dumps(resp, ensure_ascii=False)
+    for invalid_id in invalid_ids:
+        assert invalid_id not in wire
+    for valid_id in valid_ids:
+        assert valid_id in wire
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "artifact://secret/path",
+        "file:///etc/passwd",
+        "//etc/passwd",
+        "prefix:/etc/passwd",
+        "artifact:secret/path",
+        "mailto:foo@example.com",
+        "urn:secret:item",
+        "https://user:pass@example/x?token=secret",
+    ],
+)
+def test_receipt_native_scrubs_locator_tokens_from_warning_and_claim_text(
+    rpc, monkeypatch, probe
+):
+    import hades_cli.receipts as receipts_mod
+
+    text = f"producer free text {probe}"
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        f"producer output {text}",
+        {
+            "ok": True,
+            "action": "show",
+            "warning": text,
+            "claim_edges": [{
+                "claim_id": "claim-1",
+                "verdict": "satisfied",
+                "required": True,
+                "statement": text,
+                "uncertainty": [text],
+            }],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["show"]})
+
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert probe not in wire
+    for fragment in ("//secret", "secret/path", "secret/item", "/etc", "/root"):
+        assert fragment not in wire
+
+
+def test_receipt_native_preserves_wire_safe_domain_ids_and_drops_unsafe_rows(
+    rpc, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "action": "show",
+            "receipts": [
+                {
+                    "receipt_id": "receipt:one",
+                    "status": "verified",
+                    "subject_id": "project:item-1",
+                    "subject_kind": "transaction",
+                    "decided_at": "2026-07-10T00:00:00Z",
+                    "content_hash": "sha256:deadbeef",
+                    "scorer_id": "scorer:one",
+                    "scorer_version": "1.0",
+                },
+                {
+                    "receipt_id": "artifact:secret/path",
+                    "status": "verified",
+                    "subject_id": "project:item-2",
+                    "subject_kind": "transaction",
+                    "decided_at": "2026-07-10T00:00:00Z",
+                    "content_hash": "sha256:deadbeef",
+                    "scorer_id": "scorer:one",
+                    "scorer_version": "1.0",
+                },
+            ],
+            "receipt": {
+                "receipt_id": "receipt:one",
+                "status": "verified",
+                "subject_id": "project:item-1",
+                "subject_kind": "transaction",
+                "content_hash": "sha256:deadbeef",
+                "decided_at": "2026-07-10T00:00:00Z",
+                "scorer_id": "scorer:one",
+                "scorer_version": "1.0",
+                "transaction_id": "project:item-1",
+            },
+            "observations": [
+                {
+                    "observation_id": "observation:one",
+                    "receipt_id": "receipt:one",
+                    "status": "verified",
+                    "observed_at": "2026-07-11T09:00:00Z",
+                },
+                {
+                    "observation_id": "file:/etc",
+                    "receipt_id": "receipt:one",
+                    "status": "verified",
+                    "observed_at": "2026-07-11T09:00:00Z",
+                },
+            ],
+            "claim_edges": [
+                {
+                    "claim_id": "claim:one",
+                    "verdict": "satisfied",
+                    "required": True,
+                    "evidence_ids": ["evidence-1"],
+                    "artifact_ids": ["artifact-1"],
+                },
+                {
+                    "claim_id": "mailto:user",
+                    "verdict": "satisfied",
+                    "required": True,
+                    "evidence_ids": ["evidence-1"],
+                    "artifact_ids": ["artifact-1"],
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc("receipt.exec", {"argv": ["show", "receipt:one"]})
+
+    assert response["receipts"][0]["receipt_id"] == "receipt:one"
+    assert response["receipts"][0]["subject_id"] == "project:item-1"
+    assert response["receipt"]["transaction_id"] == "project:item-1"
+    assert response["observations"][0]["observation_id"] == "observation:one"
+    assert response["claim_edges"][0]["claim_id"] == "claim:one"
+    assert response["claim_edges"][0]["evidence_ids"] == ["evidence-1"]
+    assert response["claim_edges"][0]["artifact_ids"] == ["artifact-1"]
+    wire = json.dumps(response, ensure_ascii=False)
+    for unsafe in ("artifact:secret/path", "file:/etc", "mailto:user"):
+        assert unsafe not in wire
+
+    required = {
+        "receipt_id", "subject_id", "subject_kind", "decided_at", "content_hash",
+        "scorer_id", "scorer_version", "observation_id", "observed_at", "claim_id",
+        "verdict",
+    }
+
+    def assert_required_values(value):
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in required:
+                    assert nested is not None, (key, value)
+                assert_required_values(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_required_values(nested)
+
+    assert_required_values(response)
+
+
+def test_receipt_native_rejects_path_bearing_required_domain_ids(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    safe_ids = ["receipt:one", "project:item-1", "scorer:one", "团队:项目"]
+    invalid_ids = [
+        "team:email/secret",
+        "foo:bar/baz",
+        r"team:email\secret",
+        "safe/../bad",
+        "artifact:secret/path",
+        "",
+        "control\nid",
+        "x" * 257,
+    ]
+
+    def summary(receipt_id, subject_id="project:item-1", scorer_id="scorer:one"):
+        return {
+            "receipt_id": receipt_id,
+            "status": "verified",
+            "subject_id": subject_id,
+            "subject_kind": "transaction",
+            "decided_at": "2026-07-10T00:00:00Z",
+            "content_hash": "sha256:deadbeef",
+            "scorer_id": scorer_id,
+            "scorer_version": "1.0",
+        }
+
+    summaries = [summary(safe_ids[0], safe_ids[1], safe_ids[2])]
+    summaries.extend(summary(invalid_id) for invalid_id in invalid_ids)
+    summaries.extend([
+        summary(safe_ids[0], invalid_ids[0]),
+        summary(safe_ids[0], safe_ids[1], invalid_ids[1]),
+    ])
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "action": "show",
+            "receipts": summaries,
+            "receipt": summary(safe_ids[0], invalid_ids[2], safe_ids[2]),
+            "observations": [
+                {
+                    "observation_id": safe_ids[0],
+                    "receipt_id": safe_ids[0],
+                    "status": "verified",
+                    "observed_at": "2026-07-11T09:00:00Z",
+                },
+                {
+                    "observation_id": invalid_ids[3],
+                    "receipt_id": safe_ids[0],
+                    "status": "verified",
+                    "observed_at": "2026-07-11T09:00:00Z",
+                },
+            ],
+            "claim_edges": [
+                {
+                    "claim_id": safe_ids[1],
+                    "verdict": "satisfied",
+                    "required": True,
+                    "evidence_ids": ["evidence-1"],
+                    "artifact_ids": ["artifact-1"],
+                },
+                {
+                    "claim_id": invalid_ids[4],
+                    "verdict": "satisfied",
+                    "required": True,
+                    "evidence_ids": ["evidence-1"],
+                    "artifact_ids": ["artifact-1"],
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc("receipt.exec", {"argv": ["show", safe_ids[0]]})
+
+    assert response["receipts"] == [summaries[0]]
+    assert "receipt" not in response
+    assert [row["observation_id"] for row in response["observations"]] == [safe_ids[0]]
+    assert [row["claim_id"] for row in response["claim_edges"]] == [safe_ids[1]]
+    wire = json.dumps(response, ensure_ascii=False)
+    for invalid_id in invalid_ids:
+        if invalid_id:
+            assert invalid_id not in wire

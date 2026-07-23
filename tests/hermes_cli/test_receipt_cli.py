@@ -265,6 +265,22 @@ def test_export_defaults_public_and_prune_requires_exact_plan(cli, receipt):
     assert refused.exit_code == 2
 
 
+def test_relative_export_and_issuer_roots_follow_bound_workspace(home, db, tmp_path, monkeypatch):
+    from hades_cli.receipts import _Services, _resolve_output_path
+    from hades_cli.workspace_context import workspace_context
+
+    launch = tmp_path / "launch"
+    workspace = tmp_path / "session-workspace"
+    launch.mkdir()
+    workspace.mkdir()
+    monkeypatch.chdir(launch)
+    with workspace_context(workspace):
+        services = _Services(home, db)
+        assert _resolve_output_path("receipt.json") == workspace / "receipt.json"
+        assert services.exporter()._allowed_roots == (workspace.resolve(),)
+        assert services.issuer().sources._allowed_roots == (workspace.resolve(),)
+
+
 # =========================================================================
 # list
 # =========================================================================

@@ -37,6 +37,8 @@ from typing import Any, Iterator, Literal, Optional, Sequence
 
 import yaml
 
+from hades_cli.workspace_context import get_workspace_root
+
 __all__ = [
     "ReceiptCommandResult",
     "build_parser",
@@ -215,6 +217,7 @@ class _Services:
 
     def __init__(self, home: Path, db: Any) -> None:
         self.home = home
+        self.workspace_root = get_workspace_root()
         self.db = db
         from agent.receipt_store import ReceiptStore
 
@@ -238,7 +241,7 @@ class _Services:
         return ReceiptExporter(
             self.store,
             default_redaction=str(self.config.get("export_redaction", "public")),
-            allowed_roots=(self.home,),
+            allowed_roots=(self.workspace_root,),
             signing=self.signing_service(),
         )
 
@@ -257,7 +260,7 @@ class _Services:
         from agent.receipt_ingest import build_receipt_issuer
 
         return build_receipt_issuer(
-            self.db, allowed_roots=(self.home, Path.cwd())
+            self.db, allowed_roots=(self.workspace_root,)
         )
 
 
@@ -527,16 +530,16 @@ def _cmd_recheck(services: _Services, args: argparse.Namespace) -> _Outcome:
 
 
 def _resolve_output_path(raw: str) -> Path:
-    """Bound relative ``--output`` paths to the working directory."""
+    """Bound relative ``--output`` paths to the active workspace."""
     path = Path(str(raw))
     if path.is_absolute():
         return path
-    cwd = Path.cwd().resolve()
-    resolved = (cwd / path).resolve()
-    if resolved != cwd and cwd not in resolved.parents:
+    workspace = get_workspace_root()
+    resolved = (workspace / path).resolve()
+    if resolved != workspace and workspace not in resolved.parents:
         raise _usage(
-            "relative --output paths must stay inside the current working "
-            "directory; pass an absolute path to export elsewhere"
+            "relative --output paths must stay inside the active workspace; pass "
+            "an absolute path to export elsewhere"
         )
     return resolved
 

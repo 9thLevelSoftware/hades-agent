@@ -150,10 +150,13 @@ const renderTransactionResult = (action: string, r: TransactionExecResponse, ctx
 
   const statuses = [r.status ?? '', r.transaction?.status ?? '']
 
-  if (statuses.includes('unknown_effect') || (r.counts?.['unknown'] ?? 0) > 0) {
+  const uncertain = new Set(['unknown_effect', 'blocked', 'partially_compensated', 'failed'])
+  if (statuses.some(status => uncertain.has(status)) || (r.counts?.['unknown'] ?? 0) > 0) {
+    const status = statuses.find(item => uncertain.has(item)) ?? 'unknown_effect'
+    const transactionId = r.transaction?.transaction_id ?? r.transaction_id ?? '<tx>'
     sys(
-      'warning: unknown_effect — do not retry; run ' +
-        `/transaction reconcile ${r.transaction?.transaction_id ?? '<tx>'} first.`
+      `warning: ${status} — do not retry; run ` +
+        `/transaction reconcile ${transactionId} first.`
     )
   }
 
@@ -226,9 +229,9 @@ const renderReceiptResult = (action: string, r: ReceiptExecResponse, ctx: SlashR
           `${edge.claim_id} [${edge.verdict}]`,
           [
             edge.statement,
-            `  evidence: ${edge.evidence_ids.join(', ') || '(none)'}`,
-            `  artifacts: ${edge.artifact_ids.join(', ') || '(none)'}`,
-            ...edge.uncertainty.map(note => `  uncertainty: ${note}`)
+            `  evidence: ${(edge.evidence_ids ?? []).join(', ') || '(none)'}`,
+            `  artifacts: ${(edge.artifact_ids ?? []).join(', ') || '(none)'}`,
+            ...(edge.uncertainty ?? []).map(note => `  uncertainty: ${note}`)
           ].join('\n')
         ])
       }
@@ -246,7 +249,7 @@ const renderReceiptResult = (action: string, r: ReceiptExecResponse, ctx: SlashR
   }
 
   if (r.action === 'export') {
-    return sys(`exported receipt to ${r.export_path ?? '(unknown path)'}`)
+    return sys(r.exported ? 'exported receipt (path withheld)' : 'receipt export completed (path withheld)')
   }
 
   if (r.action === 'prune') {
