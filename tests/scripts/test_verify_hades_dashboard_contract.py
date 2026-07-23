@@ -1024,3 +1024,232 @@ def test_cli_passes_for_valid_fixture(tmp_path: Path) -> None:
     assert completed.returncode == 0
     assert "PASS" in completed.stdout
     assert completed.stderr == ""
+
+
+def test_nested_same_indent_required_property_does_not_count_as_outer_method(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    nested_only = VALID_API.replace(
+        '  getAutonomyStatus: () => apiGet("/api/autonomy/status"),\n',
+        '  nested: {\n'
+        '  getAutonomyStatus: () => apiGet("/api/autonomy/status"),\n'
+        '  },\n',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(nested_only, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getAutonomyStatus" in failures
+    assert "missing method" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "qualified_call",
+    (
+        'transport.apiGet("/api/autonomy/status")',
+        'this.fetchJSON("/api/autonomy/status")',
+    ),
+)
+def test_qualified_transport_alias_does_not_count_as_direct_transport(
+    tmp_path: Path, qualified_call: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        f'getAutonomyStatus: () => {qualified_call},',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getAutonomyStatus" in failures
+    assert "direct" in failures.lower() or "route" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "nested_source",
+    (
+        'getAutonomyStatus: () => { const load = () => apiGet("/api/autonomy/status"); return load(); },',
+        'getAutonomyStatus: () => { function load() { return apiGet("/api/autonomy/status"); } return load(); },',
+    ),
+)
+def test_transport_call_only_inside_local_function_is_not_direct(
+    tmp_path: Path, nested_source: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        nested_source,
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getAutonomyStatus" in failures
+    assert "direct" in failures.lower()
+
+
+def test_balanced_nested_transport_calls_are_parsed_once_per_outer_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    nesting = 3000
+    nested_call = "fetchJSON(" * nesting + '"/api/autonomy/status"' + ")" * nesting
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        f'getAutonomyStatus: () => {nested_call},',
+        1,
+    )
+    assert len(source.encode("utf-8")) < 100 * 1024
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    original = verifier._extract_call_arguments
+    parse_calls = 0
+
+    def counted_extract(text: str, opening: int):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original(text, opening)
+
+    monkeypatch.setattr(verifier, "_extract_call_arguments", counted_extract)
+    failures = _messages(root, cron_jobs)
+
+    assert parse_calls <= len(verifier._API_CONTRACTS) + 1
+    assert "getAutonomyStatus" in failures
+    assert "exactly one direct" in failures.lower() or "nested" in failures.lower()
+
+
+def test_intermediate_repo_symlink_swap_is_rejected_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    outside_web = tmp_path.parent / f"{tmp_path.name}-outside-web"
+    outside_web.mkdir()
+    (outside_web / "src/lib").mkdir(parents=True)
+    (outside_web / "src/lib/api.ts").write_text(VALID_API, encoding="utf-8")
+    web_dir = root / "web"
+    moved_web = tmp_path / "web-original"
+    web_dir.rename(moved_web)
+
+    original_open = verifier.os.open
+    swapped = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and kwargs.get("dir_fd") is not None and path == "web":
+            swapped = True
+            web_dir.symlink_to(outside_web, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(verifier.os, "open", racing_open)
+    failures = _messages(root, cron_jobs)
+
+    assert swapped
+    assert "api" in failures.lower()
+    assert "symlink" in failures.lower() or "nofollow" in failures.lower() or "safety" in failures.lower()
+
+
+def test_missing_dirfd_safety_primitives_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    monkeypatch.setattr(verifier, "_dirfd_safety_available", lambda: False)
+
+    failures = _messages(root, cron_jobs)
+
+    assert failures
+    assert "safety" in failures.lower()
+    assert "refus" in failures.lower() or "dir_fd" in failures
+
+
+def test_heredoc_data_is_not_treated_as_shell_commands(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = (
+        "## Integration Manifest + Handler Verification\n"
+        "```bash\n"
+        "cat <<'EOF'\n"
+        "cd ~/.hermes/hermes-agent\n"
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+        "./venv/bin/python3 scripts/post-sync-verify.py\n"
+        "EOF\n"
+        "```\n"
+    )
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert "shell" in failures.lower() or "command" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "post_sync_line",
+    (
+        "echo scripts/post-sync-verify.py",
+        "# scripts/post-sync-verify.py",
+    ),
+)
+def test_post_sync_echo_or_comment_does_not_satisfy_executable_anchor(
+    tmp_path: Path, post_sync_line: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = VALID_PROMPT.replace(
+        "./venv/bin/python3 scripts/post-sync-verify.py --fix", post_sync_line, 1
+    ).replace("./venv/bin/python3 scripts/post-sync-verify.py\n", post_sync_line)
+
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "post-sync" in failures.lower()
+    assert "anchor" in failures.lower() or "missing" in failures.lower()
+
+
+def test_unconditional_exit_between_cd_and_verifier_is_rejected(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = (
+        "## Integration Manifest + Handler Verification\n"
+        "```bash\n"
+        "cd ~/.hermes/hermes-agent\n"
+        "exit 0\n"
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+        "./venv/bin/python3 scripts/post-sync-verify.py\n"
+        "```\n"
+    )
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert "terminat" in failures.lower() or "exit" in failures.lower()
+
+
+def test_conditional_rollout_block_has_nonadjacent_verifier_and_later_post_sync(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = (
+        "## Integration Manifest + Handler Verification\n"
+        "```bash\n"
+        "cd ~/.hermes/hermes-agent\n"
+        "if [ -f scripts/verify_hades_dashboard_contract.py ]; then\n"
+        "  ./venv/bin/python3 scripts/verify_hades_dashboard_contract.py --cron-jobs ~/.hermes/cron/jobs.json\n"
+        "else\n"
+        "  echo rollout\n"
+        "fi\n"
+        "```\n"
+        "```bash\n"
+        "./venv/bin/python3 scripts/post-sync-verify.py --fix\n"
+        "```\n"
+    )
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert verify(root, cron_jobs) == []
