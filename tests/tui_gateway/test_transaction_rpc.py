@@ -130,6 +130,55 @@ def test_transaction_rpc_maps_validation_and_failure_codes(rpc):
     assert "Traceback" not in str(error.get("message", ""))
 
 
+def test_transaction_rpc_redacts_validation_error_details(rpc, tmp_path):
+    secret = "transaction-secret-plan-token"
+    missing_plan = tmp_path / f"missing-{secret}.yaml"
+    missing_authority = tmp_path / f"authority-{secret}.yaml"
+
+    resp = rpc("transaction.exec", {
+        "argv": [
+            "create", "--plan", str(missing_plan),
+            "--authority", str(missing_authority),
+        ],
+        "session_id": "sid",
+    })
+    error = resp.get("error") or {}
+    message = str(error.get("message", ""))
+
+    assert error.get("code") == 4007, resp
+    assert secret not in message
+    assert str(missing_plan) not in message
+    assert str(missing_authority) not in message
+    assert "file not found" not in message
+    assert "Traceback" not in message
+    assert len(message) <= 256
+
+
+def test_transaction_rpc_redacts_nonvalidation_command_failure(rpc, monkeypatch):
+    import hades_cli.transactions as transactions_mod
+
+    secret = "transaction-secret-command-output"
+    details = f"{secret} /private/authority.yaml\nTraceback (most recent call last)"
+    failed = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_ERROR,
+        f"error: {details}",
+        {"ok": False, "error": details, "code": "RuntimeError"},
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: failed)
+
+    resp = rpc("transaction.exec", {
+        "argv": ["show", "tx-failed"], "session_id": "sid",
+    })
+    error = resp.get("error") or {}
+    message = str(error.get("message", ""))
+
+    assert error.get("code") == 5044, resp
+    assert secret not in message
+    assert "/private/authority.yaml" not in message
+    assert "Traceback" not in message
+    assert len(message) <= 256
+
+
 def test_transaction_rpc_runs_mutations_in_live_process(
     rpc, tmp_path, monkeypatch
 ):

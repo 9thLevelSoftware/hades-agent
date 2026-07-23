@@ -2009,10 +2009,28 @@ def test_dispatch_offloads_long_handlers_and_emits_via_stdout(capture):
 @pytest.mark.parametrize("method", ["receipt.exec", "transaction.exec"])
 def test_dispatch_routes_native_exec_handlers_to_pool(server, method):
     """Native profile-I/O RPCs must not run on the JSON-RPC reader thread."""
-    with patch.object(server._pool, "submit") as submit:
-        assert server.dispatch({"id": "native", "method": method, "params": {}}) is None
+    assert method in server._methods
+    assert method in server._LONG_HANDLERS
 
-    assert submit.call_count == 1
+    transport = MagicMock()
+    handler = lambda rid, _params: server._ok(rid, {"method": method})
+    with (
+        patch.dict(server._methods, {method: handler}),
+        patch.object(server._pool, "submit") as submit,
+    ):
+        assert server.dispatch(
+            {"id": "native", "method": method, "params": {}}, transport,
+        ) is None
+        submit.assert_called_once()
+        submitted = submit.call_args.args[0]
+        submitted()
+
+    transport.write.assert_called_once()
+    assert transport.write.call_args.args[0] == {
+        "jsonrpc": "2.0",
+        "id": "native",
+        "result": {"method": method},
+    }
 
 
 def test_dispatch_long_handler_does_not_block_fast_handler(server):
