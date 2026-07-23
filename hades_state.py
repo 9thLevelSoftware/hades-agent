@@ -258,7 +258,12 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hades_home() / "state.db"
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
+
+# FTS storage layout is versioned independently from the main schema. Existing
+# databases may advance to schema v23 while retaining their working inline FTS
+# layout until the user explicitly runs ``optimize_fts_storage()``.
+FTS_STORAGE_VERSION = 1
 
 
 class OutboxMigrationError(sqlite3.IntegrityError):
@@ -778,14 +783,38 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
     try:
         conn = sqlite3.connect(str(db_path), isolation_level=None)
         try:
+            base_rebuilt = False
+            conn.execute("BEGIN IMMEDIATE")
             for table_name in ("messages_fts", "messages_fts_trigram"):
                 try:
                     conn.execute(
                         f"INSERT INTO {table_name}({table_name}) VALUES('rebuild')"
                     )
+                    if table_name == "messages_fts":
+                        base_rebuilt = True
                 except sqlite3.OperationalError:
                     # Table absent (FTS disabled / trigram off) — skip it.
                     continue
+            if base_rebuilt:
+                # A full external-content rebuild satisfies any deferred
+                # range. Clear its markers atomically with the repaired index
+                # so a resumed optimizer cannot insert duplicate documents.
+                try:
+                    conn.execute(
+                        "DELETE FROM state_meta WHERE key IN "
+                        "('fts_rebuild_high_water', "
+                        "'fts_rebuild_progress')"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "no such table: state_meta" not in str(exc).lower():
+                        raise
+            conn.commit()
+        except BaseException:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            raise
         finally:
             conn.close()
         if _db_opens_cleanly(db_path) is None:
@@ -1577,7 +1606,125 @@ RECEIPT_SCHEMA_STATEMENTS: tuple = (
     END""",
 )
 
+# While a deferred v23 rebuild is pending, state_meta stores:
+#   H = fts_rebuild_high_water (last message id at demotion)
+#   P = fts_rebuild_progress   (last backfilled id)
+# Rows are indexed iff id <= P or id > H. Every trigger uses that same
+# predicate: issuing an external-content delete for an unindexed row corrupts
+# FTS5, while skipping an indexed row leaves a stale entry. With no markers,
+# COALESCE makes the predicate true for every ordinary AUTOINCREMENT id.
 FTS_SQL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content,
+    tool_name,
+    tool_calls,
+    content='messages',
+    content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages
+WHEN (new.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                         WHERE key = 'fts_rebuild_high_water'), -1)
+   OR new.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                          WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts(rowid, content, tool_name, tool_calls)
+    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages
+WHEN (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                         WHERE key = 'fts_rebuild_high_water'), -1)
+   OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                          WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls)
+    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages
+WHEN (old.content IS NOT new.content
+    OR old.tool_name IS NOT new.tool_name
+    OR old.tool_calls IS NOT new.tool_calls)
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls)
+    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
+    INSERT INTO messages_fts(rowid, content, tool_name, tool_calls)
+    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
+END;
+"""
+
+# The external-content trigram index reads through a view that excludes tool
+# rows. Tool payloads remain fully stored and searchable in the base index,
+# while CJK tool-role searches deliberately use the existing LIKE fallback.
+FTS_TRIGRAM_SQL = """
+CREATE VIEW IF NOT EXISTS messages_fts_trigram_src AS
+    SELECT id, role, content, tool_name, tool_calls
+    FROM messages
+    WHERE role <> 'tool';
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
+    content,
+    tool_name,
+    tool_calls,
+    content='messages_fts_trigram_src',
+    content_rowid='id',
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON messages
+WHEN new.role <> 'tool'
+   AND (new.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR new.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(rowid, content, tool_name, tool_calls)
+    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_delete AFTER DELETE ON messages
+WHEN old.role <> 'tool'
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(
+        messages_fts_trigram, rowid, content, tool_name, tool_calls
+    )
+    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update AFTER UPDATE ON messages
+WHEN (old.content IS NOT new.content
+    OR old.tool_name IS NOT new.tool_name
+    OR old.tool_calls IS NOT new.tool_calls
+    OR old.role IS NOT new.role)
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(
+        messages_fts_trigram, rowid, content, tool_name, tool_calls
+    )
+    SELECT 'delete', old.id, old.content, old.tool_name, old.tool_calls
+    WHERE old.role <> 'tool';
+    INSERT INTO messages_fts_trigram(rowid, content, tool_name, tool_calls)
+    SELECT new.id, new.content, new.tool_name, new.tool_calls
+    WHERE new.role <> 'tool';
+END;
+"""
+
+# Exact v11-v22 inline layout. These definitions are used only to keep a
+# legacy database's existing FTS tables and repair missing triggers until the
+# explicit storage optimizer migrates it.
+LEGACY_FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content
 );
@@ -1602,11 +1749,7 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
 END;
 """
 
-# Trigram FTS5 table for CJK substring search.  The default unicode61
-# tokenizer splits CJK characters into individual tokens, breaking phrase
-# matching.  The trigram tokenizer creates overlapping 3-byte sequences so
-# substring queries work natively for any script (CJK, Thai, etc.).
-FTS_TRIGRAM_SQL = """
+LEGACY_FTS_TRIGRAM_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
     content,
     tokenize='trigram'
@@ -1815,6 +1958,23 @@ class SessionDB:
         """True when only the trigram tokenizer is missing (FTS5 itself works)."""
         return "no such tokenizer: trigram" in str(exc).lower()
 
+    @staticmethod
+    def _db_has_legacy_inline_fts(cursor: sqlite3.Cursor) -> bool:
+        """Return whether ``messages_fts`` has a pre-v23 storage shape.
+
+        The v23 table is external-content and declares three indexed columns.
+        Every earlier layout lacks ``tool_name`` in its CREATE statement,
+        including the v10-era single-column external-content form.
+        """
+        row = cursor.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'messages_fts'"
+        ).fetchone()
+        if row is None:
+            return False
+        sql = (row[0] if not isinstance(row, sqlite3.Row) else row["sql"]) or ""
+        return "tool_name" not in sql
+
     def _warn_trigram_unavailable(self, exc: sqlite3.OperationalError) -> None:
         """Log once that the trigram tokenizer is missing; base FTS5 stays enabled."""
         if getattr(self, "_trigram_unavailable_warned", False):
@@ -1878,6 +2038,28 @@ class SessionDB:
         *,
         include_trigram: bool = True,
     ) -> None:
+        """Rebuild external-content FTS indexes from their content sources."""
+        cursor.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+        if include_trigram:
+            cursor.execute(
+                "INSERT INTO messages_fts_trigram(messages_fts_trigram) "
+                "VALUES('rebuild')"
+            )
+        # The special rebuild indexes every source row, satisfying any
+        # deferred range in full. Leaving the markers would cause duplicate
+        # backfill inserts on a later optimize resume.
+        cursor.execute(
+            "DELETE FROM state_meta WHERE key IN "
+            "('fts_rebuild_high_water', 'fts_rebuild_progress')"
+        )
+
+    @staticmethod
+    def _rebuild_legacy_fts_indexes(
+        cursor: sqlite3.Cursor,
+        *,
+        include_trigram: bool = True,
+    ) -> None:
+        """Rebuild pre-v23 inline indexes after trigger-only degradation."""
         cursor.execute("DELETE FROM messages_fts")
         cursor.execute(
             "INSERT INTO messages_fts(rowid, content) "
@@ -1916,6 +2098,25 @@ class SessionDB:
                 return False
             raise
 
+    @staticmethod
+    def _execute_ddl_script(cursor: sqlite3.Cursor, ddl: str) -> None:
+        """Execute a DDL script without ``executescript``'s implicit COMMIT.
+
+        This matters during the v23 demotion transaction: the old vtables,
+        new marker-gated triggers, and rebuild markers must become visible as
+        one atomic schema change. ``sqlite3.complete_statement`` correctly
+        keeps each multi-statement trigger body together.
+        """
+        pending: list[str] = []
+        for line in ddl.splitlines():
+            pending.append(line)
+            statement = "\n".join(pending).strip()
+            if statement and sqlite3.complete_statement(statement):
+                cursor.execute(statement)
+                pending.clear()
+        if any(line.strip() for line in pending):
+            raise sqlite3.OperationalError("incomplete FTS DDL statement")
+
     def _ensure_fts_schema(
         self,
         cursor: sqlite3.Cursor,
@@ -1929,7 +2130,7 @@ class SessionDB:
             # Run even when the virtual table exists so any dropped or missing
             # triggers are recreated after a previous no-FTS5 runtime disabled
             # them to keep message writes working.
-            cursor.executescript(ddl)
+            self._execute_ddl_script(cursor, ddl)
             return True
         except sqlite3.OperationalError as exc:
             if not self._is_fts5_unavailable_error(exc):
@@ -2163,6 +2364,416 @@ class SessionDB:
                     logger.debug("WAL checkpoint (TRUNCATE) at close failed: %s", exc)
                 self._conn.close()
                 self._conn = None
+
+    # ── Chunked v23 FTS storage migration ─────────────────────────────
+    #
+    # The explicit optimizer demotes the old inline vtables in O(1), creates
+    # empty external-content indexes, and backfills them in short,
+    # crash-atomic chunks. A bounded duty cycle leaves write windows for
+    # another gateway/CLI process sharing the same WAL database.
+    _FTS_REBUILD_CHUNK_ROWS = 500
+    _FTS_REBUILD_DUTY_FACTOR = 4.0
+    _FTS_REBUILD_MIN_PAUSE = 0.2
+    _FTS_TRASH_PREFIX = "fts_v22_trash_"
+
+    def fts_rebuild_status(self) -> Optional[Dict[str, Any]]:
+        """Return deferred v23 backfill progress, or ``None`` when idle."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value FROM state_meta "
+                "WHERE key IN "
+                "('fts_rebuild_high_water', 'fts_rebuild_progress')"
+            ).fetchall()
+        markers = {row[0]: row[1] for row in rows}
+        high_water = markers.get("fts_rebuild_high_water")
+        if high_water is None:
+            return None
+        progress = int(markers.get("fts_rebuild_progress") or 0)
+        total = int(high_water)
+        percent = 100 if total <= 0 else min(100, int(100 * progress / total))
+        return {
+            "pending": True,
+            "total": total,
+            "indexed": progress,
+            "percent": percent,
+        }
+
+    def _fts_rebuild_finish(self) -> None:
+        """Boundary-sweep the rebuilt indexes, then atomically clear markers."""
+        include_trigram = self._trigram_available
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'fts_rebuild_high_water'"
+            ).fetchone()
+            if row is None:
+                return
+            high_water = int(row[0])
+            lower, upper = high_water - 1000, high_water + 1000
+            conn.execute(
+                "INSERT INTO messages_fts(rowid, content, tool_name, tool_calls) "
+                "SELECT m.id, m.content, m.tool_name, m.tool_calls "
+                "FROM messages m "
+                "WHERE m.id > ? AND m.id <= ? "
+                "AND NOT EXISTS ("
+                "    SELECT 1 FROM messages_fts_docsize d WHERE d.id = m.id"
+                ")",
+                (lower, upper),
+            )
+            if include_trigram:
+                conn.execute(
+                    "INSERT INTO messages_fts_trigram"
+                    "(rowid, content, tool_name, tool_calls) "
+                    "SELECT m.id, m.content, m.tool_name, m.tool_calls "
+                    "FROM messages m "
+                    "WHERE m.id > ? AND m.id <= ? AND m.role <> 'tool' "
+                    "AND NOT EXISTS ("
+                    "    SELECT 1 FROM messages_fts_trigram_docsize d "
+                    "    WHERE d.id = m.id"
+                    ")",
+                    (lower, upper),
+                )
+            conn.execute(
+                "DELETE FROM state_meta WHERE key IN "
+                "('fts_rebuild_high_water', 'fts_rebuild_progress')"
+            )
+
+        self._execute_write(_do)
+        logger.info("Deferred FTS rebuild complete — all messages indexed.")
+
+    def _fts_teardown_trash_step(self) -> bool:
+        """Delete one bounded chunk from a demoted v22 shadow table."""
+        with self._lock:
+            trash = [
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name LIKE ? ESCAPE '\\' ORDER BY name",
+                    (self._FTS_TRASH_PREFIX.replace("_", "\\_") + "%",),
+                ).fetchall()
+            ]
+        if not trash:
+            return False
+
+        table_name = trash[0]
+        quoted_table = '"' + table_name.replace('"', '""') + '"'
+
+        def _do(conn):
+            pk_columns = [
+                row[1]
+                for row in conn.execute(f"PRAGMA table_info({quoted_table})")
+                if row[5] > 0
+            ]
+            key = ", ".join(
+                '"' + column.replace('"', '""') + '"' for column in pk_columns
+            )
+            if not key:
+                key = "rowid"
+            result = conn.execute(
+                f"DELETE FROM {quoted_table} WHERE ({key}) IN "
+                f"(SELECT {key} FROM {quoted_table} "
+                f"LIMIT {self._FTS_REBUILD_CHUNK_ROWS})"
+            )
+            if result.rowcount == 0:
+                conn.execute(f"DROP TABLE IF EXISTS {quoted_table}")
+                logger.info("Old FTS shadow table %s torn down.", table_name)
+            return True
+
+        try:
+            return bool(self._execute_write(_do))
+        except sqlite3.OperationalError as exc:
+            # Another optimizer may have just emptied/dropped this same table,
+            # or a writer may have won the lock. Re-probe on the next step.
+            message = str(exc).lower()
+            if (
+                "no such table" not in message
+                and "locked" not in message
+                and "busy" not in message
+            ):
+                raise
+            logger.debug("FTS trash teardown chunk deferred: %s", exc)
+            return True
+
+    def fts_rebuild_step(self) -> bool:
+        """Backfill one marker-claimed chunk of the external-content indexes.
+
+        Returns ``True`` while more rows remain. Progress and index rows commit
+        in the same ``BEGIN IMMEDIATE`` transaction, so crashes resume cleanly
+        and concurrent optimizers cannot claim the same range.
+        """
+        if not self._fts_enabled or self.read_only:
+            return False
+        high_water_raw = self.get_meta("fts_rebuild_high_water")
+        if high_water_raw is None:
+            return False
+        high_water = int(high_water_raw)
+        include_trigram = self._trigram_available
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'fts_rebuild_progress'"
+            ).fetchone()
+            if row is None:
+                return False
+            progress = int(row[0])
+            if progress >= high_water:
+                return False
+
+            upper = min(progress + self._FTS_REBUILD_CHUNK_ROWS, high_water)
+            conn.execute(
+                "INSERT INTO messages_fts(rowid, content, tool_name, tool_calls) "
+                "SELECT id, content, tool_name, tool_calls FROM messages "
+                "WHERE id > ? AND id <= ?",
+                (progress, upper),
+            )
+            if include_trigram:
+                conn.execute(
+                    "INSERT INTO messages_fts_trigram"
+                    "(rowid, content, tool_name, tool_calls) "
+                    "SELECT id, content, tool_name, tool_calls FROM messages "
+                    "WHERE id > ? AND id <= ? AND role <> 'tool'",
+                    (progress, upper),
+                )
+            conn.execute(
+                "UPDATE state_meta SET value = ? "
+                "WHERE key = 'fts_rebuild_progress'",
+                (str(upper),),
+            )
+            return upper < high_water
+
+        try:
+            more = self._execute_write(_do)
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "locked" not in message and "busy" not in message:
+                raise
+            logger.debug("FTS rebuild chunk deferred: %s", exc)
+            return True
+        if more is False:
+            status = self.fts_rebuild_status()
+            if (
+                status is not None
+                and status["indexed"] >= status["total"]
+            ):
+                self._fts_rebuild_finish()
+            return False
+        return bool(more)
+
+    def _has_fts_trash(self, conn) -> bool:
+        """Return whether demoted v22 shadow tables still need teardown."""
+        return bool(
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                "AND name LIKE ? ESCAPE '\\' LIMIT 1",
+                (self._FTS_TRASH_PREFIX.replace("_", "\\_") + "%",),
+            ).fetchone()
+        )
+
+    def fts_optimize_available(self) -> bool:
+        """Return whether a legacy or interrupted v23 optimization can run."""
+        if not self._fts_enabled or self.read_only:
+            return False
+        with self._lock:
+            if self._db_has_legacy_inline_fts(self._conn):
+                return True
+            if self._conn.execute(
+                "SELECT 1 FROM state_meta "
+                "WHERE key = 'fts_rebuild_high_water' LIMIT 1"
+            ).fetchone():
+                return True
+            return self._has_fts_trash(self._conn)
+
+    def _demote_legacy_fts_to_trash(self) -> int:
+        """Atomically replace legacy vtables and stage shadows for teardown."""
+        def _do(conn):
+            # The public caller's optimistic check is only a fast path. Two
+            # processes may both observe legacy before either gets the write
+            # lock, so the authoritative layout/marker check belongs here,
+            # after BEGIN IMMEDIATE. A loser resumes the winner's transition
+            # and must never demote the newly-created v23 tables.
+            marker = conn.execute(
+                "SELECT value FROM state_meta "
+                "WHERE key = 'fts_rebuild_high_water'"
+            ).fetchone()
+            if marker is not None or not self._db_has_legacy_inline_fts(conn):
+                return int(marker[0]) if marker is not None else 0
+
+            self._drop_fts_triggers(conn)
+            conn.execute("DROP VIEW IF EXISTS messages_fts_trigram_src")
+
+            virtual_tables = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('messages_fts', 'messages_fts_trigram') "
+                "AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+            ).fetchall()
+            if virtual_tables:
+                shadows = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' "
+                        "AND (name LIKE 'messages_fts_%' ESCAPE '\\' "
+                        "OR name LIKE 'messages_fts_trigram_%' ESCAPE '\\') "
+                        "AND name NOT IN "
+                        "('messages_fts', 'messages_fts_trigram')"
+                    ).fetchall()
+                ]
+                conn.execute("PRAGMA writable_schema=ON")
+                try:
+                    conn.execute(
+                        "DELETE FROM sqlite_master WHERE type = 'table' "
+                        "AND name IN ('messages_fts', 'messages_fts_trigram') "
+                        "AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+                    )
+                finally:
+                    conn.execute("PRAGMA writable_schema=RESET")
+
+                for shadow in shadows:
+                    source = '"' + shadow.replace('"', '""') + '"'
+                    trash = self._FTS_TRASH_PREFIX + shadow
+                    target = '"' + trash.replace('"', '""') + '"'
+                    conn.execute(f"ALTER TABLE {source} RENAME TO {target}")
+
+            high_water = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM messages"
+                ).fetchone()[0]
+            )
+            for key, value in (
+                ("fts_rebuild_high_water", str(high_water)),
+                ("fts_rebuild_progress", "0"),
+            ):
+                conn.execute(
+                    "INSERT INTO state_meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
+
+            base_enabled = self._ensure_fts_schema(
+                conn, "messages_fts", FTS_SQL
+            )
+            if not base_enabled:
+                raise sqlite3.OperationalError(
+                    "FTS5 became unavailable during storage migration"
+                )
+            trigram_enabled = self._ensure_fts_schema(
+                conn, "messages_fts_trigram", FTS_TRIGRAM_SQL
+            )
+            self._fts_enabled = True
+            self._trigram_available = trigram_enabled
+            conn.execute(
+                "DELETE FROM state_meta "
+                "WHERE key IN ('fts_optimize_available', 'fts_storage_version')"
+            )
+            return high_water
+
+        return int(self._execute_write(_do))
+
+    def optimize_fts_storage(
+        self,
+        *,
+        progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+        vacuum: bool = True,
+    ) -> Dict[str, Any]:
+        """Foreground-migrate legacy inline FTS storage to the v23 layout."""
+        if not self._fts_enabled:
+            return {"ok": False, "reason": "fts5_unavailable"}
+        if self.read_only:
+            return {"ok": False, "reason": "read_only"}
+
+        with self._lock:
+            legacy = self._db_has_legacy_inline_fts(self._conn)
+            pending = self._conn.execute(
+                "SELECT 1 FROM state_meta "
+                "WHERE key = 'fts_rebuild_high_water' LIMIT 1"
+            ).fetchone() is not None
+        if legacy and not pending:
+            self._demote_legacy_fts_to_trash()
+
+        def _emit(phase: str) -> None:
+            if progress_cb is None:
+                return
+            status = self.fts_rebuild_status()
+            progress_cb(
+                {
+                    "phase": phase,
+                    "percent": status["percent"] if status else 100,
+                    "indexed": status["indexed"] if status else 0,
+                    "total": status["total"] if status else 0,
+                }
+            )
+
+        def _pause(chunk_seconds: float) -> None:
+            time.sleep(
+                max(
+                    self._FTS_REBUILD_MIN_PAUSE,
+                    chunk_seconds * self._FTS_REBUILD_DUTY_FACTOR,
+                )
+            )
+
+        _emit("backfill")
+        while True:
+            started = time.monotonic()
+            if not self.fts_rebuild_step():
+                break
+            _emit("backfill")
+            _pause(time.monotonic() - started)
+        _emit("backfill")
+
+        _emit("teardown")
+        while True:
+            started = time.monotonic()
+            if not self._fts_teardown_trash_step():
+                break
+            _emit("teardown")
+            _pause(time.monotonic() - started)
+
+        vacuum_ok = None
+        if vacuum:
+            _emit("vacuum")
+            try:
+                self.vacuum()
+                vacuum_ok = True
+            except sqlite3.OperationalError as exc:
+                logger.warning("VACUUM after FTS optimize failed: %s", exc)
+                vacuum_ok = False
+
+        def _settle(conn):
+            # Never advertise completion until every resumable transition
+            # artifact is gone and the external-content table is live.
+            if self._db_has_legacy_inline_fts(conn):
+                raise sqlite3.OperationalError(
+                    "legacy FTS layout remains after optimization"
+                )
+            if conn.execute(
+                "SELECT 1 FROM state_meta "
+                "WHERE key = 'fts_rebuild_high_water' LIMIT 1"
+            ).fetchone() or self._has_fts_trash(conn):
+                raise sqlite3.OperationalError(
+                    "FTS storage optimization is still incomplete"
+                )
+            conn.execute(
+                "INSERT INTO state_meta (key, value) "
+                "VALUES ('fts_storage_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(FTS_STORAGE_VERSION),),
+            )
+            conn.execute(
+                "DELETE FROM state_meta WHERE key = 'fts_optimize_available'"
+            )
+            conn.execute(
+                "UPDATE schema_version SET version = ? WHERE version < ?",
+                (SCHEMA_VERSION, SCHEMA_VERSION),
+            )
+
+        self._execute_write(_settle)
+        _emit("done")
+        logger.info(
+            "FTS storage optimization complete (layout v%d).",
+            FTS_STORAGE_VERSION,
+        )
+        return {"ok": True, "vacuumed": vacuum_ok}
 
     @property
     def is_open(self) -> bool:
@@ -2868,13 +3479,10 @@ class SessionDB:
                         fts_migrations_complete = False
                 else:
                     fts_migrations_complete = False
-            if current_version < 11:
-                # v11: re-index FTS5 tables to cover tool_name + tool_calls and
-                # switch from external-content to inline mode. Existing DBs have
-                # old-schema FTS tables and triggers that IF NOT EXISTS won't
-                # overwrite, so we drop them explicitly and let the post-migration
-                # existence checks (below) recreate them from FTS_SQL /
-                # FTS_TRIGRAM_SQL, then backfill every message row. Fixes #16751.
+            if current_version < 11 and SCHEMA_VERSION < 23:
+                # v11 is superseded by the v23 external-content layout. Keep
+                # this historical path gated so an old database is not first
+                # rebuilt inline only to be offered the v23 optimizer.
                 if fts5_available:
                     self._drop_fts_triggers(cursor)
                     for _tbl in ("messages_fts", "messages_fts_trigram"):
@@ -3077,6 +3685,17 @@ class SessionDB:
                         )
                 except sqlite3.OperationalError as exc:
                     logger.debug("v22 session_model_usage rebuild skipped: %s", exc)
+            if current_version < 23:
+                # v23 changes only the FTS storage layout. Existing inline
+                # indexes remain live until the foreground optimizer is
+                # invoked; the independent marker is intentionally absent in
+                # that state so later schema migrations are never held back.
+                if fts5_available and self._db_has_legacy_inline_fts(cursor):
+                    self.set_meta(
+                        "fts_optimize_available",
+                        "1",
+                        cursor=cursor,
+                    )
             if current_version < SCHEMA_VERSION and fts_migrations_complete:
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",
@@ -3123,22 +3742,82 @@ class SessionDB:
             # FTS5 setup. Run the DDL even when the virtual table exists so
             # CREATE TRIGGER IF NOT EXISTS repairs trigger-only degradation from
             # an earlier no-FTS5 runtime.
-            triggers_need_repair = self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)
-            self._fts_enabled = self._ensure_fts_schema(cursor, "messages_fts", FTS_SQL)
-
-            # Trigram FTS5 for CJK/substring search. This is optional relative
-            # to the main FTS table; if it cannot be created, CJK search falls
-            # back to LIKE.
-            if self._fts_enabled:
-                trigram_enabled = self._ensure_fts_schema(
-                    cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
+            #
+            # Existing inline databases keep their exact v22 schema here.
+            # Fresh databases and completed/in-progress v23 optimizations use
+            # the external-content definitions. Mixing the two DDL families
+            # would create a source view beside an inline trigram vtable.
+            legacy_fts = self._db_has_legacy_inline_fts(cursor)
+            triggers_need_repair = (
+                self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)
+            )
+            if legacy_fts:
+                self._fts_enabled = self._ensure_fts_schema(
+                    cursor,
+                    "messages_fts",
+                    LEGACY_FTS_SQL,
                 )
-                self._trigram_available = trigram_enabled
-                if triggers_need_repair:
-                    self._rebuild_fts_indexes(
+                if self._fts_enabled:
+                    trigram_enabled = self._ensure_fts_schema(
                         cursor,
-                        include_trigram=trigram_enabled,
+                        "messages_fts_trigram",
+                        LEGACY_FTS_TRIGRAM_SQL,
                     )
+                    self._trigram_available = trigram_enabled
+                    if triggers_need_repair:
+                        self._rebuild_legacy_fts_indexes(
+                            cursor,
+                            include_trigram=trigram_enabled,
+                        )
+                    # The live layout is authoritative. Clear a stale marker
+                    # left by a downgraded/restored database rather than
+                    # falsely claiming that inline storage is optimized.
+                    cursor.execute(
+                        "DELETE FROM state_meta "
+                        "WHERE key = 'fts_storage_version'"
+                    )
+                    self.set_meta(
+                        "fts_optimize_available",
+                        "1",
+                        cursor=cursor,
+                    )
+            else:
+                self._fts_enabled = self._ensure_fts_schema(
+                    cursor,
+                    "messages_fts",
+                    FTS_SQL,
+                )
+                if self._fts_enabled:
+                    trigram_enabled = self._ensure_fts_schema(
+                        cursor,
+                        "messages_fts_trigram",
+                        FTS_TRIGRAM_SQL,
+                    )
+                    self._trigram_available = trigram_enabled
+                    if triggers_need_repair:
+                        self._rebuild_fts_indexes(
+                            cursor,
+                            include_trigram=trigram_enabled,
+                        )
+
+                    # Stamp only a settled external-content layout. An
+                    # interrupted optimizer remains independently resumable
+                    # through its markers/trash even though schema_version is
+                    # already current.
+                    rebuild_pending = cursor.execute(
+                        "SELECT 1 FROM state_meta "
+                        "WHERE key = 'fts_rebuild_high_water' LIMIT 1"
+                    ).fetchone()
+                    if rebuild_pending is None and not self._has_fts_trash(cursor):
+                        self.set_meta(
+                            "fts_storage_version",
+                            str(FTS_STORAGE_VERSION),
+                            cursor=cursor,
+                        )
+                        cursor.execute(
+                            "DELETE FROM state_meta "
+                            "WHERE key = 'fts_optimize_available'"
+                        )
 
         self._conn.commit()
 
@@ -7195,7 +7874,7 @@ class SessionDB:
                 m.id,
                 m.session_id,
                 m.role,
-                snippet(messages_fts, 0, '>>>', '<<<', '...', 40) AS snippet,
+                snippet(messages_fts, -1, '>>>', '<<<', '...', 40) AS snippet,
                 m.content,
                 m.timestamp,
                 m.tool_name,
@@ -7237,7 +7916,16 @@ class SessionDB:
             )
 
             _trigram_succeeded = False
-            if cjk_count >= 3 and not _any_short_cjk and self._trigram_available:
+            # Tool rows deliberately have no trigram entries in v23. An
+            # explicit tool-role query therefore uses the canonical-table
+            # LIKE path so existing CJK tool search remains complete.
+            _wants_tool_rows = bool(role_filter) and "tool" in role_filter
+            if (
+                cjk_count >= 3
+                and not _any_short_cjk
+                and self._trigram_available
+                and not _wants_tool_rows
+            ):
                 # Trigram FTS5 path — quote each non-operator token to handle
                 # FTS5 special chars (%, *, etc.) while preserving boolean
                 # operators (AND, OR, NOT) for multi-term queries.
@@ -7267,7 +7955,7 @@ class SessionDB:
                         m.id,
                         m.session_id,
                         m.role,
-                        snippet(messages_fts_trigram, 0, '>>>', '<<<', '...', 40) AS snippet,
+                        snippet(messages_fts_trigram, -1, '>>>', '<<<', '...', 40) AS snippet,
                         m.content,
                         m.timestamp,
                         m.tool_name,
@@ -7282,15 +7970,32 @@ class SessionDB:
                     LIMIT ? OFFSET ?
                 """
                 tri_params.extend([limit, offset])
-                with self._lock:
-                    try:
+                try:
+                    with self._lock:
                         tri_cursor = self._conn.execute(tri_sql, tri_params)
-                    except sqlite3.OperationalError:
-                        # Trigram query failed at runtime — fall through to LIKE.
-                        pass
-                    else:
                         matches = [dict(row) for row in tri_cursor.fetchall()]
                         _trigram_succeeded = True
+                except sqlite3.OperationalError:
+                    # Trigram query failed at runtime — fall through to LIKE.
+                    pass
+                except sqlite3.DatabaseError as exc:
+                    # Preserve the runtime FTS self-heal path for corrupt
+                    # trigram shadows. If repair cannot run, the canonical
+                    # LIKE fallback below still keeps CJK search available.
+                    if self._try_runtime_fts_rebuild(exc):
+                        try:
+                            with self._lock:
+                                tri_cursor = self._conn.execute(
+                                    tri_sql,
+                                    tri_params,
+                                )
+                                matches = [
+                                    dict(row)
+                                    for row in tri_cursor.fetchall()
+                                ]
+                                _trigram_succeeded = True
+                        except sqlite3.DatabaseError:
+                            pass
             if not _trigram_succeeded:
                 # Short / mixed CJK query, trigram unavailable, or trigram
                 # <3 CJK chars. Fall back to LIKE substring search.
@@ -7343,14 +8048,43 @@ class SessionDB:
                     like_cursor = self._conn.execute(like_sql, like_params)
                     matches = [dict(row) for row in like_cursor.fetchall()]
         else:
-            with self._lock:
-                try:
+            try:
+                with self._lock:
                     cursor = self._conn.execute(sql, params)
-                except sqlite3.OperationalError:
-                    # FTS5 query syntax error despite sanitization — return empty
-                    return []
-                else:
                     matches = [dict(row) for row in cursor.fetchall()]
+            except sqlite3.OperationalError:
+                # FTS5 query syntax error despite sanitization — return empty.
+                return []
+            except sqlite3.DatabaseError as exc:
+                # Keep Hades' one-shot read-side repair: canonical messages
+                # remain intact when only an FTS shadow table is corrupt.
+                if not self._try_runtime_fts_rebuild(exc):
+                    raise
+                with self._lock:
+                    cursor = self._conn.execute(sql, params)
+                    matches = [dict(row) for row in cursor.fetchall()]
+
+        # During a resumable v23 backfill, rows in (progress, high_water] are
+        # intentionally absent from FTS. Supplement a short result page with a
+        # bounded LIKE scan of only that shrinking range.
+        if self.fts_rebuild_status() is not None and len(matches) < limit:
+            try:
+                gap_matches = self._search_unindexed_gap(
+                    query,
+                    limit - len(matches),
+                    include_inactive=include_inactive,
+                    source_filter=source_filter,
+                    exclude_sources=exclude_sources,
+                    role_filter=role_filter,
+                )
+                seen_ids = {match["id"] for match in matches}
+                matches.extend(
+                    match
+                    for match in gap_matches
+                    if match["id"] not in seen_ids
+                )
+            except sqlite3.OperationalError as exc:
+                logger.debug("Unindexed-gap supplement skipped: %s", exc)
 
         # Add surrounding context (1 message before + after each match).
         # Done outside the lock so we don't hold it across N sequential queries.
@@ -7419,6 +8153,82 @@ class SessionDB:
             match.pop("content", None)
 
         return matches
+
+    def _search_unindexed_gap(
+        self,
+        fts_query: str,
+        limit: int,
+        *,
+        include_inactive: bool = False,
+        source_filter: Optional[List[str]] = None,
+        exclude_sources: Optional[List[str]] = None,
+        role_filter: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """LIKE-scan only the deferred backfill's currently unindexed range."""
+        status = self.fts_rebuild_status()
+        if status is None or limit <= 0:
+            return []
+        progress, high_water = status["indexed"], status["total"]
+
+        terms: List[str] = []
+        for raw_token in re.findall(r'"[^"]+"|\S+', fts_query):
+            token = raw_token.strip('"').strip("*").strip()
+            if (
+                not token
+                or token.upper() in {"AND", "OR", "NOT", "NEAR"}
+            ):
+                continue
+            terms.append(token)
+        if not terms:
+            return []
+
+        where = ["m.id > ? AND m.id <= ?"]
+        params: list = [progress, high_water]
+        for term in terms:
+            escaped = (
+                term.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            where.append(
+                "(m.content LIKE ? ESCAPE '\\' "
+                "OR m.tool_name LIKE ? ESCAPE '\\' "
+                "OR m.tool_calls LIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%"] * 3)
+        if not include_inactive:
+            where.append("(m.active = 1 OR m.compacted = 1)")
+        if source_filter is not None:
+            where.append(
+                f"s.source IN ({','.join('?' for _ in source_filter)})"
+            )
+            params.extend(source_filter)
+        if exclude_sources is not None:
+            where.append(
+                f"s.source NOT IN ({','.join('?' for _ in exclude_sources)})"
+            )
+            params.extend(exclude_sources)
+        if role_filter:
+            where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
+            params.extend(role_filter)
+
+        sql = f"""
+            SELECT m.id, m.session_id, m.role,
+                   substr(m.content,
+                          max(1, instr(m.content, ?) - 40),
+                          120) AS snippet,
+                   m.content, m.timestamp, m.tool_name,
+                   s.source, s.model, s.started_at AS session_started
+            FROM messages m
+            JOIN sessions s ON s.id = m.session_id
+            WHERE {' AND '.join(where)}
+            ORDER BY m.timestamp DESC
+            LIMIT ?
+        """
+        params = [terms[0]] + params + [limit]
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
 
     def search_sessions_by_id(
         self,
@@ -8654,8 +9464,22 @@ class SessionDB:
             return None
         return row["value"] if isinstance(row, sqlite3.Row) else row[0]
 
-    def set_meta(self, key: str, value: str) -> None:
-        """Write a value to the state_meta key/value store."""
+    def set_meta(
+        self,
+        key: str,
+        value: str,
+        *,
+        cursor: Optional[sqlite3.Cursor] = None,
+    ) -> None:
+        """Write a value to state_meta, optionally within an existing write."""
+        if cursor is not None:
+            cursor.execute(
+                "INSERT INTO state_meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            return
+
         def _do(conn):
             conn.execute(
                 "INSERT INTO state_meta (key, value) VALUES (?, ?) "
@@ -9195,7 +10019,7 @@ class SessionDB:
         try:
             self._conn.execute(f"SELECT 1 FROM {name} LIMIT 0")
             return True
-        except sqlite3.OperationalError:
+        except sqlite3.DatabaseError:
             return False
 
     def optimize_fts(self) -> int:
@@ -9250,23 +10074,59 @@ class SessionDB:
         Safe to call when FTS tables don't exist (skips them).
         Returns the number of FTS indexes that were rebuilt.
         """
-        rebuilt = 0
+        self._require_open()
+        conn = self._conn
+        assert conn is not None, "_require_open did not raise"
         with self._lock:
-            for tbl in self._FTS_TABLES:
-                if not self._fts_table_exists(tbl):
-                    continue
-                try:
-                    self._conn.execute(
-                        f"INSERT INTO {tbl}({tbl}) VALUES('rebuild')"
-                    )
-                    self._conn.commit()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                rebuilt = 0
+                base_rebuilt = False
+                for tbl in self._FTS_TABLES:
+                    exists = conn.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type = 'table' AND name = ?",
+                        (tbl,),
+                    ).fetchone()
+                    if exists is None:
+                        continue
+                    try:
+                        conn.execute(
+                            f"INSERT INTO {tbl}({tbl}) VALUES('rebuild')"
+                        )
+                    except sqlite3.OperationalError as exc:
+                        if (
+                            tbl == "messages_fts_trigram"
+                            and self._is_trigram_unavailable_error(exc)
+                        ):
+                            self._warn_trigram_unavailable(exc)
+                            continue
+                        raise
                     rebuilt += 1
-                except sqlite3.OperationalError as exc:
-                    self._conn.rollback()
-                    logger.warning(
-                        "FTS rebuild failed for %s: %s", tbl, exc
+                    if tbl == "messages_fts":
+                        base_rebuilt = True
+
+                if base_rebuilt:
+                    # External-content rebuild reads every canonical source
+                    # row, so any deferred (P, H] gap is now satisfied. Clear
+                    # both markers in this same transaction; otherwise a later
+                    # chunk would insert duplicate FTS documents. This is also
+                    # harmless for legacy inline tables, where no markers
+                    # normally exist.
+                    conn.execute(
+                        "DELETE FROM state_meta WHERE key IN "
+                        "('fts_rebuild_high_water', "
+                        "'fts_rebuild_progress')"
                     )
-        return rebuilt
+                conn.commit()
+                return rebuilt
+            except sqlite3.DatabaseError as exc:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                logger.warning("Atomic FTS rebuild failed: %s", exc)
+                return 0
 
     def vacuum(self) -> int:
         """Run VACUUM to reclaim disk space after large deletes.

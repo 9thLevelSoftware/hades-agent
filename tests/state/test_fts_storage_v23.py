@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import sqlite3
+import threading
 import time
 from typing import Any
 
@@ -654,3 +656,81 @@ def test_optimize_storage_resumes_after_a_public_step_and_preserves_hades_state(
         _assert_durable_state(reopened, expected=durable, ids=ids)
     finally:
         reopened.close()
+
+
+def test_two_foreground_optimizers_cannot_demote_the_v23_winner(
+    tmp_path,
+    monkeypatch,
+):
+    """Both handles may observe legacy, but only one may demote under the lock."""
+    path = tmp_path / "concurrent-legacy.db"
+    _build_v22_inline_database(path, rows=600)
+    first = SessionDB(db_path=path)
+    second = SessionDB(db_path=path)
+    barrier = threading.Barrier(2)
+    try:
+        _require_fts(first)
+        _require_fts(second)
+
+        for db in (first, second):
+            real_demote = db._demote_legacy_fts_to_trash
+
+            def synchronized_demote(real=real_demote):
+                barrier.wait(timeout=10)
+                return real()
+
+            monkeypatch.setattr(
+                db,
+                "_demote_legacy_fts_to_trash",
+                synchronized_demote,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(db.optimize_fts_storage, vacuum=False)
+                for db in (first, second)
+            ]
+            results = [future.result(timeout=30) for future in futures]
+
+        assert all(result["ok"] is True for result in results)
+        assert first.fts_rebuild_status() is None
+        assert first.get_meta("fts_storage_version") == "1"
+        assert first.fts_optimize_available() is False
+        _assert_external_content_layout(first)
+        assert len(first.search_messages("gapneedle0598")) == 1
+    finally:
+        first.close()
+        second.close()
+
+
+def test_full_fts_repair_satisfies_a_pending_chunked_backfill(tmp_path):
+    """A full runtime repair must not leave markers that reinsert documents."""
+    path = tmp_path / "pending-repair.db"
+    _build_v22_inline_database(path, rows=600)
+    db = SessionDB(db_path=path)
+    try:
+        _require_fts(db)
+        db._demote_legacy_fts_to_trash()
+        assert db.fts_rebuild_step() is True
+        status = db.fts_rebuild_status()
+        assert status is not None
+
+        gap_row = db._conn.execute(
+            "SELECT id, content FROM messages "
+            "WHERE id > ? AND id <= ? ORDER BY id LIMIT 1",
+            (status["indexed"], status["total"]),
+        ).fetchone()
+        assert gap_row is not None
+        gap_id, gap_content = gap_row
+        gap_token = gap_content.split()[-1]
+
+        assert db.rebuild_fts() == 2
+        assert db.fts_rebuild_status() is None
+        assert db.fts_rebuild_step() is False
+        assert [hit["id"] for hit in db.search_messages(gap_token)] == [gap_id]
+
+        assert db.fts_optimize_available() is True  # trash teardown remains
+        assert db.optimize_fts_storage(vacuum=False)["ok"] is True
+        assert db.get_meta("fts_storage_version") == "1"
+    finally:
+        db.close()
