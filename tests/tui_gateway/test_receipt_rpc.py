@@ -646,7 +646,7 @@ def test_valid_receipt_success_payload_forwards_only_minimal_nonlocator_fields(
 ):
     import hades_cli.receipts as receipts_mod
 
-    secret = "receipt-valid-success-api-key"
+    secret = "sk-test-ReceiptValidSuccessSecret"
     private_path = "/Users/private/receipts/result.json"
     artifact_locator = f"artifact://private/{secret}"
     receipt_id = "rct_" + "a" * 64
@@ -676,6 +676,9 @@ def test_valid_receipt_success_payload_forwards_only_minimal_nonlocator_fields(
                 "subject_kind": "turn",
                 "content_hash": "sha256:receipt",
                 "decided_at": "2026-07-10T00:00:00Z",
+                "scorer_id": "scorer",
+                "scorer_version": "1.0",
+                "session_id": "s1",
                 "requested_outcome": {
                     "description": f"outcome {secret} {private_path}",
                     "constraints": [f"constraint {secret}"],
@@ -734,14 +737,15 @@ def test_valid_receipt_success_payload_forwards_only_minimal_nonlocator_fields(
     assert set(resp["receipt"]) <= {
         "receipt_id", "status", "subject_id", "subject_kind", "content_hash",
         "decided_at", "scorer_id", "scorer_version", "session_id", "transaction_id",
-        "turn_id", "mission_id", "uncertainty", "claims", "evidence", "artifacts",
+        "turn_id", "mission_id", "uncertainty", "claim_count", "evidence_count",
+        "artifact_count", "observation_count",
     }
 
 
 def test_valid_receipt_denial_output_is_redacted(rpc, monkeypatch):
     import hades_cli.receipts as receipts_mod
 
-    secret = "receipt-valid-denial-secret"
+    secret = "sk-test-ReceiptValidDenialSecret"
     private_path = "/Users/private/receipts/denied.db"
     result = receipts_mod.ReceiptCommandResult(
         receipts_mod.EXIT_OK,
@@ -764,4 +768,4 @@ def test_valid_receipt_denial_output_is_redacted(rpc, monkeypatch):
     wire = json.dumps(resp, ensure_ascii=False)
     assert secret not in wire
     assert private_path not in wire
-    assert resp.get("ok") is False, resp
+    assert resp["error"]["code"] == 5040, resp

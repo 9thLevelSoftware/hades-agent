@@ -6,24 +6,17 @@ import type { ReceiptDetail, ReceiptExecResponse, ReceiptObservationDetail } fro
 const RECEIPT_ID = `rct_${'a'.repeat(64)}`
 
 const receiptDetail = (overrides: Partial<ReceiptDetail> = {}): ReceiptDetail => ({
-  artifacts: [],
-  claims: [],
+  artifact_count: 0,
+  claim_count: 0,
   content_hash: 'sha256:receipt-hash',
   decided_at: '2026-07-10T00:00:00Z',
-  evidence: [],
+  evidence_count: 0,
   mission_id: null,
+  observation_count: 0,
   receipt_id: RECEIPT_ID,
-  requested_outcome: {
-    constraints: ['no force push'],
-    content_hash: 'sha256:outcome-hash',
-    description: 'add marker to README',
-    outcome_kind: 'code_change',
-    producer_id: 'hades.turn-ledger'
-  },
   scorer_id: 'hades.code-turn-end-state',
   scorer_version: '1.0',
   session_id: 's1',
-  source: { source_id: 's1:t1', source_kind: 'turn' },
   status: 'verified',
   subject_id: 's1:t1',
   subject_kind: 'turn',
@@ -34,10 +27,7 @@ const receiptDetail = (overrides: Partial<ReceiptDetail> = {}): ReceiptDetail =>
 })
 
 const observationDetail = (overrides: Partial<ReceiptObservationDetail> = {}): ReceiptObservationDetail => ({
-  artifacts: [],
-  claims: [],
   content_hash: 'sha256:obs-hash',
-  evidence: [],
   observation_id: `obs_${'b'.repeat(64)}`,
   observed_at: '2026-07-11T09:00:00Z',
   previous_observation_id: null,
@@ -54,7 +44,6 @@ const receiptResponse = (overrides: Partial<ReceiptExecResponse> = {}): ReceiptE
   exit_code: 0,
   ok: true,
   output: '(no output)',
-  profile_home: '/tmp/profile',
   receipts: [],
   ...overrides
 })
@@ -149,7 +138,6 @@ describe('/receipt slash command', () => {
           scorer_id: 'hades.receipts.default',
           scorer_version: '1.0',
           session_id: 's1',
-          source: { source_id: 's1:t1', source_kind: 'turn' },
           status: 'completed_unverified',
           subject_id: 's1:t1',
           subject_kind: 'turn'
@@ -264,25 +252,26 @@ describe('/receipt slash command', () => {
     expect(text).toContain('Do not retry the effect; recheck/reconcile evidence.')
   })
 
-  it('renders export as a concise system result with the export path', async () => {
+  it('renders export as a concise system result without the export path', async () => {
     const { page, run, sys } = buildCtx({
       action: 'export',
-      export_path: '/tmp/work/receipt.json',
-      output: `Exported ${RECEIPT_ID} to /tmp/work/receipt.json (public redaction)`,
+      exported: true,
+      output: 'receipt export completed (path withheld)',
       receipts: undefined
     })
 
     await run(`export ${RECEIPT_ID} --output receipt.json`)
 
     expect(page).not.toHaveBeenCalled()
-    expect(printed(sys)).toContain('/tmp/work/receipt.json')
+    expect(printed(sys)).toContain('path withheld')
+    expect(printed(sys)).not.toContain('/tmp/work/receipt.json')
   })
 
   it('surfaces a truthfully-unsigned export warning', async () => {
     const { run, sys } = buildCtx({
       action: 'export',
-      export_path: '/tmp/work/receipt.json',
-      output: 'Exported ...',
+      exported: true,
+      output: 'receipt export completed (path withheld)',
       receipts: undefined,
       warning: 'signing provider unavailable — the export is truthfully unsigned'
     })

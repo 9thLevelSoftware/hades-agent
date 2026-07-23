@@ -14,7 +14,6 @@ const autonomyResponse = (overrides: Partial<AutonomyExecResponse> = {}): Autono
   ok: true,
   output: 'profile: default  mode: enforce',
   preview: null,
-  profile_home: '/tmp/profile',
   rules: [],
   suggestions: [],
   ...overrides

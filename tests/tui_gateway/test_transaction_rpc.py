@@ -450,7 +450,7 @@ def test_valid_transaction_success_payload_forwards_only_minimal_schemas(
 ):
     import hades_cli.transactions as transactions_mod
 
-    secret = "transaction-valid-success-secret"
+    secret = "sk-test-TransactionValidSuccessSecret"
     private_path = "/Users/private/transactions/plan.yaml"
     result = transactions_mod.TransactionCommandResult(
         transactions_mod.EXIT_OK,

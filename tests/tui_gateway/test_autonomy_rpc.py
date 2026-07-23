@@ -687,7 +687,7 @@ def test_valid_autonomy_success_payload_redacts_all_free_text_fields(
 ):
     import hades_cli.autonomy as autonomy_mod
 
-    secret = "autonomy-valid-success-api-key"
+    secret = "sk-test-AutonomyValidSuccessSecret"
     private_path = "/Users/private/autonomy/rule.yaml"
     result = autonomy_mod.CliResult(
         autonomy_mod.EXIT_OK,
@@ -748,7 +748,7 @@ def test_valid_autonomy_denial_payload_has_fixed_safe_output(
 ):
     import hades_cli.autonomy as autonomy_mod
 
-    secret = "autonomy-valid-denial-bearer-secret"
+    secret = "sk-test-AutonomyValidDenialSecret"
     private_path = "/Users/private/autonomy/deny.yaml"
     result = autonomy_mod.CliResult(
         autonomy_mod.EXIT_DENIED,

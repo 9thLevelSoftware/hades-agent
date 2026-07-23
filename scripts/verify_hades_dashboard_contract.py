@@ -305,14 +305,101 @@ def _read_text(
                     )
                 return None
         else:
-            flags = (
+            if not _dirfd_safety_available():
+                failures.append(
+                    f"{category}: refusing external read of {label}; required "
+                    "dir_fd/O_NOFOLLOW/O_DIRECTORY safety primitives are unavailable"
+                )
+                return None
+            absolute_path = Path(os.path.abspath(path))
+            anchor = absolute_path.anchor
+            if not anchor:
+                failures.append(f"{category}: refusing unsafe external path {label}")
+                return None
+            relative_parts = absolute_path.relative_to(Path(anchor)).parts
+            if not relative_parts or any(
+                component in {"", ".", ".."} for component in relative_parts
+            ):
+                failures.append(f"{category}: refusing unsafe external path {label}")
+                return None
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | os.O_NOFOLLOW
+                | os.O_DIRECTORY
+            )
+            root_flags = directory_flags
+            try:
+                filesystem_root_fd = os.open(Path(anchor), root_flags)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    failures.append(
+                        f"{category}: refusing symlink/no-follow filesystem root {label}"
+                    )
+                else:
+                    failures.append(
+                        f"{category}: cannot open filesystem root for {label}: "
+                        f"{exc.strerror or exc}"
+                    )
+                return None
+            directory_fds.append(filesystem_root_fd)
+            try:
+                root_stat = os.fstat(filesystem_root_fd)
+            except OSError as exc:
+                failures.append(
+                    f"{category}: cannot inspect filesystem root for {label}: "
+                    f"{exc.strerror or exc}"
+                )
+                return None
+            if not stat.S_ISDIR(root_stat.st_mode):
+                failures.append(
+                    f"{category}: refusing non-directory filesystem root for {label}"
+                )
+                return None
+
+            parent_fd = filesystem_root_fd
+            for component in relative_parts[:-1]:
+                try:
+                    child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    failures.append(f"{category}: missing file {label}")
+                    return None
+                except OSError as exc:
+                    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        failures.append(
+                            f"{category}: refusing non-directory or symlink/no-follow "
+                            f"path component {label}"
+                        )
+                    else:
+                        failures.append(
+                            f"{category}: cannot open path component {label}: "
+                            f"{exc.strerror or exc}"
+                        )
+                    return None
+                directory_fds.append(child_fd)
+                try:
+                    component_stat = os.fstat(child_fd)
+                except OSError as exc:
+                    failures.append(
+                        f"{category}: cannot inspect path component {label}: "
+                        f"{exc.strerror or exc}"
+                    )
+                    return None
+                if not stat.S_ISDIR(component_stat.st_mode):
+                    failures.append(
+                        f"{category}: refusing non-directory path component {label}"
+                    )
+                    return None
+                parent_fd = child_fd
+
+            final_flags = (
                 os.O_RDONLY
                 | getattr(os, "O_CLOEXEC", 0)
                 | os.O_NOFOLLOW
                 | nonblock
             )
             try:
-                fd = os.open(path, flags)
+                fd = os.open(relative_parts[-1], final_flags, dir_fd=parent_fd)
             except FileNotFoundError:
                 failures.append(f"{category}: missing file {label}")
                 return None
@@ -375,12 +462,26 @@ def _read_text(
     return text
 
 
+_API_DECLARATION_RE = re.compile(r"\bexport\s+const\s+api\b")
+
+
+def _live_api_declarations(text: str) -> list[re.Match[str]]:
+    """Return live API declarations after masking comments and string literals."""
+    live_text = _mask_ts_comments_and_strings(text)
+    return list(_API_DECLARATION_RE.finditer(live_text))
+
+
 def _api_object(text: str) -> str | None:
-    """Return the body of the exported ``api`` object."""
-    declaration = re.search(r"\bexport\s+const\s+api\s*=\s*\{", text)
-    if declaration is None:
+    """Return the body of the sole live exported ``api`` object."""
+    declarations = _live_api_declarations(text)
+    if len(declarations) != 1:
         return None
-    object_start = declaration.end() - 1
+    declaration = declarations[0]
+    live_text = declaration.string
+    assignment = re.match(r"\s*=\s*\{", live_text[declaration.end() :])
+    if assignment is None:
+        return None
+    object_start = declaration.end() + assignment.end() - 1
     object_end = _skip_ts_balanced_group(text, object_start)
     if object_end is None:
         # Preserve a bounded body for method-level diagnostics when an inner
@@ -1086,6 +1187,16 @@ def _check_api(repo_root: Path, failures: list[str], repo_fd: int) -> None:
     )
     if text is None:
         return
+    declarations = _live_api_declarations(text)
+    if not declarations:
+        failures.append("api: missing or unterminated `export const api = { ... }` object")
+        return
+    if len(declarations) != 1:
+        failures.append(
+            "api: live `export const api` declaration must appear exactly once "
+            f"(found {len(declarations)}; duplicate or ambiguous declaration)"
+        )
+        return
     body = _api_object(text)
     if body is None:
         failures.append("api: missing or unterminated `export const api = { ... }` object")
@@ -1097,7 +1208,6 @@ def _check_api(repo_root: Path, failures: list[str], repo_fd: int) -> None:
         return
     if not properties:
         failures.append("api: exported api object has no inspectable method properties")
-        return
 
     for contract in _API_CONTRACTS:
         spans = properties.get(contract.name, [])
