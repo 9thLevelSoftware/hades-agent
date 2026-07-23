@@ -53,7 +53,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
-from hermes_constants import get_hermes_home
+from hades_constants import get_hades_home
 from tools.daemon_pool import DaemonThreadPoolExecutor
 from tools.thread_context import propagate_context_to_thread
 
@@ -112,18 +112,26 @@ _STATUS_MAP = {
 }
 
 
+def _resolved_profile_home() -> Path:
+    """Return one canonical absolute identity for the active profile."""
+    return Path(get_hades_home()).expanduser().resolve()
+
+
 def _open_journal():
     if _journal_override_enabled:
         return _journal_override
-    profile = str(get_hermes_home())
+    profile_home = _resolved_profile_home()
+    profile = str(profile_home)
     with _journal_lock:
         if profile in _journal_cache:
             return _journal_cache[profile]
         try:
             from agent.operation_journal import OperationJournal
-            from hermes_state import SessionDB
+            from hades_state import SessionDB
 
-            journal = OperationJournal(SessionDB())
+            journal = OperationJournal(
+                SessionDB(db_path=profile_home / "state.db")
+            )
         except Exception as exc:
             logger.warning(
                 "Async delegation durable journal unavailable for %s: %s",
@@ -251,7 +259,7 @@ def restore_unacknowledged_delegations(queue, put_fn) -> int:
 
 
 def _db_path():
-    return get_hermes_home() / "state.db"
+    return _resolved_profile_home() / "state.db"
 
 
 def _connect() -> sqlite3.Connection:
@@ -616,9 +624,7 @@ def get_durable_delegation(delegation_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _records_path():
-    from hermes_constants import get_hermes_home
-
-    return get_hermes_home() / "delegations.json"
+    return _resolved_profile_home() / "delegations.json"
 
 
 def _pid_alive(pid: Any, process_start_time: Any = None) -> bool:
@@ -988,7 +994,7 @@ def dispatch_async_delegation(
 
     try:
         # Propagate the dispatching profile so the detached child resolves
-        # get_hermes_home() under the right profile.
+        # get_hades_home() under the right profile.
         executor.submit(propagate_context_to_thread(_worker))
     except Exception as exc:  # pragma: no cover — pool submit failure is rare
         with _records_lock:

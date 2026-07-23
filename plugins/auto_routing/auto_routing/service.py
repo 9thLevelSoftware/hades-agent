@@ -32,10 +32,10 @@ from cron.jobs import (
     parse_schedule,
     use_cron_store,
 )
-from hermes_constants import (
+from hades_constants import (
     effective_generic_reasoning_effort,
     get_config_path,
-    get_hermes_home,
+    get_hades_home,
     resolve_reasoning_config,
 )
 from utils import fast_safe_load
@@ -345,11 +345,23 @@ class AutoRoutingService:
         fault_injector: Any = None,
         adapter: Any = None,
         allow_cross_thread_close: bool = False,
+        hermes_home: str | Path | None = None,
+        config_path: str | Path | None = None,
     ) -> "AutoRoutingService":
-        home = get_hermes_home()
+        explicit_home = hermes_home is not None
+        home = Path(
+            hermes_home if explicit_home else get_hades_home()
+        ).expanduser()
+        if explicit_home:
+            home = home.resolve()
+        pinned_config_path = Path(
+            config_path
+            if config_path is not None
+            else (home / "config.yaml" if explicit_home else get_config_path())
+        ).expanduser().absolute()
         fingerprint_key = ensure_profile_credential_fingerprint_key(
             home,
-            config_path=get_config_path(),
+            config_path=pinned_config_path,
         )
         if adapter is None:
             from .adapters.hermes_0_18 import Hermes018Adapter
@@ -366,6 +378,7 @@ class AutoRoutingService:
             ),
             adapter=adapter,
             _fault_injector=fault_injector,
+            _pinned_config_path=pinned_config_path,
         )
         service._recover_pending_applies()
         return service

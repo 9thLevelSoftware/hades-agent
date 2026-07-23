@@ -16,7 +16,7 @@ from agent.runtime_routing import (
     ManualRuntimePinRequest,
     RuntimeSessionContinuation,
 )
-from hermes_constants import get_hermes_home
+from hades_constants import get_hades_home
 
 from .service import AutoRoutingService
 from .storage import RuntimeRoutingPending
@@ -57,18 +57,13 @@ class AutoRoutingRuntimeResolver:
         self,
         plugin_context: Any,
         *,
-        home_resolver: Callable[[], Path] = get_hermes_home,
+        home_resolver: Callable[[], Path] = get_hades_home,
         service_factory: Callable[[], Any] | None = None,
         backend_factory: Callable[[Any], Any] | None = None,
     ) -> None:
         self._plugin_context = plugin_context
         self._home_resolver = home_resolver
-        self._service_factory = service_factory or (
-            lambda: AutoRoutingService.from_plugin_context(
-                plugin_context,
-                allow_cross_thread_close=True,
-            )
-        )
+        self._service_factory = service_factory
         self._backend_factory = backend_factory or _ServiceRuntimeBackend
         self._services: dict[_ServiceCacheKey, Any] = {}
         self._backends: dict[_ServiceCacheKey, Any] = {}
@@ -147,7 +142,18 @@ class AutoRoutingRuntimeResolver:
                 raise RuntimeError("auto-routing resolver is closed")
             service = self._services.get(key)
             if service is None:
-                service = self._service_factory()
+                if self._service_factory is None:
+                    service = AutoRoutingService.from_plugin_context(
+                        self._plugin_context,
+                        hermes_home=home,
+                        config_path=home / "config.yaml",
+                        allow_cross_thread_close=True,
+                    )
+                else:
+                    # Third-party/test factories predate profile-key injection.
+                    # Keep their zero-argument contract; the ownership check
+                    # below still prevents a factory from crossing profiles.
+                    service = self._service_factory()
                 service_home = getattr(service, "hermes_home", home)
                 if Path(service_home).expanduser().resolve() != home:
                     _close_service(service)
