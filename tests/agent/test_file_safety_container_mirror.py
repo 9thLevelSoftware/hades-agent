@@ -93,7 +93,7 @@ class TestFileToolIntegration:
         monkeypatch.setattr(
             file_tools,
             "_get_container_mirror_prefix_for_task",
-            lambda task_id: "/root/.hermes",
+            lambda task_id: ("/root/.hermes",),
         )
 
         warning = file_tools._check_cross_profile_path(
@@ -103,4 +103,34 @@ class TestFileToolIntegration:
 
         assert warning is not None
         assert "Sandbox-mirror write blocked" in warning
+        assert "profiles/group1/SOUL.md" in warning
+
+    @pytest.mark.parametrize("home_basename", [".hades", ".hermes"])
+    def test_live_persistent_docker_guards_all_home_candidates(
+        self, monkeypatch, home_basename
+    ):
+        from hades_constants import CONTAINER_HOME_CANDIDATES
+        import tools.file_tools as file_tools
+        import tools.terminal_tool as terminal_tool
+
+        class DockerEnvironment:
+            _persistent = True
+            cwd = "/root"
+            cwd_owner = "default"
+
+        monkeypatch.setattr(
+            terminal_tool,
+            "_active_environments",
+            {"default": DockerEnvironment()},
+        )
+
+        candidates = file_tools._get_container_mirror_prefix_for_task("default")
+        warning = file_tools._check_cross_profile_path(
+            f"/root/{home_basename}/profiles/group1/SOUL.md",
+            task_id="default",
+        )
+
+        assert tuple(candidates) == CONTAINER_HOME_CANDIDATES
+        assert warning is not None
+        assert "sandbox-mirror write blocked" in warning.lower()
         assert "profiles/group1/SOUL.md" in warning

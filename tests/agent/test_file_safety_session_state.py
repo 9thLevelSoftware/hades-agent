@@ -45,7 +45,8 @@ def test_session_state_paths_are_write_denied(fake_homes, relative):
     assert is_write_denied(str(target)) is True
     err = get_write_denied_error(str(target))
     assert err is not None
-    assert "session transcript" in err.lower() or "sessions/" in err
+    assert "session transcript" in err.lower()
+    assert "protected system/credential" not in err.lower()
 
 
 def test_default_profile_state_db_is_write_denied_from_profile(fake_homes):

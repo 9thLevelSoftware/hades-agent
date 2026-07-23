@@ -99,7 +99,7 @@ def get_safe_write_roots() -> set[str]:
 
 
 def _classify_write_denial(path: str) -> Optional[str]:
-    """Return ``'credential'``, ``'safe_root'``, or ``None`` if writes are allowed."""
+    """Return a denial category, or ``None`` if writes are allowed."""
     home = os.path.realpath(os.path.expanduser("~"))
     resolved = os.path.realpath(os.path.expanduser(str(path)))
 
@@ -126,10 +126,10 @@ def _classify_write_denial(path: str) -> Optional[str]:
         # falsify conversation history and invalidate resume/compression state.
         try:
             if resolved == os.path.realpath(os.path.join(base_real, "state.db")):
-                return True
+                return "session_state"
             sessions_real = os.path.realpath(os.path.join(base_real, "sessions"))
             if resolved == sessions_real or resolved.startswith(sessions_real + os.sep):
-                return True
+                return "session_state"
         except Exception:
             pass
         try:
@@ -173,6 +173,11 @@ def get_write_denied_error(path: str, *, verb: str = "Write") -> Optional[str]:
         return (
             f"{verb} denied: '{path}' is outside HERMES_WRITE_SAFE_ROOT "
             f"({roots_display}). Unset the variable or add this path's directory prefix."
+        )
+    if denial == "session_state":
+        return (
+            f"{verb} denied: '{path}' is an application-owned session transcript "
+            "or session-state store. Use the session APIs instead."
         )
     return f"{verb} denied: '{path}' is a protected system/credential file."
 
@@ -512,7 +517,7 @@ def get_cross_profile_warning(path: str) -> Optional[str]:
 # Non-local terminal backends (Docker, Daytona, etc.) bind a sandbox-local
 # directory to the container's ``$HOME``. The on-disk layout looks like
 #
-#   <HERMES_HOME>/profiles/<name>/sandboxes/<backend>/<task>/home/.hermes/...
+#   <HADES_HOME>/profiles/<name>/sandboxes/<backend>/<task>/home/.hades/...
 #
 # When the agent (running host-side) speculates that authoritative profile
 # state lives at one of those sandbox-mirror paths, the write lands on the
@@ -521,48 +526,55 @@ def get_cross_profile_warning(path: str) -> Optional[str]:
 # disk two divergent copies accumulate. See #32049 for evidence.
 #
 # This guard is path-shape-only: it detects the
-# ``…/sandboxes/<backend>/<task>/home/.hermes/…`` segment and warns
-# regardless of which Hermes profile is active. It does NOT cover the
+# ``…/sandboxes/<backend>/<task>/home/.hades/…`` or legacy ``.hermes/…``
+# segment and warns
+# regardless of which Hades profile is active. It does NOT cover the
 # inner-container case where the bind mount strips the ``sandboxes/`` prefix
-# (the agent's view inside the container is plain ``/root/.hermes/...``);
+# (the agent's view inside the container is plain ``/root/.hades/...`` or a
+# legacy ``/root/.hermes/...``);
 # that case needs a separate dispatch-layer or host-side ``profile_state``
 # tool.
 # ---------------------------------------------------------------------------
 
 
 def _find_sandbox_mirror_segments(parts: tuple) -> Optional[int]:
-    """Return the index of the inner ``.hermes`` part in a sandbox-mirror path.
+    """Return the index of the inner Hades/Hermes home in a mirror path.
 
-    Matches ``…/sandboxes/<backend>/<task>/home/.hermes/…`` and returns the
-    index where the inner Hermes-state portion starts. Returns ``None`` for
+    Matches ``…/sandboxes/<backend>/<task>/home/.hades/…`` and the legacy
+    ``.hermes`` spelling. Returns the index where the inner state portion
+    starts, or ``None`` for
     paths that do not contain the sandbox-mirror shape.
     """
+    # ``normcase`` mirrors the host filesystem contract: it folds case on
+    # native Windows and leaves case intact on POSIX.
+    norm = os.path.normcase
+    home_basenames = {norm(".hades"), norm(".hermes")}
     for i, part in enumerate(parts):
-        if part != "sandboxes":
+        if norm(part) != norm("sandboxes"):
             continue
-        # Need at least: sandboxes / <backend> / <task> / home / .hermes / <thing>
+        # Need: sandboxes / <backend> / <task> / home / .hades|.hermes / <thing>
         if i + 5 >= len(parts):
             continue
-        if parts[i + 3] == "home" and parts[i + 4] == ".hermes":
+        if norm(parts[i + 3]) == norm("home") and norm(parts[i + 4]) in home_basenames:
             return i + 4
     return None
 
 
 def classify_sandbox_mirror_target(path: str) -> Optional[dict]:
-    """Classify a write target as a sandbox-mirror of authoritative Hermes state.
+    """Classify a write target as a sandbox-mirror of authoritative Hades state.
 
     Returns ``None`` when the path does not match the sandbox-mirror shape.
     Otherwise returns a dict with:
 
       * ``target_path``: the resolved path string
-      * ``mirror_root``: the ``…/sandboxes/<backend>/<task>/home/.hermes``
+      * ``mirror_root``: the ``…/sandboxes/<backend>/<task>/home/.hades``
         prefix (so callers can show users which sandbox owns the mirror)
-      * ``inner_path``: the portion under the mirror's ``.hermes`` (what the
+      * ``inner_path``: the portion under the mirror home (what the
         agent likely meant to address on the host)
 
-    Detection is path-shape-only — does not require any Hermes resolver to
+    Detection is path-shape-only — does not require any Hades resolver to
     succeed, so it works correctly even when called from contexts where
-    HERMES_HOME resolution would be ambiguous.
+    HADES_HOME resolution would be ambiguous.
     """
     try:
         target = Path(os.path.expanduser(str(path))).resolve()
@@ -574,8 +586,14 @@ def classify_sandbox_mirror_target(path: str) -> Optional[dict]:
     if inner_idx is None:
         return None
 
-    mirror_root = str(Path(*parts[: inner_idx + 1]))
-    inner_path = str(Path(*parts[inner_idx + 1 :])) if inner_idx + 1 < len(parts) else ""
+    # These values go into tool-result warnings.  Use POSIX separators for a
+    # stable, copyable description regardless of whether the host is Windows.
+    mirror_root = Path(*parts[: inner_idx + 1]).as_posix()
+    inner_path = (
+        Path(*parts[inner_idx + 1 :]).as_posix()
+        if inner_idx + 1 < len(parts)
+        else ""
+    )
 
     return {
         "target_path": str(target),
@@ -605,9 +623,10 @@ def get_sandbox_mirror_warning(path: str) -> Optional[str]:
         f"Sandbox-mirror write blocked by soft guard: {info['target_path']} "
         f"sits under {info['mirror_root']!r}, which is a per-task mirror "
         f"created by a non-local terminal backend (docker/daytona/etc.). "
-        f"Writes here land on a copy that the host Hermes process never "
+        f"Writes here land on a copy that the host Hades process never "
         f"reads — the authoritative file is likely {info['inner_path']!r} "
-        f"under the real HERMES_HOME. Use the host-side tool for "
+        f"under the real HADES_HOME (legacy HERMES_HOME layouts are also "
+        f"recognized). Use the host-side tool for "
         f"authoritative state (e.g. ``memory`` for memories), or address "
         f"the host path directly. To bypass this guard after explicit "
         f"user direction, retry the call with ``cross_profile=True``. "
@@ -620,9 +639,11 @@ def get_sandbox_mirror_warning(path: str) -> Optional[str]:
 # Container-context mirror guard (inner-container case — #32049 follow-up)
 #
 # Brian's shape-based detector (#32213) catches paths that still carry the
-# full ``…/sandboxes/<backend>/<task>/home/.hermes/…`` prefix on the host.
+# full ``…/sandboxes/<backend>/<task>/home/.hades/…`` prefix on the host
+# (or the legacy ``.hermes`` spelling).
 # But when file tools execute *inside* the container the bind-mount strips
-# that prefix: the agent sees plain ``/root/.hermes/…``.  The root:root
+# that prefix: the agent sees plain ``/root/.hades/…`` (or legacy
+# ``/root/.hermes/…``).  The root:root
 # ownership on the divergent SOUL.md in #32049 confirms this is the primary
 # failure mode.
 #
@@ -646,7 +667,7 @@ def classify_container_mirror_target(
       * ``target_path``: resolved path string
       * ``mirror_root``: the declared container mirror prefix
       * ``inner_path``: portion under the mirror root (what the agent
-        likely meant to address in the host HERMES_HOME)
+        likely meant to address in the host HADES_HOME)
     """
     if not mirror_prefix:
         return None
@@ -668,7 +689,7 @@ def get_container_mirror_warning(
     mirror_prefix: str | None = None,
 ) -> Optional[str]:
     """Return a model-facing warning when *path* lands in the container's
-    sandbox mirror of authoritative Hermes state.
+    sandbox mirror of authoritative Hades state.
 
     The caller supplies ``mirror_prefix`` only when the current file-tool
     backend is known to execute inside a Docker sandbox. Same contract as
@@ -682,9 +703,10 @@ def get_container_mirror_warning(
     return (
         f"Sandbox-mirror write blocked by soft guard: {info['target_path']} "
         f"sits under {info['mirror_root']!r}, which is the container's "
-        f"bind-mounted home — a per-task mirror that the host Hermes "
+        f"bind-mounted home — a per-task mirror that the host Hades "
         f"process never reads. The authoritative file is "
-        f"{info['inner_path']!r} under the real HERMES_HOME. Use the "
+        f"{info['inner_path']!r} under the real HADES_HOME (legacy "
+        f"HERMES_HOME layouts are also recognized). Use the "
         f"host-side tool for authoritative state (e.g. ``memory`` for "
         f"memories), or address the host path directly. To bypass after "
         f"explicit user direction, retry with ``cross_profile=True``. "

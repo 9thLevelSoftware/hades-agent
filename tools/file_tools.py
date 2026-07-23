@@ -721,10 +721,12 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     return None
 
 
-def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | None:
-    """Return the container-side Hades/Hermes mirror prefix for Docker file tools."""
+def _get_container_mirror_prefix_for_task(
+    task_id: str = "default",
+) -> tuple[str, ...]:
+    """Return all possible Hades home mounts for persistent Docker file tools."""
     try:
-        from hades_constants import default_container_home
+        from hades_constants import CONTAINER_HOME_CANDIDATES
         from tools.terminal_tool import (
             _active_environments,
             _env_lock,
@@ -734,7 +736,7 @@ def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | Non
 
         container_key = _resolve_container_task_id(task_id)
     except Exception:
-        return None
+        return ()
 
     try:
         with _env_lock:
@@ -744,20 +746,20 @@ def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | Non
             if env.__class__.__name__ == "DockerEnvironment" and bool(
                 getattr(env, "_persistent", False)
             ):
-                return default_container_home()
-            return None
+                return CONTAINER_HOME_CANDIDATES
+            return ()
 
         config = _get_env_config()
     except Exception:
-        return None
+        return ()
 
     if config.get("env_type") == "docker" and config.get("container_persistent", True):
-        return default_container_home()
-    return None
+        return CONTAINER_HOME_CANDIDATES
+    return ()
 
 
 def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | None:
-    """Return a soft-guard warning when ``filepath`` lands in another Hermes
+    """Return a soft-guard warning when ``filepath`` lands in another Hades
     profile's scoped area, a host-side sandbox-mirror of authoritative profile
     state, or the Docker container's sandbox mirror of Hades state.
 
@@ -766,15 +768,17 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
     * cross-profile — writes that hit another profile's
       ``skills/plugins/cron/memories`` directory.
     * sandbox-mirror (#32049) — writes that hit the
-      ``…/sandboxes/<backend>/<task>/home/.hermes/…`` mirror created by a
+      ``…/sandboxes/<backend>/<task>/home/.hades/…`` mirror (or legacy
+      ``.hermes`` spelling) created by a
       non-local terminal backend (Docker, Daytona, etc.), where the host
-      Hermes process never reads the mirror and the authoritative file is
+      Hades process never reads the mirror and the authoritative file is
       left untouched.
     * container-mirror (#32049 follow-up) — writes from inside a Docker
       container whose bind-mounted home strips the ``sandboxes/`` prefix, so
-      the agent sees a plain ``/root/.hermes/…`` path.
+      the agent sees a plain ``/root/.hades/…`` or legacy ``/root/.hermes/…``
+      path.
 
-    Returns ``None`` when the write is in-scope or outside Hermes scope.
+    Returns ``None`` when the write is in-scope or outside Hades scope.
     All detectors are soft guards — the agent can override any by
     passing ``cross_profile=True`` to its write tool after explicit user
     direction. Defense-in-depth, NOT a security boundary — the terminal
@@ -810,10 +814,14 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
     if warning is not None:
         return warning
 
-    return get_container_mirror_warning(
-        resolved,
-        mirror_prefix=_get_container_mirror_prefix_for_task(task_id),
-    )
+    for mirror_prefix in _get_container_mirror_prefix_for_task(task_id):
+        warning = get_container_mirror_warning(
+            resolved,
+            mirror_prefix=mirror_prefix,
+        )
+        if warning is not None:
+            return warning
+    return None
 
 
 def _is_expected_write_exception(exc: Exception) -> bool:

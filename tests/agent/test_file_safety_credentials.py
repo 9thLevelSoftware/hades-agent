@@ -14,6 +14,7 @@ readable, and that the existing ``skills/.hub`` deny still applies.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,21 @@ def _create(home: Path, rel: str | Path) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("dummy", encoding="utf-8")
     return p
+
+
+@contextmanager
+def _task_cwd_override(task_id: str, cwd: Path):
+    """Use the live task-scoped cwd API, then always release it."""
+    from tools.terminal_tool import (
+        clear_task_env_overrides,
+        register_task_env_overrides,
+    )
+
+    register_task_env_overrides(task_id, {"cwd": str(cwd)})
+    try:
+        yield
+    finally:
+        clear_task_env_overrides(task_id)
 
 
 def test_auth_json_blocked(fake_home):
@@ -144,18 +160,13 @@ def test_read_file_tool_blocks_relative_path_under_terminal_cwd(
     import json
 
     import tools.file_tools as ft
-    import tools.terminal_tool as terminal_tool
-
     _create(fake_home, "auth.json")
-    # Force the file_tools resolver to anchor relative paths at HADES_HOME
-    # while the Python process cwd remains tmp_path (a different directory).
-    monkeypatch.setenv("TERMINAL_CWD", str(fake_home))
+    # The task override, not process-global terminal state, anchors the
+    # relative read while the Python process cwd remains elsewhere.
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        terminal_tool, "_session_cwd", {}
-    )
-
-    out = json.loads(ft.read_file_tool("auth.json"))
+    task_id = "relative-auth-read"
+    with _task_cwd_override(task_id, fake_home):
+        out = json.loads(ft.read_file_tool("auth.json", task_id=task_id))
     assert "error" in out
     assert "credential store" in out["error"]
 
@@ -167,8 +178,6 @@ def test_read_file_tool_blocks_nested_google_oauth_path(
     import json
 
     import tools.file_tools as ft
-    import tools.terminal_tool as terminal_tool
-
     oauth = _create(fake_home, Path("auth") / "google_oauth.json")
     oauth.write_text(
         json.dumps(
@@ -181,11 +190,9 @@ def test_read_file_tool_blocks_nested_google_oauth_path(
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        terminal_tool, "_session_cwd", {}
-    )
-
-    out = json.loads(ft.read_file_tool(str(oauth), task_id="google-oauth-test"))
+    task_id = "google-oauth-test"
+    with _task_cwd_override(task_id, fake_home):
+        out = json.loads(ft.read_file_tool(str(oauth), task_id=task_id))
     assert "error" in out
     assert "credential store" in out["error"]
     assert "REFRESH_TOKEN_MARKER" not in json.dumps(out)
@@ -197,8 +204,6 @@ def test_search_tool_blocks_direct_auth_json_path(fake_home, monkeypatch):
     import json
 
     import tools.file_tools as ft
-    import tools.terminal_tool as terminal_tool
-
     auth = _create(fake_home, "auth.json")
     auth.write_text("SEARCH_DIRECT_AUTH_SECRET", encoding="utf-8")
 
@@ -226,8 +231,6 @@ def test_search_tool_filters_credential_results(fake_home, tmp_path, monkeypatch
 
     from tools.file_operations import SearchMatch, SearchResult
     import tools.file_tools as ft
-    import tools.terminal_tool as terminal_tool
-
     auth = _create(fake_home, "auth.json")
     token = _create(fake_home, Path("mcp-tokens") / "provider.json")
     safe = _create(fake_home, "notes.txt")
@@ -259,15 +262,13 @@ def test_search_tool_filters_credential_results(fake_home, tmp_path, monkeypatch
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(ft, "_get_file_ops", lambda task_id="default": FakeFileOps())
-    monkeypatch.setattr(
-        terminal_tool, "_session_cwd", {}
-    )
-
-    search_response = ft.search_tool(
-        pattern="SEARCH",
-        path=str(fake_home),
-        task_id="search-filter-credentials",
-    )
+    task_id = "search-filter-credentials"
+    with _task_cwd_override(task_id, fake_home):
+        search_response = ft.search_tool(
+            pattern="SEARCH",
+            path=str(fake_home),
+            task_id=task_id,
+        )
     out = json.loads(search_response.split("\n\n[Hint:", 1)[0])
     raw = json.dumps(out)
     returned_paths = {
