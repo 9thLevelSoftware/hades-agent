@@ -24,6 +24,11 @@ from hermes_constants import (
     reset_hermes_home_override,
     set_hermes_home_override,
 )
+from hades_constants import (
+    get_hades_home,
+    reset_hades_home_override,
+    set_hades_home_override,
+)
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
 from tools.environments.local import hermes_subprocess_env
@@ -13516,6 +13521,215 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5016, "cli.exec: timeout")
     except Exception as e:
         return _err(rid, 5017, str(e))
+
+
+# ── Autonomy (Preferences & Autonomy Center) ─────────────────────────
+# Native in-process route for the Ink TUI's /autonomy command. Bounded
+# argv over the SAME shared parser/service as `hades autonomy ...` and
+# the classic slash path (hades_cli.autonomy.run_argv) — no shell, no
+# subprocess, no second authority surface.
+
+_AUTONOMY_MAX_ARGV_ENTRIES = 64
+_AUTONOMY_MAX_ARGV_BYTES = 65_536  # 64 KiB total UTF-8
+
+
+def _autonomy_contract_doc(payload: dict) -> dict | None:
+    """Contract identity (version/hash/profile/mode) when the verb exposed it."""
+    if not (payload.get("contract_version") or payload.get("contract_hash")):
+        return None
+    doc = {
+        "version": payload.get("contract_version"),
+        "hash": payload.get("contract_hash"),
+    }
+    for key in ("profile_id", "mode"):
+        if payload.get(key) is not None:
+            doc[key] = payload[key]
+    return doc
+
+
+@method("autonomy.exec")
+def _(rid, params: dict) -> dict:
+    argv = params.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(entry, str) for entry in argv)
+        or len(argv) > _AUTONOMY_MAX_ARGV_ENTRIES
+        or sum(len(entry.encode("utf-8")) for entry in argv) > _AUTONOMY_MAX_ARGV_BYTES
+    ):
+        return _err(
+            rid,
+            4033,
+            "autonomy.exec: argv must be a non-empty list[str] of at most "
+            f"{_AUTONOMY_MAX_ARGV_ENTRIES} entries and "
+            f"{_AUTONOMY_MAX_ARGV_BYTES} UTF-8 bytes total",
+        )
+
+    # Profile isolation: a session resumed from another profile carries its
+    # own profile_home; bind it for the duration of the call so the shared
+    # service resolves THAT profile's config.yaml/state.db, never the launch
+    # profile's. No session (or an unknown one) means the launch profile.
+    session = _sessions.get(params.get("session_id") or "") or {}
+    profile_home = session.get("profile_home")
+    home_token = set_hades_home_override(str(profile_home)) if profile_home else None
+    try:
+        import hades_cli.autonomy as _autonomy_cli
+
+        result = _autonomy_cli.run_argv(list(argv), output_mode="structured")
+        resolved_home = str(get_hades_home())
+        exit_ok = _autonomy_cli.EXIT_OK
+        exit_validation = _autonomy_cli.EXIT_VALIDATION
+        exit_storage = _autonomy_cli.EXIT_STORAGE
+    except Exception:
+        # Deliberately redacted: no tracebacks, exception strings, raw
+        # recipients, source content, or secrets on the wire.
+        logger.exception("autonomy.exec failed")
+        return _err(
+            rid,
+            5038,
+            "autonomy.exec: internal failure (details withheld; run "
+            "`hades autonomy doctor` in a terminal)",
+        )
+    finally:
+        if home_token is not None:
+            reset_hades_home_override(home_token)
+
+    payload = result.payload or {}
+    # run_argv already maps failures to bounded, redacted messages
+    # (clipped, never a traceback). Surface them on the JSON-RPC error
+    # channel: 4xxx validation/conflict, 5xxx storage/recovery.
+    if result.exit_code == exit_validation:
+        return _err(rid, 4034, payload.get("error") or "autonomy: validation error")
+    if result.exit_code == exit_storage:
+        return _err(rid, 5039, payload.get("error") or "autonomy: storage failure")
+
+    preview = payload if payload.get("applied") is False else None
+    applied = payload if payload.get("applied") is True else None
+    return _ok(
+        rid,
+        {
+            "ok": result.exit_code == exit_ok,
+            "action": argv[0].strip().lower(),
+            "exit_code": result.exit_code,
+            "output": result.output,
+            "contract": _autonomy_contract_doc(payload),
+            "rules": payload.get("rules") or [],
+            "suggestions": payload.get("suggestions") or [],
+            "decision": payload if "verdict" in payload else None,
+            "audit": payload.get("decisions") or [],
+            "preview": preview,
+            "applied": applied,
+            # True while an authority change awaits its explicit second step:
+            # a previewed change needing the exact-hash apply, or a crashed
+            # apply journal pending recovery (authority fails closed).
+            "approval_pending": bool(preview) or bool(payload.get("pending_apply")),
+            "profile_home": resolved_home,
+        },
+    )
+
+
+# ── Receipts (Verified Outcome & Artifact Receipts) ──────────────────
+# Native in-process route for the Ink TUI's /receipt (and /receipts)
+# command. Bounded argv over the SAME shared parser/service as
+# `hades receipt ...` and the classic slash path
+# (hades_cli.receipts.run_argv) — no shell, no subprocess, no second
+# authority surface. Validation/conflict failures map to JSON-RPC 4xxx
+# and store/provider failures to 5xxx; no raw locator, secret,
+# traceback, or signer material ever leaves the RPC.
+
+_RECEIPT_MAX_ARGV_ENTRIES = 64
+_RECEIPT_MAX_ARGV_BYTES = 65_536  # 64 KiB total UTF-8
+
+
+@method("receipt.exec")
+def _(rid, params: dict) -> dict:
+    argv = params.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(entry, str) for entry in argv)
+        or len(argv) > _RECEIPT_MAX_ARGV_ENTRIES
+        or sum(len(entry.encode("utf-8")) for entry in argv) > _RECEIPT_MAX_ARGV_BYTES
+    ):
+        # Deliberately does not echo any argument content: an oversized
+        # argument may be a pasted secret and must never round-trip.
+        return _err(
+            rid,
+            4004,
+            "receipt.exec: argv must be a non-empty list[str] of at most "
+            f"{_RECEIPT_MAX_ARGV_ENTRIES} entries and "
+            f"{_RECEIPT_MAX_ARGV_BYTES} UTF-8 bytes total",
+        )
+
+    # Profile isolation: only the session registry's recorded profile_home
+    # may steer profile resolution — a caller-supplied path in params is
+    # never accepted. No session (or an unknown one) means the launch
+    # profile, exactly like autonomy.exec.
+    session = _sessions.get(params.get("session_id") or "") or {}
+    profile_home = session.get("profile_home")
+    home_token = set_hades_home_override(str(profile_home)) if profile_home else None
+    try:
+        import hades_cli.receipts as _receipts_cli
+
+        result = _receipts_cli.run_argv(list(argv), output="text")
+        resolved_home = str(get_hades_home())
+        exit_ok = _receipts_cli.EXIT_OK
+        exit_validation = _receipts_cli.EXIT_VALIDATION
+        exit_unavailable = _receipts_cli.EXIT_UNAVAILABLE
+    except Exception:
+        # Deliberately redacted: no tracebacks, exception strings, raw
+        # locators, or signer material on the wire.
+        logger.exception("receipt.exec failed")
+        return _err(
+            rid,
+            5043,
+            "receipt.exec: internal failure (details withheld; run "
+            "`hades receipt list` in a terminal)",
+        )
+    finally:
+        if home_token is not None:
+            reset_hades_home_override(home_token)
+
+    payload = result.payload or {}
+    # run_argv already maps failures to bounded, redacted messages
+    # (clipped, never a traceback): 4xxx validation/unknown-ID/conflict,
+    # 5xxx signing-provider/storage.
+    if result.exit_code == exit_validation:
+        return _err(rid, 4005, payload.get("error") or "receipt: validation error")
+    if result.exit_code == exit_unavailable:
+        return _err(
+            rid,
+            5041,
+            payload.get("error") or "receipt: signing provider unavailable",
+        )
+    if result.exit_code != exit_ok:
+        return _err(rid, 5040, payload.get("error") or "receipt: storage failure")
+
+    # recheck returns one appended observation; show returns the selected
+    # chain. Normalize both to an `observations` list for the Ink viewer.
+    observations = payload.get("observations")
+    if observations is None and payload.get("observation") is not None:
+        observations = [payload["observation"]]
+
+    response = {
+        "ok": True,
+        "action": str(payload.get("action") or argv[0].strip().lower()),
+        "exit_code": result.exit_code,
+        "output": result.output,
+        "profile_home": resolved_home,
+    }
+    for key, value in (
+        ("receipts", payload.get("receipts")),
+        ("receipt", payload.get("receipt")),
+        ("observations", observations),
+        ("claim_edges", payload.get("claim_edges")),
+        ("export_path", payload.get("export_path")),
+        ("retention_plan_hash", payload.get("retention_plan_hash")),
+        ("warning", payload.get("warning")),
+    ):
+        if value is not None:
+            response[key] = value
+    return _ok(rid, response)
 
 
 @method("command.resolve")
