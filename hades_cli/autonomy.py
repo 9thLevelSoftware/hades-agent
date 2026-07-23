@@ -36,6 +36,8 @@ from typing import Any, Optional
 
 import yaml
 
+from hades_cli.workspace_context import get_workspace_root
+
 __all__ = [
     "CliResult",
     "autonomy_command",
@@ -124,6 +126,8 @@ def _now_ms() -> int:
 def _load_document(path_text: str) -> dict:
     """Read one UTF-8 YAML/JSON mapping, capped at 1 MiB, failing closed."""
     path = Path(path_text)
+    if not path.is_absolute():
+        path = get_workspace_root() / path
     try:
         data = path.read_bytes()
     except OSError as exc:

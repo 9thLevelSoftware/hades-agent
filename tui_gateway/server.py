@@ -30,6 +30,7 @@ from hades_constants import (
     reset_hades_home_override,
     set_hades_home_override,
 )
+from hades_cli.workspace_context import resolve_workspace_root, workspace_context
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
 from tools.environments.local import hermes_subprocess_env
@@ -1853,6 +1854,22 @@ def _session_cwd(session: dict | None) -> str:
     if session and session.get("cwd"):
         return str(session["cwd"])
     return _completion_cwd()
+
+
+def _native_workspace_for_session(session_id: str | None) -> Path:
+    """Resolve native CLI workspace from the registered session only.
+
+    Caller parameters are deliberately absent from this boundary.  An active
+    session's validated ``cwd`` wins; unknown/no-session calls use the same
+    validated gateway fallback as completion, and finally the launch cwd.
+    """
+    with _sessions_lock:
+        session = dict(_sessions.get(session_id or "") or {})
+    candidate = session.get("cwd") or _completion_cwd({"session_id": session_id})
+    try:
+        return resolve_workspace_root(candidate)
+    except ValueError:
+        return resolve_workspace_root()
 
 
 def _heal_dead_cwd(cwd: str) -> str:
@@ -13556,14 +13573,18 @@ _NATIVE_MAX_SAFE_LIST_ITEMS = 256
 # locations from every free-text field before JSON serialization.
 _NATIVE_LOCATION_TOKEN = r'''\S+'''
 _NATIVE_LOCATION_RE = re.compile(
-    # A scheme token is intentionally broad: native egress must not preserve
-    # either full URI schemes or colon-prefixed path forms.  Requiring a
-    # non-whitespace character after `:` avoids treating ordinary `key: value`
-    # prose as a locator, while the single bounded character class keeps the
-    # match linear on already bounded producer text.
-    rf'''[A-Za-z][A-Za-z0-9+.-]*:{_NATIVE_LOCATION_TOKEN}'''
+    # Full URI schemes and the explicitly sensitive no-slash schemes are
+    # actionable locators.  Do not treat every compact ``key:value`` diagnostic
+    # as a URI: ``port:8080`` and ``error:EADDRINUSE`` are safe producer text.
+    rf'''[A-Za-z][A-Za-z0-9+.-]*://{_NATIVE_LOCATION_TOKEN}'''
+    rf'''|(?:artifact|file|mailto|urn|data|blob):{_NATIVE_LOCATION_TOKEN}'''
+    # An arbitrary scheme is a locator only when its value starts a path.
+    rf'''|[A-Za-z][A-Za-z0-9+.-]*:/+{_NATIVE_LOCATION_TOKEN}'''
     # Protocol-relative locators have no scheme, but are equally actionable.
     rf'''|//{_NATIVE_LOCATION_TOKEN}'''
+    # Windows drive paths use a backslash after the drive colon and are not
+    # covered by the slash-prefixed scheme alternative.
+    rf'''|[A-Za-z]:[\\/]{_NATIVE_LOCATION_TOKEN}'''
     # UNC paths and generic Windows paths not already consumed by the scheme
     # alternative.
     rf'''|\\\\[^\\/\s]+(?:[\\/][^\\/\s]+)+'''
@@ -13615,6 +13636,24 @@ def _native_safe_text(
     except Exception as exc:
         logger.warning("%s producer text rejected (%s)", method, type(exc).__name__)
         raise ValueError("producer text is not wire-safe") from None
+
+
+def _native_safe_scalar(
+    value: Any,
+    *,
+    method: str,
+    limit: int = 256,
+) -> str | None:
+    """Normalize a required non-ID scalar without applying ID grammar.
+
+    Receipt subjects and RFC3339 timestamps legitimately contain colons.  They
+    still cross the same forced-redaction and locator-scrubbing boundary as
+    free text, but malformed/non-string values are rejected instead of being
+    serialized as ``None`` into a TypeScript-required string field.
+    """
+    if type(value) is not str:
+        return None
+    return _native_safe_text(value, method=method, limit=limit)
 
 
 def _native_safe_text_list(
@@ -14052,11 +14091,13 @@ def _(rid, params: dict) -> dict:
     # profile's. No session (or an unknown one) means the launch profile.
     session = _sessions.get(session_id or "") or {}
     profile_home = session.get("profile_home")
+    workspace = _native_workspace_for_session(session_id)
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.autonomy as _autonomy_cli
 
-        result = _autonomy_cli.run_argv(list(argv), output_mode="structured")
+        with workspace_context(workspace):
+            result = _autonomy_cli.run_argv(list(argv), output_mode="structured")
         exit_ok = _autonomy_cli.EXIT_OK
         exit_denied = _autonomy_cli.EXIT_DENIED
         exit_validation = _autonomy_cli.EXIT_VALIDATION
@@ -14176,9 +14217,9 @@ def _receipt_summary_doc(row: Any) -> dict | None:
     doc = {
         "receipt_id": _native_safe_id(row["receipt_id"], method=method),
         "status": _native_safe_id(row["status"], method=method),
-        "subject_id": _native_safe_id(row["subject_id"], method=method),
+        "subject_id": _native_safe_scalar(row["subject_id"], method=method),
         "subject_kind": _native_safe_id(row["subject_kind"], method=method),
-        "decided_at": _native_safe_id(row["decided_at"], method=method),
+        "decided_at": _native_safe_scalar(row["decided_at"], method=method),
         "content_hash": _native_safe_id(row["content_hash"], method=method),
         "scorer_id": _native_safe_id(row["scorer_id"], method=method),
         "scorer_version": _native_safe_id(row["scorer_version"], method=method),
@@ -14205,7 +14246,11 @@ def _receipt_detail_doc(row: Any, *, observation_count: int = 0) -> dict | None:
         return None
     method = "receipt.exec"
     doc: dict[str, Any] = {
-        key: _native_safe_id(row[key], method=method)
+        key: (
+            _native_safe_scalar(row[key], method=method)
+            if key in {"subject_id", "decided_at"}
+            else _native_safe_id(row[key], method=method)
+        )
         for key in required
     }
     for key in ("session_id", "turn_id", "mission_id", "transaction_id"):
@@ -14241,7 +14286,14 @@ def _receipt_observation_doc(row: Any) -> dict | None:
     if any(type(row.get(key)) is not str for key in required):
         return None
     method = "receipt.exec"
-    doc: dict[str, Any] = {key: _native_safe_id(row[key], method=method) for key in required}
+    doc: dict[str, Any] = {
+        key: (
+            _native_safe_scalar(row[key], method=method)
+            if key == "observed_at"
+            else _native_safe_id(row[key], method=method)
+        )
+        for key in required
+    }
     for key in ("previous_observation_id", "content_hash", "scorer_id", "scorer_version"):
         if key in row:
             value = row[key]
@@ -14335,11 +14387,13 @@ def _(rid, params: dict) -> dict:
     # profile, exactly like autonomy.exec.
     session = _sessions.get(session_id or "") or {}
     profile_home = session.get("profile_home")
+    workspace = _native_workspace_for_session(session_id)
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.receipts as _receipts_cli
 
-        result = _receipts_cli.run_argv(list(argv), output="text")
+        with workspace_context(workspace):
+            result = _receipts_cli.run_argv(list(argv), output="text")
         exit_ok = _receipts_cli.EXIT_OK
         exit_validation = _receipts_cli.EXIT_VALIDATION
         exit_unavailable = _receipts_cli.EXIT_UNAVAILABLE
@@ -14453,7 +14507,6 @@ _TRANSACTION_UNCERTAIN_STATUSES = frozenset({
     "blocked",
     "partially_compensated",
     "failed",
-    "compensated",
 })
 
 
@@ -14691,11 +14744,13 @@ def _(rid, params: dict) -> dict:
     # _SlashWorker subprocess.
     session = _sessions.get(session_id or "") or {}
     profile_home = session.get("profile_home")
+    workspace = _native_workspace_for_session(session_id)
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.transactions as _transactions_cli
 
-        result = _transactions_cli.run_argv(list(argv), output="text")
+        with workspace_context(workspace):
+            result = _transactions_cli.run_argv(list(argv), output="text")
         exit_ok = _transactions_cli.EXIT_OK
         exit_validation = _transactions_cli.EXIT_VALIDATION
     except Exception:
