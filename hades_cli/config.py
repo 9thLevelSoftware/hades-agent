@@ -3213,6 +3213,11 @@ DEFAULT_CONFIG = {
         # GBs of disk on heavy users.  Opt in only if you have an external
         # tool that consumes the JSON files directly.
         "write_json_snapshots": False,
+        # Compact v23 full-text-search storage is opt-in because rebuilding a
+        # large existing database is disk-heavy.  ``hades update`` advertises
+        # the foreground, resumable migration when a legacy layout is found.
+        # Set ``off`` to suppress that notice or ``require`` for firmer copy.
+        "fts_optimize_notice": "advise",
     },
 
     # Contextual first-touch onboarding hints (see agent/onboarding.py).
