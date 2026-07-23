@@ -617,29 +617,46 @@ def test_windows_cron_reader_rejects_intermediate_reparse_point(tmp_path: Path) 
 def test_windows_cron_reader_holds_parent_handle_against_path_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = _repo(tmp_path)
     cron_dir = tmp_path / "cron"
     cron_jobs = _write_cron(cron_dir / "jobs.json")
+    original_text = cron_jobs.read_text(encoding="utf-8")
+    replacement_text = '{"jobs": [{"name": "replacement-content"}]}'
     moved = tmp_path / "cron-moved"
     original_open = verifier._windows_open_handle
     replacement_attempted = False
+    replacement_installed = False
+    rename_blocked = False
 
     def racing_open(path: Path, *, directory: bool) -> int:
-        nonlocal replacement_attempted
+        nonlocal replacement_attempted, replacement_installed, rename_blocked
         handle = original_open(path, directory=directory)
         if directory and Path(path) == cron_dir and not replacement_attempted:
             replacement_attempted = True
             try:
                 cron_dir.rename(moved)
             except PermissionError:
-                pass
+                rename_blocked = True
+            else:
+                cron_dir.mkdir()
+                (cron_dir / "jobs.json").write_text(replacement_text, encoding="utf-8")
+                replacement_installed = True
         return handle
 
     monkeypatch.setattr(verifier, "_windows_open_handle", racing_open)
 
-    failures = verify(root, cron_jobs, runner=FakeRunner())
+    failures: list[str] = []
+    text = verifier._read_cron_text(cron_jobs, failures)
+
     assert replacement_attempted
-    assert failures == [] or any("cron" in failure.lower() for failure in failures)
+    assert text != replacement_text
+    if rename_blocked:
+        assert not replacement_installed
+        assert text == original_text
+        assert failures == []
+    else:
+        assert replacement_installed
+        assert text is None
+        assert any("cron" in failure.lower() for failure in failures)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
@@ -676,6 +693,32 @@ def test_windows_cron_reader_fails_closed_when_win32_apis_are_unavailable(
     failures = _failures(root, cron_jobs)
 
     assert "cron" in failures.lower()
+    assert "safety" in failures.lower()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
+def test_windows_cron_reader_fails_closed_when_retained_handle_close_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path)
+    cron_jobs = _write_cron(tmp_path / "cron" / "jobs.json")
+    original_close = verifier._windows_close_handle
+    close_failure_injected = False
+
+    def failing_close(handle: int) -> None:
+        nonlocal close_failure_injected
+        original_close(handle)
+        if not close_failure_injected:
+            close_failure_injected = True
+            raise OSError("forced CloseHandle failure")
+
+    monkeypatch.setattr(verifier, "_windows_close_handle", failing_close)
+
+    failures = _failures(root, cron_jobs)
+
+    assert close_failure_injected
+    assert "cron" in failures.lower()
+    assert "close" in failures.lower()
     assert "safety" in failures.lower()
 
 

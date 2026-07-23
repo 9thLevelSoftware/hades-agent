@@ -285,6 +285,7 @@ def _read_windows_cron_text(path: Path, failures: list[str], max_bytes: int) -> 
     label = str(path)
     handles: list[int] = []
     file_fd: int | None = None
+    handle_close_failed = False
     try:
         if not _windows_safety_available():
             failures.append("cron: refusing manifest read; required Win32 handle safety primitives are unavailable")
@@ -364,7 +365,13 @@ def _read_windows_cron_text(path: Path, failures: list[str], max_bytes: int) -> 
             try:
                 _windows_close_handle(handle)
             except OSError:
-                pass
+                handle_close_failed = True
+        if handle_close_failed:
+            failures.append(
+                "cron: refusing manifest read; required Win32 handle close safety check failed"
+            )
+    if handle_close_failed:
+        return None
     if not text or not text.strip():
         failures.append(f"cron: empty manifest file {label}")
         return None
