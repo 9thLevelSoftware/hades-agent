@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.verify_hades_dashboard_contract as verifier
 from scripts.verify_hades_dashboard_contract import verify
 
 
@@ -77,9 +78,12 @@ REQUIRED_RPC_TESTS = (
 
 VALID_PROMPT = (
     "## Integration Manifest + Handler Verification\n"
+    "```bash\n"
+    "cd ~/.hermes/hermes-agent\n"
     "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
     "./venv/bin/python3 scripts/post-sync-verify.py --fix\n"
-    "scripts/post-sync-verify.py\n"
+    "./venv/bin/python3 scripts/post-sync-verify.py\n"
+    "```\n"
 )
 
 
@@ -100,7 +104,17 @@ def _make_fixture(tmp_path: Path) -> tuple[Path, Path]:
         json.dumps(
             {
                 "jobs": [
-                    {"id": "integration", "name": "hades-fork-integration", "prompt": VALID_PROMPT},
+                    {
+                        "id": "integration",
+                        "name": "hades-fork-integration",
+                        "prompt": VALID_PROMPT,
+                        "skills": ["github-operations"],
+                        "schedule": {"kind": "cron", "expr": "0 */4 * * *"},
+                        "schedule_display": "0 */4 * * *",
+                        "enabled": True,
+                        "state": "scheduled",
+                        "deliver": "local",
+                    },
                     {"id": "other", "name": "other-job", "prompt": "noop"},
                 ]
             }
@@ -261,6 +275,156 @@ def test_post_marker_unrelated_to_transport_call_does_not_satisfy_verb_contract(
 
     assert "previewAutonomyChange" in failures
     assert "verb" in failures.lower()
+
+
+def test_nested_canonical_post_and_direct_wrong_route_cannot_satisfy_contract(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'previewAutonomyChange: () => fetchJSON("/api/autonomy/preview", { method: "POST" }),',
+        'previewAutonomyChange: () => { '
+        'const nested = () => fetchJSON("/api/autonomy/preview", { method: "POST" }); '
+        'return fetchJSON("/api/autonomy/wrong", { method: "POST" }); },',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "previewAutonomyChange" in failures
+    assert "exactly one direct" in failures.lower()
+
+
+def test_duplicate_post_method_properties_are_rejected(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'previewAutonomyChange: () => fetchJSON("/api/autonomy/preview", { method: "POST" }),',
+        'previewAutonomyChange: () => fetchJSON('
+        '"/api/autonomy/preview", { method: "POST", method: "GET" }),',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "previewAutonomyChange" in failures
+    assert "duplicate" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "options",
+    (
+        "requestOptions",
+        "{ ...requestOptions, method: \"POST\" }",
+        "{ method }",
+    ),
+)
+def test_post_options_must_be_a_static_object_with_literal_method(
+    tmp_path: Path, options: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'previewAutonomyChange: () => fetchJSON("/api/autonomy/preview", { method: "POST" }),',
+        f'previewAutonomyChange: () => fetchJSON("/api/autonomy/preview", {options}),',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "previewAutonomyChange" in failures
+    assert "post" in failures.lower()
+
+
+def test_get_matching_route_rejects_dynamic_request_options_argument(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status", requestOptions),',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getAutonomyStatus" in failures
+    assert "exactly one argument" in failures.lower()
+
+
+def test_two_direct_transport_calls_fail_even_when_one_is_canonical(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        'getAutonomyStatus: () => { '
+        'apiGet("/api/autonomy/status"); '
+        'return apiGet("/api/autonomy/status"); },',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getAutonomyStatus" in failures
+    assert "exactly one direct" in failures.lower()
+
+
+def test_malformed_repeated_transport_tokens_are_scanned_once_after_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    repeated_tokens = " ".join("fetchJSON(" for _ in range(6000))
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        f'getAutonomyStatus: () => {{ {repeated_tokens} }},',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    original = verifier._extract_call_arguments
+    malformed_attempts = 0
+
+    def counted_extract(text: str, opening: int):
+        nonlocal malformed_attempts
+        result = original(text, opening)
+        if text.count("fetchJSON(") > 1000:
+            malformed_attempts += 1
+        return result
+
+    monkeypatch.setattr(verifier, "_extract_call_arguments", counted_extract)
+    failures = _messages(root, cron_jobs)
+
+    assert malformed_attempts <= 1
+    assert "getAutonomyStatus" in failures
+    assert "malformed" in failures.lower()
+
+
+def test_repo_asset_final_symlink_is_rejected_with_safety_diagnostic(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-api.ts"
+    outside.write_text(VALID_API, encoding="utf-8")
+    api_path = root / "web/src/lib/api.ts"
+    api_path.unlink()
+    api_path.symlink_to(outside)
+
+    failures = _messages(root, cron_jobs)
+
+    assert "api" in failures.lower()
+    assert "symlink" in failures.lower() or "root" in failures.lower()
+
+
+def test_repo_asset_symlink_for_second_contract_file_is_rejected(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-server.py"
+    outside.write_text(VALID_SERVER, encoding="utf-8")
+    server_path = root / "tui_gateway/server.py"
+    server_path.unlink()
+    server_path.symlink_to(outside)
+
+    failures = _messages(root, cron_jobs)
+
+    assert "server" in failures.lower()
+    assert "symlink" in failures.lower() or "root" in failures.lower()
 
 
 @pytest.mark.parametrize("comment", ('// "/api/autonomy/status"', '/* "/api/autonomy/status" */'))
@@ -623,6 +787,122 @@ def test_invalid_cron_manifest_is_rejected(tmp_path: Path, payload) -> None:
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    (
+        "disabled",
+        "paused",
+        "missing_schedule",
+        "wrong_schedule_kind",
+        "wrong_schedule_expr",
+        "wrong_schedule_display",
+        "missing_skill",
+        "wrong_delivery",
+    ),
+)
+def test_cron_operational_invariants_are_required(tmp_path: Path, mutation: str) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    job = payload["jobs"][0]
+    if mutation == "disabled":
+        job["enabled"] = False
+    elif mutation == "paused":
+        job["state"] = "paused"
+    elif mutation == "missing_schedule":
+        del job["schedule"]
+    elif mutation == "wrong_schedule_kind":
+        job["schedule"]["kind"] = "interval"
+    elif mutation == "wrong_schedule_expr":
+        job["schedule"]["expr"] = "0 * * * *"
+    elif mutation == "wrong_schedule_display":
+        job["schedule_display"] = "0 * * * *"
+    elif mutation == "missing_skill":
+        job["skills"] = []
+    elif mutation == "wrong_delivery":
+        job["deliver"] = "origin"
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert {
+        "disabled": "enabled",
+        "paused": "scheduled",
+        "missing_schedule": "schedule",
+        "wrong_schedule_kind": "schedule",
+        "wrong_schedule_expr": "schedule",
+        "wrong_schedule_display": "schedule",
+        "missing_skill": "github-operations",
+        "wrong_delivery": "deliver",
+    }[mutation].lower() in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    (
+        (
+            "## Integration Manifest + Handler Verification\n"
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+            "./venv/bin/python3 scripts/post-sync-verify.py --fix\n"
+        ),
+        (
+            "## Integration Manifest + Handler Verification\n"
+            "```python\n"
+            "cd ~/.hermes/hermes-agent\n"
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+            "```\n"
+            "scripts/post-sync-verify.py\n"
+        ),
+    ),
+)
+def test_cron_verifier_command_must_be_in_shell_fenced_block(
+    tmp_path: Path, prompt: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = prompt
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert "fenced" in failures.lower() or "shell" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    (
+        (
+            "## Integration Manifest + Handler Verification\n"
+            "```bash\n"
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+            "./venv/bin/python3 scripts/post-sync-verify.py --fix\n"
+            "```\n"
+        ),
+        (
+            "## Integration Manifest + Handler Verification\n"
+            "```bash\n"
+            "cd ~/.hermes/hermes-agent\n"
+            "./venv/bin/python3 scripts/post-sync-verify.py --fix\n"
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+            "```\n"
+        ),
+    ),
+)
+def test_cron_verifier_command_requires_repo_cd_before_post_sync(
+    tmp_path: Path, prompt: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = prompt
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert "cd" in failures.lower() or "before" in failures.lower()
+
+
+@pytest.mark.parametrize(
     ("jobs", "needle"),
     [
         ([{"name": "other", "prompt": VALID_PROMPT}], "integration"),
@@ -708,6 +988,12 @@ def test_actual_repo_assets_pass_with_valid_cron_fixture(tmp_path: Path) -> None
                     {
                         "name": "hades-fork-integration",
                         "prompt": VALID_PROMPT,
+                        "skills": ["github-operations"],
+                        "schedule": {"kind": "cron", "expr": "0 */4 * * *"},
+                        "schedule_display": "0 */4 * * *",
+                        "enabled": True,
+                        "state": "scheduled",
+                        "deliver": "local",
                     }
                 ]
             }
