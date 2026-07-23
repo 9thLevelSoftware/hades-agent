@@ -48,6 +48,14 @@ class EarlyCloseSocket {
   send = vi.fn()
 }
 
+class HangingSocket {
+  readyState = 0
+  addEventListener = vi.fn()
+  removeEventListener = vi.fn()
+  close = vi.fn()
+  send = vi.fn()
+}
+
 describe('JsonRpcGatewayClient connect() URL guard', () => {
   beforeEach(() => {
     vi.stubGlobal('WebSocket', FakeSocket) // jsdom has none; class reads WebSocket.OPEN
@@ -128,6 +136,33 @@ describe('JsonRpcGatewayClient connect() URL guard', () => {
 
     expect(rejection).toBeInstanceOf(Error)
     expect((rejection as Error).message).toMatch(/connection failed/)
+    expect(client.connectionState).toBe('closed')
+    await connection
+  })
+
+  it('settles a pending connection when the client is explicitly closed', async () => {
+    vi.useFakeTimers()
+    const socket = new HangingSocket()
+    const client = new JsonRpcGatewayClient({
+      connectTimeoutMs: 60_000,
+      socketFactory: () => socket as unknown as WebSocket
+    })
+    let rejection: unknown
+    const connection = client.connect('ws://127.0.0.1:1234/api/ws').catch(error => {
+      rejection = error
+    })
+
+    expect(client.connectionState).toBe('connecting')
+    client.close()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(rejection).toBeInstanceOf(Error)
+    expect(client.connectionState).toBe('closed')
+    expect(socket.removeEventListener).toHaveBeenCalledWith('open', expect.any(Function))
+    expect(socket.removeEventListener).toHaveBeenCalledWith('error', expect.any(Function))
+    expect(socket.removeEventListener).toHaveBeenCalledWith('close', expect.any(Function))
+
+    await vi.advanceTimersByTimeAsync(60_000)
     expect(client.connectionState).toBe('closed')
     await connection
   })

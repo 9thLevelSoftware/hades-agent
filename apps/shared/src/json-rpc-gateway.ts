@@ -49,6 +49,11 @@ type PendingCall = {
   timer?: ReturnType<typeof setTimeout>
 }
 
+type PendingConnection = {
+  reject: (error: Error) => void
+  socket: WebSocketLike
+}
+
 export interface GatewayClientOptions {
   closedErrorMessage?: string
   connectErrorMessage?: string
@@ -70,6 +75,7 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
 export class JsonRpcGatewayClient {
   private nextId = 0
   private pending = new Map<GatewayRequestId, PendingCall>()
+  private pendingConnection: PendingConnection | null = null
   private socket: WebSocketLike | null = null
   private state: ConnectionState = 'idle'
   private readonly eventHandlers = new Map<string, Set<(event: GatewayEvent) => void>>()
@@ -152,6 +158,19 @@ export class JsonRpcGatewayClient {
         socket.removeEventListener('open', onOpen)
         socket.removeEventListener('error', onError)
         socket.removeEventListener('close', onClose)
+        if (this.pendingConnection?.socket === socket) {
+          this.pendingConnection = null
+        }
+      }
+
+      const fail = (error: Error) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        cleanup()
+        reject(error)
       }
 
       const onOpen = () => {
@@ -170,10 +189,8 @@ export class JsonRpcGatewayClient {
           return
         }
 
-        settled = true
-        cleanup()
         this.setState('error')
-        reject(new Error(this.options.connectErrorMessage))
+        fail(new Error(this.options.connectErrorMessage))
       }
 
       const onClose = () => {
@@ -181,11 +198,10 @@ export class JsonRpcGatewayClient {
           return
         }
 
-        settled = true
-        cleanup()
-        reject(new Error(this.options.connectErrorMessage))
+        fail(new Error(this.options.connectErrorMessage))
       }
 
+      this.pendingConnection = { reject: fail, socket }
       socket.addEventListener('open', onOpen, { once: true })
       socket.addEventListener('error', onError, { once: true })
       socket.addEventListener('close', onClose, { once: true })
@@ -196,23 +212,20 @@ export class JsonRpcGatewayClient {
             return
           }
 
-          settled = true
-          cleanup()
+          fail(new Error(this.options.connectErrorMessage))
 
           // Drop the half-open socket so the next connect() starts clean
           // instead of short-circuiting on a zombie 'connecting' state.
           if (this.socket === socket) {
+            this.socket = null
             try {
               socket.close()
             } catch {
               // ignore
             }
-
-            this.socket = null
           }
 
           this.setState('error')
-          reject(new Error(this.options.connectErrorMessage))
         }, this.options.connectTimeoutMs)
       }
     })
@@ -238,6 +251,10 @@ export class JsonRpcGatewayClient {
 
     if (!socket) {
       return
+    }
+
+    if (this.pendingConnection?.socket === socket) {
+      this.pendingConnection.reject(new Error(this.options.closedErrorMessage))
     }
 
     try {
