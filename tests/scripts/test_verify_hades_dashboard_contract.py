@@ -251,6 +251,75 @@ def test_api_duplicate_method_is_rejected(tmp_path: Path) -> None:
     assert "duplicate" in failures.lower()
 
 
+def test_api_complete_block_comment_decoy_does_not_rescue_empty_live_object(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = f"/*\n{VALID_API}\n*/\nexport const api = {{}};\n"
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "api" in failures.lower()
+    assert "missing method" in failures.lower()
+
+
+@pytest.mark.parametrize("quote", ("single", "double", "template"))
+def test_api_complete_string_decoy_does_not_rescue_empty_live_object(
+    tmp_path: Path, quote: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    if quote == "single":
+        decoy = f"const decoy = '{VALID_API}';"
+    elif quote == "double":
+        decoy = f"const decoy = {json.dumps(VALID_API)};"
+    else:
+        escaped = VALID_API.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+        decoy = f"const decoy = `{escaped}`;"
+    source = f"{decoy}\nexport const api = {{}};\n"
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "api" in failures.lower()
+    assert "missing method" in failures.lower()
+
+
+@pytest.mark.parametrize("decoy", ("comment", "single", "double", "template"))
+def test_api_decoy_before_live_valid_declaration_is_ignored(
+    tmp_path: Path, decoy: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    invalid_decoy = VALID_API.replace("getAutonomyStatus", "decoyStatus", 1)
+    if decoy == "comment":
+        prefix = f"/*\n{invalid_decoy}\n*/\n"
+    elif decoy == "single":
+        prefix = f"const decoy = '{invalid_decoy}';\n"
+    elif decoy == "double":
+        prefix = f"const decoy = {json.dumps(invalid_decoy)};\n"
+    else:
+        escaped = invalid_decoy.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+        prefix = f"const decoy = `{escaped}`;\n"
+    (root / "web/src/lib/api.ts").write_text(prefix + VALID_API, encoding="utf-8")
+
+    assert verify(root, cron_jobs) == []
+
+
+def test_api_duplicate_live_declarations_fail_closed_with_actionable_diagnostic(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    (root / "web/src/lib/api.ts").write_text(
+        VALID_API + "\nexport const api = {};\n", encoding="utf-8"
+    )
+
+    failures = _messages(root, cron_jobs)
+
+    assert "api" in failures.lower()
+    assert "exactly one" in failures.lower()
+    assert "duplicate" in failures.lower()
+
+
 def test_static_route_near_miss_is_rejected(tmp_path: Path) -> None:
     root, cron_jobs = _make_fixture(tmp_path)
     (root / "web/src/lib/api.ts").write_text(
@@ -1740,3 +1809,78 @@ def test_fifo_required_asset_is_rejected_without_hanging(tmp_path: Path) -> None
     output = completed.stdout + completed.stderr
     assert "api" in output.lower()
     assert "regular file" in output.lower() or "non-regular" in output.lower()
+
+
+def test_external_cron_intermediate_symlink_is_rejected(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-cron"
+    outside.mkdir()
+    outside_jobs = outside / "jobs.json"
+    outside_jobs.write_text(cron_jobs.read_text(encoding="utf-8"), encoding="utf-8")
+    linked_dir = root / "cron-link"
+    linked_dir.symlink_to(outside, target_is_directory=True)
+
+    failures = _messages(root, linked_dir / "jobs.json")
+
+    assert "cron" in failures.lower()
+    assert "symlink" in failures.lower() or "path component" in failures.lower()
+
+
+def test_external_cron_final_symlink_is_rejected(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-cron.json"
+    outside.write_text(cron_jobs.read_text(encoding="utf-8"), encoding="utf-8")
+    linked_file = root / "cron-link.json"
+    linked_file.symlink_to(outside)
+
+    failures = _messages(root, linked_file)
+
+    assert "cron" in failures.lower()
+    assert "symlink" in failures.lower() or "no-follow" in failures.lower()
+
+
+def test_safe_external_cron_absolute_and_relative_paths_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-safe-cron"
+    outside_dir.mkdir()
+    outside_jobs = outside_dir / "jobs.json"
+    outside_jobs.write_text(cron_jobs.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert verify(root, outside_jobs) == []
+
+    monkeypatch.chdir(tmp_path.parent)
+    assert verify(root, Path(outside_dir.name) / "jobs.json") == []
+
+
+def test_external_cron_intermediate_symlink_swap_is_rejected_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    cron_dir = root / "cron-race"
+    cron_dir.mkdir()
+    cron_path = cron_dir / "jobs.json"
+    cron_path.write_text(cron_jobs.read_text(encoding="utf-8"), encoding="utf-8")
+    outside = tmp_path.parent / f"{tmp_path.name}-race-target"
+    outside.mkdir()
+    (outside / "jobs.json").write_text(cron_jobs.read_text(encoding="utf-8"), encoding="utf-8")
+    moved_dir = tmp_path / "cron-race-original"
+
+    original_open = verifier.os.open
+    swapped = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and kwargs.get("dir_fd") is not None and path == "cron-race":
+            swapped = True
+            cron_dir.rename(moved_dir)
+            cron_dir.symlink_to(outside, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(verifier.os, "open", racing_open)
+    failures = _messages(root, cron_path)
+
+    assert swapped
+    assert "cron" in failures.lower()
+    assert "symlink" in failures.lower() or "path component" in failures.lower()
