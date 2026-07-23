@@ -13748,6 +13748,8 @@ def _(rid, params: dict) -> dict:
 
 _TRANSACTION_MAX_ARGV_ENTRIES = 64
 _TRANSACTION_MAX_ARGV_BYTES = 64 * 1024
+_TRANSACTION_MAX_OUTPUT_CHARS = 16_384
+_TRANSACTION_OUTPUT_TRUNCATION_SUFFIX = "... [truncated]"
 
 
 @method("transaction.exec")
@@ -13815,17 +13817,33 @@ def _(rid, params: dict) -> dict:
             "transaction.exec: command failed (details withheld; run "
             "hades transaction in a terminal)",
         )
+    if payload.get("ok") is False:
+        return _err(
+            rid,
+            5044,
+            "transaction.exec: command failed (details withheld; run "
+            "hades transaction in a terminal)",
+        )
+    output = str(result.output or "")
+    if len(output) > _TRANSACTION_MAX_OUTPUT_CHARS:
+        output = (
+            output[:
+                _TRANSACTION_MAX_OUTPUT_CHARS
+                - len(_TRANSACTION_OUTPUT_TRUNCATION_SUFFIX)
+            ]
+            + _TRANSACTION_OUTPUT_TRUNCATION_SUFFIX
+        )
     response = {
         "ok": True,
         "action": str(payload.get("action") or argv[0].strip().lower()),
         "exit_code": result.exit_code,
-        "output": result.output,
+        "output": output,
     }
     for key in (
         "transaction", "transactions", "nodes", "preview", "preview_hash",
         "eligibility", "receipt", "observation", "status", "counts",
         "committed_nodes", "compensated_nodes", "blocked_node", "revision",
-        "rows", "error",
+        "rows",
     ):
         value = payload.get(key)
         if value is not None:
