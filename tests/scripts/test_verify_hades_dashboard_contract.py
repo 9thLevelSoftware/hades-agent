@@ -475,6 +475,7 @@ def test_cron_json_must_be_valid_and_jobs_a_list(tmp_path: Path) -> None:
     assert "json" in failures.lower()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="covered by Windows reparse-point tests")
 def test_external_cron_final_symlink_is_rejected(tmp_path: Path) -> None:
     root = _repo(tmp_path)
     real = _write_cron(tmp_path / "outside" / "jobs.json")
@@ -488,6 +489,7 @@ def test_external_cron_final_symlink_is_rejected(tmp_path: Path) -> None:
     assert "symlink" in failures.lower() or "no-follow" in failures.lower()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="covered by Windows reparse-point tests")
 def test_external_cron_intermediate_symlink_is_rejected(tmp_path: Path) -> None:
     root = _repo(tmp_path)
     real = _write_cron(tmp_path / "outside" / "jobs.json")
@@ -500,6 +502,7 @@ def test_external_cron_intermediate_symlink_is_rejected(tmp_path: Path) -> None:
     assert "symlink" in failures.lower() or "path component" in failures.lower()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="covered by Windows handle-race tests")
 def test_external_cron_intermediate_symlink_swap_is_rejected_before_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -531,6 +534,7 @@ def test_external_cron_intermediate_symlink_swap_is_rejected_before_read(
     assert "symlink" in failures.lower() or "path component" in failures.lower()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses Win32 handle safety primitives")
 def test_missing_descriptor_safety_primitives_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -544,6 +548,181 @@ def test_missing_descriptor_safety_primitives_fail_closed(
     assert "safety" in failures.lower()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
+def test_windows_cron_reader_accepts_regular_manifest(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    cron_jobs = _write_cron(tmp_path / "cron" / "jobs.json")
+
+    assert verify(root, cron_jobs, runner=FakeRunner()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
+def test_windows_cron_reader_rejects_directory_target(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    cron_jobs = tmp_path / "cron" / "jobs.json"
+    cron_jobs.mkdir(parents=True)
+
+    failures = _failures(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert "unsafe" in failures.lower() or "regular file" in failures.lower()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
+def test_windows_cron_reader_rejects_non_disk_device_target(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    device_target = tmp_path / "cron" / "NUL"
+    device_target.parent.mkdir()
+
+    failures = _failures(root, device_target)
+
+    assert "cron" in failures.lower()
+    assert "unsafe" in failures.lower() or "regular file" in failures.lower()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
+def test_windows_cron_reader_rejects_final_reparse_point(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    real = _write_cron(tmp_path / "outside" / "jobs.json")
+    linked = tmp_path / "cron" / "jobs.json"
+    linked.parent.mkdir()
+    try:
+        linked.symlink_to(real)
+    except OSError as exc:
+        pytest.skip(f"Windows host cannot create a reparse-point fixture: {exc}")
+
+    failures = _failures(root, linked)
+
+    assert "cron" in failures.lower()
+    assert "reparse" in failures.lower() or "safe" in failures.lower()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
+def test_windows_cron_reader_rejects_intermediate_reparse_point(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    real = _write_cron(tmp_path / "outside" / "jobs.json")
+    linked_dir = tmp_path / "cron"
+    try:
+        linked_dir.symlink_to(real.parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Windows host cannot create a reparse-point fixture: {exc}")
+
+    failures = _failures(root, linked_dir / real.name)
+
+    assert "cron" in failures.lower()
+    assert "reparse" in failures.lower() or "path component" in failures.lower()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
+def test_windows_cron_reader_holds_parent_handle_against_path_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cron_dir = tmp_path / "cron"
+    cron_jobs = _write_cron(cron_dir / "jobs.json")
+    original_text = cron_jobs.read_text(encoding="utf-8")
+    replacement_text = '{"jobs": [{"name": "replacement-content"}]}'
+    moved = tmp_path / "cron-moved"
+    original_open = verifier._windows_open_handle
+    replacement_attempted = False
+    replacement_installed = False
+    rename_blocked = False
+
+    def racing_open(path: Path, *, directory: bool) -> int:
+        nonlocal replacement_attempted, replacement_installed, rename_blocked
+        handle = original_open(path, directory=directory)
+        if directory and Path(path) == cron_dir and not replacement_attempted:
+            replacement_attempted = True
+            try:
+                cron_dir.rename(moved)
+            except PermissionError:
+                rename_blocked = True
+            else:
+                cron_dir.mkdir()
+                (cron_dir / "jobs.json").write_text(replacement_text, encoding="utf-8")
+                replacement_installed = True
+        return handle
+
+    monkeypatch.setattr(verifier, "_windows_open_handle", racing_open)
+
+    failures: list[str] = []
+    text = verifier._read_cron_text(cron_jobs, failures)
+
+    assert replacement_attempted
+    assert text != replacement_text
+    if rename_blocked:
+        assert not replacement_installed
+        assert text == original_text
+        assert failures == []
+    else:
+        assert replacement_installed
+        assert text is None
+        assert any("cron" in failure.lower() for failure in failures)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
+@pytest.mark.parametrize(
+    "contents",
+    [
+        pytest.param(b"", id="empty"),
+        pytest.param(b"\xff", id="invalid-utf8"),
+        pytest.param(b"x" * (2 * 1024 * 1024 + 1), id="oversized"),
+    ],
+)
+def test_windows_cron_reader_rejects_empty_invalid_or_oversized_content(
+    tmp_path: Path, contents: bytes
+) -> None:
+    root = _repo(tmp_path)
+    cron_jobs = tmp_path / "cron" / "jobs.json"
+    cron_jobs.parent.mkdir()
+    cron_jobs.write_bytes(contents)
+
+    failures = _failures(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert any(word in failures.lower() for word in ("empty", "utf-8", "large"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
+def test_windows_cron_reader_fails_closed_when_win32_apis_are_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path)
+    cron_jobs = _write_cron(tmp_path / "cron" / "jobs.json")
+    monkeypatch.setattr(verifier, "_windows_safety_available", lambda: False)
+
+    failures = _failures(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert "safety" in failures.lower()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle reader")
+def test_windows_cron_reader_fails_closed_when_retained_handle_close_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path)
+    cron_jobs = _write_cron(tmp_path / "cron" / "jobs.json")
+    original_close = verifier._windows_close_handle
+    close_failure_injected = False
+
+    def failing_close(handle: int) -> None:
+        nonlocal close_failure_injected
+        original_close(handle)
+        if not close_failure_injected:
+            close_failure_injected = True
+            raise OSError("forced CloseHandle failure")
+
+    monkeypatch.setattr(verifier, "_windows_close_handle", failing_close)
+
+    failures = _failures(root, cron_jobs)
+
+    assert close_failure_injected
+    assert "cron" in failures.lower()
+    assert "close" in failures.lower()
+    assert "safety" in failures.lower()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="FIFOs are POSIX-only")
 def test_external_cron_fifo_is_rejected_without_hanging(tmp_path: Path) -> None:
     root = _repo(tmp_path)
     fifo = tmp_path / "cron" / "jobs.json"
