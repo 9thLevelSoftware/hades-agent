@@ -1416,7 +1416,9 @@ def test_session_branch_uses_parent_profile_context_for_db_and_agent(server, mon
         "_make_agent",
         lambda _sid, key, session_id=None, session_db=None, **_kwargs: (
             pytest.fail("agent must build in profile context")
-            if not active_override or session_db is not dbs[0]
+            if not active_override
+            or session_db is not dbs[0]
+            or _kwargs.get("owns_session_db") is not True
             else types.SimpleNamespace(model="profile/model", session_id=session_id or key)
         ),
     )
@@ -1449,6 +1451,126 @@ def test_session_branch_uses_parent_profile_context_for_db_and_agent(server, mon
     assert init_calls[0][1]["profile_home"] == str(profile_home)
     assert init_calls[0][1]["cwd"] == str(workspace)
     assert active_override is False
+
+
+
+def test_reset_profile_builds_owned_agent_before_swapping_and_closes_old(
+    server, monkeypatch, tmp_path
+):
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    active = False
+    dbs = []
+    closed = []
+    context_calls = []
+
+    class _DB:
+        def __init__(self, *, db_path):
+            assert active
+            self.db_path = Path(db_path)
+            self.closed = False
+            dbs.append(self)
+
+        def close(self):
+            self.closed = True
+
+    old_agent = types.SimpleNamespace(
+        model="old/model", session_id="reset-key", close=lambda: closed.append("old")
+    )
+    new_agent = types.SimpleNamespace(model="new/model", session_id="reset-key")
+
+    def _set_home(home):
+        nonlocal active
+        assert Path(home) == profile_home
+        active = True
+        return "reset-token"
+
+    def _reset_home(token):
+        nonlocal active
+        assert token == "reset-token"
+        active = False
+
+    def _set_context(*args, **kwargs):
+        assert active
+        context_calls.append((args, kwargs))
+        return ["ctx"]
+
+    def _make_agent(*_args, **kwargs):
+        assert active
+        assert kwargs["owns_session_db"] is True
+        assert kwargs["session_db"] is dbs[0]
+        return new_agent
+
+    monkeypatch.setattr(server, "set_hermes_home_override", _set_home)
+    monkeypatch.setattr(server, "reset_hermes_home_override", _reset_home)
+    monkeypatch.setattr(server, "_set_session_context", _set_context)
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda *_args: None)
+    monkeypatch.setattr(server, "_start_notification_poller", lambda *_args, **_kwargs: threading.Event())
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "new/model"})
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_DB))
+
+    sid = "reset-profile"
+    session = {
+        "agent": old_agent,
+        "session_key": "reset-key",
+        "profile_home": str(profile_home),
+        "cwd": str(workspace),
+        "source": "telegram",
+        "history": [{"role": "user", "content": "old"}],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "_notif_stop": threading.Event(),
+        "slash_worker": None,
+        "model_override": {"model": "old/model"},
+    }
+    server._sessions[sid] = session
+    try:
+        info = server._reset_session_agent(sid, session)
+    finally:
+        server._sessions.pop(sid, None)
+
+    assert info["model"] == "new/model"
+    assert session["agent"] is new_agent
+    assert session["session_db"] is dbs[0]
+    assert context_calls == [
+        (("reset-key",), {"cwd": str(workspace), "source": "telegram"})
+    ]
+    assert closed == ["old"]
+    assert old_agent._end_session_on_close is False
+    assert active is False
+
+
+def test_finalize_ends_profile_agent_database_without_launch_lookup(server, monkeypatch):
+    calls = []
+
+    class _DB:
+        def get_session(self, session_id):
+            calls.append(("get", session_id))
+            return {"source": "tui"}
+
+        def end_session(self, session_id, reason):
+            calls.append(("end", session_id, reason))
+
+    agent = types.SimpleNamespace(session_id="profile-session", _session_db=_DB())
+    monkeypatch.setattr(server, "_get_db", lambda: pytest.fail("launch DB must not be used"))
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_release_active_session_slot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_session_source", lambda _session: "tui")
+
+    server._finalize_session(
+        {"agent": agent, "session_key": "profile-session", "history": []},
+        end_reason="reset",
+    )
+
+    assert calls == [("get", "profile-session"), ("end", "profile-session", "reset")]
 
 
 def test_persist_branch_seed_forwards_original_timestamps(server, monkeypatch):

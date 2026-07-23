@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -155,6 +156,155 @@ def test_compute_host_fallback_publishes_profile_and_cwd_together(monkeypatch, t
     finally:
         server._sessions.pop(sid, None)
         host.close()
+
+
+def test_compute_host_keeps_profile_context_through_agent_and_init(
+    monkeypatch, tmp_path
+):
+    from tui_gateway import server
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    active_override = False
+    context_calls = []
+    init_calls = []
+
+    class _SessionDB:
+        def __init__(self, *, db_path):
+            assert active_override
+            self.db_path = Path(db_path)
+
+    def _set_home(home):
+        nonlocal active_override
+        assert Path(home) == profile_home
+        active_override = True
+        return "profile-token"
+
+    def _reset_home(token):
+        nonlocal active_override
+        assert token == "profile-token"
+        active_override = False
+
+    def _set_context(*args, **kwargs):
+        assert active_override
+        context_calls.append((args, kwargs))
+        return ["context-token"]
+
+    def _make_agent(*_args, **kwargs):
+        assert active_override
+        assert kwargs["session_db"].db_path == profile_home / "state.db"
+        assert kwargs["owns_session_db"] is True
+        return types.SimpleNamespace(model="profile/model")
+
+    def _init_session(*args, **kwargs):
+        assert active_override
+        init_calls.append(kwargs)
+        server._sessions[args[0]] = {
+            "agent": args[2],
+            "session_key": args[1],
+            "history": list(args[3]),
+            "history_lock": threading.Lock(),
+            "cwd": kwargs["cwd"],
+            "profile_home": str(kwargs["profile_home"]),
+        }
+
+    monkeypatch.setattr(server, "set_hermes_home_override", _set_home)
+    monkeypatch.setattr(server, "reset_hermes_home_override", _reset_home)
+    monkeypatch.setattr(server, "_set_session_context", _set_context)
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
+    monkeypatch.setattr(server, "_init_session", _init_session)
+    monkeypatch.setitem(
+        sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_SessionDB)
+    )
+
+    host = ComputeHost(stdout=io.StringIO(), max_workers=1, heartbeat_secs=0)
+    sid = "profile-context-session"
+    try:
+        session = host._ensure_server_session(
+            server,
+            {
+                "sid": sid,
+                "session_key": "profile-key",
+                "profile_home": str(profile_home),
+                "cwd": str(workspace),
+                "source": "telegram",
+                "history": [],
+            },
+        )
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+    assert context_calls == [
+        (("profile-key",), {"cwd": str(workspace), "source": "telegram"})
+    ]
+    assert init_calls[0]["session_db"].db_path == profile_home / "state.db"
+    assert session["cwd"] == str(workspace)
+    assert session["profile_home"] == str(profile_home)
+    assert active_override is False
+
+
+def test_compute_host_discards_partial_init_side_machinery_before_fallback(
+    monkeypatch, tmp_path
+):
+    from tui_gateway import server
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    stop = threading.Event()
+    closed = []
+
+    class _Worker:
+        def close(self):
+            closed.append(True)
+
+    agent = types.SimpleNamespace(
+        model="profile/model", close=lambda: closed.append("agent")
+    )
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: agent)
+
+    def _partial_init(sid, key, built_agent, history, **kwargs):
+        server._sessions[sid] = {
+            "agent": built_agent,
+            "session_key": key,
+            "history": list(history),
+            "history_lock": threading.Lock(),
+            "_notif_stop": stop,
+            "slash_worker": _Worker(),
+            "cwd": kwargs["cwd"],
+            "profile_home": str(kwargs["profile_home"]),
+        }
+        raise RuntimeError("poller startup")
+
+    monkeypatch.setattr(server, "_init_session", _partial_init)
+    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+
+    host = ComputeHost(stdout=io.StringIO(), max_workers=1, heartbeat_secs=0)
+    sid = "partial-profile-session"
+    try:
+        session = host._ensure_server_session(
+            server,
+            {
+                "sid": sid,
+                "session_key": "partial-key",
+                "profile_home": str(profile_home),
+                "cwd": str(tmp_path),
+                "history": [],
+            },
+        )
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+    assert session["agent"] is agent
+    assert "_notif_stop" not in session
+    assert session["slash_worker"] is None
+    assert stop.is_set()
+    assert closed == [True]
 
 
 def test_compute_host_interrupt_control_is_not_queued_behind_turn():
