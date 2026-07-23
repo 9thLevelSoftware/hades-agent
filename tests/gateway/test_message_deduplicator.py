@@ -68,10 +68,49 @@ class TestMessageDeduplicatorTTL:
 
     def test_contains_expires_stale_message_without_refreshing_it(self):
         dedup = MessageDeduplicator(ttl_seconds=5)
+        assert dedup.is_duplicate("msg-1", token=object()) is False
         dedup._seen["msg-1"] = time.time() - 10
 
         assert dedup.contains("msg-1") is False
         assert "msg-1" not in dedup._seen
+        assert "msg-1" not in dedup._claim_tokens
+
+    def test_stale_claim_token_cannot_discard_newer_claim(self):
+        dedup = MessageDeduplicator(ttl_seconds=5)
+        stale_token = object()
+        current_token = object()
+
+        assert dedup.is_duplicate("msg-1", token=stale_token) is False
+        dedup._seen["msg-1"] = time.time() - 10
+        assert dedup.is_duplicate("msg-1", token=current_token) is False
+        assert dedup._claim_tokens["msg-1"] is current_token
+
+        dedup.discard("msg-1", token=stale_token)
+        assert dedup.contains("msg-1") is True
+
+        dedup.discard("msg-1", token=current_token)
+        assert dedup.contains("msg-1") is False
+
+    def test_legacy_discard_remains_unconditional_for_token_claim(self):
+        dedup = MessageDeduplicator(ttl_seconds=60)
+
+        assert dedup.is_duplicate("msg-1", token=object()) is False
+        dedup.discard("msg-1")
+
+        assert dedup.contains("msg-1") is False
+        assert "msg-1" not in dedup._claim_tokens
+
+    def test_clear_removes_claim_token_ownership(self):
+        dedup = MessageDeduplicator(ttl_seconds=60)
+        stale_token = object()
+
+        assert dedup.is_duplicate("msg-1", token=stale_token) is False
+        dedup.clear()
+        assert "msg-1" not in dedup._claim_tokens
+        assert dedup.is_duplicate("msg-1") is False
+
+        dedup.discard("msg-1", token=stale_token)
+        assert dedup.contains("msg-1") is True
 
     def test_max_size_eviction_prunes_expired(self):
         """Cache pruning on overflow removes expired entries."""
@@ -101,6 +140,18 @@ class TestMessageDeduplicatorTTL:
         assert "msg-1" not in dedup._seen
         assert "msg-2" in dedup._seen
         assert "msg-3" in dedup._seen
+
+    def test_max_size_eviction_removes_claim_token_ownership(self):
+        dedup = MessageDeduplicator(max_size=1, ttl_seconds=60)
+        evicted_token = object()
+
+        assert dedup.is_duplicate("evicted", token=evicted_token) is False
+        assert dedup.is_duplicate("current") is False
+        assert "evicted" not in dedup._claim_tokens
+        assert dedup.is_duplicate("evicted") is False
+
+        dedup.discard("evicted", token=evicted_token)
+        assert dedup.contains("evicted") is True
 
     def test_ttl_zero_means_no_dedup(self):
         """With TTL=0, all entries expire immediately."""

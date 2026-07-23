@@ -1290,14 +1290,10 @@ class DiscordAdapter(BasePlatformAdapter):
         message: Any,
         *,
         claim: bool,
+        claim_token: Any = None,
     ) -> tuple[bool, bool]:
         """Return ``(admitted, role_authorized)`` for one Discord event."""
         message_id = str(getattr(message, "id", ""))
-        if claim:
-            if self._dedup.is_duplicate(message_id):
-                return False, False
-        elif self._dedup.contains(message_id):
-            return False, False
         if message.author == self._client.user:
             return False, False
         if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
@@ -1357,6 +1353,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 if "*" not in free_channels and not (channel_keys & free_channels):
                     return False, False
 
+        if claim:
+            duplicate = (
+                self._dedup.is_duplicate(message_id, token=claim_token)
+                if claim_token is not None
+                else self._dedup.is_duplicate(message_id)
+            )
+            if duplicate:
+                return False, False
+        elif self._dedup.contains(message_id):
+            return False, False
         return True, role_authorized
 
     async def _dispatch_discord_message(self, message: Any) -> bool:
@@ -2107,11 +2113,9 @@ class DiscordAdapter(BasePlatformAdapter):
                     if admitted:
                         dispatched += 1
                 except asyncio.CancelledError:
-                    self._dedup.discard(message_id)
                     self._record_recovery_attempt(message, status="cancelled")
                     raise
                 except Exception as exc:
-                    self._dedup.discard(message_id)
                     self._record_recovery_attempt(message, status="failed", error=str(exc))
                     raise
                 if dispatched >= max_dispatches:
@@ -2172,16 +2176,24 @@ class DiscordAdapter(BasePlatformAdapter):
                 and not self._self_is_explicitly_mentioned(message)
             ):
                 return False
+        message_id = str(getattr(message, "id", ""))
+        claim_token = object()
         admitted, role_authorized = self._discord_message_admission(
-            message, claim=False,
+            message,
+            claim=True,
+            claim_token=claim_token,
         )
         if not admitted:
             return False
-        return await self._handle_message(
-            message,
-            role_authorized=role_authorized,
-            recovered=True,
-        )
+        try:
+            return await self._handle_message(
+                message,
+                role_authorized=role_authorized,
+                recovered=True,
+            )
+        except (asyncio.CancelledError, Exception):
+            self._dedup.discard(message_id, token=claim_token)
+            raise
 
     async def _iter_missed_message_backfill_candidates(self, channel_ids: set[str]):
         if not self._client:

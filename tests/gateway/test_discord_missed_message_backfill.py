@@ -289,33 +289,6 @@ async def test_recovery_aborts_when_durable_ledger_is_unavailable(adapter, monke
 
 
 @pytest.mark.asyncio
-async def test_recovery_releases_dedup_claim_when_dispatch_is_cancelled(adapter, monkeypatch):
-    message = make_message(message_id=97)
-    started = asyncio.Event()
-
-    async def cancelled_dispatch(_message):
-        adapter._dedup.is_duplicate(str(message.id))
-        started.set()
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(adapter, "_dispatch_recovered_message", cancelled_dispatch)
-    monkeypatch.setattr(adapter, "_should_backfill_discord_message", AsyncMock(return_value=True))
-    monkeypatch.setattr(adapter, "_missed_message_backfill_channels", lambda: {"123"})
-
-    async def candidates(_channels):
-        yield message
-
-    monkeypatch.setattr(adapter, "_iter_missed_message_backfill_candidates", candidates)
-    task = asyncio.create_task(adapter._run_missed_message_backfill())
-    await started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert adapter._dedup.contains(str(message.id)) is False
-
-
-@pytest.mark.asyncio
 async def test_repeated_ready_coalesces_instead_of_cancelling_active_recovery(adapter):
     started = asyncio.Event()
     release = asyncio.Event()
@@ -418,6 +391,226 @@ async def test_recovered_messages_bypass_live_text_debounce(adapter, monkeypatch
     assert await adapter._dispatch_recovered_message(message) is True
     adapter.handle_message.assert_awaited_once()
     assert adapter._pending_text_batches == {}
+
+
+@pytest.mark.asyncio
+async def test_recovery_admission_claim_suppresses_later_live_duplicate(adapter):
+    bot_user = adapter._client.user
+    message = make_message(
+        message_id=110,
+        content=f"<@{bot_user.id}> recover first",
+        mentions=[bot_user],
+    )
+
+    assert await adapter._dispatch_recovered_message(message) is True
+    assert await adapter._dispatch_discord_message(message) is False
+    adapter._handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recovery_preclaim_error_does_not_release_live_claim(adapter, monkeypatch):
+    bot_user = adapter._client.user
+    message = make_message(
+        message_id=117,
+        content=f"<@{bot_user.id}> live owns this claim",
+        mentions=[bot_user],
+    )
+    eligibility_started = asyncio.Event()
+    resume_recovery = asyncio.Event()
+    policy_calls = 0
+
+    async def blocked_eligibility(_message):
+        eligibility_started.set()
+        await resume_recovery.wait()
+        return True
+
+    def shared_policy(*_args, **_kwargs):
+        nonlocal policy_calls
+        policy_calls += 1
+        if policy_calls == 1:
+            return True
+        raise RuntimeError("recovery policy failed before claim")
+
+    async def candidates(_channels):
+        yield message
+
+    monkeypatch.setattr(adapter, "_should_backfill_discord_message", blocked_eligibility)
+    monkeypatch.setattr(adapter, "_is_allowed_user", shared_policy)
+    monkeypatch.setattr(adapter, "_missed_message_backfill_channels", lambda: {"123"})
+    monkeypatch.setattr(adapter, "_iter_missed_message_backfill_candidates", candidates)
+
+    recovery_task = asyncio.create_task(adapter._run_missed_message_backfill())
+    await eligibility_started.wait()
+    try:
+        assert await adapter._dispatch_discord_message(message) is True
+        assert adapter._dedup.contains(str(message.id)) is True
+    finally:
+        resume_recovery.set()
+        await recovery_task
+
+    assert adapter._dedup.contains(str(message.id)) is True
+
+
+@pytest.mark.asyncio
+async def test_live_admission_claim_suppresses_later_recovery_duplicate(adapter):
+    bot_user = adapter._client.user
+    message = make_message(
+        message_id=111,
+        content=f"<@{bot_user.id}> live first",
+        mentions=[bot_user],
+    )
+
+    assert await adapter._dispatch_discord_message(message) is True
+    assert await adapter._dispatch_recovered_message(message) is False
+    adapter._handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_mode", ["error", "cancel"])
+async def test_stale_recovery_release_preserves_newer_live_claim(
+    adapter, monkeypatch, exit_mode,
+):
+    bot_user = adapter._client.user
+    message = make_message(
+        message_id=118,
+        content=f"<@{bot_user.id}> replace stale recovery",
+        mentions=[bot_user],
+    )
+    recovery_started = asyncio.Event()
+    fail_recovery = asyncio.Event()
+    clock = [100.0]
+
+    async def handler(*_args, recovered=False, **_kwargs):
+        if not recovered:
+            return True
+        recovery_started.set()
+        await fail_recovery.wait()
+        raise RuntimeError("stale recovery failed")
+
+    adapter._handle_message = handler
+    adapter._dedup._ttl = 5
+    monkeypatch.setattr("gateway.platforms.helpers.time.time", lambda: clock[0])
+
+    stale_recovery = asyncio.create_task(adapter._dispatch_recovered_message(message))
+    await recovery_started.wait()
+    try:
+        clock[0] += 10
+        assert await adapter._dispatch_discord_message(message) is True
+        assert adapter._dedup.contains(str(message.id)) is True
+
+        if exit_mode == "cancel":
+            stale_recovery.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await stale_recovery
+        else:
+            fail_recovery.set()
+            with pytest.raises(RuntimeError, match="stale recovery failed"):
+                await stale_recovery
+    finally:
+        if not stale_recovery.done():
+            stale_recovery.cancel()
+            try:
+                await stale_recovery
+            except asyncio.CancelledError:
+                pass
+
+    assert adapter._dedup.contains(str(message.id)) is True
+
+
+@pytest.mark.asyncio
+async def test_recovery_releases_claim_after_real_handler_cancellation(adapter, monkeypatch):
+    bot_user = adapter._client.user
+    message = make_message(
+        message_id=112,
+        content=f"<@{bot_user.id}> cancel recovery",
+        mentions=[bot_user],
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_handler(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+
+    adapter._handle_message = blocking_handler
+    monkeypatch.setattr(adapter, "_should_backfill_discord_message", AsyncMock(return_value=True))
+    monkeypatch.setattr(adapter, "_missed_message_backfill_channels", lambda: {"123"})
+
+    async def candidates(_channels):
+        yield message
+
+    monkeypatch.setattr(adapter, "_iter_missed_message_backfill_candidates", candidates)
+    task = asyncio.create_task(adapter._run_missed_message_backfill())
+    await started.wait()
+    try:
+        assert adapter._dedup.contains(str(message.id)) is True
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert adapter._dedup.contains(str(message.id)) is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_releases_claim_after_real_handler_error(adapter, monkeypatch):
+    bot_user = adapter._client.user
+    message = make_message(
+        message_id=113,
+        content=f"<@{bot_user.id}> fail recovery",
+        mentions=[bot_user],
+    )
+
+    async def failing_handler(*_args, **_kwargs):
+        raise RuntimeError("handler failed")
+
+    adapter._handle_message = failing_handler
+    monkeypatch.setattr(adapter, "_should_backfill_discord_message", AsyncMock(return_value=True))
+    monkeypatch.setattr(adapter, "_missed_message_backfill_channels", lambda: {"123"})
+
+    async def candidates(_channels):
+        yield message
+
+    monkeypatch.setattr(adapter, "_iter_missed_message_backfill_candidates", candidates)
+
+    await adapter._run_missed_message_backfill()
+
+    assert adapter._dedup.contains(str(message.id)) is False
+
+
+@pytest.mark.asyncio
+async def test_live_and_recovery_policy_rejection_do_not_claim_messages(adapter, monkeypatch):
+    live_message = make_message(message_id=114)
+    bot_user = adapter._client.user
+    recovered_message = make_message(
+        message_id=116,
+        content=f"<@{bot_user.id}> reject recovery",
+        mentions=[bot_user],
+    )
+    monkeypatch.setattr(adapter, "_is_allowed_user", lambda *_args, **_kwargs: False)
+
+    assert await adapter._dispatch_discord_message(live_message) is False
+    assert await adapter._dispatch_recovered_message(recovered_message) is False
+    assert adapter._dedup.contains(str(live_message.id)) is False
+    assert adapter._dedup.contains(str(recovered_message.id)) is False
+
+
+@pytest.mark.asyncio
+async def test_recovered_handler_false_result_retains_dedup_claim(adapter):
+    bot_user = adapter._client.user
+    message = make_message(
+        message_id=115,
+        content=f"<@{bot_user.id}> false result",
+        mentions=[bot_user],
+    )
+    adapter._handle_message = AsyncMock(return_value=False)
+
+    assert await adapter._dispatch_recovered_message(message) is False
+    assert adapter._dedup.contains(str(message.id)) is True
 
 
 def test_missed_message_backfill_config_bridge(monkeypatch, tmp_path):
