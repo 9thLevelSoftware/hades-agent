@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import errno
 import json
 import os
 import re
 import stat
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -27,6 +27,8 @@ _MAX_SERVER_BYTES = 1024 * 1024
 _MAX_TYPES_BYTES = 256 * 1024
 _MAX_TEST_BYTES = 512 * 1024
 _MAX_CRON_BYTES = 2 * 1024 * 1024
+
+_ORIGINAL_OS_OPEN = os.open
 
 _INTEGRATION_JOB_NAME = "hades-fork-integration"
 _INTEGRATION_HEADING = "## Integration Manifest + Handler Verification"
@@ -152,6 +154,50 @@ def _path_label(path: Path, repo_root: Path) -> str:
         return str(path)
 
 
+def _dirfd_safety_available() -> bool:
+    """Return whether confined no-follow directory walks are supported."""
+    try:
+        return (
+            _ORIGINAL_OS_OPEN in getattr(os, "supports_dir_fd", set())
+            and isinstance(getattr(os, "O_NOFOLLOW", None), int)
+            and os.O_NOFOLLOW != 0
+            and isinstance(getattr(os, "O_DIRECTORY", None), int)
+            and os.O_DIRECTORY != 0
+        )
+    except (AttributeError, TypeError):
+        return False
+
+
+def _open_repo_root_fd(repo_root: Path, failures: list[str]) -> int | None:
+    """Open the canonical repository root once for descriptor-relative walks."""
+    if not _dirfd_safety_available():
+        failures.append(
+            "repo: refusing confined asset reads; required dir_fd/O_NOFOLLOW/O_DIRECTORY "
+            "safety primitives are unavailable"
+        )
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW | os.O_DIRECTORY
+    fd: int | None = None
+    try:
+        fd = os.open(repo_root, flags)
+        root_stat = os.fstat(fd)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            failures.append("repo: refusing symlink/no-follow repository root")
+        else:
+            failures.append(
+                f"repo: cannot open repository root {repo_root}: {exc.strerror or exc}"
+            )
+        if fd is not None:
+            os.close(fd)
+        return None
+    if not stat.S_ISDIR(root_stat.st_mode):
+        os.close(fd)
+        failures.append(f"repo: repository root is not a directory {repo_root}")
+        return None
+    return fd
+
+
 def _read_text(
     path: Path,
     *,
@@ -160,12 +206,28 @@ def _read_text(
     failures: list[str],
     max_bytes: int,
     confine_to_repo: bool = True,
+    repo_fd: int | None = None,
 ) -> str | None:
     """Read a bounded UTF-8 source file and report expected failures."""
     label = _path_label(path, repo_root)
     fd: int | None = None
+    directory_fds: list[int] = []
+    text: str | None = None
     try:
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if not isinstance(nofollow, int) or nofollow == 0:
+            failures.append(
+                f"{category}: refusing read of {label}; required O_NOFOLLOW safety primitive is unavailable"
+            )
+            return None
+
         if confine_to_repo:
+            if repo_fd is None or not _dirfd_safety_available():
+                failures.append(
+                    f"{category}: refusing confined read of {label}; required dir_fd/O_NOFOLLOW/O_DIRECTORY "
+                    "safety primitives are unavailable"
+                )
+                return None
             try:
                 relative = path.relative_to(repo_root)
             except ValueError:
@@ -173,64 +235,80 @@ def _read_text(
                     f"{category}: path is outside repository root {label}"
                 )
                 return None
-            current = repo_root
-            for component in relative.parts:
-                current /= component
+
+            if not relative.parts or any(
+                component in {"", ".", ".."} for component in relative.parts
+            ):
+                failures.append(
+                    f"{category}: refusing unsafe relative path component in {label}"
+                )
+                return None
+            parent_fd = repo_fd
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | os.O_NOFOLLOW
+                | os.O_DIRECTORY
+            )
+            for component in relative.parts[:-1]:
                 try:
-                    mode = current.lstat().st_mode
+                    child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
                 except FileNotFoundError:
                     failures.append(f"{category}: missing file {label}")
                     return None
                 except OSError as exc:
+                    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        failures.append(
+                            f"{category}: refusing non-directory or symlink/no-follow path component {label}"
+                        )
+                    else:
+                        failures.append(
+                            f"{category}: cannot open path component {label}: "
+                            f"{exc.strerror or exc}"
+                        )
+                    return None
+                directory_fds.append(child_fd)
+                component_stat = os.fstat(child_fd)
+                if not stat.S_ISDIR(component_stat.st_mode):
                     failures.append(
-                        f"{category}: cannot inspect {label}: {exc.strerror or exc}"
+                        f"{category}: refusing non-directory path component {label}"
                     )
                     return None
-                if stat.S_ISLNK(mode):
-                    failures.append(
-                        f"{category}: refusing symlink path component {label}; "
-                        "repository assets must remain beneath the repository root"
-                    )
-                    return None
+                parent_fd = child_fd
+            final_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
             try:
-                resolved = path.resolve(strict=True)
-                resolved.relative_to(repo_root)
-            except (FileNotFoundError, RuntimeError):
+                fd = os.open(relative.parts[-1], final_flags, dir_fd=parent_fd)
+            except FileNotFoundError:
                 failures.append(f"{category}: missing file {label}")
                 return None
-            except ValueError:
-                failures.append(
-                    f"{category}: refusing path outside repository root {label}"
-                )
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    failures.append(
+                        f"{category}: refusing symlink/no-follow file {label}"
+                    )
+                else:
+                    failures.append(
+                        f"{category}: cannot open {label}: {exc.strerror or exc}"
+                    )
+                return None
+        else:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+            try:
+                fd = os.open(path, flags)
+            except FileNotFoundError:
+                failures.append(f"{category}: missing file {label}")
                 return None
             except OSError as exc:
-                failures.append(
-                    f"{category}: cannot resolve {label}: {exc.strerror or exc}"
-                )
+                if exc.errno == errno.ELOOP:
+                    failures.append(
+                        f"{category}: refusing symlink/no-follow file {label}"
+                    )
+                else:
+                    failures.append(
+                        f"{category}: cannot open {label}: {exc.strerror or exc}"
+                    )
                 return None
 
-        try:
-            path_stat = path.lstat()
-        except FileNotFoundError:
-            failures.append(f"{category}: missing file {label}")
-            return None
-        except OSError as exc:
-            failures.append(
-                f"{category}: cannot inspect {label}: {exc.strerror or exc}"
-            )
-            return None
-        if stat.S_ISLNK(path_stat.st_mode):
-            failures.append(
-                f"{category}: refusing symlink file {label}; no-follow reads are required"
-            )
-            return None
-        if not stat.S_ISREG(path_stat.st_mode):
-            failures.append(f"{category}: expected file but found non-file {label}")
-            return None
-        flags = os.O_RDONLY
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
         descriptor_stat = os.fstat(fd)
         if not stat.S_ISREG(descriptor_stat.st_mode):
             failures.append(f"{category}: expected regular file {label}")
@@ -271,6 +349,8 @@ def _read_text(
     finally:
         if fd is not None:
             os.close(fd)
+        for directory_fd in reversed(directory_fds):
+            os.close(directory_fd)
     if not text.strip():
         failures.append(f"{category}: empty file {label}")
         return None
@@ -282,34 +362,73 @@ def _api_object(text: str) -> str | None:
     declaration = re.search(r"\bexport\s+const\s+api\s*=\s*\{", text)
     if declaration is None:
         return None
-    body_start = declaration.end()
-    closing = re.search(r"(?m)^[ \t]*\};[ \t]*$", text[body_start:])
-    if closing is None:
-        return None
-    return text[body_start : body_start + closing.start()]
+    object_start = declaration.end() - 1
+    object_end = _skip_ts_balanced_group(text, object_start)
+    if object_end is None:
+        # Preserve a bounded body for method-level diagnostics when an inner
+        # call is malformed.  If there is no syntactic object terminator at
+        # all, fail closed as an unterminated exported object.
+        closing = re.search(r"(?m)^[ \t]*\};[ \t]*$", text[object_start + 1 :])
+        if closing is None:
+            return None
+        return text[object_start + 1 : object_start + 1 + closing.start()]
+    return text[object_start + 1 : object_end - 1]
 
 
 def _api_properties(body: str) -> dict[str, list[tuple[int, int]]]:
-    """Index top-level object properties using indentation, not a TS parser."""
-    candidates = list(
-        re.finditer(
-            r"(?m)^(?P<indent>[ \t]+)(?P<name>[A-Za-z_$][\w$]*)\s*:",
-            body,
-        )
-    )
-    if not candidates:
-        return {}
-    indent_widths = [len(match.group("indent").expandtabs(4)) for match in candidates]
-    top_width = min(indent_widths)
-    top = [
-        match
-        for match in candidates
-        if len(match.group("indent").expandtabs(4)) == top_width
-    ]
+    """Index only lexical-depth-zero identifier properties in an API object."""
+    candidates: list[tuple[str, int]] = []
+    stack: list[str] = []
+    closing_for = {"(": ")", "[": "]", "{": "}"}
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char in ("'", '"'):
+            end = _skip_ts_quoted(body, index, char)
+            if end is None:
+                raise ValueError("unterminated quoted string while indexing api object")
+            index = end
+            continue
+        if char == "`":
+            end = _skip_ts_template(body, index)
+            if end is None:
+                raise ValueError("unterminated template literal while indexing api object")
+            index = end
+            continue
+        if char == "/" and index + 1 < len(body) and body[index + 1] in "/*":
+            end = _skip_ts_comment(body, index)
+            if end is None:
+                raise ValueError("unterminated comment while indexing api object")
+            index = end
+            continue
+        if char in "([{":
+            stack.append(char)
+            index += 1
+            continue
+        if char in ")]}":
+            if not stack or closing_for[stack[-1]] != char:
+                # Keep already-indexed top-level properties so the caller can
+                # report which method contains the malformed expression.
+                break
+            stack.pop()
+            index += 1
+            continue
+        if not stack and (char.isalpha() or char in "_$"):
+            end = index + 1
+            while end < len(body) and (body[end].isalnum() or body[end] in "_$"):
+                end += 1
+            cursor = end
+            while cursor < len(body) and body[cursor].isspace():
+                cursor += 1
+            if cursor < len(body) and body[cursor] == ":":
+                candidates.append((body[index:end], index))
+            index = end
+            continue
+        index += 1
     properties: dict[str, list[tuple[int, int]]] = {}
-    for index, match in enumerate(top):
-        end = top[index + 1].start() if index + 1 < len(top) else len(body)
-        properties.setdefault(match.group("name"), []).append((match.start(), end))
+    for candidate_index, (name, start) in enumerate(candidates):
+        end = candidates[candidate_index + 1][1] if candidate_index + 1 < len(candidates) else len(body)
+        properties.setdefault(name, []).append((start, end))
     return properties
 
 
@@ -563,6 +682,57 @@ class _TransportCall:
     helper: str
     arguments: tuple[str, ...]
     direct: bool
+    nested_transport: bool = False
+
+
+def _contains_direct_transport_token(text: str) -> bool:
+    """Find a direct transport token without parsing its call arguments."""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in ("'", '"'):
+            end = _skip_ts_quoted(text, index, char)
+            if end is None:
+                return False
+            index = end
+            continue
+        if char == "`":
+            end = _skip_ts_template(text, index)
+            if end is None:
+                return False
+            index = end
+            continue
+        if char == "/" and index + 1 < len(text) and text[index + 1] in "/*":
+            end = _skip_ts_comment(text, index)
+            if end is None:
+                return False
+            index = end
+            continue
+        if char.isalpha() or char in "_$":
+            end = index + 1
+            while end < len(text) and (text[end].isalnum() or text[end] in "_$"):
+                end += 1
+            word = text[index:end]
+            if word in {"fetchJSON", "apiGet"}:
+                previous = index - 1
+                while previous >= 0 and text[previous].isspace():
+                    previous -= 1
+                if previous < 0 or text[previous] != ".":
+                    cursor = end
+                    while cursor < len(text) and text[cursor].isspace():
+                        cursor += 1
+                    if cursor < len(text) and text[cursor] == "<":
+                        cursor = _skip_ts_type_arguments(text, cursor)
+                        if cursor is None:
+                            return True
+                        while cursor < len(text) and text[cursor].isspace():
+                            cursor += 1
+                    if cursor < len(text) and text[cursor] == "(":
+                        return True
+            index = end
+            continue
+        index += 1
+    return False
 
 
 def _transport_calls(text: str) -> tuple[list[_TransportCall], bool]:
@@ -597,6 +767,10 @@ def _transport_calls(text: str) -> tuple[list[_TransportCall], bool]:
             if word == "function":
                 function_seen = True
             if word in {"fetchJSON", "apiGet"}:
+                previous = index - 1
+                while previous >= 0 and text[previous].isspace():
+                    previous -= 1
+                qualified = previous >= 0 and text[previous] == "."
                 cursor = end
                 while cursor < len(text) and text[cursor].isspace():
                     cursor += 1
@@ -610,13 +784,28 @@ def _transport_calls(text: str) -> tuple[list[_TransportCall], bool]:
                     arguments = _extract_call_arguments(text, cursor)
                     if arguments is None:
                         return calls, True
+                    call_end = _skip_ts_balanced_group(text, cursor)
+                    if call_end is None:
+                        return calls, True
+                    nested_transport = _contains_direct_transport_token(
+                        text[cursor + 1 : call_end - 1]
+                    )
                     calls.append(
                         _TransportCall(
                             word,
                             arguments,
-                            direct=arrow_count <= 1 and not function_seen,
+                            direct=(
+                                not qualified
+                                and arrow_count <= 1
+                                and not function_seen
+                            ),
+                            nested_transport=nested_transport,
                         )
                     )
+                    # The argument parser has already consumed the balanced
+                    # span.  Do not rescan each nested transport token.
+                    index = call_end
+                    continue
             index = end
             continue
         index += 1
@@ -738,23 +927,12 @@ def _inspect_options(options: str) -> tuple[str | None, str | None]:
     return method_values[0], None
 
 
-def _options_method(options: str) -> str | None:
-    """Return a valid live top-level ``method`` property, if any."""
-    method, _reason = _inspect_options(options)
-    return method
-
-
 def _get_call_is_valid(call: _TransportCall) -> bool:
     """GET contracts accept exactly the route argument and nothing else."""
     return len(call.arguments) == 1
 
 
-def _post_call_is_valid(call: _TransportCall) -> bool:
-    """POST requires exactly two arguments and a literal POST options field."""
-    return len(call.arguments) == 2 and _options_method(call.arguments[1]) == "POST"
-
-
-def _check_api(repo_root: Path, failures: list[str]) -> None:
+def _check_api(repo_root: Path, failures: list[str], repo_fd: int) -> None:
     path = repo_root / "web/src/lib/api.ts"
     text = _read_text(
         path,
@@ -762,6 +940,7 @@ def _check_api(repo_root: Path, failures: list[str]) -> None:
         category="api",
         failures=failures,
         max_bytes=_MAX_API_BYTES,
+        repo_fd=repo_fd,
     )
     if text is None:
         return
@@ -769,7 +948,11 @@ def _check_api(repo_root: Path, failures: list[str]) -> None:
     if body is None:
         failures.append("api: missing or unterminated `export const api = { ... }` object")
         return
-    properties = _api_properties(body)
+    try:
+        properties = _api_properties(body)
+    except ValueError as exc:
+        failures.append(f"api: exported api object is malformed or unbalanced: {exc}")
+        return
     if not properties:
         failures.append("api: exported api object has no inspectable method properties")
         return
@@ -804,6 +987,12 @@ def _check_api(repo_root: Path, failures: list[str]) -> None:
             )
             continue
         call = calls[0]
+        if call.nested_transport:
+            failures.append(
+                f"api: method {contract.name} transport call contains a nested direct "
+                "fetchJSON/apiGet call; nested or multiple transport calls are not allowed"
+            )
+            continue
         if not call.direct:
             failures.append(
                 f"api: method {contract.name} transport call must be direct to the "
@@ -839,7 +1028,7 @@ def _check_api(repo_root: Path, failures: list[str]) -> None:
                 )
 
 
-def _check_rpc_tests(repo_root: Path, failures: list[str]) -> None:
+def _check_rpc_tests(repo_root: Path, failures: list[str], repo_fd: int) -> None:
     for relative, description in _REQUIRED_RPC_TESTS:
         _read_text(
             repo_root / relative,
@@ -847,6 +1036,7 @@ def _check_rpc_tests(repo_root: Path, failures: list[str]) -> None:
             category=f"rpc-tests ({description})",
             failures=failures,
             max_bytes=_MAX_TEST_BYTES,
+            repo_fd=repo_fd,
         )
 
 
@@ -917,7 +1107,7 @@ def _static_string_values(node: ast.AST | None) -> tuple[list[str] | None, str |
     return None, f"unsupported expression {type(node).__name__}"
 
 
-def _check_server(repo_root: Path, failures: list[str]) -> None:
+def _check_server(repo_root: Path, failures: list[str], repo_fd: int) -> None:
     path = repo_root / "tui_gateway/server.py"
     text = _read_text(
         path,
@@ -925,6 +1115,7 @@ def _check_server(repo_root: Path, failures: list[str]) -> None:
         category="server",
         failures=failures,
         max_bytes=_MAX_SERVER_BYTES,
+        repo_fd=repo_fd,
     )
     if text is None:
         return
@@ -1025,7 +1216,7 @@ def _mask_ts_comments_and_strings(text: str) -> str:
     return "".join(chars)
 
 
-def _check_response_exports(repo_root: Path, failures: list[str]) -> None:
+def _check_response_exports(repo_root: Path, failures: list[str], repo_fd: int) -> None:
     path = repo_root / "ui-tui/src/gatewayTypes.ts"
     text = _read_text(
         path,
@@ -1033,6 +1224,7 @@ def _check_response_exports(repo_root: Path, failures: list[str]) -> None:
         category="types",
         failures=failures,
         max_bytes=_MAX_TYPES_BYTES,
+        repo_fd=repo_fd,
     )
     if text is None:
         return
@@ -1048,32 +1240,101 @@ def _check_response_exports(repo_root: Path, failures: list[str]) -> None:
             )
 
 
-def _shell_fenced_commands(prompt: str) -> list[tuple[int, str]]:
-    """Return executable lines from bash/sh/shell Markdown fences."""
-    commands: list[tuple[int, str]] = []
+@dataclass(frozen=True)
+class _ShellCommand:
+    line_number: int
+    text: str
+    block_id: int
+    conditional_depth: int
+
+
+_HEREDOC_RE = re.compile(
+    r"<<(?P<strip>-?)[ \t]*(?P<quote>['\"]?)(?P<delimiter>[^\s'\";|&]+)(?P=quote)"
+)
+
+
+def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
+    """Return shell heredoc delimiters declared on one command line."""
+    return [
+        (match.group("delimiter"), bool(match.group("strip")))
+        for match in _HEREDOC_RE.finditer(line)
+    ]
+
+
+def _conditional_depth_delta(line: str) -> int:
+    """Approximate shell ``if ... then``/``fi`` structure conservatively."""
+    stripped = line.strip()
+    delta = 0
+    if re.match(r"^fi(?:\s|$)", stripped):
+        delta -= 1
+    if re.search(r"\bthen\s*(?:#.*)?$", stripped) or re.search(
+        r"\bthen\s*;", stripped
+    ):
+        delta += len(re.findall(r"\bif\b", stripped))
+    return delta
+
+
+def _shell_fenced_commands(prompt: str) -> list[_ShellCommand]:
+    """Return executable shell lines, excluding comments and heredoc data."""
+    commands: list[_ShellCommand] = []
     lines = prompt.splitlines()
     in_block = False
     shell_block = False
+    block_id = -1
+    pending_heredocs: list[tuple[str, bool]] = []
+    conditional_depth = 0
     for line_number, line in enumerate(lines):
         if not in_block:
             opening = re.match(r"^[ \t]*```(?P<language>[A-Za-z0-9_-]*)[ \t]*$", line)
             if opening is not None:
                 in_block = True
+                block_id += 1
                 shell_block = opening.group("language").lower() in _CRON_SHELL_LANGUAGES
+                pending_heredocs = []
+                conditional_depth = 0
+            continue
+        if pending_heredocs:
+            delimiter, strip_tabs = pending_heredocs[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                pending_heredocs.pop(0)
             continue
         if line.strip() == "```":
             in_block = False
             shell_block = False
             continue
         stripped = line.strip()
-        if shell_block and stripped and not stripped.startswith("#"):
-            commands.append((line_number, stripped))
+        if not shell_block or not stripped or stripped.startswith("#"):
+            continue
+        commands.append(
+            _ShellCommand(line_number, stripped, block_id, conditional_depth)
+        )
+        pending_heredocs.extend(_heredoc_delimiters(stripped))
+        conditional_depth = max(0, conditional_depth + _conditional_depth_delta(stripped))
     return commands
+
+
+def _is_script_command(line: str, script: str) -> bool:
+    """Recognize an executable script command with optional arguments."""
+    return bool(re.fullmatch(rf"{re.escape(script)}(?:[ \t]+.*)?", line))
 
 
 def _is_post_sync_command(line: str) -> bool:
     """Recognize an executable post-sync command, not prose or comments."""
-    return _POST_SYNC_MARKER in line and not line.lstrip().startswith("#")
+    return _is_script_command(
+        line, f"./venv/bin/python3 {_POST_SYNC_MARKER}"
+    )
+
+
+def _is_unconditional_terminator(command: _ShellCommand) -> bool:
+    """Recognize a standalone exit/return that would bypass verification."""
+    if command.conditional_depth:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(?:exit|return)(?:[ \t]+[0-9]+)?(?:[ \t]+#.*)?", command.text
+        )
+    )
 
 
 def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
@@ -1153,41 +1414,61 @@ def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
         )
 
     shell_commands = _shell_fenced_commands(prompt)
-    command_positions = [
-        line_number
-        for line_number, line in shell_commands
-        if line == _INTEGRATION_COMMAND
+    verifier_commands = [
+        command
+        for command in shell_commands
+        if _is_script_command(command.text, _INTEGRATION_COMMAND)
     ]
     verifier_line: int | None = None
-    for index in range(len(shell_commands) - 1):
-        current_line, current_command = shell_commands[index]
-        next_line, next_command = shell_commands[index + 1]
-        if (
-            next_line == current_line + 1
-            and current_command == "cd ~/.hermes/hermes-agent"
-            and next_command == _INTEGRATION_COMMAND
-        ):
-            verifier_line = next_line
-            break
+    selected_verifier: _ShellCommand | None = None
+    for verifier in verifier_commands:
+        preceding_cd = [
+            command
+            for command in shell_commands
+            if command.block_id == verifier.block_id
+            and command.line_number < verifier.line_number
+            and command.text == "cd ~/.hermes/hermes-agent"
+        ]
+        if not preceding_cd:
+            continue
+        cd = max(preceding_cd, key=lambda command: command.line_number)
+        terminators = [
+            command
+            for command in shell_commands
+            if command.block_id == verifier.block_id
+            and cd.line_number < command.line_number < verifier.line_number
+            and _is_unconditional_terminator(command)
+        ]
+        if terminators:
+            failures.append(
+                "cron: hades-fork-integration prompt contains an unconditional exit/return "
+                "between the required repo cd and verifier command"
+            )
+            continue
+        verifier_line = verifier.line_number
+        selected_verifier = verifier
+        break
     if verifier_line is None:
         failures.append(
-            "cron: hades-fork-integration prompt must contain consecutive executable lines "
-            "`cd ~/.hermes/hermes-agent` then the exact verifier command in a bash/sh/shell fenced block"
+            "cron: hades-fork-integration prompt must contain an exact executable verifier "
+            "command after a prior exact `cd ~/.hermes/hermes-agent` in the same bash/sh/shell fenced block"
         )
-    elif not command_positions:
+    elif selected_verifier is None:
         failures.append(
             "cron: hades-fork-integration prompt is missing exact verifier command "
             f"{_INTEGRATION_COMMAND!r} in a shell fenced block"
         )
 
     post_sync_positions = [
-        line_number for line_number, line in shell_commands if _is_post_sync_command(line)
+        command.line_number
+        for command in shell_commands
+        if _is_post_sync_command(command.text)
     ]
     if not post_sync_positions:
         failures.append(
             "cron: hades-fork-integration prompt is missing the post-sync-verify.py anchor"
         )
-    elif command_positions and min(command_positions) > min(post_sync_positions):
+    elif verifier_line is not None and min(post_sync_positions) <= verifier_line:
         failures.append(
             "cron: verifier command must appear before the first post-sync-verify.py command"
         )
@@ -1212,11 +1493,17 @@ def verify(repo_root: Path, cron_jobs: Path) -> list[str]:
     if not canonical_root.is_dir():
         return [f"repo: repository root is not a directory {repo_root}"]
 
-    _check_api(canonical_root, failures)
-    _check_rpc_tests(canonical_root, failures)
-    _check_server(canonical_root, failures)
-    _check_response_exports(canonical_root, failures)
-    _check_cron(canonical_root, cron_jobs, failures)
+    repo_fd = _open_repo_root_fd(canonical_root, failures)
+    if repo_fd is None:
+        return failures
+    try:
+        _check_api(canonical_root, failures, repo_fd)
+        _check_rpc_tests(canonical_root, failures, repo_fd)
+        _check_server(canonical_root, failures, repo_fd)
+        _check_response_exports(canonical_root, failures, repo_fd)
+        _check_cron(canonical_root, cron_jobs, failures)
+    finally:
+        os.close(repo_fd)
     return failures
 
 
