@@ -1,11 +1,11 @@
-"""Tests for uv-tool install detection in the update path (issue #29700).
+"""Tests for managed-tool install detection in the update path (issue #29700).
 
 ``uv tool install hades-agent`` lives outside any venv, so the previous
 ``uv pip install --upgrade`` update path failed with ``No virtual
 environment found``. Detection must also retain the installed distribution
 identity: canonical Hades tools can be upgraded in place, while a legacy
 Hermes-named tool must be migrated with a forced Hades install because
-``uv tool upgrade hades-agent`` only accepts an already-installed tool name.
+managed-tool upgrade commands only accept an already-installed tool name.
 
 Detection is restricted to properties of the running interpreter
 (``sys.prefix`` / ``sys.executable``) so a pip/venv install on a machine
@@ -132,6 +132,37 @@ class TestIsUvToolInstall:
             assert config.is_uv_tool_install() is False
 
 
+class TestPipxInstallDistribution:
+    @pytest.mark.parametrize(
+        ("prefix", "expected"),
+        [
+            (
+                "/home/user/.local/pipx/venvs/hades-agent",
+                "hades-agent",
+            ),
+            (
+                r"C:\Users\example\AppData\Local\PIPX\VENVS\HERMES-AGENT\Scripts",
+                "hermes-agent",
+            ),
+            (
+                "/data/data/com.termux/files/home/.local/pipx/venvs/hades-agent",
+                "hades-agent",
+            ),
+            (
+                "/home/user/.venvs/hades-agent",
+                None,
+            ),
+        ],
+    )
+    def test_detects_named_pipx_environment_across_supported_paths(
+        self, prefix, expected
+    ):
+        from hades_cli import config
+
+        with patch.object(config.sys, "prefix", prefix):
+            assert config.pipx_install_distribution() == expected
+
+
 # ---------------------------------------------------------------------------
 # recommended_update_command_for_method
 # ---------------------------------------------------------------------------
@@ -156,6 +187,32 @@ class TestRecommendedUpdateCommandForUvTool:
             cmd = config.recommended_update_command_for_method("pip")
             assert cmd == "uv tool install --force hades-agent"
 
+
+class TestRecommendedUpdateCommandForPipx:
+    @pytest.mark.parametrize(
+        ("prefix", "expected"),
+        [
+            (
+                "/home/user/.local/pipx/venvs/hades-agent",
+                "pipx upgrade hades-agent",
+            ),
+            (
+                r"C:\Users\example\AppData\Local\PIPX\VENVS\HERMES-AGENT",
+                "pipx install --force hades-agent",
+            ),
+        ],
+    )
+    def test_pipx_install_recommends_identity_preserving_command(
+        self, prefix, expected
+    ):
+        from hades_cli import config
+
+        with patch.object(config.sys, "prefix", prefix), \
+             patch("shutil.which", return_value=None):
+            assert config.recommended_update_command_for_method("pip") == expected
+
+
+class TestRecommendedUpdateCommandForPip:
     def test_uv_pip_install_recommends_canonical_distribution(self):
         """uv is on PATH but the running Hades is a regular pip install."""
         from hades_cli import config
@@ -337,32 +394,40 @@ class TestCmdUpdatePipInstallLayouts:
         assert "env" not in mock_run.call_args.kwargs
 
     @patch("subprocess.run")
-    def test_pipx_layout_without_pipx_binary_treated_as_venv(
-        self, mock_run, monkeypatch
+    @pytest.mark.parametrize(
+        ("distribution", "recovery_command"),
+        [
+            ("hades-agent", "pipx upgrade hades-agent"),
+            ("hermes-agent", "pipx install --force hades-agent"),
+        ],
+    )
+    def test_pipx_layout_without_pipx_binary_fails_without_mutating_environment(
+        self,
+        mock_run,
+        monkeypatch,
+        capsys,
+        distribution,
+        recovery_command,
     ):
         from hades_cli import main as hm
 
-        mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        prefix = "/home/u/.local/pipx/venvs/hermes-agent"
+        prefix = f"/home/u/.local/pipx/venvs/{distribution}"
         monkeypatch.setattr(hm.sys, "prefix", prefix)
         monkeypatch.setattr(hm.sys, "base_prefix", "/usr")
 
-        # pipx layout detected via prefix, but pipx binary missing on PATH.
-        def _which(name):
-            return "/usr/bin/uv" if name == "uv" else None
+        with patch("shutil.which", return_value=None), \
+             patch("hades_cli.managed_uv.update_managed_uv") as mock_update_uv, \
+             patch("hades_cli.managed_uv.ensure_uv") as mock_ensure_uv:
+            with pytest.raises(SystemExit) as exc_info:
+                hm._cmd_update_pip(SimpleNamespace())
 
-        with patch("shutil.which", side_effect=_which), \
-             patch(
-                 "hades_cli.config.uv_tool_install_distribution",
-                 return_value=None,
-             ):
-            hm._cmd_update_pip(SimpleNamespace())
-
-        # prefix != base_prefix, so this is treated as a venv -> overlay, no --system.
-        assert mock_run.call_args[0][0] == [
-            "/usr/bin/uv", "pip", "install", "--upgrade", "hades-agent",
-        ]
-        assert mock_run.call_args.kwargs["env"]["VIRTUAL_ENV"] == prefix
+        assert exc_info.value.code == 1
+        output = capsys.readouterr().out
+        assert "pipx" in output
+        assert recovery_command in output
+        mock_update_uv.assert_not_called()
+        mock_ensure_uv.assert_not_called()
+        mock_run.assert_not_called()
 
     @patch("subprocess.run")
     def test_bare_pip_outside_venv_adds_system(self, mock_run, monkeypatch):

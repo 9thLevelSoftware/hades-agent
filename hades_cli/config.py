@@ -539,6 +539,20 @@ def is_uv_tool_install() -> bool:
     return uv_tool_install_distribution() is not None
 
 
+def pipx_install_distribution() -> Optional[str]:
+    """Return the pipx environment name for the running interpreter.
+
+    pipx owns environments below ``.../pipx/venvs/<distribution>/...``.
+    Normalize both path separators and case so an install retains its package
+    identity when inspected through Windows, WSL, POSIX, or Termux paths.
+    """
+    parts = sys.prefix.replace("\\", "/").strip("/").casefold().split("/")
+    for index in range(len(parts) - 2):
+        if parts[index:index + 2] == ["pipx", "venvs"]:
+            return parts[index + 2] or None
+    return None
+
+
 def recommended_update_command_for_method(method: str) -> str:
     """Return the update command or guidance for a given install method."""
     if method == "nixos":
@@ -553,7 +567,11 @@ def recommended_update_command_for_method(method: str) -> str:
             return "uv tool upgrade hades-agent"
         if uv_tool_distribution == "hermes-agent":
             return "uv tool install --force hades-agent"
-        import shutil
+        pipx_distribution = pipx_install_distribution()
+        if pipx_distribution == "hades-agent":
+            return "pipx upgrade hades-agent"
+        if pipx_distribution:
+            return "pipx install --force hades-agent"
         if shutil.which("uv"):
             return "uv pip install --upgrade hades-agent"
         return "pip install --upgrade hades-agent"

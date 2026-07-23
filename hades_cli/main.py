@@ -9660,36 +9660,19 @@ def cmd_update(args):
         _finalize_update_output(_update_io_state)
 
 
-def _pipx_managed_distribution(prefix: str) -> Optional[str]:
-    """Return the distribution-named pipx environment containing ``prefix``."""
-    parts = prefix.replace("\\", "/").strip("/").casefold().split("/")
-    for index in range(len(parts) - 2):
-        if parts[index:index + 2] == ["pipx", "venvs"]:
-            return parts[index + 2] or None
-    return None
-
-
 def _cmd_update_pip(args):
     """Update Hades via pip-compatible installation tools."""
     from hades_cli import __version__
-    from hades_cli.config import uv_tool_install_distribution
+    from hades_cli.config import (
+        pipx_install_distribution,
+        uv_tool_install_distribution,
+    )
 
     print(f"→ Current version: {__version__}")
     print("→ Checking PyPI for updates...")
 
-    from hades_cli.managed_uv import ensure_uv, update_managed_uv
-
-    # Keep managed uv current before using it.
-    update_managed_uv()
-
-    uv = ensure_uv()
-    in_venv = sys.prefix != sys.base_prefix
-    # pipx-managed installs live under .../pipx/venvs/<name>/.... Normalize
-    # both separators because compatibility installs can be inspected through
-    # WSL/Windows paths, and tests may model a foreign platform's prefix.
-    pipx_distribution = _pipx_managed_distribution(sys.prefix)
+    pipx_distribution = pipx_install_distribution()
     pipx = shutil.which("pipx") if pipx_distribution else None
-    uv_tool_distribution = uv_tool_install_distribution()
 
     # Only the ``uv pip install`` path inside a venv needs VIRTUAL_ENV
     # exported (uv refuses to install without it when the launcher shim
@@ -9698,38 +9681,63 @@ def _cmd_update_pip(args):
     # set it for them.
     export_virtualenv = False
 
-    if uv_tool_distribution:
-        if not uv:
-            print("✗ Detected a uv-tool install but managed uv install failed.")
-            print("  Install uv manually: https://docs.astral.sh/uv/getting-started/installation/")
+    if pipx_distribution:
+        if not pipx:
+            recovery_command = (
+                "pipx upgrade hades-agent"
+                if pipx_distribution == "hades-agent"
+                else "pipx install --force hades-agent"
+            )
+            print(
+                f"✗ Detected a pipx-managed {pipx_distribution} install, "
+                "but pipx is not on PATH."
+            )
+            print("  Restore pipx, then run:")
+            print(f"    {recovery_command}")
+            print("  Installation help: https://pipx.pypa.io/stable/installation/")
             sys.exit(1)
-        if uv_tool_distribution == "hades-agent":
-            cmd = [uv, "tool", "upgrade", "hades-agent"]
-        else:
-            # A legacy uv tool is registered under ``hermes-agent``.
-            # ``upgrade hades-agent`` cannot rename it; force-install the
-            # canonical tool so its shims move to the Hades-owned environment.
-            cmd = [uv, "tool", "install", "--force", "hades-agent"]
-    elif pipx_distribution and pipx:
         if pipx_distribution == "hades-agent":
             cmd = [pipx, "upgrade", "hades-agent"]
         else:
-            # As with uv tools, pipx upgrades by installed environment name.
+            # pipx upgrades by installed environment name. A legacy tool is
+            # registered under ``hermes-agent``, so install the canonical
+            # distribution instead of mutating pipx's private venv directly.
             # Installing with --force migrates the public shims without ever
             # fetching the unrelated upstream Hermes distribution.
             cmd = [pipx, "install", "--force", "hades-agent"]
-    elif uv:
-        cmd = [uv, "pip", "install", "--upgrade", "hades-agent"]
-        if in_venv:
-            # Launcher shim runs the venv interpreter but doesn't export
-            # VIRTUAL_ENV; without it uv errors "No virtual environment found".
-            export_virtualenv = True
-        else:
-            # Outside any venv, ``--system`` lets uv target the active
-            # interpreter, matching pip's default behaviour.
-            cmd.insert(3, "--system")
     else:
-        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hades-agent"]
+        from hades_cli.managed_uv import ensure_uv, update_managed_uv
+
+        # Keep managed uv current before using it.
+        update_managed_uv()
+
+        uv = ensure_uv()
+        in_venv = sys.prefix != sys.base_prefix
+        uv_tool_distribution = uv_tool_install_distribution()
+        if uv_tool_distribution:
+            if not uv:
+                print("✗ Detected a uv-tool install but managed uv install failed.")
+                print("  Install uv manually: https://docs.astral.sh/uv/getting-started/installation/")
+                sys.exit(1)
+            if uv_tool_distribution == "hades-agent":
+                cmd = [uv, "tool", "upgrade", "hades-agent"]
+            else:
+                # A legacy uv tool is registered under ``hermes-agent``.
+                # ``upgrade hades-agent`` cannot rename it; force-install the
+                # canonical tool so its shims move to the Hades-owned environment.
+                cmd = [uv, "tool", "install", "--force", "hades-agent"]
+        elif uv:
+            cmd = [uv, "pip", "install", "--upgrade", "hades-agent"]
+            if in_venv:
+                # Launcher shim runs the venv interpreter but doesn't export
+                # VIRTUAL_ENV; without it uv errors "No virtual environment found".
+                export_virtualenv = True
+            else:
+                # Outside any venv, ``--system`` lets uv target the active
+                # interpreter, matching pip's default behaviour.
+                cmd.insert(3, "--system")
+        else:
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hades-agent"]
 
     print(f"→ Running: {' '.join(cmd)}")
     run_kwargs = {}
