@@ -8185,6 +8185,21 @@ def _quote_env_value(value: str) -> str:
     return f'"{escaped}"'
 
 
+def _env_line_defines_key(line: str, key: str) -> bool:
+    """Return whether one active dotenv assignment defines ``key``.
+
+    ``load_env`` accepts shell-compatible ``export KEY=value`` lines, so every
+    writer must recognize the same form. Commented assignments remain inert.
+    """
+    candidate = line.strip()
+    if not candidate or candidate.startswith("#"):
+        return False
+    if candidate.startswith("export "):
+        candidate = candidate[7:].lstrip()
+    name, separator, _value = candidate.partition("=")
+    return bool(separator) and name.strip() == key
+
+
 def save_env_value(key: str, value: str):
     """Save or update a value in ~/.hades/.env."""
     if is_managed():
@@ -8226,13 +8241,19 @@ def save_env_value(key: str, value: str):
 
     serialized_value = _quote_env_value(value)
 
-    # Find and update or append
+    # Replace the first live definition and remove any later duplicates. A
+    # stale assignment later in the file would otherwise win on the next
+    # load, making a successful save appear to revert after restart.
     found = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={serialized_value}\n"
-            found = True
-            break
+    deduplicated_lines = []
+    for line in lines:
+        if _env_line_defines_key(line, key):
+            if not found:
+                deduplicated_lines.append(f"{key}={serialized_value}\n")
+                found = True
+            continue
+        deduplicated_lines.append(line)
+    lines = deduplicated_lines
 
     if not found:
         # Ensure there's a newline at the end of the file before appending
@@ -8308,7 +8329,11 @@ def remove_env_value(key: str) -> bool:
         lines = f.readlines()
     lines = _sanitize_env_lines(lines)
 
-    new_lines = [line for line in lines if not line.strip().startswith(f"{key}=")]
+    new_lines = [
+        line
+        for line in lines
+        if not _env_line_defines_key(line, key)
+    ]
     found = len(new_lines) < len(lines)
 
     if found:
@@ -8369,7 +8394,9 @@ def save_anthropic_api_key(value: str, save_fn=None):
 
 
 def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:
-    save_env_value(key, value)
+    from hades_cli.credential_lifecycle import save_provider_env_credential
+
+    save_provider_env_credential(key, value)
     return {
         "success": True,
         "stored_as": key,
@@ -8966,7 +8993,9 @@ def set_config_value(key: str, value: str):
     ]
     
     if key.upper() in api_keys or key.upper().endswith(('_API_KEY', '_TOKEN')) or key.upper().startswith('TERMINAL_SSH'):
-        save_env_value(key.upper(), value)
+        from hades_cli.credential_lifecycle import save_provider_env_credential
+
+        save_provider_env_credential(key.upper(), value)
         print(f"✓ Set {key} in {get_env_path()}")
         return
     

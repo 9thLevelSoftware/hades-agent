@@ -1,0 +1,285 @@
+"""Canonical provider-credential lifecycle across Hades' durable stores.
+
+Provider API keys may be represented in three profile-scoped files:
+
+* ``.env`` is the canonical secret store.
+* ``auth.json`` may contain credential-pool entries seeded from an env var.
+* ``config.yaml`` may contain value-matched inline mirrors for custom
+  endpoints and auxiliary models.
+
+Save and remove operations must keep those representations coherent while
+preserving unrelated credentials. In particular, removing an env key only
+prunes pool entries whose source is exactly ``env:<VAR>``; OAuth, device-code,
+manual, and borrowed entries survive unchanged.
+
+Each file mutation uses that store's existing atomic writer. The lifecycle is
+deliberately fail-loud: an I/O failure propagates to the caller instead of
+reporting a successful reconciliation. Result dictionaries contain key and
+provider names only, never credential values.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+__all__ = [
+    "save_provider_env_credential",
+    "remove_provider_env_credential",
+    "purge_env_credential_references",
+]
+
+
+def _canonical_provider_id(provider_id: str) -> str:
+    """Return the current canonical identity for a provider or legacy alias."""
+    try:
+        from hades_cli.providers import normalize_provider
+
+        return normalize_provider(provider_id) or provider_id
+    except Exception:
+        return provider_id
+
+
+def _providers_for_env_var(env_var: str) -> list[str]:
+    """Return canonical providers whose registered key vars include *env_var*."""
+    try:
+        from hades_cli.auth import PROVIDER_REGISTRY
+    except Exception:
+        return []
+
+    providers: set[str] = set()
+    for provider_id, provider_config in PROVIDER_REGISTRY.items():
+        try:
+            if env_var in (provider_config.api_key_env_vars or ()):
+                providers.add(_canonical_provider_id(provider_id))
+        except (AttributeError, TypeError):
+            continue
+    return sorted(providers)
+
+
+def _prune_env_pool_entries(env_var: str) -> list[str]:
+    """Remove only credential-pool entries sourced from ``env:<env_var>``."""
+    from hades_cli.auth import (
+        _auth_store_lock,
+        _load_auth_store,
+        _save_auth_store,
+    )
+
+    source = f"env:{env_var}"
+    pruned: list[str] = []
+    with _auth_store_lock():
+        auth_store = _load_auth_store()
+        pool = auth_store.get("credential_pool")
+        if not isinstance(pool, dict):
+            return pruned
+
+        changed = False
+        for provider_id in list(pool):
+            entries = pool[provider_id]
+            if not isinstance(entries, list):
+                continue
+            kept = [
+                entry
+                for entry in entries
+                if not (
+                    isinstance(entry, dict)
+                    and entry.get("source") == source
+                )
+            ]
+            if len(kept) == len(entries):
+                continue
+
+            changed = True
+            pruned.append(provider_id)
+            if kept:
+                pool[provider_id] = kept
+            else:
+                del pool[provider_id]
+
+        if changed:
+            _save_auth_store(auth_store)
+    return pruned
+
+
+def _scrub_config_yaml_mirrors(
+    old_value: str,
+    new_value: str | None,
+) -> list[str]:
+    """Update value-matched inline credential mirrors in raw ``config.yaml``."""
+    if not old_value:
+        return []
+
+    from hades_cli.config import (
+        atomic_config_write,
+        get_config_path,
+        require_readable_config_before_write,
+    )
+    from utils import fast_safe_load
+
+    config_path = get_config_path()
+    if not config_path.exists():
+        return []
+
+    # Validate readability before parsing and again at the atomic write
+    # boundary. Do not silently claim success while a stale higher-precedence
+    # config mirror remains on disk.
+    require_readable_config_before_write(config_path)
+    with open(config_path, encoding="utf-8") as config_file:
+        user_config = fast_safe_load(config_file) or {}
+    if not isinstance(user_config, dict):
+        return []
+
+    touched: list[str] = []
+
+    def reconcile(section: Any, path: str) -> None:
+        if not isinstance(section, dict):
+            return
+        # ``api`` is the legacy alias retained by older configurations.
+        for field in ("api_key", "api"):
+            if section.get(field) != old_value:
+                continue
+            if new_value:
+                section[field] = new_value
+            else:
+                section.pop(field, None)
+            touched.append(f"{path}.{field}")
+
+    reconcile(user_config.get("model"), "model")
+
+    auxiliary = user_config.get("auxiliary")
+    if isinstance(auxiliary, dict):
+        for task_name, task_config in auxiliary.items():
+            reconcile(task_config, f"auxiliary.{task_name}")
+
+    custom_providers = user_config.get("custom_providers")
+    if isinstance(custom_providers, list):
+        for index, provider_config in enumerate(custom_providers):
+            reconcile(provider_config, f"custom_providers.{index}")
+    elif isinstance(custom_providers, dict):
+        for provider_name, provider_config in custom_providers.items():
+            reconcile(provider_config, f"custom_providers.{provider_name}")
+
+    if touched:
+        atomic_config_write(config_path, user_config, sort_keys=False)
+    return touched
+
+
+def _suppression_provider_ids(env_var: str) -> list[str]:
+    """Return canonical plus already-stored alias ids for one env source."""
+    canonical_ids = set(_providers_for_env_var(env_var))
+    provider_ids = set(canonical_ids)
+    source = f"env:{env_var}"
+
+    # Older builds could persist suppression markers under an alias. Clear
+    # those on an explicit re-save too, without creating new alias markers.
+    try:
+        from hades_cli.auth import _load_auth_store
+
+        suppressed = _load_auth_store().get("suppressed_sources")
+        if isinstance(suppressed, dict):
+            for provider_id, sources in suppressed.items():
+                if (
+                    isinstance(provider_id, str)
+                    and isinstance(sources, list)
+                    and source in sources
+                    and _canonical_provider_id(provider_id) in canonical_ids
+                ):
+                    provider_ids.add(provider_id)
+    except Exception:
+        pass
+    return sorted(provider_ids)
+
+
+def purge_env_credential_references(
+    env_var: str,
+    *,
+    clear_models_cache: bool = True,
+) -> dict[str, Any]:
+    """Remove auth-pool and model-cache references to an env credential."""
+    pruned = _prune_env_pool_entries(env_var)
+    affected_providers = sorted(
+        set(pruned) | set(_providers_for_env_var(env_var))
+    )
+    source = f"env:{env_var}"
+
+    from hades_cli.auth import suppress_credential_source
+
+    # Seeders resolve provider aliases to canonical identities. Suppress only
+    # those canonical ids so a lingering process/shell export cannot recreate
+    # the removed pool entry.
+    suppression_ids = sorted(
+        {
+            _canonical_provider_id(provider_id)
+            for provider_id in affected_providers
+        }
+    )
+    for provider_id in suppression_ids:
+        suppress_credential_source(provider_id, source)
+
+    if clear_models_cache and affected_providers:
+        from hades_cli.models import clear_provider_models_cache
+
+        # Cache cleanup is intentionally best-effort inside the cache helper;
+        # durable credential mutations remain authoritative.
+        for provider_id in affected_providers:
+            clear_provider_models_cache(provider_id)
+
+    return {
+        "pool_pruned": pruned,
+        "providers": affected_providers,
+    }
+
+
+def save_provider_env_credential(
+    env_var: str,
+    value: str,
+) -> dict[str, Any]:
+    """Save an env credential and rotate matching config mirrors."""
+    from hades_cli.config import load_env, save_env_value
+
+    old_value = load_env().get(env_var)
+    save_env_value(env_var, value)
+
+    config_updates: list[str] = []
+    if value and old_value and old_value != value:
+        config_updates = _scrub_config_yaml_mirrors(old_value, value)
+
+    # A deliberate save is an explicit re-add. Lift canonical and legacy alias
+    # suppression markers so the credential pool may seed this source again.
+    from hades_cli.auth import unsuppress_credential_source
+
+    for provider_id in _suppression_provider_ids(env_var):
+        unsuppress_credential_source(provider_id, f"env:{env_var}")
+
+    return {
+        "ok": True,
+        "key": env_var,
+        "config_updates": config_updates,
+    }
+
+
+def remove_provider_env_credential(env_var: str) -> dict[str, Any]:
+    """Remove an env credential and every exact durable reference to it."""
+    from hades_cli.config import load_env, remove_env_value
+
+    old_value = load_env().get(env_var)
+    removed_from_env = remove_env_value(env_var)
+    references = purge_env_credential_references(env_var)
+    config_scrubbed = (
+        _scrub_config_yaml_mirrors(old_value, None)
+        if old_value
+        else []
+    )
+
+    return {
+        "ok": True,
+        "key": env_var,
+        "removed": removed_from_env,
+        "pool_pruned": references["pool_pruned"],
+        "providers": references["providers"],
+        "config_scrubbed": config_scrubbed,
+        "found": bool(
+            removed_from_env
+            or references["pool_pruned"]
+            or config_scrubbed
+        ),
+    }
