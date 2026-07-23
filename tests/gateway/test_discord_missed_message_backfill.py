@@ -460,7 +460,11 @@ def test_missed_message_backfill_config_bridge(monkeypatch, tmp_path):
     }
 
 
-def test_default_config_exposes_missed_message_backfill_settings():
+def test_default_config_exposes_missed_message_backfill_settings(monkeypatch):
+    for key in tuple(os.environ):
+        if key.startswith("DISCORD_MISSED_MESSAGE_BACKFILL"):
+            monkeypatch.delenv(key, raising=False)
+
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="one"))
 
     assert adapter._missed_message_backfill_enabled() is False
