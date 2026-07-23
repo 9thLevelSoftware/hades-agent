@@ -117,14 +117,21 @@ def _resolved_profile_home() -> Path:
     return Path(get_hades_home()).expanduser().resolve()
 
 
+def _journal_cache_key(profile_home: Path) -> str:
+    """Return the platform-correct identity for a profile journal cache entry."""
+    profile = str(profile_home)
+    return os.path.normcase(profile) if os.name == "nt" else profile
+
+
 def _open_journal():
     if _journal_override_enabled:
         return _journal_override
     profile_home = _resolved_profile_home()
     profile = str(profile_home)
+    cache_key = _journal_cache_key(profile_home)
     with _journal_lock:
-        if profile in _journal_cache:
-            return _journal_cache[profile]
+        if cache_key in _journal_cache:
+            return _journal_cache[cache_key]
         try:
             from agent.operation_journal import OperationJournal
             from hades_state import SessionDB
@@ -139,7 +146,7 @@ def _open_journal():
                 exc,
             )
             journal = None
-        _journal_cache[profile] = journal
+        _journal_cache[cache_key] = journal
         return journal
 
 
