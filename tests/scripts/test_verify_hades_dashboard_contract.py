@@ -8,6 +8,7 @@ TypeScript/Python parser.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -1253,3 +1254,225 @@ def test_conditional_rollout_block_has_nonadjacent_verifier_and_later_post_sync(
     cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
 
     assert verify(root, cron_jobs) == []
+
+
+@pytest.mark.parametrize(
+    "verifier_line",
+    (
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py || true",
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py; exit 0",
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py && true",
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py > /tmp/verifier.log",
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py | cat",
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py &",
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py $(true)",
+    ),
+)
+def test_cron_verifier_command_rejects_shell_suffixes(
+    tmp_path: Path, verifier_line: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = VALID_PROMPT.replace(
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py",
+        verifier_line,
+        1,
+    )
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "verifier" in failures.lower()
+    assert "exact" in failures.lower() or "command" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "post_sync_line",
+    (
+        "./venv/bin/python3 scripts/post-sync-verify.py || true",
+        "./venv/bin/python3 scripts/post-sync-verify.py; exit 0",
+        "./venv/bin/python3 scripts/post-sync-verify.py --fix && true",
+        "./venv/bin/python3 scripts/post-sync-verify.py > /tmp/post-sync.log",
+        "./venv/bin/python3 scripts/post-sync-verify.py | cat",
+        "./venv/bin/python3 scripts/post-sync-verify.py &",
+        "./venv/bin/python3 scripts/post-sync-verify.py $(true)",
+    ),
+)
+def test_cron_post_sync_anchor_rejects_shell_suffixes(
+    tmp_path: Path, post_sync_line: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    prompt = VALID_PROMPT.replace(
+        "./venv/bin/python3 scripts/post-sync-verify.py --fix",
+        post_sync_line,
+        1,
+    ).replace("./venv/bin/python3 scripts/post-sync-verify.py\n", "", 1)
+    payload["jobs"][0]["prompt"] = prompt
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "post-sync" in failures.lower()
+    assert "anchor" in failures.lower() or "missing" in failures.lower()
+
+
+def test_unclosed_shell_fence_is_rejected_with_malformed_fence_diagnostic(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = (
+        "## Integration Manifest + Handler Verification\n"
+        "```bash\n"
+        "cd ~/.hermes/hermes-agent\n"
+        "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+        "./venv/bin/python3 scripts/post-sync-verify.py\n"
+    )
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert "fence" in failures.lower()
+    assert "malformed" in failures.lower() or "unclosed" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    (
+        "prefix ## Integration Manifest + Handler Verification suffix\n" + VALID_PROMPT.split("\n", 1)[1],
+        "<!-- ## Integration Manifest + Handler Verification -->\n" + VALID_PROMPT.split("\n", 1)[1],
+        "```text\n## Integration Manifest + Handler Verification\n```\n" + VALID_PROMPT.split("\n", 1)[1],
+    ),
+)
+def test_cron_heading_must_be_standalone_and_outside_fences(
+    tmp_path: Path, prompt: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = prompt
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert "heading" in failures.lower()
+
+
+def test_exactly_one_standalone_heading_before_closed_shell_fence_passes(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+
+    assert verify(root, cron_jobs) == []
+
+
+def test_duplicate_standalone_integration_headings_are_rejected(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = VALID_PROMPT.replace(
+        "## Integration Manifest + Handler Verification\n",
+        "## Integration Manifest + Handler Verification\n"
+        "## Integration Manifest + Handler Verification\n",
+        1,
+    )
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "cron" in failures.lower()
+    assert "heading" in failures.lower()
+    assert "exactly one" in failures.lower() or "duplicate" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        'getAutonomyStatus: () => { const fetchJSON = fake; return fetchJSON("/api/autonomy/status"); },',
+        'getAutonomyStatus: (fetchJSON) => fetchJSON("/api/autonomy/status"),',
+        'getAutonomyStatus: () => { let fetchJSON = fake; return fetchJSON("/api/autonomy/status"); },',
+        'getAutonomyStatus: () => { var fetchJSON = fake; return fetchJSON("/api/autonomy/status"); },',
+        'getAutonomyStatus: () => { function fetchJSON() {} return fetchJSON("/api/autonomy/status"); },',
+        'getAutonomyStatus: () => { class fetchJSON {} return fetchJSON("/api/autonomy/status"); },',
+    ),
+)
+def test_api_method_local_fetchjson_binding_is_rejected(
+    tmp_path: Path, replacement: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        replacement,
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getAutonomyStatus" in failures
+    assert "fetchjson" in failures.lower()
+    assert "binding" in failures.lower() or "shadow" in failures.lower() or "parameter" in failures.lower()
+
+
+def test_api_required_call_only_under_false_conditional_is_rejected(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        'getAutonomyStatus: () => { if (false) return fetchJSON("/api/autonomy/status"); },',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getAutonomyStatus" in failures
+    assert "return" in failures.lower() or "reachable" in failures.lower() or "direct" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        'getAutonomyStatus: () => fetchJSON("/api/autonomy/status"),',
+        'getAutonomyStatus: () => { return fetchJSON("/api/autonomy/status"); },',
+    ),
+)
+def test_api_direct_return_transport_forms_are_accepted(
+    tmp_path: Path, replacement: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        replacement,
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    assert verify(root, cron_jobs) == []
+
+
+def test_fifo_required_asset_is_rejected_without_hanging(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    api_path = root / "web/src/lib/api.ts"
+    api_path.unlink()
+    os.mkfifo(api_path)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--repo-root",
+            str(root),
+            "--cron-jobs",
+            str(cron_jobs),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=2,
+    )
+
+    assert completed.returncode == 1
+    output = completed.stdout + completed.stderr
+    assert "api" in output.lower()
+    assert "regular file" in output.lower() or "non-regular" in output.lower()
