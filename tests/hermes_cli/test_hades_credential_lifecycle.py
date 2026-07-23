@@ -18,6 +18,7 @@ OLD_KEY = "credential-" + "a" * 24
 NEW_KEY = "credential-" + "b" * 24
 OTHER_KEY = "credential-" + "c" * 24
 SOURCE = "env:ZAI_API_KEY"
+DEEPSEEK_SOURCE = "env:DEEPSEEK_API_KEY"
 OPENROUTER_SOURCE = "env:OPENROUTER_API_KEY"
 
 
@@ -71,6 +72,7 @@ def hades_home(tmp_path, monkeypatch):
     yield home
     invalidate_env_cache()
     os.environ.pop("ZAI_API_KEY", None)
+    os.environ.pop("DEEPSEEK_API_KEY", None)
     os.environ.pop("OPENROUTER_API_KEY", None)
 
 
@@ -336,6 +338,83 @@ def test_public_save_reconciles_catalog_only_openrouter_credential(hades_home):
     assert OPENROUTER_SOURCE not in suppressed.get("openrouter", [])
 
 
+def test_public_save_prunes_stale_env_pool_and_rebuilds_from_new_value(
+    hades_home,
+):
+    (hades_home / ".env").write_text(
+        f"DEEPSEEK_API_KEY={OLD_KEY}\n",
+        encoding="utf-8",
+    )
+    account_state = {
+        "tokens": {
+            "access_token": "account-access-" + "d" * 20,
+            "refresh_token": "account-refresh-" + "e" * 20,
+        }
+    }
+    unrelated_entry = _pool_entry(
+        "unrelated-env",
+        "env:XAI_API_KEY",
+        OTHER_KEY,
+    )
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {"nous": account_state},
+            "credential_pool": {
+                "deepseek": [
+                    _pool_entry(
+                        "deepseek-env",
+                        DEEPSEEK_SOURCE,
+                        OLD_KEY,
+                    ),
+                    _pool_entry(
+                        "deepseek-manual",
+                        "manual",
+                        OTHER_KEY,
+                    ),
+                ],
+                "xai": [unrelated_entry],
+            },
+            "suppressed_sources": {
+                "deepseek": [DEEPSEEK_SOURCE],
+            },
+        },
+    )
+
+    from hades_cli.config import save_env_value
+
+    assert save_env_value("DEEPSEEK_API_KEY", NEW_KEY) is True
+
+    auth_store = _read_auth(hades_home)
+    assert auth_store["providers"]["nous"] == account_state
+    assert [
+        entry["source"]
+        for entry in auth_store["credential_pool"]["deepseek"]
+    ] == ["manual"]
+    assert auth_store["credential_pool"]["xai"] == [unrelated_entry]
+    assert DEEPSEEK_SOURCE not in auth_store.get(
+        "suppressed_sources", {}
+    ).get("deepseek", [])
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("deepseek")
+    env_entry = next(
+        entry
+        for entry in pool.entries()
+        if entry.source == DEEPSEEK_SOURCE
+    )
+    assert env_entry.access_token == NEW_KEY
+    assert any(
+        entry.source == "manual" and entry.access_token == OTHER_KEY
+        for entry in pool.entries()
+    )
+    auth_text = (hades_home / "auth.json").read_text(encoding="utf-8")
+    assert OLD_KEY not in auth_text
+    assert NEW_KEY not in auth_text
+
+
 def test_public_remove_reconciles_catalog_only_openrouter_credential(
     hades_home,
     capsys,
@@ -546,6 +625,100 @@ def test_save_rotates_only_value_matched_config_mirrors_and_unsuppresses(hades_h
     assert SOURCE not in suppressed.get("zai", [])
 
 
+def test_save_rotates_modern_providers_dict_mirror_and_preserves_metadata(
+    hades_home,
+):
+    (hades_home / ".env").write_text(
+        f"ZAI_API_KEY={OLD_KEY}\n",
+        encoding="utf-8",
+    )
+    _write_config(
+        hades_home,
+        {
+            "providers": {
+                "custom-zai": {
+                    "api_key": OLD_KEY,
+                    "api": "https://zai.example.test/v1",
+                    "enabled": False,
+                    "models": {"glm-test": {"supports_vision": True}},
+                },
+                "independent": {
+                    "api_key": OTHER_KEY,
+                    "api": "https://independent.example.test/v1",
+                },
+            },
+            "custom_providers": [
+                {"name": "legacy", "api_key": OLD_KEY},
+                {"name": "manual", "api_key": OTHER_KEY},
+            ],
+        },
+    )
+
+    result = _lifecycle().save_provider_env_credential(
+        "ZAI_API_KEY",
+        NEW_KEY,
+    )
+
+    assert set(result["config_updates"]) == {
+        "providers.custom-zai.api_key",
+        "custom_providers.0.api_key",
+    }
+    config = _read_config(hades_home)
+    assert config["providers"]["custom-zai"] == {
+        "api_key": NEW_KEY,
+        "api": "https://zai.example.test/v1",
+        "enabled": False,
+        "models": {"glm-test": {"supports_vision": True}},
+    }
+    assert config["providers"]["independent"]["api_key"] == OTHER_KEY
+    assert config["custom_providers"][0]["api_key"] == NEW_KEY
+    assert config["custom_providers"][1]["api_key"] == OTHER_KEY
+
+
+def test_remove_scrubs_modern_providers_dict_mirror_and_preserves_metadata(
+    hades_home,
+):
+    (hades_home / ".env").write_text(
+        f"ZAI_API_KEY={OLD_KEY}\n",
+        encoding="utf-8",
+    )
+    _write_config(
+        hades_home,
+        {
+            "providers": {
+                "custom-zai": {
+                    "api_key": OLD_KEY,
+                    "api": "https://zai.example.test/v1",
+                    "enabled": False,
+                },
+                "independent": {
+                    "api_key": OTHER_KEY,
+                    "api": "https://independent.example.test/v1",
+                },
+            },
+            "custom_providers": {
+                "legacy": {"api": OLD_KEY},
+                "manual": {"api_key": OTHER_KEY},
+            },
+        },
+    )
+
+    result = _lifecycle().remove_provider_env_credential("ZAI_API_KEY")
+
+    assert set(result["config_scrubbed"]) == {
+        "providers.custom-zai.api_key",
+        "custom_providers.legacy.api",
+    }
+    config = _read_config(hades_home)
+    assert config["providers"]["custom-zai"] == {
+        "api": "https://zai.example.test/v1",
+        "enabled": False,
+    }
+    assert config["providers"]["independent"]["api_key"] == OTHER_KEY
+    assert "api" not in config["custom_providers"]["legacy"]
+    assert config["custom_providers"]["manual"]["api_key"] == OTHER_KEY
+
+
 def test_save_mirrors_the_canonical_value_actually_persisted(hades_home):
     (hades_home / ".env").write_text(
         f"ZAI_API_KEY={OLD_KEY}\n",
@@ -576,6 +749,115 @@ def test_save_mirrors_the_canonical_value_actually_persisted(hades_home):
     )
     assert NEW_KEY not in repr(result)
     assert submitted_value not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("submitted_value", "warns"),
+    (
+        pytest.param("\r\n", False, id="line-endings"),
+        pytest.param("\u00e9\u96ea", True, id="non-ascii-only"),
+    ),
+)
+def test_public_save_canonical_empty_runs_full_removal_lifecycle(
+    hades_home,
+    capsys,
+    submitted_value,
+    warns,
+):
+    (hades_home / ".env").write_text(
+        f"ZAI_API_KEY={OLD_KEY}\nSIBLING=keep\n",
+        encoding="utf-8",
+    )
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {},
+            "credential_pool": {
+                "zai": [
+                    _pool_entry("zai-env", SOURCE, OLD_KEY),
+                    _pool_entry("zai-manual", "manual", OTHER_KEY),
+                ],
+            },
+        },
+    )
+    _write_config(
+        hades_home,
+        {
+            "model": {"api_key": OLD_KEY},
+            "providers": {
+                "custom-zai": {
+                    "api_key": OLD_KEY,
+                    "enabled": True,
+                }
+            },
+        },
+    )
+    (hades_home / "provider_models_cache.json").write_text(
+        json.dumps(
+            {
+                "zai": {"models": ["glm-test"]},
+                "deepseek": {"models": ["preserve-me"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    from hades_cli.config import save_env_value
+
+    assert save_env_value("ZAI_API_KEY", submitted_value) is True
+
+    env_text = (hades_home / ".env").read_text(encoding="utf-8")
+    assert "ZAI_API_KEY=" not in env_text
+    assert "SIBLING=keep" in env_text
+    auth_store = _read_auth(hades_home)
+    assert [
+        entry["source"]
+        for entry in auth_store["credential_pool"]["zai"]
+    ] == ["manual"]
+    assert SOURCE in auth_store["suppressed_sources"]["zai"]
+    config = _read_config(hades_home)
+    assert "api_key" not in config["model"]
+    assert "api_key" not in config["providers"]["custom-zai"]
+    assert config["providers"]["custom-zai"]["enabled"] is True
+    cache = json.loads(
+        (hades_home / "provider_models_cache.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "zai" not in cache
+    assert cache["deepseek"]["models"] == ["preserve-me"]
+    assert "ZAI_API_KEY" not in os.environ
+    captured = capsys.readouterr()
+    assert ("contains non-ASCII" in captured.err) is warns
+    assert OLD_KEY not in captured.out
+    assert OLD_KEY not in captured.err
+
+
+def test_save_preserves_meaningful_whitespace_bearing_secret(hades_home):
+    (hades_home / ".env").write_text(
+        f"ZAI_API_KEY={OLD_KEY}\n",
+        encoding="utf-8",
+    )
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {},
+            "suppressed_sources": {"zai": [SOURCE]},
+        },
+    )
+    _write_config(hades_home, {"model": {"api_key": OLD_KEY}})
+    submitted_value = "  credential with spaces\t "
+
+    from hades_cli.config import load_env, save_env_value
+
+    assert save_env_value("ZAI_API_KEY", submitted_value) is True
+
+    assert load_env()["ZAI_API_KEY"] == submitted_value
+    assert _read_config(hades_home)["model"]["api_key"] == submitted_value
+    suppressed = _read_auth(hades_home).get("suppressed_sources", {})
+    assert SOURCE not in suppressed.get("zai", [])
 
 
 def test_config_entry_points_route_provider_keys_through_lifecycle(hades_home, capsys):
@@ -700,6 +982,12 @@ def test_save_config_failure_restores_exact_env_and_suppression(
         {
             "version": 1,
             "providers": {},
+            "credential_pool": {
+                "zai": [
+                    _pool_entry("zai-env", SOURCE, OLD_KEY),
+                    _pool_entry("zai-manual", "manual", OTHER_KEY),
+                ],
+            },
             "suppressed_sources": {"zai": [SOURCE]},
         },
     )

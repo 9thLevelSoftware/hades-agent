@@ -414,9 +414,16 @@ class TestProfileScopedEnv:
         auth_store = json.loads(
             (worker / "auth.json").read_text(encoding="utf-8")
         )
+        assert [
+            entry["source"]
+            for entry in auth_store["credential_pool"]["deepseek"]
+        ] == ["manual"]
         assert source not in auth_store.get("suppressed_sources", {}).get(
             "deepseek", []
         )
+        auth_text = (worker / "auth.json").read_text(encoding="utf-8")
+        assert old_key not in auth_text
+        assert new_key not in auth_text
 
         delete = client.request(
             "DELETE",

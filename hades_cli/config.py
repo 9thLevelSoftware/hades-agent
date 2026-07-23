@@ -8169,6 +8169,16 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     return sanitized
 
 
+def _normalize_env_value_for_storage(key: str, value: str) -> str:
+    """Return the canonical value written by the dotenv store.
+
+    Newlines cannot be represented inside one dotenv assignment. Other
+    whitespace remains meaningful and is quoted by :func:`_quote_env_value`.
+    """
+    value = value.replace("\n", "").replace("\r", "")
+    return _check_non_ascii_credential(key, value)
+
+
 def _quote_env_value(value: str) -> str:
     """Quote .env values containing characters with special dotenv meaning."""
     if value == "":
@@ -8200,7 +8210,12 @@ def _env_line_defines_key(line: str, key: str) -> bool:
     return bool(separator) and name.strip() == key
 
 
-def _save_env_value_raw(key: str, value: str) -> bool:
+def _save_env_value_raw(
+    key: str,
+    value: str,
+    *,
+    _already_normalized: bool = False,
+) -> bool:
     """Low-level atomic writer for one value in ~/.hades/.env.
 
     Returns ``True`` after the canonicalized value is durably stored and
@@ -8227,9 +8242,8 @@ def _save_env_value_raw(key: str, value: str) -> bool:
     if not _ENV_VAR_NAME_RE.match(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     _reject_denylisted_env_var(key)
-    value = value.replace("\n", "").replace("\r", "")
-    # API keys / tokens must be ASCII — strip non-ASCII with a warning.
-    value = _check_non_ascii_credential(key, value)
+    if not _already_normalized:
+        value = _normalize_env_value_for_storage(key, value)
     ensure_hermes_home()
     env_path = get_env_path()
 

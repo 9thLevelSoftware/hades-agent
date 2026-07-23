@@ -339,11 +339,15 @@ def _scrub_config_yaml_mirrors(
 
     touched: list[str] = []
 
-    def reconcile(section: Any, path: str) -> None:
+    def reconcile(
+        section: Any,
+        path: str,
+        fields: tuple[str, ...] = ("api_key", "api"),
+    ) -> None:
         if not isinstance(section, dict):
             return
         # ``api`` is the legacy alias retained by older configurations.
-        for field in ("api_key", "api"):
+        for field in fields:
             if section.get(field) not in matched_values:
                 continue
             if new_value:
@@ -366,6 +370,17 @@ def _scrub_config_yaml_mirrors(
     elif isinstance(custom_providers, dict):
         for provider_name, provider_config in custom_providers.items():
             reconcile(provider_config, f"custom_providers.{provider_name}")
+
+    # The canonical providers schema uses ``api`` for the endpoint URL, not
+    # as a legacy credential alias. Reconcile only its explicit key field.
+    providers = user_config.get("providers")
+    if isinstance(providers, dict):
+        for provider_name, provider_config in providers.items():
+            reconcile(
+                provider_config,
+                f"providers.{provider_name}",
+                ("api_key",),
+            )
 
     if touched:
         atomic_config_write(config_path, user_config, sort_keys=False)
@@ -458,13 +473,28 @@ def save_provider_env_credential(
     env_var: str,
     value: str,
 ) -> dict[str, Any]:
-    """Save an env credential and rotate matching config mirrors."""
-    from hades_cli.config import _save_env_value_raw, load_env
+    """Save an env credential and reconcile its exact durable references."""
+    from hades_cli.config import (
+        _normalize_env_value_for_storage,
+        _save_env_value_raw,
+        load_env,
+    )
 
     _require_env_key_writable(env_var, "saved")
+    normalized_value = _normalize_env_value_for_storage(env_var, value)
+    if normalized_value == "":
+        return remove_provider_env_credential(env_var)
+
     with _credential_store_transaction(env_var):
         old_value = load_env().get(env_var)
-        if _save_env_value_raw(env_var, value) is not True:
+        if (
+            _save_env_value_raw(
+                env_var,
+                normalized_value,
+                _already_normalized=True,
+            )
+            is not True
+        ):
             raise RuntimeError(
                 f"credential env store did not persist key {env_var}"
             )
@@ -475,12 +505,27 @@ def save_provider_env_credential(
             )
         persisted_value = persisted_env[env_var]
 
+        # Persisted env rows are references, not independent credentials.
+        # Drop every exact-source row so no legacy raw access_token can shadow
+        # the new dotenv value. The next pool load rehydrates this source from
+        # .env and persists only its disk-safe metadata.
+        pool_pruned, stale_values = _prune_env_pool_entries(env_var)
+        mirror_values = [
+            stale_value
+            for stale_value in stale_values
+            if stale_value != persisted_value
+        ]
+        if old_value and old_value != persisted_value:
+            mirror_values.append(old_value)
+
         config_updates: list[str] = []
-        if old_value is not None and old_value != persisted_value:
+        if mirror_values:
             config_updates = _scrub_config_yaml_mirrors(
-                old_value,
+                mirror_values,
                 persisted_value,
             )
+        stale_values = ()
+        mirror_values.clear()
 
         # A deliberate save is an explicit re-add. Lift canonical and legacy
         # alias suppression markers so the credential pool may seed this source
@@ -493,6 +538,7 @@ def save_provider_env_credential(
         return {
             "ok": True,
             "key": env_var,
+            "pool_pruned": pool_pruned,
             "config_updates": config_updates,
         }
 

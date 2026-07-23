@@ -1,6 +1,7 @@
 """Tests for set_config_value — verifying secrets route to .env and config to config.yaml."""
 
 import argparse
+import json
 import os
 from unittest.mock import patch
 
@@ -138,6 +139,58 @@ class TestFalsyValues:
         set_config_value("OPENROUTER_API_KEY", "")
         env_content = _read_env(_isolated_hermes_home)
         assert "OPENROUTER_API_KEY=" not in env_content
+
+    def test_canonical_empty_provider_value_removes_env_and_pool(
+        self,
+        _isolated_hermes_home,
+    ):
+        """CLI values empty after normalization run the removal lifecycle."""
+        source = "env:DEEPSEEK_API_KEY"
+        old_key = "cli-deepseek-old-" + "a" * 24
+        manual_key = "cli-deepseek-manual-" + "b" * 24
+        (_isolated_hermes_home / ".env").write_text(
+            f"DEEPSEEK_API_KEY={old_key}\n",
+            encoding="utf-8",
+        )
+        (_isolated_hermes_home / "auth.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "providers": {},
+                    "credential_pool": {
+                        "deepseek": [
+                            {
+                                "id": "env",
+                                "source": source,
+                                "access_token": old_key,
+                            },
+                            {
+                                "id": "manual",
+                                "source": "manual",
+                                "access_token": manual_key,
+                            },
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        set_config_value("DEEPSEEK_API_KEY", "\r\n")
+
+        assert "DEEPSEEK_API_KEY=" not in _read_env(
+            _isolated_hermes_home
+        )
+        auth_store = json.loads(
+            (_isolated_hermes_home / "auth.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert [
+            entry["source"]
+            for entry in auth_store["credential_pool"]["deepseek"]
+        ] == ["manual"]
+        assert source in auth_store["suppressed_sources"]["deepseek"]
 
     def test_empty_string_routes_to_config(self, _isolated_hermes_home):
         """Blanking a config key should write an empty string to config.yaml."""
