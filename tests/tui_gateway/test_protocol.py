@@ -2414,3 +2414,94 @@ def test_broadcast_skin_if_changed_on_any_signature_move(server, monkeypatch):
         server._broadcast_skin_if_changed()
 
     assert [ev for ev, _ in emitted] == ["skin.changed"] * 3
+
+
+def test_gateway_owned_teardown_disables_agent_row_finalization(server, monkeypatch):
+    calls = []
+
+    class DB:
+        def get_session(self, _session_id):
+            return {"source": "telegram"}
+
+        def end_session(self, *args):
+            calls.append(("end", args))
+
+    class Agent:
+        session_id = "gateway-session"
+        _session_db = DB()
+        _end_session_on_close = True
+
+        def close(self):
+            calls.append(("close", self._end_session_on_close))
+            if self._end_session_on_close:
+                self._session_db.end_session(self.session_id, "agent_close")
+
+    agent = Agent()
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args: None)
+    server._teardown_session(
+        {
+            "agent": agent,
+            "session_key": "gateway-session",
+            "history": [],
+            "history_lock": threading.Lock(),
+        }
+    )
+
+    assert calls == [("close", False)]
+
+
+def test_profile_resume_lookup_closes_db_on_early_error(server, monkeypatch, tmp_path):
+    class DB:
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+        def get_session(self, _session_id):
+            return None
+
+        def get_session_by_title(self, _target):
+            return None
+
+    db = DB()
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    monkeypatch.setattr(server, "_profile_home", lambda _profile: profile_home)
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=lambda **_: db))
+
+    response = server._methods["session.resume"](
+        "resume", {"session_id": "missing", "profile": "worker"}
+    )
+
+    assert response["error"]["code"] == 4007
+    assert db.closed == 1
+
+
+def test_deferred_profile_db_open_failure_is_fatal(server, monkeypatch, tmp_path):
+    ready = threading.Event()
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    session = {
+        "agent": None,
+        "agent_error": None,
+        "agent_ready": ready,
+        "agent_build_started": False,
+        "session_key": "profile-session",
+        "profile_home": str(profile_home),
+        "source": "tui",
+        "history_lock": threading.Lock(),
+    }
+    server._sessions["profile-sid"] = session
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_state",
+        types.SimpleNamespace(SessionDB=lambda **_: (_ for _ in ()).throw(OSError("locked"))),
+    )
+    monkeypatch.setattr(
+        server, "_make_agent", lambda *_args, **_kwargs: pytest.fail("must not build")
+    )
+
+    server._start_agent_build("profile-sid", session)
+    assert ready.wait(2)
+    assert "locked" in session["agent_error"]

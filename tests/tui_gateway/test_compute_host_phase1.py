@@ -378,6 +378,72 @@ def test_compute_host_parent_guard_exits_when_parent_pid_changes(monkeypatch):
     assert isinstance(orphan["host_ns"], int)
 
 
+def test_compute_host_first_turn_binds_profile_context_before_row_creation(
+    monkeypatch, tmp_path
+):
+    from tui_gateway import server
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    active = False
+    calls = []
+    session = {
+        "session_key": "profile-key",
+        "profile_home": str(profile_home),
+        "cwd": str(tmp_path),
+        "source": "telegram",
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "agent": types.SimpleNamespace(model="profile/model"),
+    }
+
+    def set_home(_home):
+        nonlocal active
+        active = True
+        return "home-token"
+
+    def reset_home(_token):
+        nonlocal active
+        active = False
+
+    def set_context(*args, **kwargs):
+        assert active
+        calls.append(("context", args, kwargs))
+        return ["context-token"]
+
+    def clear_context(_tokens):
+        assert active
+        calls.append(("clear",))
+
+    def ensure_row(current):
+        assert active
+        assert server._resolve_model() == "profile/model"
+        calls.append(("row", current["profile_home"], current["cwd"]))
+
+    monkeypatch.setattr(server, "set_hermes_home_override", set_home)
+    monkeypatch.setattr(server, "reset_hermes_home_override", reset_home)
+    monkeypatch.setattr(server, "_set_session_context", set_context)
+    monkeypatch.setattr(server, "_clear_session_context", clear_context)
+    monkeypatch.setattr(server, "_session_source", lambda _session: "telegram")
+    monkeypatch.setattr(server, "_ensure_session_db_row", ensure_row)
+    monkeypatch.setattr(server, "_start_inflight_turn", lambda *_args: None)
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda *_args: None)
+    monkeypatch.setattr(server, "_clear_inflight_turn", lambda *_args: None)
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {})
+    monkeypatch.setattr(server, "_resolve_model", lambda: "profile/model")
+
+    host = ComputeHost(stdout=io.StringIO(), max_workers=1, heartbeat_secs=0)
+    monkeypatch.setattr(host, "_ensure_server_session", lambda *_args: session)
+    try:
+        host._run_real_turn({"sid": "profile-sid", "request_id": "turn", "text": "hello"})
+    finally:
+        host.close()
+
+    assert [entry[0] for entry in calls] == ["context", "row", "clear"]
+    assert active is False
+
+
 def test_mutator_route_table_matches_prd_inventory():
     assert MUTATOR_ROUTE_TABLE == {
         "prompt.submit": "turn-path",
