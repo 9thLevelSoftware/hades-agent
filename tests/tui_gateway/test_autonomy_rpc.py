@@ -190,6 +190,60 @@ def test_session_profile_home_override_is_honored(rpc, server, tmp_path):
     assert result["rules"] == []
 
 
+def test_autonomy_rpc_binds_session_workspace_for_native_run_argv(
+    rpc, server, tmp_path, monkeypatch
+):
+    import hades_cli.autonomy as autonomy_mod
+    from hades_cli.workspace_context import get_workspace_root
+
+    launch = tmp_path / "gateway-launch"
+    workspace = tmp_path / "session-workspace"
+    launch.mkdir()
+    workspace.mkdir()
+    server._sessions["sid-autonomy-workspace"] = {
+        "session_key": "tui-autonomy-workspace",
+        "cwd": str(workspace),
+    }
+    captured: list[Path] = []
+
+    def run(argv, **kwargs):
+        captured.append(get_workspace_root())
+        return autonomy_mod.CliResult(
+            autonomy_mod.EXIT_OK,
+            "safe",
+            {"ok": True, "action": "status"},
+        )
+
+    monkeypatch.setattr(autonomy_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    result = rpc("autonomy.exec", {
+        "session_id": "sid-autonomy-workspace", "argv": ["status"],
+    })
+
+    assert result["ok"] is True
+    assert captured == [workspace.resolve()]
+    assert Path.cwd() == launch
+
+
+def test_autonomy_relative_action_file_uses_workspace_context(tmp_path, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+    from hades_cli.workspace_context import workspace_context
+    from hades_cli.autonomy import run_argv
+
+    launch = tmp_path / "gateway-launch"
+    workspace = tmp_path / "session-workspace"
+    launch.mkdir()
+    workspace.mkdir()
+    (workspace / "action.yaml").write_text(
+        yaml.safe_dump(ACTION_SEND), encoding="utf-8"
+    )
+    monkeypatch.chdir(launch)
+    with workspace_context(workspace):
+        result = run_argv(["evaluate", "--file", "action.yaml"])
+    assert result.exit_code == autonomy_mod.EXIT_OK
+    assert result.payload["verdict"] in {"allow", "ask"}
+
+
 # ── Bounded argv validation (4xxx) ──────────────────────────────────────────
 
 

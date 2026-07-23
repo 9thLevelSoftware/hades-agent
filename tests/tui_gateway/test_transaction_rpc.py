@@ -337,6 +337,111 @@ def test_transaction_rpc_runs_mutations_in_live_process(
         db.close()
 
 
+def test_transaction_rpc_binds_relative_inputs_and_adapters_to_session_workspace(
+    rpc, server, tmp_path, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+    from hades_cli.workspace_context import get_workspace_root
+
+    launch = tmp_path / "gateway-launch"
+    workspace = tmp_path / "session-workspace"
+    launch.mkdir()
+    workspace.mkdir()
+    (workspace / "plan.yaml").write_text(yaml.safe_dump({
+        "transaction": {"title": "session-relative"},
+        "nodes": [{
+            "node_id": "write",
+            "adapter_id": "workspace.v1",
+            "action": "write_file",
+            "args": {"path": "relative.txt", "content": "hello"},
+        }],
+        "edges": [],
+    }), encoding="utf-8")
+    (workspace / "authority.yaml").write_text(
+        yaml.safe_dump({"authority_version": 1}), encoding="utf-8"
+    )
+    server._sessions["sid-workspace"] = {
+        "session_key": "tui-workspace",
+        "cwd": str(workspace),
+    }
+    monkeypatch.chdir(launch)
+    captured: list[Path] = []
+    adapters_mod = __import__(
+        "agent.effects.adapters", fromlist=["register_builtin_adapters"]
+    )
+    original_register = adapters_mod.register_builtin_adapters
+
+    def register(registry, *, workspace_root, **kwargs):
+        captured.append(get_workspace_root())
+        assert Path(workspace_root) == workspace.resolve()
+        return original_register(registry, workspace_root=workspace_root, **kwargs)
+
+    monkeypatch.setattr(adapters_mod, "register_builtin_adapters", register)
+    result = rpc("transaction.exec", {
+        "session_id": "sid-workspace",
+        "argv": [
+            "create", "--plan", "plan.yaml", "--authority", "authority.yaml",
+            "--transaction-id", "tx-relative",
+        ],
+    })
+
+    assert result.get("ok") is True, result
+    assert captured == [workspace.resolve()]
+    assert Path.cwd() == launch
+
+
+def test_transaction_rpc_preserves_safe_scalar_diagnostics(rpc, monkeypatch):
+    import hades_cli.transactions as transactions_mod
+
+    safe = "port:8080 error:EADDRINUSE code:42 name:foo sha256:abc123 id:abc"
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        safe,
+        {
+            "ok": True,
+            "action": "show",
+            "eligibility": {
+                "node-1": {
+                    "can_execute": False,
+                    "code": "blocked",
+                    "fidelity": "exact",
+                    "reason": safe,
+                    "blockers": [safe],
+                    "required_cascade_node_ids": ["node-2"],
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc("transaction.exec", {"argv": ["show", "tx"]})
+    wire = json.dumps(response, ensure_ascii=False)
+    for fragment in safe.split():
+        assert fragment in wire
+
+
+def test_transaction_rpc_successful_compensation_is_not_uncertain(rpc, monkeypatch):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        "compensation compensated; nodes: write",
+        {
+            "ok": True,
+            "action": "compensate",
+            "status": "compensated",
+            "compensated_nodes": ["write"],
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc("transaction.exec", {"argv": ["compensate", "tx", "write"]})
+    assert response["ok"] is True
+    assert response["action"] == "compensate"
+    assert response["status"] == "compensated"
+    assert "reconcile" not in response["output"]
+
+
 def test_transaction_preview_wire_result_contains_only_safe_node_metadata(
     rpc, tmp_path, monkeypatch
 ):
@@ -559,7 +664,7 @@ def test_transaction_native_redacts_generic_posix_paths_recursively(
 
 @pytest.mark.parametrize(
     "status",
-    ["unknown_effect", "blocked", "partially_compensated", "failed", "compensated"],
+    ["unknown_effect", "blocked", "partially_compensated", "failed"],
 )
 def test_transaction_rpc_uncertainty_wins_over_exit_ok_and_payload_ok(
     rpc, monkeypatch, status

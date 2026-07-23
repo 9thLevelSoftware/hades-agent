@@ -333,6 +333,41 @@ def test_session_profile_home_override_is_honored(rpc, server, tmp_path):
     assert [s["receipt_id"] for s in result["receipts"]] == [other.receipt_id]
 
 
+def test_receipt_rpc_binds_session_workspace_for_native_run_argv(
+    rpc, server, tmp_path, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+    from hades_cli.workspace_context import get_workspace_root
+
+    launch = tmp_path / "gateway-launch"
+    workspace = tmp_path / "session-workspace"
+    launch.mkdir()
+    workspace.mkdir()
+    server._sessions["sid-receipt-workspace"] = {
+        "session_key": "tui-receipt-workspace",
+        "cwd": str(workspace),
+    }
+    captured: list[Path] = []
+
+    def run(argv, **kwargs):
+        captured.append(get_workspace_root())
+        return receipts_mod.ReceiptCommandResult(
+            receipts_mod.EXIT_OK,
+            "safe",
+            {"ok": True, "action": "list", "receipts": []},
+        )
+
+    monkeypatch.setattr(receipts_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    result = rpc("receipt.exec", {
+        "session_id": "sid-receipt-workspace", "argv": ["list"],
+    })
+
+    assert result["ok"] is True
+    assert captured == [workspace.resolve()]
+    assert Path.cwd() == launch
+
+
 def test_caller_supplied_profile_path_is_never_accepted(rpc, home, tmp_path, seeded_receipt):
     evil_home = tmp_path / "evil-profile"
     evil_home.mkdir()
@@ -776,6 +811,56 @@ def test_valid_receipt_denial_output_is_redacted(rpc, monkeypatch):
     assert secret not in wire
     assert private_path not in wire
     assert resp["error"]["code"] == 5040, resp
+
+
+def test_receipt_native_preserves_colon_subject_and_rfc3339_scalars(
+    rpc, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    receipt_id = "rct_" + "a" * 64
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "action": "show",
+            "receipts": [{
+                "receipt_id": receipt_id,
+                "status": "verified",
+                "subject_id": "s1:t1",
+                "subject_kind": "turn",
+                "decided_at": "2026-07-10T00:00:00Z",
+                "content_hash": "sha256:deadbeef",
+                "scorer_id": "scorer",
+                "scorer_version": "1.0",
+            }],
+            "receipt": {
+                "receipt_id": receipt_id,
+                "status": "verified",
+                "subject_id": "s1:t1",
+                "subject_kind": "turn",
+                "content_hash": "sha256:deadbeef",
+                "decided_at": "2026-07-10T00:00:00Z",
+                "scorer_id": "scorer",
+                "scorer_version": "1.0",
+            },
+            "observations": [{
+                "observation_id": "obs_" + "b" * 64,
+                "receipt_id": receipt_id,
+                "status": "verified",
+                "observed_at": "2026-07-11T09:00:00Z",
+            }],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc("receipt.exec", {"argv": ["show", receipt_id]})
+    assert response["receipts"][0]["subject_id"] == "s1:t1"
+    assert response["receipts"][0]["decided_at"] == "2026-07-10T00:00:00Z"
+    assert response["receipt"]["subject_id"] == "s1:t1"
+    assert response["receipt"]["decided_at"] == "2026-07-10T00:00:00Z"
+    assert response["observations"][0]["observed_at"] == "2026-07-11T09:00:00Z"
 
 
 @pytest.mark.parametrize(
