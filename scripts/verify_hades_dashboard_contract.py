@@ -23,12 +23,64 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
 
 _MAX_CRON_BYTES = 2 * 1024 * 1024
 _MAX_DIAGNOSTIC_CHARS = 4_096
 _MAX_COMMAND_OUTPUT_CHARS = 64 * 1024
 
 _ORIGINAL_OS_OPEN = os.open
+
+if os.name == "nt":
+    _GENERIC_READ = 0x80000000
+    _FILE_READ_ATTRIBUTES = 0x0080
+    _FILE_SHARE_READ = 0x00000001
+    _FILE_SHARE_WRITE = 0x00000002
+    _OPEN_EXISTING = 3
+    _FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+    _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+    _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    _FILE_TYPE_DISK = 0x0001
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("last_access_time", wintypes.FILETIME),
+            ("last_write_time", wintypes.FILETIME),
+            ("volume_serial_number", wintypes.DWORD),
+            ("file_size_high", wintypes.DWORD),
+            ("file_size_low", wintypes.DWORD),
+            ("number_of_links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _create_file = _kernel32.CreateFileW
+    _create_file.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    _create_file.restype = wintypes.HANDLE
+    _close_handle = _kernel32.CloseHandle
+    _close_handle.argtypes = (wintypes.HANDLE,)
+    _close_handle.restype = wintypes.BOOL
+    _get_file_information = _kernel32.GetFileInformationByHandle
+    _get_file_information.argtypes = (wintypes.HANDLE, ctypes.POINTER(_ByHandleFileInformation))
+    _get_file_information.restype = wintypes.BOOL
+    _get_final_path = _kernel32.GetFinalPathNameByHandleW
+    _get_final_path.argtypes = (wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD)
+    _get_final_path.restype = wintypes.DWORD
+    _get_file_type = _kernel32.GetFileType
+    _get_file_type.argtypes = (wintypes.HANDLE,)
+    _get_file_type.restype = wintypes.DWORD
 
 _INTEGRATION_JOB_NAME = "hades-fork-integration"
 _INTEGRATION_HEADING = "## Integration Manifest + Handler Verification"
@@ -160,6 +212,172 @@ def _dirfd_safety_available() -> bool:
         return False
 
 
+def _windows_safety_available() -> bool:
+    """Return whether the Win32 handle APIs required for a pinned read exist."""
+    if os.name != "nt":
+        return False
+    return all(
+        callable(globals().get(name))
+        for name in (
+            "_create_file",
+            "_close_handle",
+            "_get_file_information",
+            "_get_final_path",
+            "_get_file_type",
+        )
+    )
+
+
+def _windows_open_handle(path: Path, *, directory: bool) -> int:
+    flags = _FILE_FLAG_OPEN_REPARSE_POINT
+    if directory:
+        flags |= _FILE_FLAG_BACKUP_SEMANTICS
+    handle = _create_file(
+        str(path),
+        _FILE_READ_ATTRIBUTES | (0 if directory else _GENERIC_READ),
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        None,
+        _OPEN_EXISTING,
+        flags,
+        None,
+    )
+    if handle == _INVALID_HANDLE_VALUE:
+        raise OSError(ctypes.get_last_error())
+    return int(handle)
+
+
+def _windows_close_handle(handle: int) -> None:
+    if not _close_handle(wintypes.HANDLE(handle)):
+        raise OSError(ctypes.get_last_error())
+
+
+def _windows_file_information(handle: int) -> _ByHandleFileInformation:
+    information = _ByHandleFileInformation()
+    if not _get_file_information(wintypes.HANDLE(handle), ctypes.byref(information)):
+        raise OSError(ctypes.get_last_error())
+    return information
+
+
+def _windows_final_path(handle: int) -> str:
+    capacity = 32_768
+    buffer = ctypes.create_unicode_buffer(capacity)
+    length = _get_final_path(wintypes.HANDLE(handle), buffer, capacity, 0)
+    if not length or length >= capacity:
+        raise OSError(ctypes.get_last_error())
+    return buffer.value.rstrip("\\/")
+
+
+def _windows_validate_handle(
+    handle: int, *, directory: bool, expected_path: str
+) -> _ByHandleFileInformation:
+    information = _windows_file_information(handle)
+    attributes = int(information.file_attributes)
+    is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT or is_directory is not directory:
+        raise OSError("unsafe reparse point or file type")
+    if _windows_final_path(handle).casefold() != expected_path.casefold():
+        raise OSError("manifest path identity changed")
+    return information
+
+
+def _read_windows_cron_text(path: Path, failures: list[str], max_bytes: int) -> str | None:
+    """Read a regular manifest only through Win32 handles pinned against rename."""
+    label = str(path)
+    handles: list[int] = []
+    file_fd: int | None = None
+    handle_close_failed = False
+    try:
+        if not _windows_safety_available():
+            failures.append("cron: refusing manifest read; required Win32 handle safety primitives are unavailable")
+            return None
+        absolute = Path(os.path.abspath(path.expanduser()))
+        anchor = absolute.anchor
+        if not anchor:
+            failures.append(f"cron: refusing unsafe manifest path {label}")
+            return None
+        parts = absolute.relative_to(Path(anchor)).parts
+        if not parts or any(part in {"", ".", ".."} for part in parts):
+            failures.append(f"cron: refusing unsafe manifest path {label}")
+            return None
+
+        current_path = Path(anchor)
+        root_handle = _windows_open_handle(current_path, directory=True)
+        handles.append(root_handle)
+        expected_path = _windows_final_path(root_handle)
+        _windows_validate_handle(root_handle, directory=True, expected_path=expected_path)
+        for component in parts[:-1]:
+            current_path /= component
+            expected_path = f"{expected_path}\\{component}"
+            directory_handle = _windows_open_handle(current_path, directory=True)
+            handles.append(directory_handle)
+            _windows_validate_handle(directory_handle, directory=True, expected_path=expected_path)
+            _windows_validate_handle(root_handle, directory=True, expected_path=_windows_final_path(root_handle))
+
+        current_path /= parts[-1]
+        expected_path = f"{expected_path}\\{parts[-1]}"
+        file_handle = _windows_open_handle(current_path, directory=False)
+        try:
+            information = _windows_validate_handle(
+                file_handle, directory=False, expected_path=expected_path
+            )
+            if _get_file_type(wintypes.HANDLE(file_handle)) != _FILE_TYPE_DISK:
+                failures.append(f"cron: expected regular file {label}")
+                return None
+            size = (int(information.file_size_high) << 32) | int(information.file_size_low)
+            if size == 0:
+                failures.append(f"cron: empty manifest file {label}")
+                return None
+            if size > max_bytes:
+                failures.append(f"cron: {label} is too large to inspect ({size} bytes; limit {max_bytes} bytes)")
+                return None
+            file_fd = msvcrt.open_osfhandle(file_handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+            file_handle = 0
+        finally:
+            if file_handle:
+                _windows_close_handle(file_handle)
+
+        chunks: list[bytes] = []
+        total = 0
+        while total <= max_bytes:
+            chunk = os.read(file_fd, min(64 * 1024, max_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                failures.append(f"cron: {label} grew beyond inspection limit {max_bytes} bytes")
+                return None
+        try:
+            text = b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError:
+            failures.append(f"cron: {label} is not valid UTF-8 text")
+            return None
+    except PermissionError:
+        failures.append(f"cron: permission denied reading {label}")
+        return None
+    except (OSError, TypeError, ValueError):
+        failures.append(f"cron: refusing unsafe manifest read {label}")
+        return None
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        for handle in reversed(handles):
+            try:
+                _windows_close_handle(handle)
+            except OSError:
+                handle_close_failed = True
+        if handle_close_failed:
+            failures.append(
+                "cron: refusing manifest read; required Win32 handle close safety check failed"
+            )
+    if handle_close_failed:
+        return None
+    if not text or not text.strip():
+        failures.append(f"cron: empty manifest file {label}")
+        return None
+    return text
+
+
 def _read_cron_text(path: Path, failures: list[str], max_bytes: int = _MAX_CRON_BYTES) -> str | None:
     """Read only a bounded regular cron file through no-follow descriptors.
 
@@ -167,6 +385,9 @@ def _read_cron_text(path: Path, failures: list[str], max_bytes: int = _MAX_CRON_
     cannot redirect the read.  ``O_NONBLOCK`` plus the regular-file check keeps
     a FIFO or other special file from hanging the sync job.
     """
+    if os.name == "nt":
+        return _read_windows_cron_text(path, failures, max_bytes)
+
     label = str(path)
     fd: int | None = None
     directory_fds: list[int] = []

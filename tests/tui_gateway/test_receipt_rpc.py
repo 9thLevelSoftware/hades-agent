@@ -226,7 +226,13 @@ def test_receipt_rpc_rejects_oversized_argv_without_secret_echo(rpc):
         ("transaction.exec", 4006),
     ],
 )
-@pytest.mark.parametrize("rid", ["r" * 1_100_000, object()])
+@pytest.mark.parametrize(
+    "rid",
+    [
+        pytest.param("r" * 1_100_000, id="oversized-json-id"),
+        pytest.param(object(), id="non-json-id"),
+    ],
+)
 def test_native_validation_errors_bound_oversized_or_non_json_ids(
     server, method, code, rid
 ):
