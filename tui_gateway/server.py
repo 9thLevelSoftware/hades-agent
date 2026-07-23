@@ -1863,9 +1863,26 @@ def _native_workspace_for_session(session_id: str | None) -> Path:
     session's validated ``cwd`` wins; unknown/no-session calls use the same
     validated gateway fallback as completion, and finally the launch cwd.
     """
+    session_key = session_id or ""
     with _sessions_lock:
-        session = dict(_sessions.get(session_id or "") or {})
-    candidate = session.get("cwd") or _completion_cwd({"session_id": session_id})
+        registered = session_id is not None and session_key in _sessions
+        raw_session = _sessions.get(session_key) if registered else None
+
+    if registered:
+        # A registry entry is an active session binding, not a hint.  Never
+        # reinterpret a missing, malformed, or deleted cwd as the gateway's
+        # launch directory: that could route native reads/writes elsewhere.
+        if type(raw_session) is not dict:
+            raise ValueError("registered session workspace is invalid")
+        cwd = raw_session.get("cwd")
+        if type(cwd) is not str or not cwd.strip():
+            raise ValueError("registered session workspace is invalid")
+        return resolve_workspace_root(cwd)
+
+    # No session (or an unknown session) is allowed to use the validated
+    # gateway fallback.  This path is intentionally separate from the active
+    # registry path above so a stale session can never fall through to it.
+    candidate = _completion_cwd({"session_id": session_id})
     try:
         return resolve_workspace_root(candidate)
     except ValueError:
@@ -14149,9 +14166,15 @@ def _(rid, params: dict) -> dict:
     # own profile_home; bind it for the duration of the call so the shared
     # service resolves THAT profile's config.yaml/state.db, never the launch
     # profile's. No session (or an unknown one) means the launch profile.
-    session = _sessions.get(session_id or "") or {}
+    raw_session = _sessions.get(session_id or "")
+    session = raw_session if type(raw_session) is dict else {}
     profile_home = session.get("profile_home")
-    workspace = _native_workspace_for_session(session_id)
+    try:
+        workspace = _native_workspace_for_session(session_id)
+    except Exception:
+        # Workspace resolution is a security boundary.  In particular, an
+        # active session whose cwd disappeared must not fall back to launch cwd.
+        return _native_internal_error(rid, method="autonomy.exec", code=5038)
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.autonomy as _autonomy_cli
@@ -14472,9 +14495,13 @@ def _(rid, params: dict) -> dict:
     # may steer profile resolution — a caller-supplied path in params is
     # never accepted. No session (or an unknown one) means the launch
     # profile, exactly like autonomy.exec.
-    session = _sessions.get(session_id or "") or {}
+    raw_session = _sessions.get(session_id or "")
+    session = raw_session if type(raw_session) is dict else {}
     profile_home = session.get("profile_home")
-    workspace = _native_workspace_for_session(session_id)
+    try:
+        workspace = _native_workspace_for_session(session_id)
+    except Exception:
+        return _native_internal_error(rid, method="receipt.exec", code=5043)
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.receipts as _receipts_cli
@@ -14589,12 +14616,19 @@ def _(rid, params: dict) -> dict:
 
 _TRANSACTION_MAX_ARGV_ENTRIES = 64
 _TRANSACTION_MAX_ARGV_BYTES = 64 * 1024
-_TRANSACTION_UNCERTAIN_STATUSES = frozenset({
-    "unknown_effect",
+_TRANSACTION_UNCERTAIN_STATUSES = frozenset({"unknown_effect"})
+_TRANSACTION_KNOWN_FAILURES = frozenset({
     "blocked",
-    "partially_compensated",
     "failed",
+    "partially_compensated",
 })
+_TRANSACTION_KNOWN_FAILURE_OUTPUTS = {
+    "blocked": "transaction blocked — execution was prevented",
+    "failed": "transaction failed — operation did not complete",
+    "partially_compensated": (
+        "transaction partially compensated — compensation incomplete"
+    ),
+}
 
 
 def _transaction_doc(row: Any) -> dict | None:
@@ -14813,7 +14847,13 @@ def _transaction_uncertainty_response(
     exit_code: int,
 ) -> dict | None:
     status = payload.get("status")
-    if not isinstance(status, str) or status not in _TRANSACTION_UNCERTAIN_STATUSES:
+    counts = payload.get("counts")
+    unknown_count = 0
+    if type(counts) is dict and type(counts.get("unknown")) is int:
+        unknown_count = counts["unknown"]
+    if (
+        not isinstance(status, str) or status not in _TRANSACTION_UNCERTAIN_STATUSES
+    ) and unknown_count <= 0:
         return None
     action_value = payload.get("action")
     action = _native_safe_action(
@@ -14826,6 +14866,36 @@ def _transaction_uncertainty_response(
         action=action,
         exit_code=exit_code,
         output=output,
+        ok=False,
+    )
+    transaction_id = _native_safe_domain_id(
+        argv[1] if len(argv) > 1 else None,
+        method="transaction.exec",
+    )
+    if transaction_id is not None:
+        response["transaction_id"] = transaction_id
+    return response
+
+
+def _transaction_known_failure_response(
+    payload: dict,
+    *,
+    argv: list[str],
+    exit_code: int,
+) -> dict | None:
+    status = payload.get("status")
+    if not isinstance(status, str) or status not in _TRANSACTION_KNOWN_FAILURES:
+        return None
+    action_value = payload.get("action")
+    action = _native_safe_action(
+        action_value if type(action_value) is str else argv[0],
+        fallback="command",
+    )
+    response = _transaction_response(
+        payload,
+        action=action,
+        exit_code=exit_code,
+        output=_TRANSACTION_KNOWN_FAILURE_OUTPUTS[status],
         ok=False,
     )
     transaction_id = _native_safe_domain_id(
@@ -14865,9 +14935,13 @@ def _(rid, params: dict) -> dict:
     # recorded profile_home steers resolution; caller paths are never
     # accepted. Mutations run in THIS live gateway process — never in a
     # _SlashWorker subprocess.
-    session = _sessions.get(session_id or "") or {}
+    raw_session = _sessions.get(session_id or "")
+    session = raw_session if type(raw_session) is dict else {}
     profile_home = session.get("profile_home")
-    workspace = _native_workspace_for_session(session_id)
+    try:
+        workspace = _native_workspace_for_session(session_id)
+    except Exception:
+        return _native_internal_error(rid, method="transaction.exec", code=5045)
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.transactions as _transactions_cli
@@ -14897,6 +14971,16 @@ def _(rid, params: dict) -> dict:
         payload = _normalize_native_payload(result.payload, method="transaction.exec")
     except Exception:
         return _native_internal_error(rid, method="transaction.exec", code=5045)
+    uncertainty = _transaction_uncertainty_response(
+        payload, argv=argv, exit_code=exit_code
+    )
+    if uncertainty is not None:
+        return _native_success(rid, uncertainty, method="transaction.exec", code=5045)
+    known_failure = _transaction_known_failure_response(
+        payload, argv=argv, exit_code=exit_code
+    )
+    if known_failure is not None:
+        return _native_success(rid, known_failure, method="transaction.exec", code=5045)
     if exit_code == exit_validation:
         return _native_error(
             rid,
@@ -14904,11 +14988,6 @@ def _(rid, params: dict) -> dict:
             "transaction.exec: validation failed (details withheld; run "
             "hades transaction in a terminal)",
         )
-    uncertainty = _transaction_uncertainty_response(
-        payload, argv=argv, exit_code=exit_code
-    )
-    if uncertainty is not None:
-        return _native_success(rid, uncertainty, method="transaction.exec", code=5045)
     if exit_code != exit_ok:
         return _native_error(
             rid,
