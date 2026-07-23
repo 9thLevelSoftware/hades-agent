@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
-"""Verify the cross-surface Hades dashboard/TUI integration contract.
+"""Execute the cross-surface Hades dashboard/TUI integration contract.
 
-This is deliberately a small semantic verifier, not a TypeScript or Python
-parser.  It checks the exact API method/route/verb surface, native TUI RPC
-registration, response type exports, required RPC tests, and the integration
-cron prompt.  It is safe to run from a sync job: expected file and manifest
-problems become actionable diagnostics instead of tracebacks.
+The contract is intentionally behavioral: every required surface is exercised
+through its real test or typecheck command.  The only file content inspected by
+this verifier is the operational cron JSON and its prompt; Python and
+TypeScript implementation files are never read or parsed here.
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 import errno
 import json
 import os
 import re
 import shlex
 import stat
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 
-_MAX_API_BYTES = 512 * 1024
-_MAX_SERVER_BYTES = 1024 * 1024
-_MAX_TYPES_BYTES = 256 * 1024
-_MAX_TEST_BYTES = 512 * 1024
 _MAX_CRON_BYTES = 2 * 1024 * 1024
+_MAX_DIAGNOSTIC_CHARS = 4_096
+_MAX_COMMAND_OUTPUT_CHARS = 64 * 1024
 
 _ORIGINAL_OS_OPEN = os.open
 
@@ -35,1478 +34,39 @@ _INTEGRATION_JOB_NAME = "hades-fork-integration"
 _INTEGRATION_HEADING = "## Integration Manifest + Handler Verification"
 _INTEGRATION_COMMAND = "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py"
 _POST_SYNC_MARKER = "scripts/post-sync-verify.py"
+_TRACKED_VERIFIER_REF = "fix/dashboard-api-contract"
 _CRON_SHELL_LANGUAGES = frozenset({"bash", "sh", "shell"})
 
+_SECRET_RE = re.compile(
+    r"(?i)(\b(?:api[_-]?key|access[_-]?key|token|password|secret|authorization)\b"
+    r"\s*[:=]\s*)([^\s,;]+)"
+)
+
 
 @dataclass(frozen=True)
-class _ApiContract:
+class CommandSpec:
+    """One executable behavioral contract surface."""
+
     name: str
-    verb: str
-    route_expression: str
-    route_display: str
-    plain_static_route: bool = False
-
-
-_API_CONTRACTS = (
-    _ApiContract(
-        "getAutonomyStatus",
-        "GET",
-        "/api/autonomy/status",
-        "/api/autonomy/status",
-        True,
-    ),
-    _ApiContract(
-        "getAutonomyRules",
-        "GET",
-        '`/api/autonomy/rules${qs ? `?${qs}` : ""}`',
-        "/api/autonomy/rules",
-    ),
-    _ApiContract(
-        "explainAutonomyRule",
-        "GET",
-        "`/api/autonomy/rules/${encodeURIComponent(ruleId)}`",
-        "/api/autonomy/rules/${encodeURIComponent(ruleId)}",
-    ),
-    _ApiContract(
-        "previewAutonomyChange",
-        "POST",
-        "/api/autonomy/preview",
-        "/api/autonomy/preview",
-        True,
-    ),
-    _ApiContract(
-        "applyAutonomyPreview",
-        "POST",
-        "/api/autonomy/apply",
-        "/api/autonomy/apply",
-        True,
-    ),
-    _ApiContract(
-        "acceptAutonomySuggestion",
-        "POST",
-        "`/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/accept`",
-        "/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/accept",
-    ),
-    _ApiContract(
-        "rejectAutonomySuggestion",
-        "POST",
-        "`/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/reject`",
-        "/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/reject",
-    ),
-    _ApiContract(
-        "getAutonomyMandates",
-        "GET",
-        '`/api/autonomy/mandates${state ? `?state=${encodeURIComponent(state)}` : ""}`',
-        "/api/autonomy/mandates",
-    ),
-    _ApiContract(
-        "revokeAutonomyMandate",
-        "POST",
-        "`/api/autonomy/mandates/${encodeURIComponent(ruleId)}/revoke`",
-        "/api/autonomy/mandates/${encodeURIComponent(ruleId)}/revoke",
-    ),
-    _ApiContract(
-        "getAutonomyAudit",
-        "GET",
-        '`/api/autonomy/audit?limit=${limit}${verdict ? `&verdict=${encodeURIComponent(verdict)}` : ""}`',
-        "/api/autonomy/audit",
-    ),
-    _ApiContract(
-        "getReceipts",
-        "GET",
-        '`/api/receipts${qs ? `?${qs}` : ""}`',
-        "/api/receipts",
-    ),
-    _ApiContract(
-        "getReceipt",
-        "GET",
-        "`/api/receipts/${encodeURIComponent(receiptId)}`",
-        "/api/receipts/${encodeURIComponent(receiptId)}",
-    ),
-    _ApiContract(
-        "getReceiptObservations",
-        "GET",
-        "`/api/receipts/${encodeURIComponent(receiptId)}/observations`",
-        "/api/receipts/${encodeURIComponent(receiptId)}/observations",
-    ),
-)
-
-_REQUIRED_RPC_TESTS = (
-    ("tests/tui_gateway/test_autonomy_rpc.py", "autonomy RPC test"),
-    ("tests/tui_gateway/test_receipt_rpc.py", "receipt RPC test"),
-    (
-        "tests/tui_gateway/test_transaction_rpc.py",
-        "transaction RPC test (same-sync dependency)",
-    ),
-)
-_REQUIRED_RESPONSE_EXPORTS = (
-    "AutonomyExecResponse",
-    "ReceiptExecResponse",
-    "TransactionExecResponse",
-)
-_REQUIRED_HANDLERS = ("autonomy.exec", "receipt.exec", "transaction.exec")
-
-
-def _path_label(path: Path, repo_root: Path) -> str:
-    """Prefer stable repo-relative paths in diagnostics."""
-    try:
-        return str(path.relative_to(repo_root))
-    except ValueError:
-        return str(path)
-
-
-def _dirfd_safety_available() -> bool:
-    """Return whether confined no-follow directory walks are supported."""
-    try:
-        return (
-            _ORIGINAL_OS_OPEN in getattr(os, "supports_dir_fd", set())
-            and isinstance(getattr(os, "O_NOFOLLOW", None), int)
-            and os.O_NOFOLLOW != 0
-            and isinstance(getattr(os, "O_DIRECTORY", None), int)
-            and os.O_DIRECTORY != 0
-        )
-    except (AttributeError, TypeError):
-        return False
-
-
-def _open_repo_root_fd(repo_root: Path, failures: list[str]) -> int | None:
-    """Open the canonical repository root once for descriptor-relative walks."""
-    if not _dirfd_safety_available():
-        failures.append(
-            "repo: refusing confined asset reads; required dir_fd/O_NOFOLLOW/O_DIRECTORY "
-            "safety primitives are unavailable"
-        )
-        return None
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW | os.O_DIRECTORY
-    fd: int | None = None
-    try:
-        fd = os.open(repo_root, flags)
-        root_stat = os.fstat(fd)
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            failures.append("repo: refusing symlink/no-follow repository root")
-        else:
-            failures.append(
-                f"repo: cannot open repository root {repo_root}: {exc.strerror or exc}"
-            )
-        if fd is not None:
-            os.close(fd)
-        return None
-    if not stat.S_ISDIR(root_stat.st_mode):
-        os.close(fd)
-        failures.append(f"repo: repository root is not a directory {repo_root}")
-        return None
-    return fd
-
-
-def _read_text(
-    path: Path,
-    *,
-    repo_root: Path,
-    category: str,
-    failures: list[str],
-    max_bytes: int,
-    confine_to_repo: bool = True,
-    repo_fd: int | None = None,
-) -> str | None:
-    """Read a bounded UTF-8 source file and report expected failures."""
-    label = _path_label(path, repo_root)
-    fd: int | None = None
-    directory_fds: list[int] = []
-    text: str | None = None
-    try:
-        nofollow = getattr(os, "O_NOFOLLOW", None)
-        if not isinstance(nofollow, int) or nofollow == 0:
-            failures.append(
-                f"{category}: refusing read of {label}; required O_NOFOLLOW safety primitive is unavailable"
-            )
-            return None
-
-        nonblock = getattr(os, "O_NONBLOCK", None)
-        if not isinstance(nonblock, int) or nonblock == 0:
-            failures.append(
-                f"{category}: refusing read of {label}; required O_NONBLOCK safety primitive is unavailable"
-            )
-            return None
-
-        if confine_to_repo:
-            if repo_fd is None or not _dirfd_safety_available():
-                failures.append(
-                    f"{category}: refusing confined read of {label}; required dir_fd/O_NOFOLLOW/O_DIRECTORY "
-                    "safety primitives are unavailable"
-                )
-                return None
-            try:
-                relative = path.relative_to(repo_root)
-            except ValueError:
-                failures.append(
-                    f"{category}: path is outside repository root {label}"
-                )
-                return None
-
-            if not relative.parts or any(
-                component in {"", ".", ".."} for component in relative.parts
-            ):
-                failures.append(
-                    f"{category}: refusing unsafe relative path component in {label}"
-                )
-                return None
-            parent_fd = repo_fd
-            directory_flags = (
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | os.O_NOFOLLOW
-                | os.O_DIRECTORY
-            )
-            for component in relative.parts[:-1]:
-                try:
-                    child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
-                except FileNotFoundError:
-                    failures.append(f"{category}: missing file {label}")
-                    return None
-                except OSError as exc:
-                    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
-                        failures.append(
-                            f"{category}: refusing non-directory or symlink/no-follow path component {label}"
-                        )
-                    else:
-                        failures.append(
-                            f"{category}: cannot open path component {label}: "
-                            f"{exc.strerror or exc}"
-                        )
-                    return None
-                directory_fds.append(child_fd)
-                component_stat = os.fstat(child_fd)
-                if not stat.S_ISDIR(component_stat.st_mode):
-                    failures.append(
-                        f"{category}: refusing non-directory path component {label}"
-                    )
-                    return None
-                parent_fd = child_fd
-            final_flags = (
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | os.O_NOFOLLOW
-                | nonblock
-            )
-            try:
-                fd = os.open(relative.parts[-1], final_flags, dir_fd=parent_fd)
-            except FileNotFoundError:
-                failures.append(f"{category}: missing file {label}")
-                return None
-            except OSError as exc:
-                if exc.errno == errno.ELOOP:
-                    failures.append(
-                        f"{category}: refusing symlink/no-follow file {label}"
-                    )
-                else:
-                    failures.append(
-                        f"{category}: cannot open {label}: {exc.strerror or exc}"
-                    )
-                return None
-        else:
-            if not _dirfd_safety_available():
-                failures.append(
-                    f"{category}: refusing external read of {label}; required "
-                    "dir_fd/O_NOFOLLOW/O_DIRECTORY safety primitives are unavailable"
-                )
-                return None
-            absolute_path = Path(os.path.abspath(path))
-            anchor = absolute_path.anchor
-            if not anchor:
-                failures.append(f"{category}: refusing unsafe external path {label}")
-                return None
-            relative_parts = absolute_path.relative_to(Path(anchor)).parts
-            if not relative_parts or any(
-                component in {"", ".", ".."} for component in relative_parts
-            ):
-                failures.append(f"{category}: refusing unsafe external path {label}")
-                return None
-            directory_flags = (
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | os.O_NOFOLLOW
-                | os.O_DIRECTORY
-            )
-            root_flags = directory_flags
-            try:
-                filesystem_root_fd = os.open(Path(anchor), root_flags)
-            except OSError as exc:
-                if exc.errno == errno.ELOOP:
-                    failures.append(
-                        f"{category}: refusing symlink/no-follow filesystem root {label}"
-                    )
-                else:
-                    failures.append(
-                        f"{category}: cannot open filesystem root for {label}: "
-                        f"{exc.strerror or exc}"
-                    )
-                return None
-            directory_fds.append(filesystem_root_fd)
-            try:
-                root_stat = os.fstat(filesystem_root_fd)
-            except OSError as exc:
-                failures.append(
-                    f"{category}: cannot inspect filesystem root for {label}: "
-                    f"{exc.strerror or exc}"
-                )
-                return None
-            if not stat.S_ISDIR(root_stat.st_mode):
-                failures.append(
-                    f"{category}: refusing non-directory filesystem root for {label}"
-                )
-                return None
-
-            parent_fd = filesystem_root_fd
-            for component in relative_parts[:-1]:
-                try:
-                    child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
-                except FileNotFoundError:
-                    failures.append(f"{category}: missing file {label}")
-                    return None
-                except OSError as exc:
-                    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
-                        failures.append(
-                            f"{category}: refusing non-directory or symlink/no-follow "
-                            f"path component {label}"
-                        )
-                    else:
-                        failures.append(
-                            f"{category}: cannot open path component {label}: "
-                            f"{exc.strerror or exc}"
-                        )
-                    return None
-                directory_fds.append(child_fd)
-                try:
-                    component_stat = os.fstat(child_fd)
-                except OSError as exc:
-                    failures.append(
-                        f"{category}: cannot inspect path component {label}: "
-                        f"{exc.strerror or exc}"
-                    )
-                    return None
-                if not stat.S_ISDIR(component_stat.st_mode):
-                    failures.append(
-                        f"{category}: refusing non-directory path component {label}"
-                    )
-                    return None
-                parent_fd = child_fd
-
-            final_flags = (
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | os.O_NOFOLLOW
-                | nonblock
-            )
-            try:
-                fd = os.open(relative_parts[-1], final_flags, dir_fd=parent_fd)
-            except FileNotFoundError:
-                failures.append(f"{category}: missing file {label}")
-                return None
-            except OSError as exc:
-                if exc.errno == errno.ELOOP:
-                    failures.append(
-                        f"{category}: refusing symlink/no-follow file {label}"
-                    )
-                else:
-                    failures.append(
-                        f"{category}: cannot open {label}: {exc.strerror or exc}"
-                    )
-                return None
-
-        descriptor_stat = os.fstat(fd)
-        if not stat.S_ISREG(descriptor_stat.st_mode):
-            failures.append(f"{category}: expected regular file {label}")
-            return None
-        if descriptor_stat.st_size == 0:
-            failures.append(f"{category}: empty file {label}")
-            return None
-        if descriptor_stat.st_size > max_bytes:
-            failures.append(
-                f"{category}: {label} is too large to inspect ({descriptor_stat.st_size} bytes; "
-                f"limit {max_bytes} bytes)"
-            )
-            return None
-        chunks: list[bytes] = []
-        total = 0
-        while total <= max_bytes:
-            chunk = os.read(fd, min(64 * 1024, max_bytes + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > max_bytes:
-                failures.append(
-                    f"{category}: {label} grew beyond inspection limit {max_bytes} bytes"
-                )
-                return None
-        try:
-            text = b"".join(chunks).decode("utf-8")
-        except UnicodeDecodeError:
-            failures.append(f"{category}: {label} is not valid UTF-8 text")
-            return None
-    except PermissionError:
-        failures.append(f"{category}: permission denied reading {label}")
-        return None
-    except OSError as exc:
-        failures.append(f"{category}: cannot read {label}: {exc.strerror or exc}")
-        return None
-    finally:
-        if fd is not None:
-            os.close(fd)
-        for directory_fd in reversed(directory_fds):
-            os.close(directory_fd)
-    if not text.strip():
-        failures.append(f"{category}: empty file {label}")
-        return None
-    return text
-
-
-_API_DECLARATION_RE = re.compile(r"\bexport\s+const\s+api\b")
-
-
-def _live_api_declarations(text: str) -> list[re.Match[str]]:
-    """Return live API declarations after masking comments and string literals."""
-    live_text = _mask_ts_comments_and_strings(text)
-    return list(_API_DECLARATION_RE.finditer(live_text))
-
-
-def _api_object(text: str) -> str | None:
-    """Return the body of the sole live exported ``api`` object."""
-    declarations = _live_api_declarations(text)
-    if len(declarations) != 1:
-        return None
-    declaration = declarations[0]
-    live_text = declaration.string
-    assignment = re.match(r"\s*=\s*\{", live_text[declaration.end() :])
-    if assignment is None:
-        return None
-    object_start = declaration.end() + assignment.end() - 1
-    object_end = _skip_ts_balanced_group(text, object_start)
-    if object_end is None:
-        # Preserve a bounded body for method-level diagnostics when an inner
-        # call is malformed.  If there is no syntactic object terminator at
-        # all, fail closed as an unterminated exported object.
-        closing = re.search(r"(?m)^[ \t]*\};[ \t]*$", text[object_start + 1 :])
-        if closing is None:
-            return None
-        return text[object_start + 1 : object_start + 1 + closing.start()]
-    return text[object_start + 1 : object_end - 1]
-
-
-def _api_properties(body: str) -> dict[str, list[tuple[int, int]]]:
-    """Index only lexical-depth-zero identifier properties in an API object."""
-    candidates: list[tuple[str, int]] = []
-    stack: list[str] = []
-    closing_for = {"(": ")", "[": "]", "{": "}"}
-    index = 0
-    while index < len(body):
-        char = body[index]
-        if char in ("'", '"'):
-            end = _skip_ts_quoted(body, index, char)
-            if end is None:
-                raise ValueError("unterminated quoted string while indexing api object")
-            index = end
-            continue
-        if char == "`":
-            end = _skip_ts_template(body, index)
-            if end is None:
-                raise ValueError("unterminated template literal while indexing api object")
-            index = end
-            continue
-        if char == "/" and index + 1 < len(body) and body[index + 1] in "/*":
-            end = _skip_ts_comment(body, index)
-            if end is None:
-                raise ValueError("unterminated comment while indexing api object")
-            index = end
-            continue
-        if char in "([{":
-            stack.append(char)
-            index += 1
-            continue
-        if char in ")]}":
-            if not stack or closing_for[stack[-1]] != char:
-                # Keep already-indexed top-level properties so the caller can
-                # report which method contains the malformed expression.
-                break
-            stack.pop()
-            index += 1
-            continue
-        if not stack and (char.isalpha() or char in "_$"):
-            end = index + 1
-            while end < len(body) and (body[end].isalnum() or body[end] in "_$"):
-                end += 1
-            cursor = end
-            while cursor < len(body) and body[cursor].isspace():
-                cursor += 1
-            if cursor < len(body) and body[cursor] == ":":
-                candidates.append((body[index:end], index))
-            index = end
-            continue
-        index += 1
-    properties: dict[str, list[tuple[int, int]]] = {}
-    for candidate_index, (name, start) in enumerate(candidates):
-        end = candidates[candidate_index + 1][1] if candidate_index + 1 < len(candidates) else len(body)
-        properties.setdefault(name, []).append((start, end))
-    return properties
-
-
-def _strip_ts_comments(text: str) -> str:
-    """Blank TypeScript comments without touching quoted route expressions.
-
-    This deliberately remains a small lexical state machine rather than a
-    TypeScript parser.  It preserves all characters inside single-quoted,
-    double-quoted, and backticked strings (including escaped delimiters),
-    while replacing comment characters with spaces and retaining newlines so
-    diagnostics and method boundaries remain stable.
-    """
-    chars = list(text)
-    state = "normal"
-    quote = ""
-    index = 0
-    while index < len(chars):
-        char = chars[index]
-        next_char = chars[index + 1] if index + 1 < len(chars) else ""
-
-        if state == "normal":
-            if char == "/" and next_char == "/":
-                chars[index] = " "
-                chars[index + 1] = " "
-                index += 2
-                state = "line_comment"
-                continue
-            if char == "/" and next_char == "*":
-                chars[index] = " "
-                chars[index + 1] = " "
-                index += 2
-                state = "block_comment"
-                continue
-            if char in ("'", '"', "`"):
-                quote = char
-                state = "quoted"
-            index += 1
-            continue
-
-        if state == "line_comment":
-            if char in ("\n", "\r"):
-                state = "normal"
-            else:
-                chars[index] = " "
-            index += 1
-            continue
-
-        if state == "block_comment":
-            if char == "*" and next_char == "/":
-                chars[index] = " "
-                chars[index + 1] = " "
-                index += 2
-                state = "normal"
-                continue
-            if char not in ("\n", "\r"):
-                chars[index] = " "
-            index += 1
-            continue
-
-        # quoted string/template literal: preserve route text and escaped
-        # delimiters.  Template interpolation is intentionally kept intact;
-        # the API contract only needs its route expression and this avoids
-        # mistaking comment-looking text inside a template string for source.
-        if char == "\\":
-            index += 2
-            continue
-        if char == quote:
-            state = "normal"
-            quote = ""
-        index += 1
-
-    return "".join(chars)
-
-
-def _skip_ts_quoted(text: str, start: int, quote: str) -> int | None:
-    """Return the index after a quoted string, or ``None`` if unterminated."""
-    index = start + 1
-    while index < len(text):
-        char = text[index]
-        if char == "\\":
-            index += 2
-            continue
-        if char == quote:
-            return index + 1
-        if char in ("\n", "\r"):
-            return None
-        index += 1
-    return None
-
-
-def _skip_ts_comment(text: str, start: int) -> int | None:
-    """Return the index after a comment beginning at ``start``."""
-    if text.startswith("//", start):
-        newline = text.find("\n", start + 2)
-        return len(text) if newline < 0 else newline
-    if text.startswith("/*", start):
-        closing = text.find("*/", start + 2)
-        return None if closing < 0 else closing + 2
-    return None
-
-
-def _skip_ts_template(text: str, start: int) -> int | None:
-    """Skip a template literal, including nested ``${...}`` expressions."""
-    index = start + 1
-    while index < len(text):
-        char = text[index]
-        if char == "\\":
-            index += 2
-            continue
-        if char == "`":
-            return index + 1
-        if char == "$" and index + 1 < len(text) and text[index + 1] == "{":
-            end = _skip_ts_balanced_group(text, index + 1)
-            if end is None:
-                return None
-            index = end
-            continue
-        index += 1
-    return None
-
-
-def _skip_ts_balanced_group(text: str, start: int) -> int | None:
-    """Skip one balanced ``()``, ``{}``, or ``[]`` group lexically."""
-    opening = text[start] if start < len(text) else ""
-    closing_for = {"(": ")", "{": "}", "[": "]"}
-    if opening not in closing_for:
-        return None
-    stack = [opening]
-    index = start + 1
-    while index < len(text):
-        char = text[index]
-        if char in ("'", '"'):
-            end = _skip_ts_quoted(text, index, char)
-            if end is None:
-                return None
-            index = end
-            continue
-        if char == "`":
-            end = _skip_ts_template(text, index)
-            if end is None:
-                return None
-            index = end
-            continue
-        if char in "([{":
-            stack.append(char)
-            index += 1
-            continue
-        if char in ")]}":
-            if not stack or closing_for[stack[-1]] != char:
-                return None
-            stack.pop()
-            index += 1
-            if not stack:
-                return index
-            continue
-        if char == "/" and index + 1 < len(text) and text[index + 1] in "/*":
-            end = _skip_ts_comment(text, index)
-            if end is None:
-                return None
-            index = end
-            continue
-        index += 1
-    return None
-
-
-def _split_top_level(text: str, delimiter: str = ",") -> list[str] | None:
-    """Split text on delimiters outside balanced groups and literals."""
-    pieces: list[str] = []
-    start = 0
-    stack: list[str] = []
-    closing_for = {"(": ")", "{": "}", "[": "]"}
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char in ("'", '"'):
-            end = _skip_ts_quoted(text, index, char)
-            if end is None:
-                return None
-            index = end
-            continue
-        if char == "`":
-            end = _skip_ts_template(text, index)
-            if end is None:
-                return None
-            index = end
-            continue
-        if char in "([{":
-            stack.append(char)
-        elif char in ")]}":
-            if not stack or closing_for[stack[-1]] != char:
-                return None
-            stack.pop()
-        elif char == delimiter and not stack:
-            pieces.append(text[start:index].strip())
-            start = index + 1
-        index += 1
-    if stack:
-        return None
-    pieces.append(text[start:].strip())
-    return pieces
-
-
-def _extract_call_arguments(text: str, opening: int) -> tuple[str, ...] | None:
-    """Extract one call's top-level comma-separated argument expressions."""
-    inner_end = _skip_ts_balanced_group(text, opening)
-    if inner_end is None:
-        return None
-    inner = text[opening + 1 : inner_end - 1]
-    if not inner.strip():
-        return ()
-    pieces = _split_top_level(inner)
-    if pieces is None:
-        return None
-    while len(pieces) > 1 and not pieces[-1]:
-        pieces.pop()
-    return tuple(pieces)
-
-
-def _skip_ts_type_arguments(text: str, start: int) -> int | None:
-    """Skip a simple generic type argument list before a call parenthesis."""
-    if start >= len(text) or text[start] != "<":
-        return start
-    depth = 1
-    index = start + 1
-    while index < len(text):
-        char = text[index]
-        if char in ("'", '"'):
-            end = _skip_ts_quoted(text, index, char)
-            if end is None:
-                return None
-            index = end
-            continue
-        if char == "`":
-            end = _skip_ts_template(text, index)
-            if end is None:
-                return None
-            index = end
-            continue
-        if char == "<":
-            depth += 1
-        elif char == ">":
-            depth -= 1
-            if depth == 0:
-                return index + 1
-        index += 1
-    return None
+    argv: tuple[str, ...]
+    cwd: Path
+    timeout_seconds: float
+    tmpdir: Path
 
 
 @dataclass(frozen=True)
-class _TransportCall:
-    helper: str
-    arguments: tuple[str, ...]
-    direct: bool
-    nested_transport: bool = False
-    start: int = -1
-    end: int = -1
+class CommandResult:
+    """Bounded result from a contract command."""
+
+    returncode: int | None = 0
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+    missing_executable: bool = False
+    error: str = ""
 
 
-def _contains_direct_transport_token(text: str) -> bool:
-    """Find a direct transport token without parsing its call arguments."""
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char in ("'", '"'):
-            end = _skip_ts_quoted(text, index, char)
-            if end is None:
-                return False
-            index = end
-            continue
-        if char == "`":
-            end = _skip_ts_template(text, index)
-            if end is None:
-                return False
-            index = end
-            continue
-        if char == "/" and index + 1 < len(text) and text[index + 1] in "/*":
-            end = _skip_ts_comment(text, index)
-            if end is None:
-                return False
-            index = end
-            continue
-        if char.isalpha() or char in "_$":
-            end = index + 1
-            while end < len(text) and (text[end].isalnum() or text[end] in "_$"):
-                end += 1
-            word = text[index:end]
-            if word in {"fetchJSON", "apiGet"}:
-                previous = index - 1
-                while previous >= 0 and text[previous].isspace():
-                    previous -= 1
-                if previous < 0 or text[previous] != ".":
-                    cursor = end
-                    while cursor < len(text) and text[cursor].isspace():
-                        cursor += 1
-                    if cursor < len(text) and text[cursor] == "<":
-                        cursor = _skip_ts_type_arguments(text, cursor)
-                        if cursor is None:
-                            return True
-                        while cursor < len(text) and text[cursor].isspace():
-                            cursor += 1
-                    if cursor < len(text) and text[cursor] == "(":
-                        return True
-            index = end
-            continue
-        index += 1
-    return False
-
-
-def _transport_calls(text: str) -> tuple[list[_TransportCall], bool]:
-    """Extract fetchJSON/apiGet calls, reporting malformed lexical calls."""
-    calls: list[_TransportCall] = []
-    index = 0
-    arrow_count = 0
-    function_seen = False
-    while index < len(text):
-        char = text[index]
-        if char in ("'", '"'):
-            end = _skip_ts_quoted(text, index, char)
-            if end is None:
-                return calls, True
-            index = end
-            continue
-        if char == "`":
-            end = _skip_ts_template(text, index)
-            if end is None:
-                return calls, True
-            index = end
-            continue
-        if text.startswith("=>", index):
-            arrow_count += 1
-            index += 2
-            continue
-        if char.isalpha() or char in "_$":
-            end = index + 1
-            while end < len(text) and (text[end].isalnum() or text[end] in "_$"):
-                end += 1
-            word = text[index:end]
-            if word == "function":
-                function_seen = True
-            if word in {"fetchJSON", "apiGet"}:
-                previous = index - 1
-                while previous >= 0 and text[previous].isspace():
-                    previous -= 1
-                qualified = previous >= 0 and text[previous] == "."
-                cursor = end
-                while cursor < len(text) and text[cursor].isspace():
-                    cursor += 1
-                if cursor < len(text) and text[cursor] == "<":
-                    cursor = _skip_ts_type_arguments(text, cursor)
-                    if cursor is None:
-                        return calls, True
-                    while cursor < len(text) and text[cursor].isspace():
-                        cursor += 1
-                if cursor < len(text) and text[cursor] == "(":
-                    arguments = _extract_call_arguments(text, cursor)
-                    if arguments is None:
-                        return calls, True
-                    call_end = _skip_ts_balanced_group(text, cursor)
-                    if call_end is None:
-                        return calls, True
-                    nested_transport = _contains_direct_transport_token(
-                        text[cursor + 1 : call_end - 1]
-                    )
-                    calls.append(
-                        _TransportCall(
-                            word,
-                            arguments,
-                            direct=(
-                                not qualified
-                                and arrow_count <= 1
-                                and not function_seen
-                            ),
-                            nested_transport=nested_transport,
-                            start=index,
-                            end=call_end,
-                        )
-                    )
-                    # The argument parser has already consumed the balanced
-                    # span.  Do not rescan each nested transport token.
-                    index = call_end
-                    continue
-            index = end
-            continue
-        index += 1
-    return calls, False
-
-
-def _normalize_ts_expression(expression: str) -> str:
-    """Remove whitespace outside quoted/template literal text."""
-    normalized: list[str] = []
-    index = 0
-    while index < len(expression):
-        char = expression[index]
-        if char.isspace():
-            index += 1
-            continue
-        if char in ("'", '"'):
-            end = _skip_ts_quoted(expression, index, char)
-            if end is None:
-                normalized.append(expression[index:])
-                break
-            normalized.append(expression[index:end])
-            index = end
-            continue
-        if char == "`":
-            end = _skip_ts_template(expression, index)
-            if end is None:
-                normalized.append(expression[index:])
-                break
-            normalized.append(_normalize_ts_template(expression, index, end))
-            index = end
-            continue
-        normalized.append(char)
-        index += 1
-    return "".join(normalized)
-
-
-def _normalize_ts_template(text: str, start: int, end: int) -> str:
-    """Normalize whitespace in template interpolations, not literal chunks."""
-    normalized: list[str] = ["`"]
-    index = start + 1
-    while index < end - 1:
-        char = text[index]
-        if char == "\\":
-            normalized.append(text[index : min(index + 2, end - 1)])
-            index += 2
-            continue
-        if char == "$" and index + 1 < end - 1 and text[index + 1] == "{":
-            interpolation_end = _skip_ts_balanced_group(text, index + 1)
-            if interpolation_end is None or interpolation_end > end:
-                normalized.append(text[index : end - 1])
-                break
-            normalized.append("${")
-            normalized.append(
-                _normalize_ts_expression(text[index + 2 : interpolation_end - 1])
-            )
-            normalized.append("}")
-            index = interpolation_end
-            continue
-        normalized.append(char)
-        index += 1
-    normalized.append("`")
-    return "".join(normalized)
-
-
-def _route_matches(expression: str, contract: _ApiContract) -> bool:
-    actual = _normalize_ts_expression(expression)
-    if contract.plain_static_route:
-        return actual in {
-            _normalize_ts_expression(f'"{contract.route_expression}"'),
-            _normalize_ts_expression(f"'{contract.route_expression}'"),
-            _normalize_ts_expression(f"`{contract.route_expression}`"),
-        }
-    return actual == _normalize_ts_expression(contract.route_expression)
-
-
-def _inspect_options(options: str) -> tuple[str | None, str | None]:
-    """Inspect a static request-options object and its top-level method field."""
-    stripped = options.strip()
-    if not stripped.startswith("{"):
-        return None, "second argument must be an object literal"
-    end = _skip_ts_balanced_group(stripped, 0)
-    if end is None or stripped[end:].strip():
-        return None, "request options object is malformed or unbalanced"
-    fields = _split_top_level(stripped[1 : end - 1])
-    if fields is None:
-        return None, "request options object has malformed members"
-    property_pattern = re.compile(
-        r"^\s*(?P<key>[A-Za-z_$][\w$]*|'[^']*'|\"[^\"]*\")\s*:\s*(?P<value>.*)\s*$",
-        re.DOTALL,
-    )
-    method_values: list[str] = []
-    for field in fields:
-        if not field:
-            continue
-        stripped_field = field.strip()
-        if stripped_field.startswith("..."):
-            return None, "request options must not contain spread members"
-        if stripped_field.startswith("["):
-            return None, "request options must not contain computed members"
-        match = property_pattern.match(field)
-        if match is None:
-            return None, "request options contains a dynamic or shorthand member"
-        key = match.group("key")
-        if key[:1] in {"'", '"'}:
-            key = key[1:-1]
-        if key != "method":
-            continue
-        value = match.group("value").strip()
-        if not value or value[:1] not in {"'", '"'}:
-            return None, "method property must be a literal string"
-        value_end = _skip_ts_quoted(value, 0, value[0])
-        if value_end is None or value[value_end:].strip():
-            return None, "method property must be a literal string"
-        method_values.append(value[1 : value_end - 1])
-    if not method_values:
-        return None, "request options must contain exactly one top-level method property"
-    if len(method_values) != 1:
-        return None, "request options contains duplicate top-level method properties"
-    return method_values[0], None
-
-
-def _get_call_is_valid(call: _TransportCall) -> bool:
-    """GET contracts accept exactly the route argument and nothing else."""
-    return len(call.arguments) == 1
-
-
-def _method_arrow_position(method_body: str) -> int:
-    """Return the method's own arrow position in comment/string-masked text."""
-    live = _mask_ts_comments_and_strings(method_body)
-    property_colon = live.find(":")
-    if property_colon < 0:
-        return -1
-    depth = 0
-    index = property_colon + 1
-    while index < len(live):
-        char = live[index]
-        if char in "([{":
-            depth += 1
-        elif char in ")]}":
-            depth = max(0, depth - 1)
-        elif live.startswith("=>", index) and depth == 0:
-            return index
-        index += 1
-    return -1
-
-
-def _method_local_transport_binding(method_body: str, arrow_position: int) -> str | None:
-    """Return a shadowed transport helper name, if one is declared in a method."""
-    live = _mask_ts_comments_and_strings(method_body)
-    declaration = re.search(
-        r"\b(?:const|let|var|function|class)\s+(?:[\[{]\s*)?"
-        r"(?P<name>fetchJSON|apiGet)\b",
-        live[arrow_position + 2 :],
-    )
-    if declaration is not None:
-        return declaration.group("name")
-
-    property_colon = live.find(":")
-    if property_colon < 0 or property_colon >= arrow_position:
-        return None
-    parameter_text = live[property_colon + 1 : arrow_position].strip()
-    if parameter_text.startswith("("):
-        parameter_end = _skip_ts_balanced_group(parameter_text, 0)
-        if parameter_end is None:
-            return "fetchJSON/apiGet"
-        parameters = _split_top_level(parameter_text[1 : parameter_end - 1])
-        if parameters is None:
-            return "fetchJSON/apiGet"
-        for parameter in parameters:
-            candidate = parameter.strip()
-            candidate = re.sub(r"^(?:readonly\s+|\.\.\.)+", "", candidate)
-            match = re.match(r"(?P<name>fetchJSON|apiGet)\b", candidate)
-            if match is not None:
-                return match.group("name")
-            if candidate.startswith(("{", "[")):
-                match = re.search(r"\b(?P<name>fetchJSON|apiGet)\b", candidate)
-                if match is not None:
-                    return match.group("name")
-    else:
-        match = re.fullmatch(r"(?P<name>fetchJSON|apiGet)", parameter_text)
-        if match is not None:
-            return match.group("name")
-    return None
-
-
-def _transport_call_is_returned(method_body: str, call: _TransportCall) -> bool:
-    """Require the sole transport call to be the method's direct return value."""
-    live = _mask_ts_comments_and_strings(method_body)
-    arrow_position = live.find("=>")
-    if arrow_position < 0 or call.start < 0 or call.end < 0:
-        return False
-    expression_start = arrow_position + 2
-    while expression_start < len(live) and live[expression_start].isspace():
-        expression_start += 1
-    if expression_start >= len(live):
-        return False
-
-    if live[expression_start] != "{":
-        prefix = live[expression_start : call.start]
-        if prefix.strip(" \t\r\n()"):
-            return False
-        suffix = live[call.end :]
-        return not suffix.strip(" \t\r\n),;")
-
-    block_end = _skip_ts_balanced_group(live, expression_start)
-    if block_end is None or not (expression_start < call.start < block_end):
-        return False
-
-    prefix = live[expression_start + 1 : call.start]
-    brace_depth = 0
-    bracket_depth = 0
-    parenthesis_depth = 0
-    for char in prefix:
-        if char == "{":
-            brace_depth += 1
-        elif char == "}":
-            brace_depth -= 1
-        elif char == "[":
-            bracket_depth += 1
-        elif char == "]":
-            bracket_depth -= 1
-        elif char == "(":
-            parenthesis_depth += 1
-        elif char == ")":
-            parenthesis_depth -= 1
-    if brace_depth != 0 or bracket_depth != 0 or parenthesis_depth < 0:
-        return False
-
-    return_match = re.search(r"\breturn\s*(?:\(\s*)*$", prefix)
-    if return_match is None:
-        return False
-    statement_prefix = prefix[: return_match.start()]
-    statement_start = max(
-        statement_prefix.rfind(";"),
-        statement_prefix.rfind("{"),
-        statement_prefix.rfind("}"),
-    )
-    if re.search(
-        r"\b(?:if|for|while|switch|try|catch|finally|do|with|else)\b",
-        statement_prefix[statement_start + 1 :],
-    ):
-        return False
-    suffix = live[call.end : block_end - 1]
-    return not suffix.strip(" \t\r\n);,")
-
-
-def _check_api(repo_root: Path, failures: list[str], repo_fd: int) -> None:
-    path = repo_root / "web/src/lib/api.ts"
-    text = _read_text(
-        path,
-        repo_root=repo_root,
-        category="api",
-        failures=failures,
-        max_bytes=_MAX_API_BYTES,
-        repo_fd=repo_fd,
-    )
-    if text is None:
-        return
-    declarations = _live_api_declarations(text)
-    if not declarations:
-        failures.append("api: missing or unterminated `export const api = { ... }` object")
-        return
-    if len(declarations) != 1:
-        failures.append(
-            "api: live `export const api` declaration must appear exactly once "
-            f"(found {len(declarations)}; duplicate or ambiguous declaration)"
-        )
-        return
-    body = _api_object(text)
-    if body is None:
-        failures.append("api: missing or unterminated `export const api = { ... }` object")
-        return
-    try:
-        properties = _api_properties(body)
-    except ValueError as exc:
-        failures.append(f"api: exported api object is malformed or unbalanced: {exc}")
-        return
-    if not properties:
-        failures.append("api: exported api object has no inspectable method properties")
-
-    for contract in _API_CONTRACTS:
-        spans = properties.get(contract.name, [])
-        if not spans:
-            failures.append(f"api: missing method {contract.name}")
-            continue
-        if len(spans) != 1:
-            failures.append(
-                f"api: method {contract.name} must appear exactly once (found {len(spans)}; duplicate method)"
-            )
-            continue
-        start, end = spans[0]
-        method_body = _strip_ts_comments(body[start:end])
-
-        calls, malformed = _transport_calls(method_body)
-        if malformed:
-            failures.append(
-                f"api: method {contract.name} has malformed or unbalanced transport call"
-            )
-            failures.append(
-                f"api: method {contract.name} missing exact route {contract.route_display} "
-                "because the transport call could not be parsed"
-            )
-            continue
-        arrow_position = _method_arrow_position(method_body)
-        if arrow_position < 0:
-            failures.append(f"api: method {contract.name} has no inspectable method arrow")
-            continue
-        shadowed_helper = _method_local_transport_binding(method_body, arrow_position)
-        if shadowed_helper is not None:
-            failures.append(
-                f"api: method {contract.name} contains method-local {shadowed_helper} binding "
-                "that shadows the canonical transport helper"
-            )
-            continue
-        if len(calls) != 1:
-            failures.append(
-                f"api: method {contract.name} must contain exactly one direct "
-                f"apiGet/fetchJSON transport call (found {len(calls)})"
-            )
-            continue
-        call = calls[0]
-        if call.nested_transport:
-            failures.append(
-                f"api: method {contract.name} transport call contains a nested direct "
-                "fetchJSON/apiGet call; nested or multiple transport calls are not allowed"
-            )
-            continue
-        if not call.direct:
-            failures.append(
-                f"api: method {contract.name} transport call must be direct to the "
-                "method implementation, not nested in another function"
-            )
-            continue
-        if not _transport_call_is_returned(method_body, call):
-            failures.append(
-                f"api: method {contract.name} transport call must be the directly returned "
-                "value at method scope; nested or conditionally reachable calls are not allowed"
-            )
-            continue
-
-        if not call.arguments or not _route_matches(call.arguments[0], contract):
-            failures.append(
-                f"api: method {contract.name} missing exact route {contract.route_display}"
-            )
-            continue
-
-        if contract.verb == "GET":
-            if not _get_call_is_valid(call):
-                failures.append(
-                    f"api: method {contract.name} GET transport call must have exactly one argument "
-                    "(the canonical route; request options are not allowed)"
-                )
-        else:
-            if len(call.arguments) != 2:
-                failures.append(
-                    f"api: method {contract.name} POST transport call must have exactly two arguments "
-                    "(route and static request options; HTTP verb must be explicit)"
-                )
-                continue
-            method, reason = _inspect_options(call.arguments[1])
-            if method != "POST":
-                failures.append(
-                    f"api: method {contract.name} missing POST HTTP verb on the matching call "
-                    "(expected method: POST; "
-                    f"{reason or 'method property must be the literal string POST'})"
-                )
-
-
-def _check_rpc_tests(repo_root: Path, failures: list[str], repo_fd: int) -> None:
-    for relative, description in _REQUIRED_RPC_TESTS:
-        _read_text(
-            repo_root / relative,
-            repo_root=repo_root,
-            category=f"rpc-tests ({description})",
-            failures=failures,
-            max_bytes=_MAX_TEST_BYTES,
-            repo_fd=repo_fd,
-        )
-
-
-def _method_decorator_handler(decorator: ast.AST) -> str | None:
-    """Return the literal handler from a strict ``@method("...")`` call."""
-    if not isinstance(decorator, ast.Call):
-        return None
-    if not isinstance(decorator.func, ast.Name) or decorator.func.id != "method":
-        return None
-    if len(decorator.args) != 1 or decorator.keywords:
-        return None
-    argument = decorator.args[0]
-    if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
-        return argument.value
-    return None
-
-
-def _assignment_to_long_handlers(node: ast.AST) -> ast.Assign | ast.AnnAssign | None:
-    """Return an assignment whose target is exactly ``_LONG_HANDLERS``."""
-    if isinstance(node, ast.Assign):
-        targets = node.targets
-    elif isinstance(node, ast.AnnAssign):
-        targets = [node.target]
-    else:
-        return None
-    if any(isinstance(target, ast.Name) and target.id == "_LONG_HANDLERS" for target in targets):
-        return node
-    return None
-
-
-def _static_string_values(node: ast.AST | None) -> tuple[list[str] | None, str | None]:
-    """Evaluate the runtime-selected strings in a conservative AST subset."""
-    if node is None:
-        return None, "missing assignment RHS"
-    if isinstance(node, ast.Constant):
-        if isinstance(node.value, str):
-            return [node.value], None
-        return None, f"unsupported literal {node.value!r}"
-    if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
-        values: list[str] = []
-        for element in node.elts:
-            nested, reason = _static_string_values(element)
-            if nested is None:
-                return None, reason
-            values.extend(nested)
-        return values, None
-    if isinstance(node, ast.Call):
-        if (
-            isinstance(node.func, ast.Name)
-            and node.func.id in {"frozenset", "set"}
-            and len(node.args) == 1
-            and not node.keywords
-        ):
-            return _static_string_values(node.args[0])
-        return None, "unsupported call expression"
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
-        left, left_reason = _static_string_values(node.left)
-        right, right_reason = _static_string_values(node.right)
-        if left is None:
-            return None, left_reason
-        if right is None:
-            return None, right_reason
-        return left + right, None
-    if isinstance(node, ast.IfExp):
-        if not isinstance(node.test, ast.Constant) or not isinstance(node.test.value, bool):
-            return None, "conditional test is not a literal bool"
-        return _static_string_values(node.body if node.test.value else node.orelse)
-    return None, f"unsupported expression {type(node).__name__}"
-
-
-def _check_server(repo_root: Path, failures: list[str], repo_fd: int) -> None:
-    path = repo_root / "tui_gateway/server.py"
-    text = _read_text(
-        path,
-        repo_root=repo_root,
-        category="server",
-        failures=failures,
-        max_bytes=_MAX_SERVER_BYTES,
-        repo_fd=repo_fd,
-    )
-    if text is None:
-        return
-
-    label = _path_label(path, repo_root)
-    try:
-        tree = ast.parse(text, filename=label)
-    except SyntaxError as exc:
-        location = f"line {exc.lineno}" if exc.lineno is not None else "unknown line"
-        failures.append(f"server: invalid Python syntax in {label} at {location}: {exc.msg}")
-        return
-
-    registrations = {handler: 0 for handler in _REQUIRED_HANDLERS}
-    for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for decorator in node.decorator_list:
-            handler = _method_decorator_handler(decorator)
-            if handler in registrations:
-                registrations[handler] += 1
-
-    for handler in _REQUIRED_HANDLERS:
-        count = registrations[handler]
-        if count != 1:
-            failures.append(
-                f"server: handler registration {handler!r} must appear exactly once "
-                f"(found {count}; missing or duplicate registration)"
-            )
-
-    assignments = [
-        assignment
-        for node in tree.body
-        if (assignment := _assignment_to_long_handlers(node)) is not None
-    ]
-    if not assignments:
-        failures.append(
-            "server: could not locate live _LONG_HANDLERS assignment; "
-            "registration text alone is insufficient"
-        )
-        return
-    if len(assignments) != 1:
-        failures.append(
-            "server: _LONG_HANDLERS assignment must appear exactly once "
-            f"(found {len(assignments)}; duplicate or ambiguous assignment)"
-        )
-        return
-
-    assignment = assignments[0]
-    rhs = assignment.value
-    values, reason = _static_string_values(rhs)
-    if values is None:
-        failures.append(
-            "server: _LONG_HANDLERS assignment RHS is not statically inspectable: "
-            f"{reason or 'unsupported expression'}"
-        )
-        return
-    if not values:
-        failures.append("server: _LONG_HANDLERS assignment RHS has no inspectable strings")
-    for handler in _REQUIRED_HANDLERS:
-        count = values.count(handler)
-        if count != 1:
-            failures.append(
-                f"server: _LONG_HANDLERS must contain {handler!r} exactly once (found {count})"
-            )
-
-
-def _mask_ts_comments_and_strings(text: str) -> str:
-    """Blank comments and all TS string/template contents, retaining newlines."""
-    chars = list(text)
-
-    def blank(start: int, end: int) -> None:
-        for index in range(start, min(end, len(chars))):
-            if chars[index] not in ("\n", "\r"):
-                chars[index] = " "
-
-    index = 0
-    while index < len(chars):
-        char = chars[index]
-        if char == "/" and index + 1 < len(chars) and chars[index + 1] in "/*":
-            end = _skip_ts_comment(text, index)
-            end = len(text) if end is None else end
-            blank(index, end)
-            index = end
-            continue
-        if char in ("'", '"'):
-            end = _skip_ts_quoted(text, index, char)
-            end = len(text) if end is None else end
-            blank(index, end)
-            index = end
-            continue
-        if char == "`":
-            end = _skip_ts_template(text, index)
-            end = len(text) if end is None else end
-            blank(index, end)
-            index = end
-            continue
-        index += 1
-    return "".join(chars)
-
-
-def _check_response_exports(repo_root: Path, failures: list[str], repo_fd: int) -> None:
-    path = repo_root / "ui-tui/src/gatewayTypes.ts"
-    text = _read_text(
-        path,
-        repo_root=repo_root,
-        category="types",
-        failures=failures,
-        max_bytes=_MAX_TYPES_BYTES,
-        repo_fd=repo_fd,
-    )
-    if text is None:
-        return
-    live_text = _mask_ts_comments_and_strings(text)
-    for name in _REQUIRED_RESPONSE_EXPORTS:
-        pattern = rf"(?m)^[ \t]*export\s+(?:interface|type)\s+{re.escape(name)}\b"
-        count = len(re.findall(pattern, live_text))
-        if count == 0:
-            failures.append(f"types: missing response export {name}")
-        elif count != 1:
-            failures.append(
-                f"types: response export {name} must appear exactly once (found {count}; duplicate export)"
-            )
+Runner = Callable[[CommandSpec], CommandResult]
 
 
 @dataclass(frozen=True)
@@ -1514,7 +74,6 @@ class _ShellCommand:
     line_number: int
     text: str
     block_id: int
-    conditional_depth: int
 
 
 @dataclass(frozen=True)
@@ -1527,120 +86,19 @@ class _ShellScan:
 _HEREDOC_RE = re.compile(
     r"<<(?P<strip>-?)[ \t]*(?P<quote>['\"]?)(?P<delimiter>[^\s'\";|&]+)(?P=quote)"
 )
-
-
-def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
-    """Return shell heredoc delimiters declared on one command line."""
-    return [
-        (match.group("delimiter"), bool(match.group("strip")))
-        for match in _HEREDOC_RE.finditer(line)
-    ]
-
-
-def _conditional_depth_delta(line: str) -> int:
-    """Approximate shell ``if ... then``/``fi`` structure conservatively."""
-    stripped = line.strip(" \t")
-    delta = 0
-    if re.match(r"^fi(?:\s|$)", stripped):
-        delta -= 1
-    if re.search(r"\bthen\s*(?:#.*)?$", stripped) or re.search(
-        r"\bthen\s*;", stripped
-    ):
-        delta += len(re.findall(r"\bif\b", stripped))
-    return delta
-
-
-def _shell_fenced_commands(prompt: str) -> _ShellScan:
-    """Scan fenced prompt structure and return executable shell lines."""
-    commands: list[_ShellCommand] = []
-    heading_lines: list[int] = []
-    errors: list[str] = []
-    # Only CR/LF are command-line delimiters here.  ``str.splitlines()`` also
-    # treats vertical tab, form feed, and several Unicode separators as line
-    # boundaries, which could hide non-shell whitespace in an audited command.
-    lines = re.split(r"\r\n?|\n", prompt)
-    in_block = False
-    shell_block = False
-    block_id = -1
-    fence_marker = ""
-    block_start_line: int | None = None
-    pending_heredocs: list[tuple[str, bool]] = []
-    conditional_depth = 0
-    for line_number, line in enumerate(lines):
-        if not in_block:
-            if line.strip() == _INTEGRATION_HEADING:
-                heading_lines.append(line_number)
-            opening = re.match(
-                r"^[ \t]*(?P<marker>`{3,}|~{3,})(?P<language>[A-Za-z0-9_-]*)[ \t]*$",
-                line,
-            )
-            if opening is not None:
-                in_block = True
-                block_id += 1
-                fence_marker = opening.group("marker")
-                block_start_line = line_number
-                shell_block = (
-                    fence_marker.startswith("`")
-                    and opening.group("language").lower() in _CRON_SHELL_LANGUAGES
-                )
-                pending_heredocs = []
-                conditional_depth = 0
-            continue
-        if pending_heredocs:
-            delimiter, strip_tabs = pending_heredocs[0]
-            candidate = line.lstrip("\t") if strip_tabs else line
-            if candidate == delimiter:
-                pending_heredocs.pop(0)
-            continue
-        if line.strip(" \t") == fence_marker:
-            in_block = False
-            shell_block = False
-            fence_marker = ""
-            block_start_line = None
-            continue
-        fence_like = re.match(r"^[ \t]*(?P<marker>`{3,}|~{3,}).*$", line)
-        if fence_like is not None:
-            expected_line = block_start_line + 1 if block_start_line is not None else line_number
-            displayed_line = line.strip(" \t")
-            errors.append(
-                f"malformed fenced block at line {expected_line}: expected closing "
-                f"{fence_marker!r}, found {displayed_line!r} at line {line_number + 1}"
-            )
-            in_block = False
-            shell_block = False
-            fence_marker = ""
-            block_start_line = None
-            pending_heredocs = []
-            continue
-        stripped = line.strip(" \t")
-        if not shell_block or not stripped or stripped.startswith("#"):
-            continue
-        commands.append(
-            _ShellCommand(line_number, stripped, block_id, conditional_depth)
-        )
-        pending_heredocs.extend(_heredoc_delimiters(stripped))
-        conditional_depth = max(0, conditional_depth + _conditional_depth_delta(stripped))
-    if in_block:
-        expected_line = block_start_line + 1 if block_start_line is not None else len(lines)
-        errors.append(
-            f"malformed fenced block at line {expected_line}: unclosed fence "
-            f"(expected closing {fence_marker!r})"
-        )
-    return _ShellScan(
-        commands=commands,
-        heading_lines=tuple(heading_lines),
-        errors=tuple(errors),
-    )
-
-
 _SHELL_CONTROL_CHARS = frozenset(";|&<>")
+_SAFE_GIT_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+_ROLLOUT_GIT_SHOW_RE = re.compile(
+    r'if ! git show (?P<ref>[A-Za-z0-9][A-Za-z0-9._/-]*):scripts/verify_hades_dashboard_contract\.py'
+    r' > "\$verifier_tmp"; then'
+)
 
 _PRODUCTION_VERIFIER_LINES = (
     "set -euo pipefail",
     "cd ~/.hermes/hermes-agent",
     _INTEGRATION_COMMAND,
 )
-_ROLLOUT_VERIFIER_LINES = (
+_ROLLOUT_VERIFIER_LINES: tuple[str | None, ...] = (
     "set -euo pipefail",
     "cd ~/.hermes/hermes-agent",
     "if [ -f scripts/verify_hades_dashboard_contract.py ]; then",
@@ -1659,15 +117,444 @@ _ROLLOUT_VERIFIER_LINES = (
     './venv/bin/python3 "$verifier_tmp" --repo-root "$PWD" --cron-jobs ~/.hermes/cron/jobs.json',
     "fi",
 )
-_SAFE_GIT_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
-_ROLLOUT_GIT_SHOW_RE = re.compile(
-    r'if ! git show (?P<ref>[A-Za-z0-9][A-Za-z0-9._/-]*):scripts/verify_hades_dashboard_contract\.py'
-    r' > "\$verifier_tmp"; then'
-)
+
+
+def _path_label(path: Path, repo_root: Path) -> str:
+    """Prefer stable repo-relative paths in diagnostics."""
+    try:
+        return str(path.relative_to(repo_root))
+    except ValueError:
+        return str(path)
+
+
+def _canonical_repo_root(repo_root: Path) -> tuple[Path | None, list[str]]:
+    """Resolve a usable repository directory without inspecting source files."""
+    requested = Path(repo_root).expanduser()
+    try:
+        canonical = requested.resolve(strict=True)
+    except FileNotFoundError:
+        return None, [f"repo: missing repository root {requested}"]
+    except OSError as exc:
+        return None, [f"repo: cannot resolve repository root {requested}: {exc.strerror or exc}"]
+    if not canonical.is_dir():
+        return None, [f"repo: repository root is not a directory {requested}"]
+    if not os.access(canonical, os.R_OK | os.X_OK):
+        return None, [f"repo: repository root is not usable {requested}"]
+    return canonical, []
+
+
+def _dirfd_safety_available() -> bool:
+    """Return whether confined no-follow descriptor walks are supported."""
+    try:
+        return (
+            _ORIGINAL_OS_OPEN in getattr(os, "supports_dir_fd", set())
+            and isinstance(getattr(os, "O_NOFOLLOW", None), int)
+            and os.O_NOFOLLOW != 0
+            and isinstance(getattr(os, "O_DIRECTORY", None), int)
+            and os.O_DIRECTORY != 0
+        )
+    except (AttributeError, TypeError):
+        return False
+
+
+def _read_cron_text(path: Path, failures: list[str], max_bytes: int = _MAX_CRON_BYTES) -> str | None:
+    """Read only a bounded regular cron file through no-follow descriptors.
+
+    The directory walk is descriptor-relative so an intermediate symlink swap
+    cannot redirect the read.  ``O_NONBLOCK`` plus the regular-file check keeps
+    a FIFO or other special file from hanging the sync job.
+    """
+    label = str(path)
+    fd: int | None = None
+    directory_fds: list[int] = []
+    text: str | None = None
+    if not _dirfd_safety_available():
+        failures.append(
+            "cron: refusing manifest read; required dir_fd/O_NOFOLLOW/O_DIRECTORY safety primitives are unavailable"
+        )
+        return None
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
+    if not isinstance(nofollow, int) or not nofollow:
+        failures.append("cron: refusing manifest read; O_NOFOLLOW safety primitive is unavailable")
+        return None
+    if not isinstance(nonblock, int) or not nonblock:
+        failures.append("cron: refusing manifest read; O_NONBLOCK safety primitive is unavailable")
+        return None
+
+    absolute = Path(os.path.abspath(path.expanduser()))
+    anchor = absolute.anchor
+    if not anchor:
+        failures.append(f"cron: refusing unsafe manifest path {label}")
+        return None
+    relative_parts = absolute.relative_to(Path(anchor)).parts
+    if not relative_parts or any(part in {"", ".", ".."} for part in relative_parts):
+        failures.append(f"cron: refusing unsafe manifest path {label}")
+        return None
+
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | nofollow
+        | os.O_DIRECTORY
+    )
+    try:
+        try:
+            filesystem_root_fd = os.open(Path(anchor), directory_flags)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                failures.append(f"cron: refusing symlink/no-follow filesystem root {label}")
+            else:
+                failures.append(f"cron: cannot open filesystem root for {label}: {exc.strerror or exc}")
+            return None
+        directory_fds.append(filesystem_root_fd)
+        parent_fd = filesystem_root_fd
+        for component in relative_parts[:-1]:
+            try:
+                child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                failures.append(f"cron: missing manifest file {label}")
+                return None
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    failures.append(
+                        f"cron: refusing non-directory or symlink/no-follow path component {label}"
+                    )
+                else:
+                    failures.append(f"cron: cannot open path component {label}: {exc.strerror or exc}")
+                return None
+            directory_fds.append(child_fd)
+            if not stat.S_ISDIR(os.fstat(child_fd).st_mode):
+                failures.append(f"cron: refusing non-directory path component {label}")
+                return None
+            parent_fd = child_fd
+
+        final_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | nofollow
+            | nonblock
+        )
+        try:
+            fd = os.open(relative_parts[-1], final_flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            failures.append(f"cron: missing manifest file {label}")
+            return None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                failures.append(f"cron: refusing symlink/no-follow manifest file {label}")
+            else:
+                failures.append(f"cron: cannot open manifest {label}: {exc.strerror or exc}")
+            return None
+
+        descriptor_stat = os.fstat(fd)
+        if not stat.S_ISREG(descriptor_stat.st_mode):
+            failures.append(f"cron: expected regular file {label}")
+            return None
+        if descriptor_stat.st_size == 0:
+            failures.append(f"cron: empty manifest file {label}")
+            return None
+        if descriptor_stat.st_size > max_bytes:
+            failures.append(
+                f"cron: {label} is too large to inspect ({descriptor_stat.st_size} bytes; limit {max_bytes} bytes)"
+            )
+            return None
+
+        chunks: list[bytes] = []
+        total = 0
+        while total <= max_bytes:
+            chunk = os.read(fd, min(64 * 1024, max_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                failures.append(f"cron: {label} grew beyond inspection limit {max_bytes} bytes")
+                return None
+        try:
+            text = b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError:
+            failures.append(f"cron: {label} is not valid UTF-8 text")
+            return None
+    except PermissionError:
+        failures.append(f"cron: permission denied reading {label}")
+        return None
+    except OSError as exc:
+        failures.append(f"cron: cannot read manifest {label}: {exc.strerror or exc}")
+        return None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        for directory_fd in reversed(directory_fds):
+            os.close(directory_fd)
+    if not text or not text.strip():
+        failures.append(f"cron: empty manifest file {label}")
+        return None
+    return text
+
+
+def _safe_diagnostic(text: str) -> str:
+    """Redact common secret assignments and bound untrusted command output."""
+    sanitized = text.replace("\x00", "?")
+    sanitized = _SECRET_RE.sub(r"\1[REDACTED]", sanitized)
+    if len(sanitized) > _MAX_DIAGNOSTIC_CHARS:
+        return sanitized[:_MAX_DIAGNOSTIC_CHARS] + "…"
+    return sanitized
+
+
+def _command_display(spec: CommandSpec) -> str:
+    return shlex.join(spec.argv)
+
+
+def run_command(spec: CommandSpec) -> CommandResult:
+    """Run one contract command with an explicit timeout and no shell."""
+    try:
+        spec.tmpdir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return CommandResult(returncode=None, error=f"cannot prepare TMPDIR: {exc.strerror or exc}")
+    environment = os.environ.copy()
+    environment["TMPDIR"] = str(spec.tmpdir)
+    try:
+        completed = subprocess.run(
+            list(spec.argv),
+            cwd=spec.cwd,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=spec.timeout_seconds,
+        )
+    except FileNotFoundError as exc:
+        return CommandResult(returncode=None, missing_executable=True, error=str(exc))
+    except PermissionError as exc:
+        return CommandResult(returncode=None, error=f"permission denied: {exc}")
+    except subprocess.TimeoutExpired as exc:
+        return CommandResult(
+            returncode=None,
+            stdout=_bounded_command_output(exc.stdout),
+            stderr=_bounded_command_output(exc.stderr),
+            timed_out=True,
+        )
+    except OSError as exc:
+        return CommandResult(returncode=None, error=f"OS error: {exc.strerror or exc}")
+    return CommandResult(
+        returncode=completed.returncode,
+        stdout=_bounded_command_output(completed.stdout),
+        stderr=_bounded_command_output(completed.stderr),
+    )
+
+
+def _output_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _bounded_command_output(value: object) -> str:
+    output = _output_text(value)
+    if len(output) > _MAX_COMMAND_OUTPUT_CHARS:
+        return output[:_MAX_COMMAND_OUTPUT_CHARS] + "…"
+    return output
+
+
+def contract_command_specs(repo_root: Path, tmpdir: Path | None = None) -> tuple[CommandSpec, ...]:
+    """Return all required executable contract surfaces."""
+    root = Path(repo_root)
+    safe_tmpdir = Path(tmpdir) if tmpdir is not None else Path(tempfile.gettempdir())
+    return (
+        CommandSpec(
+            "web-api",
+            ("npm", "run", "--prefix", "web", "test", "--", "src/lib/api.test.ts"),
+            root,
+            180,
+            safe_tmpdir,
+        ),
+        CommandSpec(
+            "native-rpc",
+            (
+                sys.executable,
+                "-m",
+                "pytest",
+                "tests/tui_gateway/test_autonomy_rpc.py",
+                "tests/tui_gateway/test_receipt_rpc.py",
+                "tests/tui_gateway/test_transaction_rpc.py",
+            ),
+            root,
+            180,
+            safe_tmpdir,
+        ),
+        CommandSpec(
+            "tui-slash-commands",
+            (
+                "npm",
+                "run",
+                "--prefix",
+                "ui-tui",
+                "test",
+                "--",
+                "src/__tests__/autonomyCommand.test.ts",
+                "src/__tests__/receiptCommand.test.ts",
+                "src/__tests__/transactionCommand.test.ts",
+            ),
+            root,
+            180,
+            safe_tmpdir,
+        ),
+        CommandSpec(
+            "web-typecheck",
+            ("npm", "run", "--prefix", "web", "typecheck"),
+            root,
+            180,
+            safe_tmpdir,
+        ),
+        CommandSpec(
+            "ui-tui-typecheck",
+            ("npm", "run", "--prefix", "ui-tui", "typecheck"),
+            root,
+            180,
+            safe_tmpdir,
+        ),
+    )
+
+
+def _normalize_result(result: object) -> CommandResult:
+    if isinstance(result, CommandResult):
+        return result
+    return CommandResult(
+        returncode=getattr(result, "returncode", None),
+        stdout=_output_text(getattr(result, "stdout", "")),
+        stderr=_output_text(getattr(result, "stderr", "")),
+    )
+
+
+def _command_failure(spec: CommandSpec, result: CommandResult) -> str | None:
+    command = _command_display(spec)
+    prefix = f"{spec.name}: command `{command}`"
+    if result.missing_executable:
+        return f"{prefix} failed: missing executable"
+    if result.timed_out:
+        detail = _safe_diagnostic(result.stdout + result.stderr)
+        suffix = f"; diagnostics: {detail}" if detail else ""
+        return f"{prefix} timed out after {spec.timeout_seconds:g}s{suffix}"
+    if result.returncode != 0:
+        detail = _safe_diagnostic(result.stderr or result.stdout or result.error)
+        suffix = f"; diagnostics: {detail}" if detail else ""
+        return f"{prefix} failed with exit {result.returncode}{suffix}"
+    if result.error:
+        return f"{prefix} failed: {_safe_diagnostic(result.error)}"
+    return None
+
+
+def run_contract_checks(repo_root: Path, runner: Runner | None = None) -> list[str]:
+    """Execute every required surface and return actionable failures.
+
+    A supplied runner is intentionally a one-argument dependency injection
+    seam: tests can provide completed behavioral outcomes without replacing the
+    real command definitions or reading implementation source.
+    """
+    canonical_root, failures = _canonical_repo_root(Path(repo_root))
+    if canonical_root is None:
+        return failures
+    actual_runner = runner or run_command
+    with tempfile.TemporaryDirectory(
+        prefix="hades-dashboard-contract-", dir=tempfile.gettempdir()
+    ) as temporary_directory:
+        specs = contract_command_specs(canonical_root, Path(temporary_directory))
+        for spec in specs:
+            try:
+                result = _normalize_result(actual_runner(spec))
+            except FileNotFoundError:
+                result = CommandResult(returncode=None, missing_executable=True)
+            except subprocess.TimeoutExpired:
+                result = CommandResult(returncode=None, timed_out=True)
+            except Exception as exc:  # keep sync diagnostics bounded and actionable
+                result = CommandResult(returncode=None, error=f"runner error: {exc}")
+            failure = _command_failure(spec, result)
+            if failure is not None:
+                failures.append(failure)
+    return failures
+
+
+def _heredoc_delimiters(line: str) -> list[tuple[str, bool]]:
+    return [
+        (match.group("delimiter"), bool(match.group("strip")))
+        for match in _HEREDOC_RE.finditer(line)
+    ]
+
+
+def _shell_fenced_commands(prompt: str) -> _ShellScan:
+    """Scan fenced prompt structure for executable shell lines."""
+    commands: list[_ShellCommand] = []
+    heading_lines: list[int] = []
+    errors: list[str] = []
+    lines = re.split(r"\r\n?|\n", prompt)
+    in_block = False
+    shell_block = False
+    block_id = -1
+    fence_marker = ""
+    block_start_line: int | None = None
+    pending_heredocs: list[tuple[str, bool]] = []
+    for line_number, line in enumerate(lines):
+        if not in_block:
+            if line.strip() == _INTEGRATION_HEADING:
+                heading_lines.append(line_number)
+            opening = re.match(
+                r"^[ \t]*(?P<marker>`{3,}|~{3,})(?P<language>[A-Za-z0-9_-]*)[ \t]*$",
+                line,
+            )
+            if opening is not None:
+                in_block = True
+                block_id += 1
+                fence_marker = opening.group("marker")
+                block_start_line = line_number
+                shell_block = (
+                    fence_marker.startswith("`")
+                    and opening.group("language").lower() in _CRON_SHELL_LANGUAGES
+                )
+                pending_heredocs = []
+            continue
+        if pending_heredocs:
+            delimiter, strip_tabs = pending_heredocs[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                pending_heredocs.pop(0)
+            continue
+        if line.strip(" \t") == fence_marker:
+            in_block = False
+            shell_block = False
+            fence_marker = ""
+            block_start_line = None
+            continue
+        fence_like = re.match(r"^[ \t]*(?P<marker>`{3,}|~{3,}).*$", line)
+        if fence_like is not None:
+            expected_line = block_start_line + 1 if block_start_line is not None else line_number
+            displayed_line = line.strip(" \\t")
+            errors.append(
+                f"malformed fenced block at line {expected_line}: expected closing {fence_marker!r}, "
+                f"found {displayed_line!r} at line {line_number + 1}"
+            )
+            in_block = False
+            shell_block = False
+            fence_marker = ""
+            block_start_line = None
+            pending_heredocs = []
+            continue
+        stripped = line.strip(" \t")
+        if not shell_block or not stripped or stripped.startswith("#"):
+            continue
+        commands.append(_ShellCommand(line_number, stripped, block_id))
+        pending_heredocs.extend(_heredoc_delimiters(stripped))
+    if in_block:
+        expected_line = block_start_line + 1 if block_start_line is not None else len(lines)
+        errors.append(
+            f"malformed fenced block at line {expected_line}: unclosed fence (expected closing {fence_marker!r})"
+        )
+    return _ShellScan(commands, tuple(heading_lines), tuple(errors))
 
 
 def _strict_shell_tokens(line: str) -> list[str] | None:
-    """Tokenize a candidate command only when no shell syntax is present."""
     if any(character in line for character in _SHELL_CONTROL_CHARS):
         return None
     if re.search(r"\$\s*\(", line) or "`" in line:
@@ -1679,21 +566,23 @@ def _strict_shell_tokens(line: str) -> list[str] | None:
 
 
 def _is_post_sync_command(line: str) -> bool:
-    """Recognize an executable post-sync command, not prose or comments."""
-    tokens = _strict_shell_tokens(line)
-    return tokens in (
+    return _strict_shell_tokens(line) in (
         ["./venv/bin/python3", _POST_SYNC_MARKER],
         ["./venv/bin/python3", _POST_SYNC_MARKER, "--fix"],
     )
 
 
+def _shell_blocks(commands: Iterable[_ShellCommand]) -> list[list[_ShellCommand]]:
+    blocks: dict[int, list[_ShellCommand]] = {}
+    for command in commands:
+        blocks.setdefault(command.block_id, []).append(command)
+    return sorted(blocks.values(), key=lambda block: block[0].line_number)
+
+
 def _is_safe_git_ref(ref: str) -> bool:
-    """Accept only the bounded ref token audited for the rollout fallback."""
     if _SAFE_GIT_REF_RE.fullmatch(ref) is None:
         return False
-    if ref in {"@", "@{", ".."}:
-        return False
-    if ".." in ref or ref.startswith("/") or ref.endswith("/") or "//" in ref:
+    if ref in {"@", "@{", ".."} or ".." in ref or ref.startswith("/") or ref.endswith("/") or "//" in ref:
         return False
     components = ref.split("/")
     if any(
@@ -1713,12 +602,11 @@ def _is_safe_git_ref(ref: str) -> bool:
 
 
 def _normalize_shell_command(line: str) -> str:
-    """Remove only shell-safe ASCII indentation at executable line edges."""
     return line.strip(" \t")
 
 
 def _approved_verifier_block(commands: Iterable[_ShellCommand]) -> bool:
-    """Match exactly one audited production or rollout verifier shell shape."""
+    """Accept only fail-closed production or tracked-branch rollout gates."""
     normalized = tuple(_normalize_shell_command(command.text) for command in commands)
     if normalized == _PRODUCTION_VERIFIER_LINES:
         return True
@@ -1728,34 +616,83 @@ def _approved_verifier_block(commands: Iterable[_ShellCommand]) -> bool:
         if expected is not None and normalized[index] != expected:
             return False
     materialization = _ROLLOUT_GIT_SHOW_RE.fullmatch(normalized[7])
-    return materialization is not None and _is_safe_git_ref(materialization.group("ref"))
+    return bool(
+        materialization
+        and _is_safe_git_ref(materialization.group("ref"))
+        and materialization.group("ref") == _TRACKED_VERIFIER_REF
+    )
 
 
-def _shell_blocks(commands: Iterable[_ShellCommand]) -> list[list[_ShellCommand]]:
-    """Group executable shell lines by fenced shell block, preserving order."""
-    blocks: dict[int, list[_ShellCommand]] = {}
-    for command in commands:
-        blocks.setdefault(command.block_id, []).append(command)
-    return sorted(blocks.values(), key=lambda block: block[0].line_number)
+def _check_prompt(prompt: str, failures: list[str]) -> None:
+    shell_scan = _shell_fenced_commands(prompt)
+    for shell_error in shell_scan.errors:
+        failures.append(f"cron: {shell_error}")
+    if len(shell_scan.heading_lines) != 1:
+        failures.append(
+            "cron: hades-fork-integration prompt must contain exactly one standalone "
+            f"heading line {_INTEGRATION_HEADING!r} outside fenced blocks"
+        )
+
+    shell_commands = shell_scan.commands
+    post_sync_positions = [
+        command.line_number for command in shell_commands if _is_post_sync_command(command.text)
+    ]
+    if not post_sync_positions:
+        failures.append(
+            "cron: hades-fork-integration prompt is missing the executable post-sync-verify.py anchor"
+        )
+
+    if len(shell_scan.heading_lines) != 1:
+        return
+    heading_line = shell_scan.heading_lines[0]
+    blocks = _shell_blocks(shell_commands)
+    first_post_sync = min(post_sync_positions) if post_sync_positions else None
+    blocks_under_heading = [block for block in blocks if block[0].line_number > heading_line]
+    gate_blocks = [
+        block
+        for block in blocks_under_heading
+        if first_post_sync is None or block[0].line_number < first_post_sync
+    ]
+    approved_blocks = [block for block in blocks_under_heading if _approved_verifier_block(block)]
+    shape_error = (
+        "cron: hades-fork-integration prompt must contain exactly one approved fail-closed "
+        "verifier shell block under the standalone heading before the first post-sync-verify.py "
+        "command; no error swallowing is allowed and rollout fallback must use the tracked verifier branch"
+    )
+    if len(approved_blocks) != 1 or len(gate_blocks) != 1:
+        failures.append(shape_error)
+    elif approved_blocks[0] != gate_blocks[0]:
+        failures.append(shape_error)
+
+
+def _nonempty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _pinned_string(value: object) -> bool:
+    return _nonempty_string(value) and str(value).strip().lower() not in {"auto", "default"}
+
+
+def _positive_interval(value: object) -> bool:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value > 0
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(_positive_interval(value.get(key)) for key in ("seconds", "minutes", "hours"))
+    return False
 
 
 def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
-    text = _read_text(
-        cron_jobs,
-        repo_root=repo_root,
-        category="cron",
-        failures=failures,
-        max_bytes=_MAX_CRON_BYTES,
-        confine_to_repo=False,
-    )
+    del repo_root  # retained in the signature for stable, testable diagnostics
+    text = _read_cron_text(Path(cron_jobs), failures)
     if text is None:
         return
     try:
         manifest = json.loads(text)
     except json.JSONDecodeError as exc:
-        failures.append(f"cron: invalid JSON in {_path_label(cron_jobs, repo_root)}: {exc.msg}")
+        failures.append(f"cron: invalid JSON in {cron_jobs}: {exc.msg}")
         return
-
     if not isinstance(manifest, dict):
         failures.append("cron: manifest root must be a JSON object")
         return
@@ -1770,131 +707,72 @@ def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
     integration_jobs = [job for job in jobs if job.get("name") == _INTEGRATION_JOB_NAME]
     if len(integration_jobs) != 1:
         failures.append(
-            "cron: expected exactly one job named "
-            f"{_INTEGRATION_JOB_NAME!r}, found {len(integration_jobs)}"
+            f"cron: expected exactly one job named {_INTEGRATION_JOB_NAME!r}, found {len(integration_jobs)}"
         )
         return
     job = integration_jobs[0]
+
     if job.get("enabled") is not True:
         failures.append("cron: hades-fork-integration job must be enabled=true")
     if job.get("state") != "scheduled":
-        failures.append(
-            "cron: hades-fork-integration job state must be exactly 'scheduled'"
-        )
+        failures.append("cron: hades-fork-integration job must be scheduled, not paused or one-shot")
+
     schedule = job.get("schedule")
     if not isinstance(schedule, dict):
-        failures.append(
-            "cron: hades-fork-integration schedule must be an object with kind='cron' and expr='0 */4 * * *'"
-        )
+        failures.append("cron: hades-fork-integration job must have a recurring schedule object")
     else:
-        if schedule.get("kind") != "cron" or schedule.get("expr") != "0 */4 * * *":
-            failures.append(
-                "cron: hades-fork-integration schedule must be "
-                "{kind: 'cron', expr: '0 */4 * * *'}"
-            )
-    if job.get("schedule_display") != "0 */4 * * *":
-        failures.append(
-            "cron: hades-fork-integration schedule_display must be '0 */4 * * *'"
-        )
+        kind = schedule.get("kind")
+        if kind not in {"cron", "interval"}:
+            failures.append("cron: hades-fork-integration schedule must describe a recurring cron or interval")
+        if kind == "cron" and not _nonempty_string(schedule.get("expr")):
+            failures.append("cron: recurring cron schedule must have a nonempty expression")
+        if kind == "interval":
+            interval = schedule.get("interval", schedule.get("seconds", schedule.get("every")))
+            if not _positive_interval(interval):
+                failures.append("cron: recurring interval schedule must have a positive interval")
+    if not _nonempty_string(job.get("schedule_display")):
+        failures.append("cron: recurring schedule_display must be nonempty")
+
+    repeat = job.get("repeat")
+    if repeat is not None:
+        if not isinstance(repeat, dict):
+            failures.append("cron: repeat configuration must be an object when present")
+        else:
+            times = repeat.get("times")
+            if times is not None and (
+                not isinstance(times, int) or isinstance(times, bool) or times <= 1
+            ):
+                failures.append("cron: hades-fork-integration schedule must be recurring, not one-shot")
+
+    if not _pinned_string(job.get("provider")):
+        failures.append("cron: hades-fork-integration provider must be pinned and nonempty")
+    if not _pinned_string(job.get("model")):
+        failures.append("cron: hades-fork-integration model must be pinned and nonempty")
     skills = job.get("skills")
     if not isinstance(skills, list) or "github-operations" not in skills:
-        failures.append(
-            "cron: hades-fork-integration skills must include 'github-operations'"
-        )
+        failures.append("cron: hades-fork-integration skills must include 'github-operations'")
     if job.get("deliver") != "local":
         failures.append("cron: hades-fork-integration deliver must be 'local'")
 
     prompt = job.get("prompt")
-    if not isinstance(prompt, str):
-        failures.append("cron: hades-fork-integration prompt must be a string")
+    if not isinstance(prompt, str) or not prompt.strip():
+        failures.append("cron: hades-fork-integration prompt must be a nonempty string")
         return
-
-    shell_scan = _shell_fenced_commands(prompt)
-    for shell_error in shell_scan.errors:
-        failures.append(f"cron: {shell_error}")
-    if len(shell_scan.heading_lines) != 1:
-        failures.append(
-            "cron: hades-fork-integration prompt must contain exactly one standalone "
-            f"heading line {_INTEGRATION_HEADING!r} outside fenced blocks"
-        )
-
-    shell_commands = shell_scan.commands
-    post_sync_positions = [
-        command.line_number
-        for command in shell_commands
-        if _is_post_sync_command(command.text)
-    ]
-    verifier_line: int | None = None
-    if not post_sync_positions:
-        failures.append(
-            "cron: hades-fork-integration prompt is missing the post-sync-verify.py anchor"
-        )
-
-    heading_line = shell_scan.heading_lines[0] if len(shell_scan.heading_lines) == 1 else None
-    if heading_line is not None:
-        blocks = _shell_blocks(shell_commands)
-        first_post_sync = min(post_sync_positions) if post_sync_positions else None
-        blocks_under_heading = [
-            block for block in blocks if block[0].line_number > heading_line
-        ]
-        gate_blocks = [
-            block
-            for block in blocks_under_heading
-            if first_post_sync is None or block[0].line_number < first_post_sync
-        ]
-        approved_blocks = [
-            block for block in blocks_under_heading if _approved_verifier_block(block)
-        ]
-        shape_error = (
-            "cron: hades-fork-integration prompt must contain exactly one approved "
-            "verifier shell block (exact executable command shape; extra control flow/exit "
-            "and other commands are rejected) under the standalone heading before the first "
-            "post-sync-verify.py command"
-        )
-        if len(approved_blocks) != 1 or len(gate_blocks) != 1:
-            failures.append(shape_error)
-        elif approved_blocks[0] != gate_blocks[0]:
-            failures.append(shape_error)
-        else:
-            verifier_line = gate_blocks[0][2].line_number
-
-    if verifier_line is not None and post_sync_positions:
-        if min(post_sync_positions) <= verifier_line:
-            failures.append(
-                "cron: verifier command must appear before the first post-sync-verify.py command"
-            )
+    _check_prompt(prompt, failures)
 
 
-def verify(repo_root: Path, cron_jobs: Path) -> list[str]:
-    """Return deterministic diagnostics for integration-contract failures.
-
-    An empty list means every contract check passed.  All paths are resolved
-    only for stable diagnostics; no files are modified.
-    """
-    repo_root = Path(repo_root).expanduser()
-    cron_jobs = Path(cron_jobs).expanduser()
-    failures: list[str] = []
-
-    try:
-        canonical_root = repo_root.resolve(strict=True)
-    except FileNotFoundError:
-        return [f"repo: missing repository root {repo_root}"]
-    except OSError as exc:
-        return [f"repo: cannot resolve repository root {repo_root}: {exc.strerror or exc}"]
-    if not canonical_root.is_dir():
-        return [f"repo: repository root is not a directory {repo_root}"]
-
-    repo_fd = _open_repo_root_fd(canonical_root, failures)
-    if repo_fd is None:
+def verify(
+    repo_root: Path,
+    cron_jobs: Path,
+    *,
+    runner: Runner | None = None,
+) -> list[str]:
+    """Execute all behavioral checks and return deterministic diagnostics."""
+    canonical_root, failures = _canonical_repo_root(Path(repo_root).expanduser())
+    if canonical_root is None:
         return failures
-    try:
-        _check_api(canonical_root, failures, repo_fd)
-        _check_rpc_tests(canonical_root, failures, repo_fd)
-        _check_server(canonical_root, failures, repo_fd)
-        _check_response_exports(canonical_root, failures, repo_fd)
-        _check_cron(canonical_root, cron_jobs, failures)
-    finally:
-        os.close(repo_fd)
+    failures.extend(run_contract_checks(canonical_root, runner=runner))
+    _check_cron(canonical_root, Path(cron_jobs).expanduser(), failures)
     return failures
 
 
@@ -1918,11 +796,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="cron manifest path (default: ~/.hermes/cron/jobs.json)",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
-
     try:
         failures = verify(args.repo_root, args.cron_jobs)
     except Exception as exc:  # defensive boundary for sync jobs; no traceback
-        failures = [f"verifier: unexpected failure while checking contract: {exc}"]
+        failures = [f"verifier: unexpected failure while checking contract: {_safe_diagnostic(str(exc))}"]
 
     if failures:
         print("FAIL: Hades dashboard/TUI integration contract")
