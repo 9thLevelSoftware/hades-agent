@@ -6105,6 +6105,78 @@ def _print_curator_first_run_notice() -> None:
     )
 
 
+def _print_fts_optimize_available_notice() -> None:
+    """Advertise the opt-in v23 search-index migration after ``hades update``."""
+    mode = "advise"
+    try:
+        from hades_cli.config import load_config
+
+        mode = str(
+            ((load_config() or {}).get("sessions") or {}).get(
+                "fts_optimize_notice", "advise"
+            )
+        ).strip().lower()
+    except Exception:
+        pass
+    if mode == "off":
+        return
+
+    try:
+        from hades_constants import get_hades_home
+        from hades_state import SessionDB
+
+        db_path = get_hades_home() / "state.db"
+        if not db_path.exists():
+            return
+        size_gb = db_path.stat().st_size / (1024 ** 3)
+        if size_gb < 0.5:
+            return
+
+        db = SessionDB(db_path=db_path, read_only=True)
+        try:
+            row = db._conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'messages_fts'"
+            ).fetchone()
+            interrupted = bool(
+                db._conn.execute(
+                    "SELECT 1 FROM state_meta "
+                    "WHERE key = 'fts_rebuild_high_water' LIMIT 1"
+                ).fetchone()
+                or db._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name LIKE 'fts\\_v22\\_trash\\_%' ESCAPE '\\' LIMIT 1"
+                ).fetchone()
+            )
+        finally:
+            db.close()
+    except Exception:
+        return
+
+    sql = (row[0] if row else "") or ""
+    if not sql or ("tool_name" in sql and not interrupted):
+        return
+
+    print()
+    if interrupted:
+        print("◆ Hades session database optimization incomplete")
+        print("  A previous run was interrupted. Search still works; resume with:")
+    elif mode == "require":
+        print("◆ Hades session database upgrade required")
+        print(
+            "  Your search index uses the old storage layout and should be "
+            "upgraded for continued optimal operation."
+        )
+    else:
+        print("◆ Hades can reclaim session database disk")
+        print(
+            f"  The compact search-index layout typically frees about 60% of "
+            f"your current {size_gb:.1f} GB state.db."
+        )
+    print("  Run when convenient:  hades sessions optimize-storage")
+    print("  It runs in the foreground, is safe to interrupt/re-run, and never changes conversations.")
+
+
 def _print_curator_recent_run_notice() -> None:
     """Print the most recent curator run summary, exactly once.
 
@@ -10490,6 +10562,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
         print()
         print("✓ Update complete!")
 
+        try:
+            _print_fts_optimize_available_notice()
+        except Exception as e:
+            logger.debug("FTS optimize notice failed: %s", e)
+
         # Curator first-run heads-up. Only prints when curator is enabled AND
         # has never run — i.e. the window where the ticker would otherwise
         # have fired against a fresh skill library. Kept silent on steady
@@ -14043,6 +14120,24 @@ def main():
         help="Reclaim disk space: merge FTS5 segments + VACUUM (no data change)",
     )
 
+    sessions_optimize_storage = sessions_subparsers.add_parser(
+        "optimize-storage",
+        help="Migrate the search index to the compact v23 layout",
+        description=(
+            "Rebuild the full-text search index in the compact v23 layout. "
+            "It runs in the foreground, is safe to interrupt and re-run, and "
+            "does not change conversation data."
+        ),
+    )
+    sessions_optimize_storage.add_argument(
+        "--no-vacuum",
+        action="store_true",
+        help="Skip the final VACUUM; reclaim disk space later with `hades sessions optimize`",
+    )
+    sessions_optimize_storage.add_argument(
+        "--yes", "-y", action="store_true", help="Skip the confirmation prompt"
+    )
+
     sessions_repair = sessions_subparsers.add_parser(
         "repair",
         help="Repair a malformed state.db schema so hidden sessions reappear",
@@ -14824,6 +14919,105 @@ def main():
                 f"Database size: {before_mb:.1f} MB -> {after_mb:.1f} MB "
                 f"(reclaimed {saved:.1f} MB)"
             )
+
+        elif action == "optimize-storage":
+            db_path = db.db_path
+            if not db.fts_optimize_available():
+                print("Hades search index is already on the compact layout — nothing to do.")
+                db.close()
+                return
+
+            resuming = db.fts_rebuild_status() is not None
+            before_bytes = os.path.getsize(db_path) if db_path.exists() else 0
+            before_mb = before_bytes / (1024 * 1024)
+            do_vacuum = not args.no_vacuum
+            try:
+                import shutil as _shutil
+
+                free_bytes = _shutil.disk_usage(db_path.parent).free
+            except Exception:
+                free_bytes = None
+            need_bytes = before_bytes if do_vacuum else int(before_bytes * 0.3)
+
+            print(f"Hades search-index optimization for {db_path}")
+            print(f"  Current database size: {before_mb:.1f} MB")
+            if free_bytes is not None:
+                print(
+                    f"  Free disk: {free_bytes / (1024 * 1024):.0f} MB "
+                    f"(need ~{need_bytes / (1024 * 1024):.0f} MB to complete"
+                    f"{' incl. VACUUM' if do_vacuum else ''})"
+                )
+                if free_bytes < need_bytes:
+                    print(
+                        "⚠ Not enough free disk to complete safely. Free space or "
+                        "use --no-vacuum."
+                    )
+                    db.close()
+                    return
+            if resuming:
+                print("  Resuming the interrupted search-index rebuild.")
+            if not args.yes and not _confirm_prompt("Proceed? [y/N] "):
+                print("Cancelled.")
+                db.close()
+                return
+
+            _last_phase = {"value": None}
+
+            def _progress(info):
+                phase = info.get("phase")
+                if phase == "backfill":
+                    print(
+                        f"\r  Rebuilding index: {info.get('percent', 0):3d}% "
+                        f"({info.get('indexed', 0):,}/{info.get('total', 0):,})",
+                        end="",
+                        flush=True,
+                    )
+                elif phase != _last_phase["value"]:
+                    label = {
+                        "teardown": "Reclaiming old index",
+                        "vacuum": "Compacting database (VACUUM)",
+                        "done": "Done",
+                    }.get(phase, phase)
+                    print(f"\n  {label}…", flush=True)
+                _last_phase["value"] = phase
+
+            try:
+                result = db.optimize_fts_storage(
+                    progress_cb=_progress, vacuum=do_vacuum
+                )
+            except Exception as e:
+                print(f"\nError: optimization failed: {e}")
+                print(
+                    "No data was lost. Re-run `hades sessions optimize-storage` "
+                    "to resume."
+                )
+                db.close()
+                return
+            if not result.get("ok"):
+                print(f"\nCould not optimize: {result.get('reason', 'unknown')}")
+                db.close()
+                return
+
+            after_mb = (
+                os.path.getsize(db_path) / (1024 * 1024)
+                if db_path.exists()
+                else 0.0
+            )
+            print("\n✓ Hades search index optimized.")
+            print(
+                f"  Database size: {before_mb:.1f} MB -> {after_mb:.1f} MB "
+                f"(reclaimed {before_mb - after_mb:.1f} MB)"
+            )
+            if not do_vacuum:
+                print(
+                    "  VACUUM skipped; run `hades sessions optimize` later to "
+                    "reclaim freed space."
+                )
+            elif result.get("vacuumed") is False:
+                print(
+                    "  VACUUM failed; run `hades sessions optimize` later to "
+                    "reclaim freed space."
+                )
 
         elif action == "stats":
             total = db.session_count()
