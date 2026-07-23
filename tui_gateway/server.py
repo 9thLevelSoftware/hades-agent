@@ -13540,6 +13540,88 @@ def _(rid, params: dict) -> dict:
 _AUTONOMY_MAX_ARGV_ENTRIES = 64
 _AUTONOMY_MAX_ARGV_BYTES = 65_536  # 64 KiB total UTF-8
 
+_NATIVE_MAX_OUTPUT_CHARS = 16_384
+_NATIVE_OUTPUT_TRUNCATION_SUFFIX = "... [truncated]"
+_NATIVE_MAX_RESULT_BYTES = 1_048_576  # 1 MiB UTF-8 JSON
+_TRANSACTION_MAX_PREVIEW_NODES = 256
+
+
+def _native_internal_error(rid, *, method: str, code: int) -> dict:
+    commands = {
+        "autonomy.exec": "`hades autonomy doctor`",
+        "receipt.exec": "`hades receipt list`",
+        "transaction.exec": "`hermes transaction list`",
+    }
+    return _err(
+        rid,
+        code,
+        f"{method}: internal failure (details withheld; run "
+        f"{commands[method]} in a terminal)",
+    )
+
+
+def _normalize_native_payload(payload: Any, *, method: str) -> dict:
+    """Copy a producer payload into plain JSON values before inspecting it."""
+    if type(payload) is not dict:
+        raise ValueError("producer payload must be an exact dict")
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > _NATIVE_MAX_RESULT_BYTES:
+            raise ValueError("producer payload exceeds native result bound")
+        normalized = json.loads(encoded)
+    except Exception as exc:
+        logger.warning("%s producer payload rejected (%s)", method, type(exc).__name__)
+        raise ValueError("producer payload is not wire-safe") from None
+    if type(normalized) is not dict:
+        raise ValueError("producer payload did not normalize to a dict")
+    return normalized
+
+
+def _cap_native_output(value: Any, *, method: str) -> str:
+    """Convert producer text without allowing conversion errors on the wire."""
+    try:
+        text = "" if value is None else str(value)
+        if len(text) <= _NATIVE_MAX_OUTPUT_CHARS:
+            return text
+        return (
+            text[: _NATIVE_MAX_OUTPUT_CHARS - len(_NATIVE_OUTPUT_TRUNCATION_SUFFIX)]
+            + _NATIVE_OUTPUT_TRUNCATION_SUFFIX
+        )
+    except Exception as exc:
+        logger.warning("%s producer output rejected (%s)", method, type(exc).__name__)
+        raise ValueError("producer output is not wire-safe") from None
+
+
+def _native_success(rid, response: dict, *, method: str, code: int) -> dict:
+    """Bound and rehydrate a native success envelope before JSON-RPC output."""
+    try:
+        encoded = json.dumps(
+            response,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > _NATIVE_MAX_RESULT_BYTES:
+            raise ValueError("native result exceeds wire bound")
+        normalized = json.loads(encoded)
+        if type(normalized) is not dict:
+            raise ValueError("native result did not normalize to a dict")
+        return _ok(rid, normalized)
+    except Exception as exc:
+        logger.warning("%s success envelope rejected (%s)", method, type(exc).__name__)
+        return _native_internal_error(rid, method=method, code=code)
+
+
+def _native_failure_payload(payload: dict) -> bool:
+    """Recognize an EXIT_OK result that is actually a producer failure."""
+    ok = payload.get("ok")
+    return ok is False or (payload.get("error") is not None and ok is not True)
+
 
 def _autonomy_contract_doc(payload: dict) -> dict | None:
     """Contract identity (version/hash/profile/mode) when the verb exposed it."""
@@ -13590,6 +13672,7 @@ def _(rid, params: dict) -> dict:
         result = _autonomy_cli.run_argv(list(argv), output_mode="structured")
         resolved_home = str(get_hades_home())
         exit_ok = _autonomy_cli.EXIT_OK
+        exit_denied = _autonomy_cli.EXIT_DENIED
         exit_validation = _autonomy_cli.EXIT_VALIDATION
         exit_storage = _autonomy_cli.EXIT_STORAGE
     except Exception:
@@ -13606,33 +13689,42 @@ def _(rid, params: dict) -> dict:
         if home_token is not None:
             reset_hades_home_override(home_token)
 
-    payload = result.payload or {}
+    try:
+        exit_code = result.exit_code
+        if type(exit_code) is not int:
+            raise ValueError("producer exit code is not an int")
+        producer_output = result.output
+        payload = _normalize_native_payload(result.payload, method="autonomy.exec")
+    except Exception:
+        return _native_internal_error(rid, method="autonomy.exec", code=5038)
     # Producer failure text is not a wire-safe boundary. Keep these messages
     # fixed and actionable without forwarding payload.error or output.
-    if result.exit_code == exit_validation:
+    if exit_code == exit_validation:
         return _err(
             rid,
             4034,
             "autonomy.exec: validation failed (details withheld; run "
             "hades autonomy in terminal)",
         )
-    if result.exit_code == exit_storage:
+    if exit_code == exit_storage:
         return _err(
             rid,
             5039,
             "autonomy.exec: storage failure (details withheld; run "
             "hades autonomy doctor in terminal)",
         )
-
-    preview = payload if payload.get("applied") is False else None
-    applied = payload if payload.get("applied") is True else None
-    return _ok(
-        rid,
-        {
-            "ok": result.exit_code == exit_ok,
+    if exit_code not in {exit_ok, exit_denied}:
+        return _native_internal_error(rid, method="autonomy.exec", code=5038)
+    try:
+        if exit_code == exit_ok and _native_failure_payload(payload):
+            return _native_internal_error(rid, method="autonomy.exec", code=5038)
+        preview = payload if payload.get("applied") is False else None
+        applied = payload if payload.get("applied") is True else None
+        response = {
+            "ok": exit_code == exit_ok,
             "action": argv[0].strip().lower(),
-            "exit_code": result.exit_code,
-            "output": result.output,
+            "exit_code": exit_code,
+            "output": _cap_native_output(producer_output, method="autonomy.exec"),
             "contract": _autonomy_contract_doc(payload),
             "rules": payload.get("rules") or [],
             "suggestions": payload.get("suggestions") or [],
@@ -13645,8 +13737,10 @@ def _(rid, params: dict) -> dict:
             # apply journal pending recovery (authority fails closed).
             "approval_pending": bool(preview) or bool(payload.get("pending_apply")),
             "profile_home": resolved_home,
-        },
-    )
+        }
+    except Exception:
+        return _native_internal_error(rid, method="autonomy.exec", code=5038)
+    return _native_success(rid, response, method="autonomy.exec", code=5038)
 
 
 # ── Receipts (Verified Outcome & Artifact Receipts) ──────────────────
@@ -13715,24 +13809,31 @@ def _(rid, params: dict) -> dict:
         if home_token is not None:
             reset_hades_home_override(home_token)
 
-    payload = result.payload or {}
+    try:
+        exit_code = result.exit_code
+        if type(exit_code) is not int:
+            raise ValueError("producer exit code is not an int")
+        producer_output = result.output
+        payload = _normalize_native_payload(result.payload, method="receipt.exec")
+    except Exception:
+        return _native_internal_error(rid, method="receipt.exec", code=5043)
     # Producer failure text is not a wire-safe boundary. Keep these messages
     # fixed and actionable without forwarding payload.error or output.
-    if result.exit_code == exit_validation:
+    if exit_code == exit_validation:
         return _err(
             rid,
             4005,
             "receipt.exec: validation failed (details withheld; run "
             "hades receipt in terminal)",
         )
-    if result.exit_code == exit_unavailable:
+    if exit_code == exit_unavailable:
         return _err(
             rid,
             5041,
             "receipt.exec: signing provider unavailable (details withheld; run "
             "hades receipt in terminal)",
         )
-    if result.exit_code != exit_ok:
+    if exit_code != exit_ok:
         return _err(
             rid,
             5040,
@@ -13740,37 +13841,47 @@ def _(rid, params: dict) -> dict:
             "hades receipt list in terminal)",
         )
 
-    # recheck returns one appended observation; show returns the selected
-    # chain. Normalize both to an `observations` list for the Ink viewer.
-    observations = payload.get("observations")
-    if observations is None and payload.get("observation") is not None:
-        observations = [payload["observation"]]
+    try:
+        if _native_failure_payload(payload):
+            return _err(
+                rid,
+                5040,
+                "receipt.exec: command failed (details withheld; run "
+                "`hades receipt list` in a terminal)",
+            )
+        # recheck returns one appended observation; show returns the selected
+        # chain. Normalize both to an `observations` list for the Ink viewer.
+        observations = payload.get("observations")
+        if observations is None and payload.get("observation") is not None:
+            observations = [payload["observation"]]
 
-    response = {
-        "ok": True,
-        "action": str(payload.get("action") or argv[0].strip().lower()),
-        "exit_code": result.exit_code,
-        "output": result.output,
-        "profile_home": resolved_home,
-    }
-    for key, value in (
-        ("receipts", payload.get("receipts")),
-        ("receipt", payload.get("receipt")),
-        ("observations", observations),
-        ("claim_edges", payload.get("claim_edges")),
-        ("export_path", payload.get("export_path")),
-        ("retention_plan_hash", payload.get("retention_plan_hash")),
-        ("warning", payload.get("warning")),
-    ):
-        if value is not None:
-            response[key] = value
-    return _ok(rid, response)
+        response = {
+            "ok": True,
+            "action": str(payload.get("action") or argv[0].strip().lower()),
+            "exit_code": exit_code,
+            "output": _cap_native_output(producer_output, method="receipt.exec"),
+            "profile_home": resolved_home,
+        }
+        for key, value in (
+            ("receipts", payload.get("receipts")),
+            ("receipt", payload.get("receipt")),
+            ("observations", observations),
+            ("claim_edges", payload.get("claim_edges")),
+            ("export_path", payload.get("export_path")),
+            ("retention_plan_hash", payload.get("retention_plan_hash")),
+            ("warning", payload.get("warning")),
+        ):
+            if value is not None:
+                response[key] = value
+    except Exception:
+        return _native_internal_error(rid, method="receipt.exec", code=5043)
+    return _native_success(rid, response, method="receipt.exec", code=5043)
 
 
 _TRANSACTION_MAX_ARGV_ENTRIES = 64
 _TRANSACTION_MAX_ARGV_BYTES = 64 * 1024
-_TRANSACTION_MAX_OUTPUT_CHARS = 16_384
-_TRANSACTION_OUTPUT_TRUNCATION_SUFFIX = "... [truncated]"
+_TRANSACTION_MAX_OUTPUT_CHARS = _NATIVE_MAX_OUTPUT_CHARS
+_TRANSACTION_OUTPUT_TRUNCATION_SUFFIX = _NATIVE_OUTPUT_TRUNCATION_SUFFIX
 
 
 @method("transaction.exec")
@@ -13823,96 +13934,102 @@ def _(rid, params: dict) -> dict:
         if home_token is not None:
             reset_hades_home_override(home_token)
 
-    payload = result.payload or {}
-    if result.exit_code == exit_validation:
+    try:
+        exit_code = result.exit_code
+        if type(exit_code) is not int:
+            raise ValueError("producer exit code is not an int")
+        producer_output = result.output
+        payload = _normalize_native_payload(result.payload, method="transaction.exec")
+    except Exception:
+        return _native_internal_error(rid, method="transaction.exec", code=5045)
+    if exit_code == exit_validation:
         return _err(
             rid,
             4007,
             "transaction.exec: validation failed (details withheld; run "
             "hades transaction in a terminal)",
         )
-    if result.exit_code != exit_ok:
+    if exit_code != exit_ok:
         return _err(
             rid,
             5044,
             "transaction.exec: command failed (details withheld; run "
             "hades transaction in a terminal)",
         )
-    if payload.get("ok") is False:
-        return _err(
-            rid,
-            5044,
-            "transaction.exec: command failed (details withheld; run "
-            "hades transaction in a terminal)",
-        )
-    action = str(payload.get("action") or argv[0].strip().lower())
-    safe_preview_nodes = None
-    safe_preview_hash = None
-    if action.strip().lower() == "preview":
-        safe_preview_hash = payload.get("preview_hash")
-        if not isinstance(safe_preview_hash, str):
-            safe_preview_hash = ""
-        safe_preview_hash = safe_preview_hash[:256]
-        safe_preview_nodes = []
-        for row in payload.get("nodes") or []:
-            if not isinstance(row, dict):
-                continue
-            node_id = row.get("node_id")
-            if not isinstance(node_id, str):
-                continue
-            fidelity = row.get("fidelity")
-            if fidelity is not None and not isinstance(fidelity, str):
-                fidelity = None
-            requires_approval = row.get("requires_approval")
-            if not isinstance(requires_approval, bool):
-                requires_approval = False
-            safe_preview_nodes.append(
-                {
-                    "node_id": node_id[:200],
-                    "fidelity": None if fidelity is None else fidelity[:64],
-                    "requires_approval": requires_approval,
-                }
+    try:
+        if _native_failure_payload(payload):
+            return _err(
+                rid,
+                5044,
+                "transaction.exec: command failed (details withheld; run "
+                "hades transaction in a terminal)",
             )
-        output = "\n".join(
-            [f"preview ready (hash {safe_preview_hash})"]
-            + [
-                "node "
-                f"{node['node_id']} fidelity {node['fidelity'] or '?'} "
-                f"approval {'yes' if node['requires_approval'] else 'no'}"
-                for node in safe_preview_nodes
-            ]
-        )
-    else:
-        output = str(result.output or "")
-    if len(output) > _TRANSACTION_MAX_OUTPUT_CHARS:
-        output = (
-            output[:
-                _TRANSACTION_MAX_OUTPUT_CHARS
-                - len(_TRANSACTION_OUTPUT_TRUNCATION_SUFFIX)
-            ]
-            + _TRANSACTION_OUTPUT_TRUNCATION_SUFFIX
-        )
-    response = {
-        "ok": True,
-        "action": action,
-        "exit_code": result.exit_code,
-        "output": output,
-    }
-    if safe_preview_nodes is not None:
-        response["nodes"] = safe_preview_nodes
-        response["preview_hash"] = safe_preview_hash
-    for key in (
-        "transaction", "transactions", "nodes", "preview", "preview_hash",
-        "eligibility", "receipt", "observation", "status", "counts",
-        "committed_nodes", "compensated_nodes", "blocked_node", "revision",
-        "rows",
-    ):
-        if safe_preview_nodes is not None and key in {"nodes", "preview", "preview_hash"}:
-            continue
-        value = payload.get(key)
-        if value is not None:
-            response[key] = value
-    return _ok(rid, response)
+        action = str(payload.get("action") or argv[0].strip().lower())
+        safe_preview_nodes = None
+        safe_preview_hash = None
+        if action.strip().lower() == "preview":
+            safe_preview_hash = payload.get("preview_hash")
+            if not isinstance(safe_preview_hash, str):
+                safe_preview_hash = ""
+            safe_preview_hash = safe_preview_hash[:256]
+            safe_preview_nodes = []
+            rows = payload.get("nodes") or []
+            if not isinstance(rows, list):
+                rows = []
+            for row in rows[:_TRANSACTION_MAX_PREVIEW_NODES]:
+                if not isinstance(row, dict):
+                    continue
+                node_id = row.get("node_id")
+                if not isinstance(node_id, str):
+                    continue
+                fidelity = row.get("fidelity")
+                if fidelity is not None and not isinstance(fidelity, str):
+                    fidelity = None
+                requires_approval = row.get("requires_approval")
+                if not isinstance(requires_approval, bool):
+                    requires_approval = False
+                safe_preview_nodes.append(
+                    {
+                        "node_id": node_id[:200],
+                        "fidelity": None if fidelity is None else fidelity[:64],
+                        "requires_approval": requires_approval,
+                    }
+                )
+            output = "\n".join(
+                [f"preview ready (hash {safe_preview_hash})"]
+                + [
+                    "node "
+                    f"{node['node_id']} fidelity {node['fidelity'] or '?'} "
+                    f"approval {'yes' if node['requires_approval'] else 'no'}"
+                    for node in safe_preview_nodes
+                ]
+            )
+        else:
+            output = _cap_native_output(producer_output, method="transaction.exec")
+        output = _cap_native_output(output, method="transaction.exec")
+        response = {
+            "ok": True,
+            "action": action,
+            "exit_code": exit_code,
+            "output": output,
+        }
+        if safe_preview_nodes is not None:
+            response["nodes"] = safe_preview_nodes
+            response["preview_hash"] = safe_preview_hash
+        for key in (
+            "transaction", "transactions", "nodes", "preview", "preview_hash",
+            "eligibility", "receipt", "observation", "status", "counts",
+            "committed_nodes", "compensated_nodes", "blocked_node", "revision",
+            "rows",
+        ):
+            if safe_preview_nodes is not None and key in {"nodes", "preview", "preview_hash"}:
+                continue
+            value = payload.get(key)
+            if value is not None:
+                response[key] = value
+    except Exception:
+        return _native_internal_error(rid, method="transaction.exec", code=5045)
+    return _native_success(rid, response, method="transaction.exec", code=5045)
 
 
 @method("command.resolve")
