@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +32,7 @@ _INTEGRATION_JOB_NAME = "hades-fork-integration"
 _INTEGRATION_HEADING = "## Integration Manifest + Handler Verification"
 _INTEGRATION_COMMAND = "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py"
 _POST_SYNC_MARKER = "scripts/post-sync-verify.py"
+_CRON_SHELL_LANGUAGES = frozenset({"bash", "sh", "shell"})
 
 
 @dataclass(frozen=True)
@@ -156,36 +159,118 @@ def _read_text(
     category: str,
     failures: list[str],
     max_bytes: int,
+    confine_to_repo: bool = True,
 ) -> str | None:
     """Read a bounded UTF-8 source file and report expected failures."""
     label = _path_label(path, repo_root)
+    fd: int | None = None
     try:
-        if not path.exists():
+        if confine_to_repo:
+            try:
+                relative = path.relative_to(repo_root)
+            except ValueError:
+                failures.append(
+                    f"{category}: path is outside repository root {label}"
+                )
+                return None
+            current = repo_root
+            for component in relative.parts:
+                current /= component
+                try:
+                    mode = current.lstat().st_mode
+                except FileNotFoundError:
+                    failures.append(f"{category}: missing file {label}")
+                    return None
+                except OSError as exc:
+                    failures.append(
+                        f"{category}: cannot inspect {label}: {exc.strerror or exc}"
+                    )
+                    return None
+                if stat.S_ISLNK(mode):
+                    failures.append(
+                        f"{category}: refusing symlink path component {label}; "
+                        "repository assets must remain beneath the repository root"
+                    )
+                    return None
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(repo_root)
+            except (FileNotFoundError, RuntimeError):
+                failures.append(f"{category}: missing file {label}")
+                return None
+            except ValueError:
+                failures.append(
+                    f"{category}: refusing path outside repository root {label}"
+                )
+                return None
+            except OSError as exc:
+                failures.append(
+                    f"{category}: cannot resolve {label}: {exc.strerror or exc}"
+                )
+                return None
+
+        try:
+            path_stat = path.lstat()
+        except FileNotFoundError:
             failures.append(f"{category}: missing file {label}")
             return None
-        if not path.is_file():
+        except OSError as exc:
+            failures.append(
+                f"{category}: cannot inspect {label}: {exc.strerror or exc}"
+            )
+            return None
+        if stat.S_ISLNK(path_stat.st_mode):
+            failures.append(
+                f"{category}: refusing symlink file {label}; no-follow reads are required"
+            )
+            return None
+        if not stat.S_ISREG(path_stat.st_mode):
             failures.append(f"{category}: expected file but found non-file {label}")
             return None
-        size = path.stat().st_size
-        if size == 0:
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        descriptor_stat = os.fstat(fd)
+        if not stat.S_ISREG(descriptor_stat.st_mode):
+            failures.append(f"{category}: expected regular file {label}")
+            return None
+        if descriptor_stat.st_size == 0:
             failures.append(f"{category}: empty file {label}")
             return None
-        if size > max_bytes:
+        if descriptor_stat.st_size > max_bytes:
             failures.append(
-                f"{category}: {label} is too large to inspect ({size} bytes; "
+                f"{category}: {label} is too large to inspect ({descriptor_stat.st_size} bytes; "
                 f"limit {max_bytes} bytes)"
             )
             return None
-        text = path.read_text(encoding="utf-8")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= max_bytes:
+            chunk = os.read(fd, min(64 * 1024, max_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                failures.append(
+                    f"{category}: {label} grew beyond inspection limit {max_bytes} bytes"
+                )
+                return None
+        try:
+            text = b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError:
+            failures.append(f"{category}: {label} is not valid UTF-8 text")
+            return None
     except PermissionError:
         failures.append(f"{category}: permission denied reading {label}")
-        return None
-    except UnicodeError:
-        failures.append(f"{category}: {label} is not valid UTF-8 text")
         return None
     except OSError as exc:
         failures.append(f"{category}: cannot read {label}: {exc.strerror or exc}")
         return None
+    finally:
+        if fd is not None:
+            os.close(fd)
     if not text.strip():
         failures.append(f"{category}: empty file {label}")
         return None
@@ -436,7 +521,11 @@ def _extract_call_arguments(text: str, opening: int) -> tuple[str, ...] | None:
     if not inner.strip():
         return ()
     pieces = _split_top_level(inner)
-    return None if pieces is None else tuple(pieces)
+    if pieces is None:
+        return None
+    while len(pieces) > 1 and not pieces[-1]:
+        pieces.pop()
+    return tuple(pieces)
 
 
 def _skip_ts_type_arguments(text: str, start: int) -> int | None:
@@ -473,13 +562,15 @@ def _skip_ts_type_arguments(text: str, start: int) -> int | None:
 class _TransportCall:
     helper: str
     arguments: tuple[str, ...]
+    direct: bool
 
 
 def _transport_calls(text: str) -> tuple[list[_TransportCall], bool]:
     """Extract fetchJSON/apiGet calls, reporting malformed lexical calls."""
     calls: list[_TransportCall] = []
-    malformed = False
     index = 0
+    arrow_count = 0
+    function_seen = False
     while index < len(text):
         char = text[index]
         if char in ("'", '"'):
@@ -494,11 +585,17 @@ def _transport_calls(text: str) -> tuple[list[_TransportCall], bool]:
                 return calls, True
             index = end
             continue
+        if text.startswith("=>", index):
+            arrow_count += 1
+            index += 2
+            continue
         if char.isalpha() or char in "_$":
             end = index + 1
             while end < len(text) and (text[end].isalnum() or text[end] in "_$"):
                 end += 1
             word = text[index:end]
+            if word == "function":
+                function_seen = True
             if word in {"fetchJSON", "apiGet"}:
                 cursor = end
                 while cursor < len(text) and text[cursor].isspace():
@@ -506,22 +603,24 @@ def _transport_calls(text: str) -> tuple[list[_TransportCall], bool]:
                 if cursor < len(text) and text[cursor] == "<":
                     cursor = _skip_ts_type_arguments(text, cursor)
                     if cursor is None:
-                        malformed = True
-                        index = end
-                        continue
+                        return calls, True
                     while cursor < len(text) and text[cursor].isspace():
                         cursor += 1
                 if cursor < len(text) and text[cursor] == "(":
                     arguments = _extract_call_arguments(text, cursor)
                     if arguments is None:
-                        malformed = True
-                        index = cursor + 1
-                        continue
-                    calls.append(_TransportCall(word, arguments))
+                        return calls, True
+                    calls.append(
+                        _TransportCall(
+                            word,
+                            arguments,
+                            direct=arrow_count <= 1 and not function_seen,
+                        )
+                    )
             index = end
             continue
         index += 1
-    return calls, malformed
+    return calls, False
 
 
 def _normalize_ts_expression(expression: str) -> str:
@@ -593,38 +692,66 @@ def _route_matches(expression: str, contract: _ApiContract) -> bool:
     return actual == _normalize_ts_expression(contract.route_expression)
 
 
-def _options_method(options: str) -> str | None:
-    """Return a live top-level ``method`` property from a request object."""
+def _inspect_options(options: str) -> tuple[str | None, str | None]:
+    """Inspect a static request-options object and its top-level method field."""
     stripped = options.strip()
     if not stripped.startswith("{"):
-        return None
+        return None, "second argument must be an object literal"
     end = _skip_ts_balanced_group(stripped, 0)
     if end is None or stripped[end:].strip():
-        return None
+        return None, "request options object is malformed or unbalanced"
     fields = _split_top_level(stripped[1 : end - 1])
     if fields is None:
-        return None
+        return None, "request options object has malformed members"
     property_pattern = re.compile(
-        r"^\s*(?:method|['\"]method['\"])\s*:\s*(['\"])(?P<verb>[A-Za-z]+)\1\s*$"
+        r"^\s*(?P<key>[A-Za-z_$][\w$]*|'[^']*'|\"[^\"]*\")\s*:\s*(?P<value>.*)\s*$",
+        re.DOTALL,
     )
+    method_values: list[str] = []
     for field in fields:
+        if not field:
+            continue
+        stripped_field = field.strip()
+        if stripped_field.startswith("..."):
+            return None, "request options must not contain spread members"
+        if stripped_field.startswith("["):
+            return None, "request options must not contain computed members"
         match = property_pattern.match(field)
-        if match is not None:
-            return match.group("verb")
-    return None
+        if match is None:
+            return None, "request options contains a dynamic or shorthand member"
+        key = match.group("key")
+        if key[:1] in {"'", '"'}:
+            key = key[1:-1]
+        if key != "method":
+            continue
+        value = match.group("value").strip()
+        if not value or value[:1] not in {"'", '"'}:
+            return None, "method property must be a literal string"
+        value_end = _skip_ts_quoted(value, 0, value[0])
+        if value_end is None or value[value_end:].strip():
+            return None, "method property must be a literal string"
+        method_values.append(value[1 : value_end - 1])
+    if not method_values:
+        return None, "request options must contain exactly one top-level method property"
+    if len(method_values) != 1:
+        return None, "request options contains duplicate top-level method properties"
+    return method_values[0], None
+
+
+def _options_method(options: str) -> str | None:
+    """Return a valid live top-level ``method`` property, if any."""
+    method, _reason = _inspect_options(options)
+    return method
 
 
 def _get_call_is_valid(call: _TransportCall) -> bool:
-    """GET allows no explicit non-GET method on the matching call."""
-    if len(call.arguments) < 2:
-        return True
-    method = _options_method(call.arguments[1])
-    return method is None or method.upper() == "GET"
+    """GET contracts accept exactly the route argument and nothing else."""
+    return len(call.arguments) == 1
 
 
 def _post_call_is_valid(call: _TransportCall) -> bool:
-    """POST requires a second argument with a live exact POST property."""
-    return len(call.arguments) >= 2 and _options_method(call.arguments[1]) == "POST"
+    """POST requires exactly two arguments and a literal POST options field."""
+    return len(call.arguments) == 2 and _options_method(call.arguments[1]) == "POST"
 
 
 def _check_api(repo_root: Path, failures: list[str]) -> None:
@@ -665,30 +792,51 @@ def _check_api(repo_root: Path, failures: list[str]) -> None:
             failures.append(
                 f"api: method {contract.name} has malformed or unbalanced transport call"
             )
-        if not calls:
             failures.append(
-                f"api: method {contract.name} expected apiGet/fetchJSON transport call"
+                f"api: method {contract.name} missing exact route {contract.route_display} "
+                "because the transport call could not be parsed"
             )
+            continue
+        if len(calls) != 1:
+            failures.append(
+                f"api: method {contract.name} must contain exactly one direct "
+                f"apiGet/fetchJSON transport call (found {len(calls)})"
+            )
+            continue
+        call = calls[0]
+        if not call.direct:
+            failures.append(
+                f"api: method {contract.name} transport call must be direct to the "
+                "method implementation, not nested in another function"
+            )
+            continue
 
-        matching = [
-            call for call in calls if call.arguments and _route_matches(call.arguments[0], contract)
-        ]
-        if not matching:
+        if not call.arguments or not _route_matches(call.arguments[0], contract):
             failures.append(
                 f"api: method {contract.name} missing exact route {contract.route_display}"
             )
             continue
 
         if contract.verb == "GET":
-            if not any(_get_call_is_valid(call) for call in matching):
+            if not _get_call_is_valid(call):
                 failures.append(
-                    f"api: method {contract.name} expected GET on the matching apiGet/fetchJSON call"
+                    f"api: method {contract.name} GET transport call must have exactly one argument "
+                    "(the canonical route; request options are not allowed)"
                 )
-        elif not any(_post_call_is_valid(call) for call in matching):
-            failures.append(
-                f"api: method {contract.name} missing POST HTTP verb on the matching call "
-                "(expected method: POST)"
-            )
+        else:
+            if len(call.arguments) != 2:
+                failures.append(
+                    f"api: method {contract.name} POST transport call must have exactly two arguments "
+                    "(route and static request options; HTTP verb must be explicit)"
+                )
+                continue
+            method, reason = _inspect_options(call.arguments[1])
+            if method != "POST":
+                failures.append(
+                    f"api: method {contract.name} missing POST HTTP verb on the matching call "
+                    "(expected method: POST; "
+                    f"{reason or 'method property must be the literal string POST'})"
+                )
 
 
 def _check_rpc_tests(repo_root: Path, failures: list[str]) -> None:
@@ -900,6 +1048,34 @@ def _check_response_exports(repo_root: Path, failures: list[str]) -> None:
             )
 
 
+def _shell_fenced_commands(prompt: str) -> list[tuple[int, str]]:
+    """Return executable lines from bash/sh/shell Markdown fences."""
+    commands: list[tuple[int, str]] = []
+    lines = prompt.splitlines()
+    in_block = False
+    shell_block = False
+    for line_number, line in enumerate(lines):
+        if not in_block:
+            opening = re.match(r"^[ \t]*```(?P<language>[A-Za-z0-9_-]*)[ \t]*$", line)
+            if opening is not None:
+                in_block = True
+                shell_block = opening.group("language").lower() in _CRON_SHELL_LANGUAGES
+            continue
+        if line.strip() == "```":
+            in_block = False
+            shell_block = False
+            continue
+        stripped = line.strip()
+        if shell_block and stripped and not stripped.startswith("#"):
+            commands.append((line_number, stripped))
+    return commands
+
+
+def _is_post_sync_command(line: str) -> bool:
+    """Recognize an executable post-sync command, not prose or comments."""
+    return _POST_SYNC_MARKER in line and not line.lstrip().startswith("#")
+
+
 def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
     text = _read_text(
         cron_jobs,
@@ -907,6 +1083,7 @@ def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
         category="cron",
         failures=failures,
         max_bytes=_MAX_CRON_BYTES,
+        confine_to_repo=False,
     )
     if text is None:
         return
@@ -934,7 +1111,37 @@ def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
             f"{_INTEGRATION_JOB_NAME!r}, found {len(integration_jobs)}"
         )
         return
-    prompt = integration_jobs[0].get("prompt")
+    job = integration_jobs[0]
+    if job.get("enabled") is not True:
+        failures.append("cron: hades-fork-integration job must be enabled=true")
+    if job.get("state") != "scheduled":
+        failures.append(
+            "cron: hades-fork-integration job state must be exactly 'scheduled'"
+        )
+    schedule = job.get("schedule")
+    if not isinstance(schedule, dict):
+        failures.append(
+            "cron: hades-fork-integration schedule must be an object with kind='cron' and expr='0 */4 * * *'"
+        )
+    else:
+        if schedule.get("kind") != "cron" or schedule.get("expr") != "0 */4 * * *":
+            failures.append(
+                "cron: hades-fork-integration schedule must be "
+                "{kind: 'cron', expr: '0 */4 * * *'}"
+            )
+    if job.get("schedule_display") != "0 */4 * * *":
+        failures.append(
+            "cron: hades-fork-integration schedule_display must be '0 */4 * * *'"
+        )
+    skills = job.get("skills")
+    if not isinstance(skills, list) or "github-operations" not in skills:
+        failures.append(
+            "cron: hades-fork-integration skills must include 'github-operations'"
+        )
+    if job.get("deliver") != "local":
+        failures.append("cron: hades-fork-integration deliver must be 'local'")
+
+    prompt = job.get("prompt")
     if not isinstance(prompt, str):
         failures.append("cron: hades-fork-integration prompt must be a string")
         return
@@ -944,20 +1151,45 @@ def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
             "cron: hades-fork-integration prompt is missing heading "
             f"{_INTEGRATION_HEADING!r}"
         )
-    command_position = prompt.find(_INTEGRATION_COMMAND)
-    if command_position < 0:
+
+    shell_commands = _shell_fenced_commands(prompt)
+    command_positions = [
+        line_number
+        for line_number, line in shell_commands
+        if line == _INTEGRATION_COMMAND
+    ]
+    verifier_line: int | None = None
+    for index in range(len(shell_commands) - 1):
+        current_line, current_command = shell_commands[index]
+        next_line, next_command = shell_commands[index + 1]
+        if (
+            next_line == current_line + 1
+            and current_command == "cd ~/.hermes/hermes-agent"
+            and next_command == _INTEGRATION_COMMAND
+        ):
+            verifier_line = next_line
+            break
+    if verifier_line is None:
+        failures.append(
+            "cron: hades-fork-integration prompt must contain consecutive executable lines "
+            "`cd ~/.hermes/hermes-agent` then the exact verifier command in a bash/sh/shell fenced block"
+        )
+    elif not command_positions:
         failures.append(
             "cron: hades-fork-integration prompt is missing exact verifier command "
-            f"{_INTEGRATION_COMMAND!r}"
+            f"{_INTEGRATION_COMMAND!r} in a shell fenced block"
         )
-    post_sync_position = prompt.find(_POST_SYNC_MARKER)
-    if post_sync_position < 0:
+
+    post_sync_positions = [
+        line_number for line_number, line in shell_commands if _is_post_sync_command(line)
+    ]
+    if not post_sync_positions:
         failures.append(
             "cron: hades-fork-integration prompt is missing the post-sync-verify.py anchor"
         )
-    elif command_position >= 0 and command_position > post_sync_position:
+    elif command_positions and min(command_positions) > min(post_sync_positions):
         failures.append(
-            "cron: verifier command must appear before the first scripts/post-sync-verify.py occurrence"
+            "cron: verifier command must appear before the first post-sync-verify.py command"
         )
 
 
@@ -971,21 +1203,24 @@ def verify(repo_root: Path, cron_jobs: Path) -> list[str]:
     cron_jobs = Path(cron_jobs).expanduser()
     failures: list[str] = []
 
-    if not repo_root.exists():
+    try:
+        canonical_root = repo_root.resolve(strict=True)
+    except FileNotFoundError:
         return [f"repo: missing repository root {repo_root}"]
-    if not repo_root.is_dir():
+    except OSError as exc:
+        return [f"repo: cannot resolve repository root {repo_root}: {exc.strerror or exc}"]
+    if not canonical_root.is_dir():
         return [f"repo: repository root is not a directory {repo_root}"]
 
-    _check_api(repo_root, failures)
-    _check_rpc_tests(repo_root, failures)
-    _check_server(repo_root, failures)
-    _check_response_exports(repo_root, failures)
-    _check_cron(repo_root, cron_jobs, failures)
+    _check_api(canonical_root, failures)
+    _check_rpc_tests(canonical_root, failures)
+    _check_server(canonical_root, failures)
+    _check_response_exports(canonical_root, failures)
+    _check_cron(canonical_root, cron_jobs, failures)
     return failures
 
 
 def _parser() -> argparse.ArgumentParser:
-    script_root = Path(__file__).resolve().parent.parent
     return argparse.ArgumentParser(description=__doc__)
 
 
