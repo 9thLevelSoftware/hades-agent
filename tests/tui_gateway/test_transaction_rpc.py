@@ -184,7 +184,17 @@ def test_transaction_rpc_redacts_nonvalidation_command_failure(rpc, monkeypatch)
     assert len(message) <= 256
 
 
-def test_transaction_rpc_redacts_false_payload_on_success_exit(rpc, monkeypatch):
+@pytest.mark.parametrize(
+    ("status", "extra"),
+    [
+        ("unknown_effect", {"committed_nodes": ["write"]}),
+        ("blocked", {"committed_nodes": ["write"], "blocked_node": "publish"}),
+        ("partially_compensated", {"compensated_nodes": ["write"]}),
+    ],
+)
+def test_transaction_rpc_preserves_safety_uncertainty_on_nonzero_exit(
+    rpc, monkeypatch, status, extra
+):
     import hades_cli.transactions as transactions_mod
 
     secret = "transaction-secret-partial-compensation"
@@ -198,8 +208,9 @@ def test_transaction_rpc_redacts_false_payload_on_success_exit(rpc, monkeypatch)
         {
             "ok": False,
             "action": "compensate",
-            "status": "partially_compensated",
+            "status": status,
             "error": details,
+            **extra,
         },
     )
     monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: failed)
@@ -207,15 +218,62 @@ def test_transaction_rpc_redacts_false_payload_on_success_exit(rpc, monkeypatch)
     resp = rpc("transaction.exec", {
         "argv": ["compensate", "tx-partial"], "session_id": "sid",
     })
-    assert resp.get("ok") is not True, resp
-    error = resp.get("error") or {}
-    message = str(error.get("message", ""))
-
-    assert error.get("code") == 5044, resp
+    assert resp.get("ok") is False, resp
+    assert resp["status"] == status
+    for key, value in extra.items():
+        assert resp[key] == value
     assert secret not in str(resp)
     assert "/private/authority.yaml" not in str(resp)
     assert "Traceback" not in str(resp)
-    assert len(message) <= 256
+    assert resp["output"] != failed.output
+
+
+def test_transaction_rpc_keeps_unrecognized_nonzero_failure_as_fixed_error(
+    rpc, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+
+    failed = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_ERROR,
+        "unsafe producer output",
+        {"ok": False, "action": "commit", "error": "unsafe"},
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: failed)
+
+    resp = rpc("transaction.exec", {"argv": ["commit", "tx"], "session_id": "sid"})
+
+    assert resp["error"]["code"] == 5044
+    assert "unsafe" not in str(resp)
+
+
+def test_transaction_rpc_preserves_recognized_status_on_success_exit(
+    rpc, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+
+    secret = "transaction-success-uncertainty-secret"
+    failed = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        f"unsafe {secret} /Users/private/transaction",
+        {
+            "ok": False,
+            "action": "commit",
+            "status": "unknown_effect",
+            "committed_nodes": ["write"],
+            "blocked_node": "publish",
+            "error": secret,
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: failed)
+
+    resp = rpc("transaction.exec", {"argv": ["commit", "tx"], "session_id": "sid"})
+
+    assert resp["ok"] is False
+    assert resp["status"] == "unknown_effect"
+    assert resp["committed_nodes"] == ["write"]
+    assert resp["blocked_node"] == "publish"
+    assert secret not in str(resp)
+    assert "/Users/private/transaction" not in str(resp)
 
 
 def test_transaction_rpc_bounds_success_output_and_omits_failure_error(
@@ -385,3 +443,72 @@ def test_success_envelope_is_bounded(rpc, monkeypatch):
 
     assert resp["error"]["code"] == 5045
     assert len(str(resp)) < 2_000
+
+
+def test_valid_transaction_success_payload_forwards_only_minimal_schemas(
+    rpc, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+
+    secret = "transaction-valid-success-secret"
+    private_path = "/Users/private/transactions/plan.yaml"
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        f"transaction output {secret} {private_path}",
+        {
+            "ok": True,
+            "action": "show",
+            "transaction": {
+                "transaction_id": "tx-1",
+                "status": "ready",
+                "current_revision": 3,
+                "receipt_id": "rct-1",
+                "title": f"title {secret}",
+                "path": private_path,
+            },
+            "transactions": [{
+                "transaction_id": "tx-2",
+                "status": "committed",
+                "current_revision": 4,
+                "receipt_id": None,
+                "title": f"title {secret}",
+                "path": private_path,
+            }],
+            "eligibility": {
+                "node-1": {
+                    "can_execute": False,
+                    "code": "blocked",
+                    "fidelity": "exact",
+                    "reason": f"reason {secret} {private_path}",
+                    "blockers": [f"blocker {secret} {private_path}"],
+                    "required_cascade_node_ids": ["node-2"],
+                    "title": f"title {secret}",
+                }
+            },
+            "rows": [{"title": f"row {secret}", "path": private_path}],
+            "nodes": [{"node_id": "node-1", "title": f"node {secret}", "path": private_path}],
+            "receipt": {"receipt_id": "rct-1", "status": "verified", "content_hash": "sha256:r"},
+            "observation": {"observation_id": "obs-1", "status": "verified", "content_hash": "sha256:o"},
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("transaction.exec", {"argv": ["show", "tx-1"], "session_id": "sid"})
+
+    wire = str(resp)
+    assert secret not in wire
+    assert private_path not in wire
+    assert "title" not in wire
+    assert "path" not in wire
+    assert "rows" not in resp
+    assert "nodes" not in resp
+    assert set(resp["transaction"]) == {
+        "transaction_id", "status", "current_revision", "receipt_id"
+    }
+    assert set(resp["transactions"][0]) == {
+        "transaction_id", "status", "current_revision", "receipt_id"
+    }
+    assert set(resp["eligibility"]["node-1"]) == {
+        "can_execute", "code", "fidelity", "reason", "blockers",
+        "required_cascade_node_ids"
+    }

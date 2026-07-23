@@ -122,6 +122,28 @@ describe('/transaction slash command', () => {
     expect(text).toContain('/transaction reconcile tx-1')
   })
 
+  it('renders the persistent warning for an uncertain nonzero commit result', async () => {
+    const { run, sys } = buildCtx({
+      action: 'commit',
+      ok: false,
+      output: 'commit result withheld',
+      status: 'partially_compensated',
+      compensated_nodes: ['write'],
+      transaction: {
+        current_revision: 1,
+        receipt_id: null,
+        status: 'partially_compensated',
+        transaction_id: 'tx-1'
+      }
+    })
+
+    await run('commit tx-1')
+
+    const text = printed(sys)
+    expect(text).toContain('do not retry')
+    expect(text).toContain('/transaction reconcile tx-1')
+  })
+
   it('drops the render when the slash flight went stale', async () => {
     const { page, run, sys } = buildCtx({}, { stale: true })
 

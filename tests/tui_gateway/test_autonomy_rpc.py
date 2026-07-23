@@ -672,3 +672,105 @@ def test_success_envelope_is_bounded(rpc_raw, monkeypatch):
 
     assert resp["error"]["code"] == 5038
     assert len(str(resp)) < 2_000
+
+
+def _assert_native_wire_has_no_sentinels(resp, *sentinels):
+    wire = json.dumps(resp, ensure_ascii=False)
+    for sentinel in sentinels:
+        assert sentinel not in wire
+    assert "/Users/private/" not in wire
+    assert "profile_home" not in wire
+
+
+def test_valid_autonomy_success_payload_redacts_all_free_text_fields(
+    rpc_raw, monkeypatch
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    secret = "autonomy-valid-success-api-key"
+    private_path = "/Users/private/autonomy/rule.yaml"
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        f"success output {secret} {private_path}",
+        {
+            "ok": True,
+            "action": "evaluate",
+            "rules": [{
+                "rule_id": "allow-safe",
+                "source": "stable",
+                "state": "active",
+                "effect": "allow",
+                "description": f"description {secret} {private_path}",
+                "provenance": f"provenance {secret} {private_path}",
+                "edit_command": f"edit {private_path} --token {secret}",
+            }],
+            "suggestions": [{
+                "rule_id": "suggest-safe",
+                "source": "learned_suggestion",
+                "state": "awaiting_confirmation",
+                "effect": "allow",
+                "description": f"suggestion {secret} {private_path}",
+                "provenance": f"suggestion provenance {secret} {private_path}",
+            }],
+            "verdict": "allow",
+            "code": "explicit_allow",
+            "reason": f"decision reason {secret} {private_path}",
+            "edit_targets": [f"target {private_path} {secret}"],
+            "clarification": {
+                "question": f"question {secret} {private_path}",
+                "choices": [f"choice {secret} {private_path}"],
+                "code": "needs_input",
+            },
+            "decisions": [{
+                "decision_id": "decision-1",
+                "operation_key": "operation-1",
+                "verdict": "allow",
+                "code": "explicit_allow",
+                "reason": f"audit reason {secret} {private_path}",
+                "edit_targets": [f"audit target {private_path}"],
+                "created_at_ms": 1,
+            }],
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["evaluate"]})
+
+    assert "result" in resp and "error" not in resp
+    _assert_native_wire_has_no_sentinels(resp, secret, private_path)
+    assert resp["result"]["output"] != result.output
+    assert resp["result"]["decision"]["reason"] != f"decision reason {secret} {private_path}"
+    assert resp["result"]["rules"][0]["description"] != f"description {secret} {private_path}"
+
+
+def test_valid_autonomy_denial_payload_has_fixed_safe_output(
+    rpc_raw, monkeypatch
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    secret = "autonomy-valid-denial-bearer-secret"
+    private_path = "/Users/private/autonomy/deny.yaml"
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_DENIED,
+        f"denied output {secret} {private_path}",
+        {
+            "ok": False,
+            "verdict": "deny",
+            "code": "sensitive_data_boundary",
+            "reason": f"denial reason {secret} {private_path}",
+            "edit_targets": [f"edit {private_path} {secret}"],
+            "clarification": {
+                "question": f"question {secret} {private_path}",
+                "choices": [f"choice {secret} {private_path}"],
+            },
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["evaluate"]})
+
+    assert "result" in resp and resp["result"]["ok"] is False
+    _assert_native_wire_has_no_sentinels(resp, secret, private_path)
+    assert resp["result"]["output"] != result.output
+    assert resp["result"]["decision"]["verdict"] == "deny"
+    assert resp["result"]["decision"]["code"] == "sensitive_data_boundary"
