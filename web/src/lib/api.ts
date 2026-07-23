@@ -1300,8 +1300,8 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        profile: getManagementProfile() || undefined,
         ...change,
+        profile: getManagementProfile() || undefined,
       }),
     }),
   applyAutonomyPreview: (change: AutonomyApplyRequest) =>
@@ -1309,8 +1309,8 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        profile: getManagementProfile() || undefined,
         ...change,
+        profile: getManagementProfile() || undefined,
       }),
     }),
   acceptAutonomySuggestion: (
@@ -1323,8 +1323,8 @@ export const api = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          profile: getManagementProfile() || undefined,
           ...body,
+          profile: getManagementProfile() || undefined,
         }),
       },
     ),
