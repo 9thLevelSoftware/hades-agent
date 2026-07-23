@@ -1548,6 +1548,234 @@ def test_reset_profile_builds_owned_agent_before_swapping_and_closes_old(
     assert active is False
 
 
+def test_deferred_agent_build_discards_stale_constructed_agent(server, monkeypatch, tmp_path):
+    """A deferred profile build must not publish into a reaped session slot."""
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    sid = "deferred-stale"
+    ready = threading.Event()
+    replacement = {"replacement": True}
+    dbs = []
+    agents = []
+    worker_calls = []
+    poller_calls = []
+    notifier_calls = []
+    approval_calls = []
+
+    class _Approval:
+        register_gateway_notify = staticmethod(
+            lambda *_args, **_kwargs: approval_calls.append("register")
+        )
+        load_permanent_allowlist = staticmethod(
+            lambda: approval_calls.append("load")
+        )
+
+    monkeypatch.setitem(sys.modules, "tools.approval", _Approval)
+
+    class _DB:
+        def __init__(self, *, db_path):
+            self.db_path = Path(db_path)
+            self.close_calls = 0
+            dbs.append(self)
+
+        def close(self):
+            self.close_calls += 1
+
+    class _Agent:
+        def __init__(self, session_db):
+            self.model = "profile/model"
+            self.session_db = session_db
+            self._session_db = session_db
+            self._owns_session_db = True
+            self.close_calls = 0
+            agents.append(self)
+
+        def close(self):
+            self.close_calls += 1
+            self.session_db.close()
+
+    original = {
+        "agent": None,
+        "agent_ready": ready,
+        "session_key": "20260723_000001_deferred",
+        "profile_home": str(profile_home),
+        "cwd": str(tmp_path / "workspace"),
+        "source": "telegram",
+    }
+
+    def _reset_home(token):
+        assert token == "home-token"
+
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_DB))
+    monkeypatch.setattr(server, "set_hermes_home_override", lambda _home: "home-token")
+    monkeypatch.setattr(server, "reset_hermes_home_override", _reset_home)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args, **_kwargs: ["context"])
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+
+    def _make_agent(_sid, _key, *, session_db, **_kwargs):
+        agent = _Agent(session_db)
+        with server._sessions_lock:
+            assert server._sessions[sid] is original
+            server._sessions[sid] = replacement
+        return agent
+
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
+    monkeypatch.setattr(server, "_SlashWorker", lambda *_args, **_kwargs: worker_calls.append(True))
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda *_args, **_kwargs: poller_calls.append(True),
+    )
+    monkeypatch.setattr(server, "_wire_callbacks", lambda *_args: notifier_calls.append("callbacks"))
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args: notifier_calls.append("boundary"))
+    monkeypatch.setattr(server, "_emit", lambda *_args: notifier_calls.append("emit"))
+
+    server._sessions[sid] = original
+    server._start_agent_build(sid, original)
+
+    assert ready.wait(timeout=1.0)
+    assert server._sessions[sid] is replacement
+    assert original["agent"] is None
+    assert original.get("session_db") is None
+    assert len(agents) == 1
+    assert agents[0].close_calls == 1
+    assert len(dbs) == 1
+    assert dbs[0].close_calls == 1
+    assert worker_calls == []
+    assert poller_calls == []
+    assert notifier_calls == []
+    assert approval_calls == []
+
+
+def test_reset_discards_replacement_when_session_reaped_during_build(
+    server, monkeypatch, tmp_path
+):
+    """Reset must abandon all candidate resources if its registry slot is replaced."""
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    sid = "reset-reaped"
+    replacement = {"replacement": True}
+    dbs = []
+    agents = []
+    worker_calls = []
+    poller_calls = []
+    config_calls = []
+    lock_probe_results = []
+
+    class _DB:
+        def __init__(self, *, db_path):
+            self.db_path = Path(db_path)
+            self.close_calls = 0
+            dbs.append(self)
+
+        def close(self):
+            self.close_calls += 1
+
+    def _assert_lock_is_free_during_close():
+        acquired = []
+
+        def _probe():
+            got_lock = server._sessions_lock.acquire(timeout=0.5)
+            acquired.append(got_lock)
+            if got_lock:
+                server._sessions_lock.release()
+
+        thread = threading.Thread(target=_probe)
+        thread.start()
+        thread.join(timeout=1.0)
+        lock_probe_results.append(acquired == [True] and not thread.is_alive())
+
+    class _Agent:
+        def __init__(self, session_db):
+            self.model = "new/model"
+            self.session_db = session_db
+            self._session_db = session_db
+            self._owns_session_db = True
+            self.close_calls = 0
+            agents.append(self)
+
+        def close(self):
+            self.close_calls += 1
+            _assert_lock_is_free_during_close()
+            self.session_db.close()
+
+    class _Worker:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            _assert_lock_is_free_during_close()
+
+    old_agent = types.SimpleNamespace(model="old/model", session_id="reset-key")
+    original = {
+        "agent": old_agent,
+        "session_key": "reset-key",
+        "profile_home": str(profile_home),
+        "cwd": str(tmp_path / "workspace"),
+        "source": "telegram",
+        "history": [{"role": "user", "content": "old"}],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "_notif_stop": threading.Event(),
+        "slash_worker": None,
+    }
+
+    def _reset_home(token):
+        assert token == "home-token"
+
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_DB))
+    monkeypatch.setattr(server, "set_hermes_home_override", lambda _home: "home-token")
+    monkeypatch.setattr(server, "reset_hermes_home_override", _reset_home)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args, **_kwargs: ["context"])
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+
+    def _make_agent(_sid, _key, *, session_db, **_kwargs):
+        agent = _Agent(session_db)
+        with server._sessions_lock:
+            server._sessions.pop(sid)
+            server._sessions[sid] = replacement
+        return agent
+
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
+    monkeypatch.setattr(
+        server,
+        "_restart_slash_worker",
+        lambda *_args, **_kwargs: worker_calls.append(_Worker()) or worker_calls[-1],
+    )
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda *_args, **_kwargs: poller_calls.append(threading.Event()) or poller_calls[-1],
+    )
+    monkeypatch.setattr(
+        server,
+        "_config_model_target",
+        lambda: config_calls.append(True) or "new/model",
+    )
+    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "new/model"})
+
+    server._sessions[sid] = original
+    with pytest.raises(RuntimeError, match="closed or replaced during reset"):
+        server._reset_session_agent(sid, original)
+
+    assert server._sessions[sid] is replacement
+    assert replacement == {"replacement": True}
+    assert original["agent"] is old_agent
+    assert original["history"] == [{"role": "user", "content": "old"}]
+    assert not hasattr(old_agent, "_end_session_on_close")
+    assert len(agents) == 1
+    assert agents[0].close_calls == 1
+    assert len(dbs) == 1
+    assert dbs[0].close_calls == 1
+    assert worker_calls == []
+    assert poller_calls == []
+    assert config_calls == []
+    assert lock_probe_results == [True]
+
+
 def test_finalize_ends_profile_agent_database_without_launch_lookup(server, monkeypatch):
     calls = []
 
