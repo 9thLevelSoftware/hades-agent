@@ -1,7 +1,7 @@
 // connect() must reject before WebSocket coerces garbage into
 // `ws://<origin>/[object%20Object]` (#68250 stale-emit boot loop).
 
-import { JsonRpcGatewayClient } from '@hermes/shared'
+import { JsonRpcGatewayClient } from '@hades/shared'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 class FakeSocket {
@@ -30,23 +30,29 @@ describe('JsonRpcGatewayClient connect() URL guard', () => {
   })
 
   it('rejects a non-string IPC result object', async () => {
-    const client = new JsonRpcGatewayClient()
+    const socketFactory = vi.fn()
+    const client = new JsonRpcGatewayClient({ socketFactory })
     await expect(
       client.connect({ ok: true, wsUrl: 'ws://127.0.0.1:1/api/ws' } as unknown as string)
     ).rejects.toThrow(/requires a ws:\/\/ or wss:\/\/ URL string, got type "object"/)
+    expect(socketFactory).not.toHaveBeenCalled()
   })
 
   it('rejects a non-ws URL string', async () => {
-    const client = new JsonRpcGatewayClient()
+    const socketFactory = vi.fn()
+    const client = new JsonRpcGatewayClient({ socketFactory })
     await expect(client.connect('http://127.0.0.1:1234/api/ws')).rejects.toThrow(
       /requires a ws:\/\/ or wss:\/\/ URL string/
     )
+    expect(socketFactory).not.toHaveBeenCalled()
   })
 
   it('rejects a malformed ws URL before opening a socket', async () => {
-    const client = new JsonRpcGatewayClient()
+    const socketFactory = vi.fn()
+    const client = new JsonRpcGatewayClient({ socketFactory })
     await expect(client.connect('ws://')).rejects.toThrow(/requires a ws:\/\/ or wss:\/\/ URL string/)
     expect(client.connectionState).toBe('idle')
+    expect(socketFactory).not.toHaveBeenCalled()
   })
 
   it('keeps connection state idle on rejection', async () => {
