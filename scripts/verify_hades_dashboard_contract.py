@@ -37,6 +37,9 @@ _POST_SYNC_MARKER = "scripts/post-sync-verify.py"
 _TRACKED_VERIFIER_REF = "fix/dashboard-api-contract"
 _CRON_SHELL_LANGUAGES = frozenset({"bash", "sh", "shell"})
 
+_AUTHORIZATION_RE = re.compile(
+    r"(?im)(\bauthorization\b[ \t]*[:=][ \t]*)([^\r\n,;]*)"
+)
 _SECRET_RE = re.compile(
     r"(?i)(\b(?:api[_-]?key|access[_-]?key|token|password|secret|authorization)\b"
     r"\s*[:=]\s*)([^\s,;]+)"
@@ -296,6 +299,7 @@ def _read_cron_text(path: Path, failures: list[str], max_bytes: int = _MAX_CRON_
 def _safe_diagnostic(text: str) -> str:
     """Redact common secret assignments and bound untrusted command output."""
     sanitized = text.replace("\x00", "?")
+    sanitized = _AUTHORIZATION_RE.sub(r"\1[REDACTED]", sanitized)
     sanitized = _SECRET_RE.sub(r"\1[REDACTED]", sanitized)
     if len(sanitized) > _MAX_DIAGNOSTIC_CHARS:
         return sanitized[:_MAX_DIAGNOSTIC_CHARS] + "…"
