@@ -8,6 +8,7 @@ identity), not to parallel copies.
 
 import importlib
 import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -59,6 +60,40 @@ def test_hermes_cli_submodule_identity():
     import hades_cli.config
 
     assert sys.modules["hermes_cli.config"] is sys.modules["hades_cli.config"]
+
+
+def test_route_identity_imports_stay_inside_the_isolated_worktree():
+    """The legacy route identity path is a canonical Hades module alias."""
+    worktree_root = Path(__file__).resolve().parents[1]
+    program = f"""
+import importlib
+from pathlib import Path
+import sys
+
+root = Path({str(worktree_root)!r}).resolve()
+sys.path.insert(0, str(root))
+
+hades_cli = importlib.import_module("hades_cli")
+hermes_cli = importlib.import_module("hermes_cli")
+hades_route_identity = importlib.import_module("hades_cli.route_identity")
+hermes_route_identity = importlib.import_module("hermes_cli.route_identity")
+agent_init = importlib.import_module("agent.agent_init")
+run_agent = importlib.import_module("run_agent")
+
+assert hermes_cli is hades_cli
+assert hermes_route_identity is hades_route_identity
+for module in (hades_cli, hades_route_identity, agent_init, run_agent):
+    assert Path(module.__file__).resolve().is_relative_to(root), module.__file__
+assert run_agent.AIAgent.__module__ == "run_agent"
+"""
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", program],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_hermes_cli_from_import():
