@@ -218,6 +218,25 @@ def test_receipt_rpc_rejects_oversized_argv_without_secret_echo(rpc):
     assert "x" * 100 not in result["error"]["message"]
 
 
+@pytest.mark.parametrize(
+    ("method", "code"),
+    [
+        ("autonomy.exec", 4033),
+        ("receipt.exec", 4004),
+        ("transaction.exec", 4006),
+    ],
+)
+@pytest.mark.parametrize("rid", ["r" * 1_100_000, object()])
+def test_native_validation_errors_bound_oversized_or_non_json_ids(
+    server, method, code, rid
+):
+    resp = server._methods[method](rid, {"argv": []})
+
+    assert resp["error"]["code"] == code
+    assert resp["id"] is None
+    assert len((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")) <= 1_048_576
+
+
 # =========================================================================
 # Structured, profile-local success paths
 # =========================================================================

@@ -468,6 +468,127 @@ def test_exit_ok_preview_is_allowlisted(rpc_raw, monkeypatch):
     assert '"error"' not in wire
 
 
+@pytest.mark.parametrize(
+    ("field", "malformed"),
+    [
+        ("contract_version", {"secret": "nested-contract-version"}),
+        ("contract_hash", ["nested-contract-hash"]),
+        ("profile_id", {"secret": "nested-profile-id"}),
+        ("mode", ["nested-mode"]),
+    ],
+)
+def test_contract_document_rejects_non_primitive_fields(
+    rpc_raw, monkeypatch, field, malformed
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    payload = {
+        "ok": True,
+        "contract_version": 1,
+        "contract_hash": "contract-hash",
+        field: malformed,
+    }
+    result = autonomy_mod.CliResult(autonomy_mod.EXIT_OK, "safe", payload)
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
+
+    assert resp["result"]["contract"] is None
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert "nested-" not in wire
+    assert "secret" not in wire
+
+
+def test_contract_document_preserves_exact_primitive_fields(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "contract_version": 7,
+            "contract_hash": "contract-hash",
+            "profile_id": "profile-id",
+            "mode": "enforce",
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
+
+    assert resp["result"]["contract"] == {
+        "version": 7,
+        "hash": "contract-hash",
+        "profile_id": "profile-id",
+        "mode": "enforce",
+    }
+
+
+def test_rule_with_nullable_confidence_is_rejected(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "rules": [
+                {
+                    "rule_id": "allow-send",
+                    "source": "stable",
+                    "state": "active",
+                    "effect": "allow",
+                    "confidence_ppm": None,
+                    "description": "secret-bearing malformed row",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["list"]})
+
+    assert resp["result"]["rules"] == []
+    assert "secret-bearing malformed row" not in json.dumps(resp, ensure_ascii=False)
+
+
+def test_rule_with_integer_confidence_is_preserved(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    row = {
+        "rule_id": "allow-send",
+        "source": "stable",
+        "state": "active",
+        "effect": "allow",
+        "confidence_ppm": 900_000,
+    }
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK, "safe", {"ok": True, "rules": [row]}
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["list"]})
+
+    assert resp["result"]["rules"] == [row]
+
+
+def test_oversized_request_id_uses_bounded_null_id_fallback(
+    server, monkeypatch
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    result = autonomy_mod.CliResult(autonomy_mod.EXIT_OK, "safe", {"ok": True})
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+    rid = "r" * 1_100_000
+
+    resp = server._methods["autonomy.exec"](rid, {"argv": ["status"]})
+
+    assert resp["error"]["code"] == 5038
+    assert resp["id"] is None
+    assert len((json.dumps(resp, ensure_ascii=False) + "\n").encode("utf-8")) <= 1_048_576
+
+
 def test_unknown_exit_code_is_a_bounded_internal_error(rpc_raw, monkeypatch):
     import hades_cli.autonomy as autonomy_mod
 
