@@ -16,6 +16,7 @@ import errno
 import json
 import os
 import re
+import shlex
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -221,6 +222,13 @@ def _read_text(
             )
             return None
 
+        nonblock = getattr(os, "O_NONBLOCK", None)
+        if not isinstance(nonblock, int) or nonblock == 0:
+            failures.append(
+                f"{category}: refusing read of {label}; required O_NONBLOCK safety primitive is unavailable"
+            )
+            return None
+
         if confine_to_repo:
             if repo_fd is None or not _dirfd_safety_available():
                 failures.append(
@@ -275,7 +283,12 @@ def _read_text(
                     )
                     return None
                 parent_fd = child_fd
-            final_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+            final_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | os.O_NOFOLLOW
+                | nonblock
+            )
             try:
                 fd = os.open(relative.parts[-1], final_flags, dir_fd=parent_fd)
             except FileNotFoundError:
@@ -292,7 +305,12 @@ def _read_text(
                     )
                 return None
         else:
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | os.O_NOFOLLOW
+                | nonblock
+            )
             try:
                 fd = os.open(path, flags)
             except FileNotFoundError:
@@ -683,6 +701,8 @@ class _TransportCall:
     arguments: tuple[str, ...]
     direct: bool
     nested_transport: bool = False
+    start: int = -1
+    end: int = -1
 
 
 def _contains_direct_transport_token(text: str) -> bool:
@@ -800,6 +820,8 @@ def _transport_calls(text: str) -> tuple[list[_TransportCall], bool]:
                                 and not function_seen
                             ),
                             nested_transport=nested_transport,
+                            start=index,
+                            end=call_end,
                         )
                     )
                     # The argument parser has already consumed the balanced
@@ -932,6 +954,126 @@ def _get_call_is_valid(call: _TransportCall) -> bool:
     return len(call.arguments) == 1
 
 
+def _method_arrow_position(method_body: str) -> int:
+    """Return the method's own arrow position in comment/string-masked text."""
+    live = _mask_ts_comments_and_strings(method_body)
+    property_colon = live.find(":")
+    if property_colon < 0:
+        return -1
+    depth = 0
+    index = property_colon + 1
+    while index < len(live):
+        char = live[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        elif live.startswith("=>", index) and depth == 0:
+            return index
+        index += 1
+    return -1
+
+
+def _method_local_transport_binding(method_body: str, arrow_position: int) -> str | None:
+    """Return a shadowed transport helper name, if one is declared in a method."""
+    live = _mask_ts_comments_and_strings(method_body)
+    declaration = re.search(
+        r"\b(?:const|let|var|function|class)\s+(?:[\[{]\s*)?"
+        r"(?P<name>fetchJSON|apiGet)\b",
+        live[arrow_position + 2 :],
+    )
+    if declaration is not None:
+        return declaration.group("name")
+
+    property_colon = live.find(":")
+    if property_colon < 0 or property_colon >= arrow_position:
+        return None
+    parameter_text = live[property_colon + 1 : arrow_position].strip()
+    if parameter_text.startswith("("):
+        parameter_end = _skip_ts_balanced_group(parameter_text, 0)
+        if parameter_end is None:
+            return "fetchJSON/apiGet"
+        parameters = _split_top_level(parameter_text[1 : parameter_end - 1])
+        if parameters is None:
+            return "fetchJSON/apiGet"
+        for parameter in parameters:
+            candidate = parameter.strip()
+            candidate = re.sub(r"^(?:readonly\s+|\.\.\.)+", "", candidate)
+            match = re.match(r"(?P<name>fetchJSON|apiGet)\b", candidate)
+            if match is not None:
+                return match.group("name")
+            if candidate.startswith(("{", "[")):
+                match = re.search(r"\b(?P<name>fetchJSON|apiGet)\b", candidate)
+                if match is not None:
+                    return match.group("name")
+    else:
+        match = re.fullmatch(r"(?P<name>fetchJSON|apiGet)", parameter_text)
+        if match is not None:
+            return match.group("name")
+    return None
+
+
+def _transport_call_is_returned(method_body: str, call: _TransportCall) -> bool:
+    """Require the sole transport call to be the method's direct return value."""
+    live = _mask_ts_comments_and_strings(method_body)
+    arrow_position = live.find("=>")
+    if arrow_position < 0 or call.start < 0 or call.end < 0:
+        return False
+    expression_start = arrow_position + 2
+    while expression_start < len(live) and live[expression_start].isspace():
+        expression_start += 1
+    if expression_start >= len(live):
+        return False
+
+    if live[expression_start] != "{":
+        prefix = live[expression_start : call.start]
+        if prefix.strip(" \t\r\n()"):
+            return False
+        suffix = live[call.end :]
+        return not suffix.strip(" \t\r\n),;")
+
+    block_end = _skip_ts_balanced_group(live, expression_start)
+    if block_end is None or not (expression_start < call.start < block_end):
+        return False
+
+    prefix = live[expression_start + 1 : call.start]
+    brace_depth = 0
+    bracket_depth = 0
+    parenthesis_depth = 0
+    for char in prefix:
+        if char == "{":
+            brace_depth += 1
+        elif char == "}":
+            brace_depth -= 1
+        elif char == "[":
+            bracket_depth += 1
+        elif char == "]":
+            bracket_depth -= 1
+        elif char == "(":
+            parenthesis_depth += 1
+        elif char == ")":
+            parenthesis_depth -= 1
+    if brace_depth != 0 or bracket_depth != 0 or parenthesis_depth < 0:
+        return False
+
+    return_match = re.search(r"\breturn\s*(?:\(\s*)*$", prefix)
+    if return_match is None:
+        return False
+    statement_prefix = prefix[: return_match.start()]
+    statement_start = max(
+        statement_prefix.rfind(";"),
+        statement_prefix.rfind("{"),
+        statement_prefix.rfind("}"),
+    )
+    if re.search(
+        r"\b(?:if|for|while|switch|try|catch|finally|do|with|else)\b",
+        statement_prefix[statement_start + 1 :],
+    ):
+        return False
+    suffix = live[call.end : block_end - 1]
+    return not suffix.strip(" \t\r\n);,")
+
+
 def _check_api(repo_root: Path, failures: list[str], repo_fd: int) -> None:
     path = repo_root / "web/src/lib/api.ts"
     text = _read_text(
@@ -980,6 +1122,17 @@ def _check_api(repo_root: Path, failures: list[str], repo_fd: int) -> None:
                 "because the transport call could not be parsed"
             )
             continue
+        arrow_position = _method_arrow_position(method_body)
+        if arrow_position < 0:
+            failures.append(f"api: method {contract.name} has no inspectable method arrow")
+            continue
+        shadowed_helper = _method_local_transport_binding(method_body, arrow_position)
+        if shadowed_helper is not None:
+            failures.append(
+                f"api: method {contract.name} contains method-local {shadowed_helper} binding "
+                "that shadows the canonical transport helper"
+            )
+            continue
         if len(calls) != 1:
             failures.append(
                 f"api: method {contract.name} must contain exactly one direct "
@@ -997,6 +1150,12 @@ def _check_api(repo_root: Path, failures: list[str], repo_fd: int) -> None:
             failures.append(
                 f"api: method {contract.name} transport call must be direct to the "
                 "method implementation, not nested in another function"
+            )
+            continue
+        if not _transport_call_is_returned(method_body, call):
+            failures.append(
+                f"api: method {contract.name} transport call must be the directly returned "
+                "value at method scope; nested or conditionally reachable calls are not allowed"
             )
             continue
 
@@ -1248,6 +1407,13 @@ class _ShellCommand:
     conditional_depth: int
 
 
+@dataclass(frozen=True)
+class _ShellScan:
+    commands: list[_ShellCommand]
+    heading_lines: tuple[int, ...]
+    errors: tuple[str, ...]
+
+
 _HEREDOC_RE = re.compile(
     r"<<(?P<strip>-?)[ \t]*(?P<quote>['\"]?)(?P<delimiter>[^\s'\";|&]+)(?P=quote)"
 )
@@ -1274,22 +1440,36 @@ def _conditional_depth_delta(line: str) -> int:
     return delta
 
 
-def _shell_fenced_commands(prompt: str) -> list[_ShellCommand]:
-    """Return executable shell lines, excluding comments and heredoc data."""
+def _shell_fenced_commands(prompt: str) -> _ShellScan:
+    """Scan fenced prompt structure and return executable shell lines."""
     commands: list[_ShellCommand] = []
+    heading_lines: list[int] = []
+    errors: list[str] = []
     lines = prompt.splitlines()
     in_block = False
     shell_block = False
     block_id = -1
+    fence_marker = ""
+    block_start_line: int | None = None
     pending_heredocs: list[tuple[str, bool]] = []
     conditional_depth = 0
     for line_number, line in enumerate(lines):
         if not in_block:
-            opening = re.match(r"^[ \t]*```(?P<language>[A-Za-z0-9_-]*)[ \t]*$", line)
+            if line.strip() == _INTEGRATION_HEADING:
+                heading_lines.append(line_number)
+            opening = re.match(
+                r"^[ \t]*(?P<marker>`{3,}|~{3,})(?P<language>[A-Za-z0-9_-]*)[ \t]*$",
+                line,
+            )
             if opening is not None:
                 in_block = True
                 block_id += 1
-                shell_block = opening.group("language").lower() in _CRON_SHELL_LANGUAGES
+                fence_marker = opening.group("marker")
+                block_start_line = line_number
+                shell_block = (
+                    fence_marker.startswith("`")
+                    and opening.group("language").lower() in _CRON_SHELL_LANGUAGES
+                )
                 pending_heredocs = []
                 conditional_depth = 0
             continue
@@ -1299,9 +1479,24 @@ def _shell_fenced_commands(prompt: str) -> list[_ShellCommand]:
             if candidate == delimiter:
                 pending_heredocs.pop(0)
             continue
-        if line.strip() == "```":
+        if line.strip() == fence_marker:
             in_block = False
             shell_block = False
+            fence_marker = ""
+            block_start_line = None
+            continue
+        fence_like = re.match(r"^[ \t]*(?P<marker>`{3,}|~{3,}).*$", line)
+        if fence_like is not None:
+            expected_line = block_start_line + 1 if block_start_line is not None else line_number
+            errors.append(
+                f"malformed fenced block at line {expected_line}: expected closing "
+                f"{fence_marker!r}, found {line.strip()!r} at line {line_number + 1}"
+            )
+            in_block = False
+            shell_block = False
+            fence_marker = ""
+            block_start_line = None
+            pending_heredocs = []
             continue
         stripped = line.strip()
         if not shell_block or not stripped or stripped.startswith("#"):
@@ -1311,18 +1506,61 @@ def _shell_fenced_commands(prompt: str) -> list[_ShellCommand]:
         )
         pending_heredocs.extend(_heredoc_delimiters(stripped))
         conditional_depth = max(0, conditional_depth + _conditional_depth_delta(stripped))
-    return commands
+    if in_block:
+        expected_line = block_start_line + 1 if block_start_line is not None else len(lines)
+        errors.append(
+            f"malformed fenced block at line {expected_line}: unclosed fence "
+            f"(expected closing {fence_marker!r})"
+        )
+    return _ShellScan(
+        commands=commands,
+        heading_lines=tuple(heading_lines),
+        errors=tuple(errors),
+    )
+
+
+_SHELL_CONTROL_CHARS = frozenset(";|&<>")
+
+
+def _strict_shell_tokens(line: str) -> list[str] | None:
+    """Tokenize a candidate command only when no shell syntax is present."""
+    if any(character in line for character in _SHELL_CONTROL_CHARS):
+        return None
+    if re.search(r"\$\s*\(", line) or "`" in line:
+        return None
+    try:
+        return shlex.split(line, posix=True)
+    except ValueError:
+        return None
 
 
 def _is_script_command(line: str, script: str) -> bool:
-    """Recognize an executable script command with optional arguments."""
-    return bool(re.fullmatch(rf"{re.escape(script)}(?:[ \t]+.*)?", line))
+    """Recognize the verifier command without shell suffixes or free text."""
+    tokens = _strict_shell_tokens(line)
+    expected = _strict_shell_tokens(script)
+    if tokens is None or expected is None or tokens[: len(expected)] != expected:
+        return False
+    tail = tokens[len(expected) :]
+    if script != _INTEGRATION_COMMAND:
+        return not tail
+    allowed_options = {"--repo-root", "--cron-jobs"}
+    index = 0
+    while index < len(tail):
+        if tail[index] not in allowed_options or index + 1 >= len(tail):
+            return False
+        value = tail[index + 1]
+        if not value or value.startswith("-"):
+            return False
+        index += 2
+    return True
 
 
 def _is_post_sync_command(line: str) -> bool:
     """Recognize an executable post-sync command, not prose or comments."""
-    return _is_script_command(
-        line, f"./venv/bin/python3 {_POST_SYNC_MARKER}"
+    tokens = _strict_shell_tokens(line)
+    return tokens in (
+        ["./venv/bin/python3", _POST_SYNC_MARKER],
+        ["./venv/bin/python3", _POST_SYNC_MARKER, "--fix"],
     )
 
 
@@ -1407,13 +1645,16 @@ def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
         failures.append("cron: hades-fork-integration prompt must be a string")
         return
 
-    if _INTEGRATION_HEADING not in prompt:
+    shell_scan = _shell_fenced_commands(prompt)
+    for shell_error in shell_scan.errors:
+        failures.append(f"cron: {shell_error}")
+    if len(shell_scan.heading_lines) != 1:
         failures.append(
-            "cron: hades-fork-integration prompt is missing heading "
-            f"{_INTEGRATION_HEADING!r}"
+            "cron: hades-fork-integration prompt must contain exactly one standalone "
+            f"heading line {_INTEGRATION_HEADING!r} outside fenced blocks"
         )
 
-    shell_commands = _shell_fenced_commands(prompt)
+    shell_commands = shell_scan.commands
     verifier_commands = [
         command
         for command in shell_commands
