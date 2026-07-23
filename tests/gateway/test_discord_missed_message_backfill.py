@@ -716,7 +716,9 @@ def test_successful_final_delivery_clears_prior_outage_state(adapter):
 async def test_send_uses_notify_metadata_as_final_delivery_signal(adapter):
     channel = FakeChannel(channel_id=123)
     channel.send = AsyncMock(return_value=SimpleNamespace(id=9008))
-    channel.fetch_message = AsyncMock()
+    channel.fetch_message = AsyncMock(
+        return_value=SimpleNamespace(to_reference=lambda **_kwargs: None)
+    )
     adapter._client.get_channel = lambda _channel_id: channel
 
     preview = await adapter.send(

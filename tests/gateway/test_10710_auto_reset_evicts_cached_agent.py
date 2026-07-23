@@ -1,114 +1,73 @@
-"""Regression test for #10710 — stale context summary leak after auto-reset.
+"""Regression coverage for auto-reset conversation-boundary cleanup."""
 
-The gateway agent cache is keyed on the stable chat ``session_key``, which does
-NOT change when a session is auto-reset (daily schedule / idle timeout /
-suspended). So unless the cached agent is explicitly evicted on auto-reset, the
-NEXT message reuses the old ``AIAgent`` instance — carrying its
-``context_compressor._previous_summary`` — and prior-conversation content leaks
-into the new session's compaction summaries.
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
-Manual ``/reset`` and the compression-exhausted path (#9893) already evict the
-cached agent. This pins the matching eviction onto the auto-reset cleanup block
-in ``_handle_message_with_agent``.
+import pytest
 
-These are AST invariants — load-bearing pins that fail if the eviction is
-removed from the cleanup block (mirrors
-test_48031_model_switch_after_auto_reset.py's approach).
-"""
-from __future__ import annotations
-
-import ast
-import inspect
-
-from gateway import run as gateway_run
+from gateway.config import Platform
+from gateway.platforms.base import MessageEvent, MessageType
+from gateway.run import GatewayRunner
+from gateway.session import SessionSource
 
 
-def _calls(node: ast.AST) -> set[str]:
-    """Method-call attribute names invoked anywhere under ``node``."""
-    return {
-        n.func.attr
-        for n in ast.walk(node)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-    }
+class _StopAfterAutoReset(Exception):
+    """Deliberately stop the large handler immediately after the boundary."""
 
 
-def _assigns_false(node: ast.AST, attr: str) -> bool:
-    """True if ``node`` contains an assignment ``<something>.<attr> = False``."""
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Assign):
-            for tgt in sub.targets:
-                if (
-                    isinstance(tgt, ast.Attribute)
-                    and tgt.attr == attr
-                    and isinstance(sub.value, ast.Constant)
-                    and sub.value.value is False
-                ):
-                    return True
-    return False
-
-
-def test_auto_reset_cleanup_evicts_cached_agent():
-    """The auto-reset cleanup block in gateway/run.py must call
-    ``_evict_cached_agent`` so the fresh session does not reuse the previous
-    conversation's cached agent (and its leaked
-    ``context_compressor._previous_summary``) — the cache is keyed on the
-    stable ``session_key`` (#10710)."""
-    tree = ast.parse(inspect.getsource(gateway_run))
-
-    # Fingerprint the cleanup branch: the `if <was_auto_reset>:` block that
-    # clears the conversation scope via the funnel and consumes the flag by
-    # setting was_auto_reset = False. The eviction must live in that same
-    # block: the funnel does not evict the agent cache.
-    found = False
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.If):
-            continue
-        calls = _calls(node)
-        if (
-            "_clear_conversation_scope" in calls
-            and _assigns_false(node, "was_auto_reset")
-        ):
-            assert "_evict_cached_agent" in calls, (
-                "gateway/run.py auto-reset cleanup block must call "
-                "`_evict_cached_agent(session_key)` so the auto-reset session "
-                "does not reuse the previous cached agent and leak its "
-                "context_compressor._previous_summary into new compaction "
-                "summaries (#10710)."
-            )
-            found = True
-            break
-    assert found, (
-        "could not locate the auto-reset transient-state cleanup block in "
-        "gateway/run.py (fingerprint: _clear_conversation_scope + "
-        "was_auto_reset = False)."
+@pytest.mark.asyncio
+async def test_auto_reset_clears_scope_evicts_agent_and_consumes_marker():
+    """A real auto-reset turn must establish a clean cached-agent boundary."""
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="10710", chat_type="dm")
+    event = MessageEvent(text="fresh turn", message_type=MessageType.TEXT, source=source)
+    session_entry = SimpleNamespace(
+        session_key="agent:main:telegram:dm:10710",
+        session_id="session-10710",
+        was_auto_reset=True,
+        created_at=1,
+        updated_at=2,
+        is_fresh_reset=False,
     )
-
-
-def test_evict_cached_agent_method_exists():
-    """The eviction helper the cleanup relies on must exist on the runner."""
-    assert hasattr(gateway_run.GatewayRunner, "_evict_cached_agent"), (
-        "GatewayRunner._evict_cached_agent is the helper the auto-reset "
-        "cleanup depends on (#10710)."
+    runner = object.__new__(GatewayRunner)
+    runner.session_store = object()
+    runner._async_session_store = SimpleNamespace(
+        _store=runner.session_store,
+        get_or_create_session=AsyncMock(return_value=session_entry),
     )
-
-
-def _references_name(node: ast.AST, literal: str) -> bool:
-    """True if a string constant equal to ``literal`` appears anywhere under ``node``."""
-    return any(
-        isinstance(n, ast.Constant) and n.value == literal for n in ast.walk(node)
+    runner._recover_telegram_topic_thread_id = lambda _source: None
+    runner._cache_session_source = MagicMock()
+    runner._is_telegram_topic_lane = lambda _source: False
+    runner._session_model_overrides = {session_entry.session_key: {"model": "stale"}}
+    runner._last_resolved_model = {session_entry.session_key: "stale/model"}
+    runner._agent_cache = {session_entry.session_key: None}
+    runner._clear_conversation_scope = MagicMock(
+        wraps=runner._clear_conversation_scope,
     )
+    runner._evict_cached_agent = MagicMock(wraps=runner._evict_cached_agent)
+    runner.hooks = MagicMock()
+    runner.hooks.emit = AsyncMock(side_effect=_StopAfterAutoReset)
+
+    with pytest.raises(_StopAfterAutoReset):
+        await runner._handle_message_with_agent(event, source, "turn-10710", 1)
+
+    runner._clear_conversation_scope.assert_called_once_with(
+        session_entry.session_key,
+        reason="auto_reset",
+    )
+    runner._evict_cached_agent.assert_called_once_with(session_entry.session_key)
+    assert session_entry.was_auto_reset is False
+    assert session_entry.session_key not in runner._session_model_overrides
+    assert session_entry.session_key not in runner._last_resolved_model
+    assert session_entry.session_key not in runner._agent_cache
 
 
 def test_auto_reset_cleanup_clears_last_resolved_model():
-    """Regression test for #58403.
-
-    Auto-reset is a full conversation boundary and routes through the
-    `_clear_conversation_scope` funnel. The funnel must clear
-    `_last_resolved_model`.
-    """
-    runner = object.__new__(gateway_run.GatewayRunner)
+    """The conversation-scope funnel clears stale model routing for one session."""
+    runner = object.__new__(GatewayRunner)
     key = "agent:main:telegram:dm:58403"
     runner._last_resolved_model = {key: "stale/model", "other": "keep/me"}
+
     runner._clear_conversation_scope(key, reason="auto_reset")
+
     assert key not in runner._last_resolved_model
     assert runner._last_resolved_model.get("other") == "keep/me"
