@@ -77,6 +77,86 @@ def test_compute_host_frame_protocol_round_trip():
         host.close()
 
 
+def test_compute_host_new_session_passes_profile_home_to_init(monkeypatch, tmp_path):
+    from tui_gateway import server
+
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
+    sid = "profile-session"
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    workspace = tmp_path / "workspace"
+    init_calls = []
+    try:
+        monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: object())
+
+        def _init(_sid, _key, _agent, _history, **kwargs):
+            init_calls.append(kwargs)
+            server._sessions[_sid] = {
+                "agent": _agent,
+                "session_key": _key,
+                "history": list(_history),
+                "history_lock": threading.Lock(),
+                "cwd": kwargs["cwd"],
+                "profile_home": str(kwargs["profile_home"]),
+            }
+
+        monkeypatch.setattr(server, "_init_session", _init)
+        session = host._ensure_server_session(
+            server,
+            {
+                "sid": sid,
+                "session_key": "profile-key",
+                "profile_home": str(profile_home),
+                "cwd": str(workspace),
+                "history": [],
+            },
+        )
+
+        assert init_calls[0]["profile_home"] == str(profile_home)
+        assert session["profile_home"] == str(profile_home)
+        assert session["cwd"] == str(workspace)
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+
+def test_compute_host_fallback_publishes_profile_and_cwd_together(monkeypatch, tmp_path):
+    from tui_gateway import server
+
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
+    sid = "fallback-profile-session"
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    workspace = tmp_path / "workspace"
+    try:
+        monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: object())
+
+        def _fail_init(*_args, **_kwargs):
+            raise RuntimeError("side machinery")
+
+        monkeypatch.setattr(server, "_init_session", _fail_init)
+        session = host._ensure_server_session(
+            server,
+            {
+                "sid": sid,
+                "session_key": "fallback-key",
+                "profile_home": str(profile_home),
+                "cwd": str(workspace),
+                "history": [],
+            },
+        )
+
+        assert session["profile_home"] == str(profile_home)
+        assert session["cwd"] == str(workspace)
+        assert server._sessions[sid]["profile_home"] == str(profile_home)
+        assert server._sessions[sid]["cwd"] == str(workspace)
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+
 def test_compute_host_interrupt_control_is_not_queued_behind_turn():
     out = io.StringIO()
     host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
