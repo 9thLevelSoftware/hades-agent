@@ -6357,8 +6357,15 @@ async def get_env_vars(profile: Optional[str] = None):
 async def set_env_var(body: EnvVarUpdate, profile: Optional[str] = None):
     try:
         with _profile_scope(body.profile or profile):
-            save_env_value(body.key, body.value)
+            saved = save_env_value(body.key, body.value)
+        if not saved:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{body.key} was not changed",
+            )
         return {"ok": True, "key": body.key}
+    except HTTPException:
+        raise
     except ValueError as exc:
         # save_env_value raises ValueError for invalid names and for keys
         # on the denylist (LD_PRELOAD, PATH, PYTHONPATH, …). Surface the

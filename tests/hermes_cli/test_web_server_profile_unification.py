@@ -6,6 +6,8 @@ profile switcher can target any profile's HADES_HOME. These tests pin:
 reads/writes land in the REQUESTED profile, the dashboard's own profile
 stays untouched, and the chat PTY env is scoped via HADES_HOME.
 """
+import json
+
 import pytest
 import yaml
 
@@ -40,7 +42,7 @@ def client(monkeypatch, isolated_profiles):
     from hades_constants import get_hades_home
     from hades_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
 
-    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", get_hades_home() / "state.db")
+    monkeypatch.setattr(hades_state, "DEFAULT_DB_PATH", get_hades_home() / "state.db")
     c = TestClient(app)
     c.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
     return c
@@ -141,6 +143,476 @@ class TestProfileScopedEnv:
         )
         assert resp.status_code == 200
         assert "doomed" not in (isolated_profiles["worker_beta"] / ".env").read_text()
+
+    def test_openrouter_put_replaces_through_catalog_lifecycle(
+        self,
+        client,
+        isolated_profiles,
+    ):
+        worker = isolated_profiles["worker_beta"]
+        default = isolated_profiles["default"]
+        old_key = "dashboard-openrouter-old-" + "h" * 24
+        new_key = "dashboard-openrouter-new-" + "i" * 24
+        source = "env:OPENROUTER_API_KEY"
+        (worker / ".env").write_text(
+            f"OPENROUTER_API_KEY={old_key}\n",
+            encoding="utf-8",
+        )
+        (worker / "auth.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "providers": {},
+                    "suppressed_sources": {"openrouter": [source]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (worker / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "model": {"provider": "custom", "api_key": old_key},
+                    "auxiliary": {"vision": {"api": old_key}},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        default_before = (default / "config.yaml").read_bytes()
+
+        response = client.put(
+            "/api/env",
+            json={
+                "key": "OPENROUTER_API_KEY",
+                "value": new_key,
+                "profile": "worker_beta",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "ok": True,
+            "key": "OPENROUTER_API_KEY",
+        }
+        assert old_key not in response.text
+        assert new_key not in response.text
+        env_text = (worker / ".env").read_text(encoding="utf-8")
+        assert old_key not in env_text
+        assert new_key in env_text
+        config = _cfg(worker)
+        assert config["model"]["api_key"] == new_key
+        assert config["auxiliary"]["vision"]["api"] == new_key
+        auth_store = json.loads(
+            (worker / "auth.json").read_text(encoding="utf-8")
+        )
+        assert source not in auth_store.get("suppressed_sources", {}).get(
+            "openrouter", []
+        )
+        assert (default / "config.yaml").read_bytes() == default_before
+
+    def test_openrouter_delete_clears_through_catalog_lifecycle(
+        self,
+        client,
+        isolated_profiles,
+    ):
+        worker = isolated_profiles["worker_beta"]
+        secret = "dashboard-openrouter-clear-" + "j" * 24
+        manual_secret = "dashboard-openrouter-manual-" + "k" * 24
+        source = "env:OPENROUTER_API_KEY"
+        (worker / ".env").write_text(
+            f"export OPENROUTER_API_KEY={secret}\nSIBLING=keep\n",
+            encoding="utf-8",
+        )
+        (worker / "auth.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "providers": {},
+                    "credential_pool": {
+                        "openrouter": [
+                            {
+                                "id": "env",
+                                "label": "OPENROUTER_API_KEY",
+                                "auth_type": "api_key",
+                                "priority": 0,
+                                "source": source,
+                                "access_token": secret,
+                            },
+                            {
+                                "id": "manual",
+                                "label": "manual",
+                                "auth_type": "api_key",
+                                "priority": 1,
+                                "source": "manual",
+                                "access_token": manual_secret,
+                            },
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (worker / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "model": {"provider": "custom", "api_key": secret},
+                    "auxiliary": {"vision": {"api_key": secret}},
+                    "custom_providers": {
+                        "mirror": {"api": secret},
+                        "manual": {"api_key": manual_secret},
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        (worker / "provider_models_cache.json").write_text(
+            json.dumps(
+                {
+                    "openrouter": {"models": ["openai/gpt-5"]},
+                    "deepseek": {"models": ["preserve-me"]},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        response = client.request(
+            "DELETE",
+            "/api/env",
+            json={
+                "key": "OPENROUTER_API_KEY",
+                "profile": "worker_beta",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "ok": True,
+            "key": "OPENROUTER_API_KEY",
+        }
+        assert secret not in response.text
+        env_text = (worker / ".env").read_text(encoding="utf-8")
+        assert "OPENROUTER_API_KEY=" not in env_text
+        assert "SIBLING=keep" in env_text
+        auth_store = json.loads(
+            (worker / "auth.json").read_text(encoding="utf-8")
+        )
+        assert [
+            entry["source"]
+            for entry in auth_store["credential_pool"]["openrouter"]
+        ] == ["manual"]
+        assert source in auth_store["suppressed_sources"]["openrouter"]
+        config = _cfg(worker)
+        assert "api_key" not in config["model"]
+        assert "api_key" not in config["auxiliary"]["vision"]
+        assert "api" not in config["custom_providers"]["mirror"]
+        assert (
+            config["custom_providers"]["manual"]["api_key"]
+            == manual_secret
+        )
+        cache = json.loads(
+            (worker / "provider_models_cache.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert "openrouter" not in cache
+        assert cache["deepseek"]["models"] == ["preserve-me"]
+
+    def test_registered_provider_put_delete_uses_full_lifecycle(
+        self,
+        client,
+        isolated_profiles,
+    ):
+        worker = isolated_profiles["worker_beta"]
+        default = isolated_profiles["default"]
+        old_key = "dashboard-deepseek-old-" + "a" * 24
+        new_key = "dashboard-deepseek-new-" + "b" * 24
+        manual_key = "dashboard-manual-" + "c" * 24
+        source = "env:DEEPSEEK_API_KEY"
+        (worker / ".env").write_text(
+            f"export DEEPSEEK_API_KEY={old_key}\nSIBLING=keep\n",
+            encoding="utf-8",
+        )
+        (worker / "auth.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "credential_pool": {
+                        "deepseek": [
+                            {
+                                "id": "env",
+                                "label": "DEEPSEEK_API_KEY",
+                                "auth_type": "api_key",
+                                "priority": 0,
+                                "source": source,
+                                "access_token": old_key,
+                            },
+                            {
+                                "id": "manual",
+                                "label": "manual",
+                                "auth_type": "api_key",
+                                "priority": 1,
+                                "source": "manual",
+                                "access_token": manual_key,
+                            },
+                        ]
+                    },
+                    "suppressed_sources": {"deepseek": [source]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (worker / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "model": {"provider": "custom", "api_key": old_key},
+                    "auxiliary": {"vision": {"api": old_key}},
+                    "custom_providers": {
+                        "mirror": {"api_key": old_key},
+                        "manual": {"api_key": manual_key},
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        (worker / "provider_models_cache.json").write_text(
+            json.dumps(
+                {
+                    "deepseek": {"models": ["deepseek-chat"]},
+                    "openrouter": {"models": ["preserve-me"]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        default_before = {
+            path.name: path.read_bytes()
+            for path in default.iterdir()
+            if path.is_file()
+        }
+
+        put = client.put(
+            "/api/env",
+            json={
+                "key": "DEEPSEEK_API_KEY",
+                "value": new_key,
+                "profile": "worker_beta",
+            },
+        )
+
+        assert put.status_code == 200
+        assert put.json() == {"ok": True, "key": "DEEPSEEK_API_KEY"}
+        assert old_key not in put.text
+        assert new_key not in put.text
+        env_text = (worker / ".env").read_text(encoding="utf-8")
+        assert old_key not in env_text
+        assert new_key in env_text
+        config = _cfg(worker)
+        assert config["model"]["api_key"] == new_key
+        assert config["auxiliary"]["vision"]["api"] == new_key
+        assert config["custom_providers"]["mirror"]["api_key"] == new_key
+        auth_store = json.loads(
+            (worker / "auth.json").read_text(encoding="utf-8")
+        )
+        assert [
+            entry["source"]
+            for entry in auth_store["credential_pool"]["deepseek"]
+        ] == ["manual"]
+        assert source not in auth_store.get("suppressed_sources", {}).get(
+            "deepseek", []
+        )
+        auth_text = (worker / "auth.json").read_text(encoding="utf-8")
+        assert old_key not in auth_text
+        assert new_key not in auth_text
+
+        delete = client.request(
+            "DELETE",
+            "/api/env",
+            json={"key": "DEEPSEEK_API_KEY", "profile": "worker_beta"},
+        )
+
+        assert delete.status_code == 200
+        assert delete.json() == {"ok": True, "key": "DEEPSEEK_API_KEY"}
+        assert old_key not in delete.text
+        assert new_key not in delete.text
+        env_text = (worker / ".env").read_text(encoding="utf-8")
+        assert "DEEPSEEK_API_KEY=" not in env_text
+        assert "SIBLING=keep" in env_text
+        auth_store = json.loads(
+            (worker / "auth.json").read_text(encoding="utf-8")
+        )
+        assert [
+            entry["source"]
+            for entry in auth_store["credential_pool"]["deepseek"]
+        ] == ["manual"]
+        assert source in auth_store["suppressed_sources"]["deepseek"]
+        config = _cfg(worker)
+        assert "api_key" not in config["model"]
+        assert "api" not in config["auxiliary"]["vision"]
+        assert "api_key" not in config["custom_providers"]["mirror"]
+        assert (
+            config["custom_providers"]["manual"]["api_key"] == manual_key
+        )
+        cache = json.loads(
+            (worker / "provider_models_cache.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert "deepseek" not in cache
+        assert cache["openrouter"]["models"] == ["preserve-me"]
+        for name, content in default_before.items():
+            assert (default / name).read_bytes() == content
+
+    def test_arbitrary_env_key_stays_on_low_level_profile_writer(
+        self,
+        client,
+        isolated_profiles,
+    ):
+        worker = isolated_profiles["worker_beta"]
+        old_value = "custom-old-" + "d" * 24
+        new_value = "custom-new-" + "e" * 24
+        (worker / ".env").write_text(
+            f"CUSTOM_DASHBOARD_SECRET={old_value}\n",
+            encoding="utf-8",
+        )
+        (worker / "auth.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "credential_pool": {
+                        "custom": [
+                            {
+                                "source": "env:CUSTOM_DASHBOARD_SECRET",
+                                "access_token": old_value,
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (worker / "config.yaml").write_text(
+            yaml.safe_dump(
+                {"model": {"api_key": old_value}},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        (worker / "provider_models_cache.json").write_text(
+            '{"custom":{"models":["preserve-me"]}}\n',
+            encoding="utf-8",
+        )
+        unrelated_before = {
+            name: (worker / name).read_bytes()
+            for name in (
+                "auth.json",
+                "config.yaml",
+                "provider_models_cache.json",
+            )
+        }
+
+        put = client.put(
+            "/api/env",
+            json={
+                "key": "CUSTOM_DASHBOARD_SECRET",
+                "value": new_value,
+                "profile": "worker_beta",
+            },
+        )
+        assert put.status_code == 200
+        assert old_value not in put.text
+        assert new_value not in put.text
+        assert new_value in (worker / ".env").read_text(encoding="utf-8")
+        for name, content in unrelated_before.items():
+            assert (worker / name).read_bytes() == content
+
+        delete = client.request(
+            "DELETE",
+            "/api/env",
+            json={
+                "key": "CUSTOM_DASHBOARD_SECRET",
+                "profile": "worker_beta",
+            },
+        )
+        assert delete.status_code == 200
+        assert "CUSTOM_DASHBOARD_SECRET=" not in (
+            worker / ".env"
+        ).read_text(encoding="utf-8")
+        for name, content in unrelated_before.items():
+            assert (worker / name).read_bytes() == content
+
+    @pytest.mark.parametrize(
+        "key",
+        ["DEEPSEEK_API_KEY", "CUSTOM_DASHBOARD_SECRET"],
+    )
+    @pytest.mark.parametrize("method", ["put", "delete"])
+    def test_managed_env_mutation_never_returns_ok_or_touches_profile(
+        self,
+        client,
+        isolated_profiles,
+        tmp_path,
+        monkeypatch,
+        key,
+        method,
+    ):
+        worker = isolated_profiles["worker_beta"]
+        local_value = "worker-local-" + "f" * 24
+        managed_value = "organization-owned-" + "g" * 24
+        (worker / ".env").write_text(
+            f"{key}={local_value}\nSIBLING=keep\n",
+            encoding="utf-8",
+        )
+        (worker / "auth.json").write_text(
+            json.dumps({"version": 1}),
+            encoding="utf-8",
+        )
+        (worker / "provider_models_cache.json").write_text(
+            '{"deepseek":{"models":["preserve-me"]}}\n',
+            encoding="utf-8",
+        )
+        before = {
+            name: (worker / name).read_bytes()
+            for name in (
+                ".env",
+                "auth.json",
+                "config.yaml",
+                "provider_models_cache.json",
+            )
+        }
+        managed_dir = tmp_path / f"managed-{method}-{key}"
+        managed_dir.mkdir()
+        (managed_dir / ".env").write_text(
+            f"{key}={managed_value}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_dir))
+        from hades_cli import managed_scope
+
+        managed_scope.invalidate_managed_cache()
+        try:
+            if method == "put":
+                response = client.put(
+                    "/api/env",
+                    json={
+                        "key": key,
+                        "value": "attempted-update",
+                        "profile": "worker_beta",
+                    },
+                )
+            else:
+                response = client.request(
+                    "DELETE",
+                    "/api/env",
+                    json={"key": key, "profile": "worker_beta"},
+                )
+
+            assert response.status_code >= 400
+            assert response.json().get("ok") is not True
+            for name, content in before.items():
+                assert (worker / name).read_bytes() == content
+        finally:
+            monkeypatch.delenv("HERMES_MANAGED_DIR", raising=False)
+            managed_scope.invalidate_managed_cache()
 
 
 class TestProfileScopedMcp:

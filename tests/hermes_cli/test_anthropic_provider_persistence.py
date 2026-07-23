@@ -14,7 +14,7 @@ def test_save_anthropic_oauth_token_uses_token_slot_and_clears_api_key(tmp_path,
 
     env_vars = load_env()
     assert env_vars["ANTHROPIC_TOKEN"] == "sk-ant-oat01-test-token"
-    assert env_vars["ANTHROPIC_API_KEY"] == ""
+    assert "ANTHROPIC_API_KEY" not in env_vars
 
 
 def test_use_anthropic_claude_code_credentials_clears_env_slots(tmp_path, monkeypatch):
@@ -28,8 +28,8 @@ def test_use_anthropic_claude_code_credentials_clears_env_slots(tmp_path, monkey
     use_anthropic_claude_code_credentials()
 
     env_vars = load_env()
-    assert env_vars["ANTHROPIC_TOKEN"] == ""
-    assert env_vars["ANTHROPIC_API_KEY"] == ""
+    assert "ANTHROPIC_TOKEN" not in env_vars
+    assert "ANTHROPIC_API_KEY" not in env_vars
 
 
 def test_save_anthropic_api_key_uses_api_key_slot_and_clears_token(tmp_path, monkeypatch):
@@ -43,4 +43,4 @@ def test_save_anthropic_api_key_uses_api_key_slot_and_clears_token(tmp_path, mon
 
     env_vars = load_env()
     assert env_vars["ANTHROPIC_API_KEY"] == "sk-ant-api03-key"
-    assert env_vars["ANTHROPIC_TOKEN"] == ""
+    assert "ANTHROPIC_TOKEN" not in env_vars
