@@ -80,8 +80,38 @@ REQUIRED_RPC_TESTS = (
 VALID_PROMPT = (
     "## Integration Manifest + Handler Verification\n"
     "```bash\n"
+    "set -euo pipefail\n"
     "cd ~/.hermes/hermes-agent\n"
     "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+    "```\n"
+    "```bash\n"
+    "./venv/bin/python3 scripts/post-sync-verify.py --fix\n"
+    "./venv/bin/python3 scripts/post-sync-verify.py\n"
+    "```\n"
+)
+
+VALID_ROLLOUT_PROMPT = (
+    "## Integration Manifest + Handler Verification\n"
+    "```bash\n"
+    "set -euo pipefail\n"
+    "cd ~/.hermes/hermes-agent\n"
+    "if [ -f scripts/verify_hades_dashboard_contract.py ]; then\n"
+    "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+    "else\n"
+    "verifier_tmp=$(mktemp)\n"
+    "trap 'rm -f \"$verifier_tmp\"' EXIT\n"
+    "if ! git show fix/dashboard-api-contract:scripts/verify_hades_dashboard_contract.py > \"$verifier_tmp\"; then\n"
+    "echo \"dashboard verifier materialization failed\" >&2\n"
+    "exit 1\n"
+    "fi\n"
+    "if [ ! -s \"$verifier_tmp\" ]; then\n"
+    "echo \"dashboard verifier materialized empty\" >&2\n"
+    "exit 1\n"
+    "fi\n"
+    "./venv/bin/python3 \"$verifier_tmp\" --repo-root \"$PWD\" --cron-jobs ~/.hermes/cron/jobs.json\n"
+    "fi\n"
+    "```\n"
+    "```bash\n"
     "./venv/bin/python3 scripts/post-sync-verify.py --fix\n"
     "./venv/bin/python3 scripts/post-sync-verify.py\n"
     "```\n"
@@ -127,6 +157,14 @@ def _make_fixture(tmp_path: Path) -> tuple[Path, Path]:
 
 def _messages(root: Path, cron_jobs: Path) -> str:
     return "\n".join(verify(root, cron_jobs))
+
+
+def _prompt_failures(tmp_path: Path, prompt: str) -> str:
+    root, cron_jobs = _make_fixture(tmp_path)
+    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
+    payload["jobs"][0]["prompt"] = prompt
+    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
+    return _messages(root, cron_jobs)
 
 
 def test_fully_valid_minimal_fixture_has_no_failures(tmp_path: Path) -> None:
@@ -1232,28 +1270,161 @@ def test_unconditional_exit_between_cd_and_verifier_is_rejected(tmp_path: Path) 
     assert "terminat" in failures.lower() or "exit" in failures.lower()
 
 
-def test_conditional_rollout_block_has_nonadjacent_verifier_and_later_post_sync(
-    tmp_path: Path,
+def test_approved_production_gate_shape_passes(tmp_path: Path) -> None:
+    assert _prompt_failures(tmp_path, VALID_PROMPT) == ""
+
+
+def test_approved_rollout_gate_shape_passes(tmp_path: Path) -> None:
+    assert _prompt_failures(tmp_path, VALID_ROLLOUT_PROMPT) == ""
+
+
+@pytest.mark.parametrize(
+    "gate",
+    (
+        (
+            "set -euo\n"
+            "cd ~/.hermes/hermes-agent\n"
+            "if false; then\n"
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+            "fi"
+        ),
+        (
+            "set -euo pipefail\n"
+            "set +e\n"
+            "cd ~/.hermes/hermes-agent\n"
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py"
+        ),
+        (
+            "set -e\n"
+            "cd ~/.hermes/hermes-agent\n"
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py"
+        ),
+        (
+            "set -euo pipefail\n"
+            "cd ~/.hermes/hermes-agent\n"
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+            "true"
+        ),
+        (
+            "set -euo pipefail\n"
+            "cd ~/.hermes/hermes-agent\n"
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+            "exit 0"
+        ),
+        (
+            "set -euo pipefail\n"
+            "cd ~/.hermes/hermes-agent\n"
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n"
+            "printf 'extra'"
+        ),
+    ),
+)
+def test_cron_rejects_unapproved_production_gate_shapes(
+    tmp_path: Path, gate: str
 ) -> None:
-    root, cron_jobs = _make_fixture(tmp_path)
-    payload = json.loads(cron_jobs.read_text(encoding="utf-8"))
-    payload["jobs"][0]["prompt"] = (
+    prompt = (
         "## Integration Manifest + Handler Verification\n"
         "```bash\n"
-        "cd ~/.hermes/hermes-agent\n"
-        "if [ -f scripts/verify_hades_dashboard_contract.py ]; then\n"
-        "  ./venv/bin/python3 scripts/verify_hades_dashboard_contract.py --cron-jobs ~/.hermes/cron/jobs.json\n"
-        "else\n"
-        "  echo rollout\n"
-        "fi\n"
+        f"{gate}\n"
         "```\n"
         "```bash\n"
         "./venv/bin/python3 scripts/post-sync-verify.py --fix\n"
+        "./venv/bin/python3 scripts/post-sync-verify.py\n"
         "```\n"
     )
-    cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert verify(root, cron_jobs) == []
+    failures = _prompt_failures(tmp_path, prompt)
+
+    assert "cron" in failures.lower()
+    assert "approved" in failures.lower() or "shape" in failures.lower() or "verifier" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "remove_direct_branch_verifier",
+        "bypass_materialization_check",
+        "remove_nonempty_check",
+        "remove_materialization_exit_one",
+        "remove_empty_exit_one",
+        "remove_trap",
+        "fallback_suffix",
+    ),
+)
+def test_rollout_gate_safety_mutations_fail(tmp_path: Path, mutation: str) -> None:
+    prompt = VALID_ROLLOUT_PROMPT
+    if mutation == "remove_direct_branch_verifier":
+        prompt = prompt.replace(
+            "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py\n", "", 1
+        )
+    elif mutation == "bypass_materialization_check":
+        prompt = prompt.replace(
+            "if ! git show fix/dashboard-api-contract:scripts/verify_hades_dashboard_contract.py > \"$verifier_tmp\"; then",
+            "git show fix/dashboard-api-contract:scripts/verify_hades_dashboard_contract.py > \"$verifier_tmp\"",
+            1,
+        )
+    elif mutation == "remove_nonempty_check":
+        prompt = prompt.replace(
+            "if [ ! -s \"$verifier_tmp\" ]; then\n"
+            "echo \"dashboard verifier materialized empty\" >&2\n"
+            "exit 1\n"
+            "fi\n",
+            "",
+            1,
+        )
+    elif mutation == "remove_materialization_exit_one":
+        prompt = prompt.replace("exit 1\n", "true\n", 1)
+    elif mutation == "remove_empty_exit_one":
+        prompt = prompt.replace(
+            "echo \"dashboard verifier materialized empty\" >&2\nexit 1\n",
+            "echo \"dashboard verifier materialized empty\" >&2\ntrue\n",
+            1,
+        )
+    elif mutation == "remove_trap":
+        prompt = prompt.replace("trap 'rm -f \"$verifier_tmp\"' EXIT\n", "", 1)
+    elif mutation == "fallback_suffix":
+        prompt = prompt.replace(
+            "./venv/bin/python3 \"$verifier_tmp\" --repo-root \"$PWD\" --cron-jobs ~/.hermes/cron/jobs.json\n",
+            "./venv/bin/python3 \"$verifier_tmp\" --repo-root \"$PWD\" --cron-jobs ~/.hermes/cron/jobs.json || true\n",
+            1,
+        )
+    else:
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+    failures = _prompt_failures(tmp_path, prompt)
+
+    assert "cron" in failures.lower()
+    assert "verifier" in failures.lower() or "shape" in failures.lower() or "approved" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    "unsafe_ref",
+    (";true", "../x", "x..y", "x//y", "x.lock", "fix/dashboard api"),
+)
+def test_rollout_gate_rejects_unsafe_safe_refs(tmp_path: Path, unsafe_ref: str) -> None:
+    prompt = VALID_ROLLOUT_PROMPT.replace("fix/dashboard-api-contract", unsafe_ref, 1)
+
+    failures = _prompt_failures(tmp_path, prompt)
+
+    assert "cron" in failures.lower()
+    assert "verifier" in failures.lower() or "ref" in failures.lower() or "shape" in failures.lower()
+
+
+def test_decoy_verifier_block_does_not_rescue_invalid_gate(tmp_path: Path) -> None:
+    invalid_gate = VALID_PROMPT.replace("set -euo pipefail", "set +e", 1)
+    prompt = invalid_gate + VALID_PROMPT
+
+    failures = _prompt_failures(tmp_path, prompt)
+
+    assert "cron" in failures.lower()
+    assert "exactly one" in failures.lower() or "approved" in failures.lower() or "shape" in failures.lower()
+
+
+def test_duplicate_approved_verifier_blocks_fail_closed(tmp_path: Path) -> None:
+    failures = _prompt_failures(tmp_path, VALID_PROMPT + VALID_PROMPT)
+
+    assert "cron" in failures.lower()
+    assert "exactly one" in failures.lower() or "duplicate" in failures.lower()
 
 
 @pytest.mark.parametrize(
