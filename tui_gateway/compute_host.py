@@ -435,81 +435,113 @@ class ComputeHost:
 
         history = frame.get("history") if isinstance(frame.get("history"), list) else []
         profile_home = str(frame.get("profile_home") or "") or None
+        frame_cwd = str(frame.get("cwd") or "") or None
+        frame_source = frame.get("source")
         session_db = None
         home_token = None
+        context_tokens = []
+        agent = None
         try:
             if profile_home:
-                from hermes_constants import set_hermes_home_override
                 from hermes_state import SessionDB
 
-                home_token = set_hermes_home_override(profile_home)
+                # Keep the profile override active for every build/init helper,
+                # including config/poller fallback field loaders.
+                home_token = server.set_hermes_home_override(profile_home)
                 session_db = SessionDB(db_path=Path(profile_home) / "state.db")
-            agent = server._make_agent(
-                sid,
+            context_tokens = server._set_session_context(
                 key,
-                session_id=key,
-                model_override=frame.get("model_override"),
-                reasoning_config_override=frame.get("reasoning_config_override"),
-                service_tier_override=frame.get("service_tier_override"),
-                platform_override=frame.get("source"),
-                session_db=session_db,
+                cwd=frame_cwd,
+                source=frame_source,
             )
-        finally:
-            if home_token is not None:
-                try:
-                    from hermes_constants import reset_hermes_home_override
-
-                    reset_hermes_home_override(home_token)
-                except Exception:
-                    pass
-        try:
-            from tui_gateway.transport import bind_transport, reset_transport
-
-            token = bind_transport(self._transport)
             try:
-                server._init_session(
+                agent = server._make_agent(
                     sid,
                     key,
-                    agent,
-                    list(history),
-                    cols=int(frame.get("cols") or 80),
-                    cwd=str(frame.get("cwd") or "") or None,
+                    session_id=key,
+                    model_override=frame.get("model_override"),
+                    reasoning_config_override=frame.get("reasoning_config_override"),
+                    service_tier_override=frame.get("service_tier_override"),
+                    platform_override=frame_source,
                     session_db=session_db,
-                    source=frame.get("source"),
-                    profile_home=profile_home,
+                    owns_session_db=bool(profile_home and session_db is not None),
                 )
-            finally:
-                reset_transport(token)
-        except Exception:
-            # If _init_session's side machinery (slash worker, approval notify) is
-            # unavailable, keep a minimal host-owned session rather than failing
-            # the turn after the expensive agent build succeeded.
-            fallback = {
-                "agent": agent,
-                "session_key": key,
-                "history": list(history),
-                "history_lock": threading.Lock(),
-                "history_version": int(frame.get("history_version") or 0),
-                "inflight_turn": None,
-                "created_at": time.time(),
-                "last_active": time.time(),
-                "running": False,
-                "attached_images": [],
-                "image_counter": 0,
-                "cwd": str(frame.get("cwd") or os.getcwd()),
-                "cols": int(frame.get("cols") or 80),
-                "profile_home": profile_home,
-                "slash_worker": None,
-                "show_reasoning": server._load_show_reasoning(),
-                "tool_progress_mode": server._load_tool_progress_mode(),
-                "edit_snapshots": {},
-                "tool_started_at": {},
-                "model_override": frame.get("model_override"),
-                "source": server._resolve_session_source(frame.get("source")),
-                "transport": self._transport,
-            }
-            with server._sessions_lock:
-                server._sessions[sid] = fallback
+            except Exception:
+                # No agent received ownership of a profile DB when construction
+                # fails; the outer finally closes that acquisition before
+                # propagating the build error to the host turn path.
+                raise
+
+            try:
+                from tui_gateway.transport import bind_transport, reset_transport
+
+                token = bind_transport(self._transport)
+                try:
+                    server._init_session(
+                        sid,
+                        key,
+                        agent,
+                        list(history),
+                        cols=int(frame.get("cols") or 80),
+                        cwd=frame_cwd,
+                        session_db=session_db,
+                        source=frame_source,
+                        profile_home=profile_home,
+                    )
+                finally:
+                    reset_transport(token)
+            except Exception:
+                # _init_session can publish a record before a worker/notifier/
+                # poller fails. Detach and stop all partial side machinery, but
+                # retain the successfully built agent for the host fallback.
+                partial = server._sessions.get(sid)
+                server._discard_partial_initialized_session(
+                    sid, partial, close_agent=False
+                )
+                fallback = {
+                    "agent": agent,
+                    "session_key": key,
+                    "session_db": session_db,
+                    "history": list(history),
+                    "history_lock": threading.Lock(),
+                    "history_version": int(frame.get("history_version") or 0),
+                    "inflight_turn": None,
+                    "created_at": time.time(),
+                    "last_active": time.time(),
+                    "running": False,
+                    "attached_images": [],
+                    "image_counter": 0,
+                    "cwd": frame_cwd or os.getcwd(),
+                    "cols": int(frame.get("cols") or 80),
+                    "profile_home": profile_home,
+                    "slash_worker": None,
+                    "agent_ready": threading.Event(),
+                    "agent_error": None,
+                    "show_reasoning": server._load_show_reasoning(),
+                    "tool_progress_mode": server._load_tool_progress_mode(),
+                    "edit_snapshots": {},
+                    "tool_started_at": {},
+                    "model_override": frame.get("model_override"),
+                    "source": server._resolve_session_source(frame_source),
+                    "transport": self._transport,
+                }
+                fallback["agent_ready"].set()
+                with server._sessions_lock:
+                    server._sessions[sid] = fallback
+                server._register_session_cwd(fallback)
+        finally:
+            if agent is None and session_db is not None:
+                try:
+                    session_db.close()
+                except Exception:
+                    pass
+            if context_tokens:
+                server._clear_session_context(context_tokens)
+            if home_token is not None:
+                try:
+                    server.reset_hermes_home_override(home_token)
+                except Exception:
+                    pass
         with server._sessions_lock:
             session = server._sessions[sid]
             session["transport"] = self._transport

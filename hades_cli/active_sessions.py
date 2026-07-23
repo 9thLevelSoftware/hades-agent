@@ -224,6 +224,11 @@ class ActiveSessionLease:
     surface: str
     enabled: bool = True
     released: bool = False
+    # Capture the registry that granted this slot. Profile-scoped callers may
+    # reset ambient HADES_HOME before compression/finalize releases or transfers
+    # the lease, so lifecycle mutations must not resolve a new registry.
+    state_path: str | None = None
+    lock_path: str | None = None
 
     def release(self) -> None:
         if self.released or not self.enabled:
@@ -269,7 +274,8 @@ def try_acquire_active_session(
         }
 
     state_path = _state_path()
-    with _FileLock(_lock_path()):
+    lock_path = _lock_path()
+    with _FileLock(lock_path):
         raw_entries = _read_entries(state_path)
         entries = _prune_dead(raw_entries)
         pruned = len(raw_entries) - len(entries)
@@ -292,13 +298,26 @@ def try_acquire_active_session(
         lease_id=lease_id,
         session_id=str(session_id),
         surface=str(surface),
+        state_path=str(state_path),
+        lock_path=str(lock_path),
     ), None
 
 
+def _lease_registry_paths(lease: ActiveSessionLease) -> tuple[Path, Path]:
+    """Resolve a lease's registry paths, with ambient fallback for old leases."""
+    state_path = getattr(lease, "state_path", None)
+    lock_path = getattr(lease, "lock_path", None)
+    if state_path and lock_path:
+        return Path(state_path), Path(lock_path)
+    return _state_path(), _lock_path()
+
+
 def release_active_session(lease: ActiveSessionLease) -> None:
-    state_path = _state_path()
+    if lease.released or not lease.enabled:
+        return
+    state_path, lock_path = _lease_registry_paths(lease)
     try:
-        with _FileLock(_lock_path()):
+        with _FileLock(lock_path):
             entries = _prune_dead(_read_entries(state_path))
             kept = [
                 entry
@@ -327,8 +346,8 @@ def transfer_active_session(
         lease.session_id = new_session_id
         return True
 
-    state_path = _state_path()
-    with _FileLock(_lock_path()):
+    state_path, lock_path = _lease_registry_paths(lease)
+    with _FileLock(lock_path):
         entries = _prune_dead(_read_entries(state_path))
         updated = False
         for entry in entries:
