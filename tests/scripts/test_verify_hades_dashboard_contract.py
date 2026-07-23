@@ -23,18 +23,18 @@ VALID_API = r'''\
 const apiGet = <T>(url: string) => fetchJSON<T>(url);
 export const api = {
   getAutonomyStatus: () => apiGet("/api/autonomy/status"),
-  getAutonomyRules: () => apiGet("/api/autonomy/rules"),
-  explainAutonomyRule: (id: string) => apiGet(`/api/autonomy/rules/${encodeURIComponent(id)}`),
-  previewAutonomyChange: () => fetch("/api/autonomy/preview", { method: "POST" }),
-  applyAutonomyPreview: () => fetch("/api/autonomy/apply", { method: "POST" }),
-  acceptAutonomySuggestion: (id: string) => fetch(`/api/autonomy/suggestions/${encodeURIComponent(id)}/accept`, { method: "POST" }),
-  rejectAutonomySuggestion: (id: string) => fetch(`/api/autonomy/suggestions/${encodeURIComponent(id)}/reject`, { method: "POST" }),
-  getAutonomyMandates: () => apiGet("/api/autonomy/mandates"),
-  revokeAutonomyMandate: (id: string) => fetch(`/api/autonomy/mandates/${encodeURIComponent(id)}/revoke`, { method: "POST" }),
-  getAutonomyAudit: () => apiGet("/api/autonomy/audit"),
-  getReceipts: () => apiGet(`/api/receipts${query}`),
-  getReceipt: (id: string) => apiGet(`/api/receipts/${encodeURIComponent(id)}`),
-  getReceiptObservations: (id: string) => apiGet(`/api/receipts/${encodeURIComponent(id)}/observations`),
+  getAutonomyRules: () => apiGet(`/api/autonomy/rules${qs ? `?${qs}` : ""}`),
+  explainAutonomyRule: (ruleId: string) => apiGet(`/api/autonomy/rules/${encodeURIComponent(ruleId)}`),
+  previewAutonomyChange: () => fetchJSON("/api/autonomy/preview", { method: "POST" }),
+  applyAutonomyPreview: () => fetchJSON("/api/autonomy/apply", { method: "POST" }),
+  acceptAutonomySuggestion: (suggestionId: string) => fetchJSON(`/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/accept`, { method: "POST" }),
+  rejectAutonomySuggestion: (suggestionId: string) => fetchJSON(`/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/reject`, { method: "POST" }),
+  getAutonomyMandates: () => apiGet(`/api/autonomy/mandates${state ? `?state=${encodeURIComponent(state)}` : ""}`),
+  revokeAutonomyMandate: (ruleId: string) => fetchJSON(`/api/autonomy/mandates/${encodeURIComponent(ruleId)}/revoke`, { method: "POST" }),
+  getAutonomyAudit: () => apiGet(`/api/autonomy/audit?limit=${limit}${verdict ? `&verdict=${encodeURIComponent(verdict)}` : ""}`),
+  getReceipts: () => apiGet(`/api/receipts${qs ? `?${qs}` : ""}`),
+  getReceipt: (receiptId: string) => apiGet(`/api/receipts/${encodeURIComponent(receiptId)}`),
+  getReceiptObservations: (receiptId: string) => apiGet(`/api/receipts/${encodeURIComponent(receiptId)}/observations`),
 };
 '''
 
@@ -168,6 +168,101 @@ def test_static_route_near_miss_is_rejected(tmp_path: Path) -> None:
     assert "route" in failures.lower()
 
 
+@pytest.mark.parametrize(
+    ("method", "valid_route", "invalid_route"),
+    [
+        (
+            "getAutonomyRules",
+            r'`/api/autonomy/rules${qs ? `?${qs}` : ""}`',
+            r'`/api/autonomy/rules${qs ? `?${qs}` : ""}/extra`',
+        ),
+        (
+            "getAutonomyMandates",
+            r'`/api/autonomy/mandates${state ? `?state=${encodeURIComponent(state)}` : ""}`',
+            r'`/api/autonomy/mandates${state ? `?state=${encodeURIComponent(state)}` : ""}/extra`',
+        ),
+        (
+            "getReceipts",
+            r'`/api/receipts${qs ? `?${qs}` : ""}`',
+            r'`/api/receipts${qs ? `?${qs}` : ""}/extra`',
+        ),
+        (
+            "getAutonomyAudit",
+            r'`/api/autonomy/audit?limit=${limit}${verdict ? `&verdict=${encodeURIComponent(verdict)}` : ""}`',
+            r'`/api/autonomy/audit?limit=${limit}${verdict ? `&verdict=${encodeURIComponent(verdict)}` : ""}/extra`',
+        ),
+    ],
+)
+def test_query_route_requires_complete_outer_template_expression(
+    tmp_path: Path, method: str, valid_route: str, invalid_route: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(valid_route, invalid_route, 1)
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert method in failures
+    assert "route" in failures.lower()
+
+
+def test_static_route_marker_unrelated_to_transport_call_does_not_satisfy_contract(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        'getAutonomyStatus: () => { const marker = "/api/autonomy/status"; '
+        'return fetchJSON("/api/autonomy/wrong"); },',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getAutonomyStatus" in failures
+    assert "route" in failures.lower()
+
+
+def test_dynamic_route_marker_unrelated_to_transport_call_does_not_satisfy_contract(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'explainAutonomyRule: (ruleId: string) => '
+        'apiGet(`/api/autonomy/rules/${encodeURIComponent(ruleId)}`),',
+        'explainAutonomyRule: (ruleId: string) => { '
+        'const marker = `/api/autonomy/rules/${encodeURIComponent(ruleId)}`; '
+        'return fetchJSON(`/api/autonomy/rules/${encodeURIComponent(ruleId)}/wrong`); },',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "explainAutonomyRule" in failures
+    assert "route" in failures.lower()
+
+
+def test_post_marker_unrelated_to_transport_call_does_not_satisfy_verb_contract(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'previewAutonomyChange: () => fetchJSON("/api/autonomy/preview", '
+        '{ method: "POST" }),',
+        'previewAutonomyChange: () => { const marker = \'method: "POST"\'; '
+        'return fetchJSON("/api/autonomy/preview"); },',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "previewAutonomyChange" in failures
+    assert "verb" in failures.lower()
+
+
 @pytest.mark.parametrize("comment", ('// "/api/autonomy/status"', '/* "/api/autonomy/status" */'))
 def test_static_route_in_comment_does_not_satisfy_method_contract(
     tmp_path: Path, comment: str
@@ -191,19 +286,19 @@ def test_static_route_in_comment_does_not_satisfy_method_contract(
     [
         (
             "acceptAutonomySuggestion",
-            "/api/autonomy/suggestions/${encodeURIComponent(id)}",
+            "/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}",
         ),
         (
             "rejectAutonomySuggestion",
-            "/api/autonomy/suggestions/${encodeURIComponent(id)}",
+            "/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}",
         ),
         (
             "revokeAutonomyMandate",
-            "/api/autonomy/mandates/${encodeURIComponent(id)}",
+            "/api/autonomy/mandates/${encodeURIComponent(ruleId)}",
         ),
         (
             "getReceiptObservations",
-            "/api/receipts/${encodeURIComponent(id)}",
+            "/api/receipts/${encodeURIComponent(receiptId)}",
         ),
     ],
 )
@@ -215,19 +310,19 @@ def test_dynamic_route_without_required_suffix_is_rejected(
     source = api_path.read_text(encoding="utf-8")
     if method == "acceptAutonomySuggestion":
         source = source.replace(
-            "/api/autonomy/suggestions/${encodeURIComponent(id)}/accept", route, 1
+            "/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/accept", route, 1
         )
     elif method == "rejectAutonomySuggestion":
         source = source.replace(
-            "/api/autonomy/suggestions/${encodeURIComponent(id)}/reject", route, 1
+            "/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/reject", route, 1
         )
     elif method == "revokeAutonomyMandate":
         source = source.replace(
-            "/api/autonomy/mandates/${encodeURIComponent(id)}/revoke", route, 1
+            "/api/autonomy/mandates/${encodeURIComponent(ruleId)}/revoke", route, 1
         )
     else:
         source = source.replace(
-            "/api/receipts/${encodeURIComponent(id)}/observations", route, 1
+            "/api/receipts/${encodeURIComponent(receiptId)}/observations", route, 1
         )
     api_path.write_text(source, encoding="utf-8")
 
@@ -240,9 +335,9 @@ def test_dynamic_route_without_required_suffix_is_rejected(
 def test_dynamic_route_in_comment_does_not_satisfy_method_contract(tmp_path: Path) -> None:
     root, cron_jobs = _make_fixture(tmp_path)
     source = VALID_API.replace(
-        "`/api/receipts/${encodeURIComponent(id)}/observations`",
-        "`/api/receipts/${encodeURIComponent(id)}/wrong` // "
-        "`/api/receipts/${encodeURIComponent(id)}/observations`",
+        "`/api/receipts/${encodeURIComponent(receiptId)}/observations`",
+        "`/api/receipts/${encodeURIComponent(receiptId)}/wrong` // "
+        "`/api/receipts/${encodeURIComponent(receiptId)}/observations`",
         1,
     )
     (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
@@ -376,6 +471,77 @@ def test_handler_registration_alone_cannot_satisfy_long_handler_check(tmp_path: 
     assert "_LONG_HANDLERS" in failures
 
 
+def test_decorated_handler_under_false_branch_does_not_count_as_registration(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    live = (
+        '@method("autonomy.exec")\n'
+        "def autonomy_exec(rid, params):\n"
+        '    return {"result": {}}\n\n'
+    )
+    dead = (
+        "if False:\n"
+        '    @method("autonomy.exec")\n'
+        "    def autonomy_exec(rid, params):\n"
+        '        return {"result": {}}\n'
+    )
+    source = VALID_SERVER.replace(live, "", 1) + "\n" + dead
+    (root / "tui_gateway/server.py").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "autonomy.exec" in failures
+    assert "registration" in failures.lower()
+
+
+def test_long_handlers_false_conditional_branch_does_not_count_membership(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    old_assignment = """_LONG_HANDLERS = frozenset(
+    {
+        "autonomy.exec",
+        "receipt.exec",
+        "transaction.exec",
+    }
+)"""
+    new_assignment = (
+        '_LONG_HANDLERS = ({"autonomy.exec"} if False else '
+        '{"receipt.exec", "transaction.exec"})'
+    )
+    source = VALID_SERVER.replace(old_assignment, new_assignment, 1)
+    (root / "tui_gateway/server.py").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "autonomy.exec" in failures
+    assert "long" in failures.lower()
+
+
+def test_long_handlers_constant_true_branch_and_frozenset_are_inspectable(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    old_assignment = """_LONG_HANDLERS = frozenset(
+    {
+        "autonomy.exec",
+        "receipt.exec",
+        "transaction.exec",
+    }
+)"""
+    new_assignment = (
+        '_LONG_HANDLERS = frozenset(\n'
+        '    ({"autonomy.exec", "receipt.exec", "transaction.exec"} '
+        'if True else set())\n'
+        ')'
+    )
+    source = VALID_SERVER.replace(old_assignment, new_assignment, 1)
+    (root / "tui_gateway/server.py").write_text(source, encoding="utf-8")
+
+    assert verify(root, cron_jobs) == []
+
+
 @pytest.mark.parametrize("name", ("AutonomyExecResponse", "ReceiptExecResponse", "TransactionExecResponse"))
 def test_each_ts_response_export_is_required(tmp_path: Path, name: str) -> None:
     root, cron_jobs = _make_fixture(tmp_path)
@@ -401,6 +567,42 @@ def test_duplicate_ts_response_export_is_rejected(tmp_path: Path) -> None:
 
     assert "ReceiptExecResponse" in failures
     assert "duplicate" in failures.lower()
+
+
+def test_response_export_inside_multiline_block_comment_does_not_count(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_TYPES.replace(
+        "export interface AutonomyExecResponse { ok: boolean }",
+        "/*\nexport interface AutonomyExecResponse { ok: boolean }\n*/",
+        1,
+    )
+    (root / "ui-tui/src/gatewayTypes.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "AutonomyExecResponse" in failures
+    assert "missing" in failures.lower()
+
+
+def test_response_export_inside_multiline_template_does_not_count(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_TYPES.replace(
+        "export interface AutonomyExecResponse { ok: boolean }",
+        "const fakeTypes = `\n"
+        "export interface AutonomyExecResponse { ok: boolean }\n"
+        "`;",
+        1,
+    )
+    (root / "ui-tui/src/gatewayTypes.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "AutonomyExecResponse" in failures
+    assert "missing" in failures.lower()
 
 
 @pytest.mark.parametrize(
