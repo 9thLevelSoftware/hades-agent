@@ -14,6 +14,8 @@ The agent reported success; the rule never took effect.
 """
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -45,6 +47,39 @@ class TestClassifySandboxMirrorTarget:
             "sandboxes/docker/default/home/.hades"
         )
         assert result["inner_path"] == "profiles/group1/SOUL.md"
+
+    @pytest.mark.skipif(os.name != "nt", reason="native Windows path semantics")
+    @pytest.mark.parametrize("home_basename", [".HaDeS", ".HeRmEs"])
+    def test_windows_case_variant_mirror_is_blocked_by_write_tool(
+        self, tmp_path, home_basename
+    ):
+        """Windows mirror markers follow the filesystem's case semantics."""
+        from tools.file_tools import write_file_tool
+
+        target = (
+            tmp_path
+            / "SandBoxes"
+            / "docker"
+            / "default"
+            / "Home"
+            / home_basename
+            / "profiles"
+            / "group1"
+            / "SOUL.md"
+        )
+        target.parent.mkdir(parents=True)
+        target.write_text("original", encoding="utf-8")
+
+        blocked = json.loads(write_file_tool(str(target), "tampered"))
+
+        assert "sandbox-mirror write blocked" in blocked["error"].lower()
+        assert target.read_text(encoding="utf-8") == "original"
+
+        bypassed = json.loads(
+            write_file_tool(str(target), "user-directed", cross_profile=True)
+        )
+        assert "error" not in bypassed
+        assert target.read_text(encoding="utf-8") == "user-directed"
 
     def test_legacy_hermes_mirror_basename_classified(self, tmp_path):
         """Remote/container layouts still use home/.hermes (#32049)."""
