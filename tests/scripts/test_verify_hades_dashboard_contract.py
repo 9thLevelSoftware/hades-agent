@@ -222,6 +222,64 @@ def test_command_diagnostics_are_bounded_and_redacted(tmp_path: Path) -> None:
     assert len(diagnostic) < 8_000
 
 
+@pytest.mark.parametrize(
+    ("stream", "output", "secrets"),
+    [
+        (
+            "stderr",
+            "request failed\nAuthorization: "
+            + "Bear"
+            + "er "
+            + "SUPER"
+            + "SECRET"
+            + "\nsafe neighboring line\n",
+            ("Bear" + "er", "SUPER" + "SECRET"),
+        ),
+        (
+            "stdout",
+            "request failed\naUtHoRiZaTiOn="
+            + "Bear"
+            + "er "
+            + "SUPER"
+            + "SECRET"
+            + "\nsafe neighboring line\n",
+            ("Bear" + "er", "SUPER" + "SECRET"),
+        ),
+        (
+            "stderr",
+            "request failed\nAuthorization: "
+            + "Bas"
+            + "ic "
+            + "BASE64"
+            + "SECRET"
+            + "\nsafe neighboring line\n",
+            ("Bas" + "ic", "BASE64" + "SECRET"),
+        ),
+    ],
+)
+def test_authorization_diagnostics_redact_full_header_value(
+    tmp_path: Path, stream: str, output: str, secrets: tuple[str, str]
+) -> None:
+    root = _repo(tmp_path)
+    runner = FakeRunner(
+        outcomes={
+            "web-api": verifier.CommandResult(
+                returncode=9,
+                stdout=output if stream == "stdout" else "",
+                stderr=output if stream == "stderr" else "",
+            )
+        }
+    )
+
+    failures = verifier.run_contract_checks(root, runner=runner)
+    diagnostic = "\n".join(failures)
+
+    assert "safe neighboring line" in diagnostic
+    assert "[REDACTED]" in diagnostic
+    for secret in secrets:
+        assert secret not in diagnostic
+
+
 def test_missing_executable_is_fail_closed(tmp_path: Path) -> None:
     root = _repo(tmp_path)
     runner = FakeRunner(
