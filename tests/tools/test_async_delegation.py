@@ -1994,6 +1994,77 @@ def test_operation_journal_cache_canonicalizes_equivalent_profile_paths(
     assert created_paths == [profile.resolve() / "state.db"]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows has case-insensitive paths")
+def test_operation_journal_cache_shares_case_variant_windows_profile_concurrently(
+    tmp_path,
+    monkeypatch,
+):
+    """Case variants of one Windows profile must share one durable journal.
+
+    The two homes deliberately do not exist yet: ``Path.resolve()`` cannot
+    recover their on-disk casing, so the cache must normalize its *identity*
+    while retaining the first resolved path for SessionDB I/O.
+    """
+    created_paths = []
+    resolver_barrier = threading.Barrier(2)
+    homes = {
+        "upper": tmp_path / "Profiles" / "Hades",
+        "lower": tmp_path / "profiles" / "hades",
+    }
+
+    class FakeDB:
+        def __init__(self, db_path=None):
+            created_paths.append(Path(db_path))
+
+    def profile_home():
+        name = threading.current_thread().name
+        if name in homes:
+            resolver_barrier.wait(timeout=5)
+            return homes[name]
+        # The autouse fixture queries the active profile during teardown after
+        # both workers have already met at the barrier.
+        return homes["upper"]
+
+    monkeypatch.setattr(ad, "get_hades_home", profile_home)
+    monkeypatch.setattr("hades_state.SessionDB", FakeDB)
+    ad._set_journal_for_tests(None)
+
+    journals = []
+
+    def open_journal():
+        journals.append(ad._open_journal())
+
+    workers = [threading.Thread(target=open_journal, name=name) for name in homes]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert journals[0] is journals[1]
+    assert len(created_paths) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX paths are case-sensitive")
+def test_operation_journal_cache_keeps_case_distinct_posix_profiles(tmp_path, monkeypatch):
+    created_paths = []
+
+    class FakeDB:
+        def __init__(self, db_path=None):
+            created_paths.append(Path(db_path))
+
+    homes = iter((tmp_path / "Profiles" / "Hades", tmp_path / "profiles" / "hades"))
+    monkeypatch.setattr(ad, "get_hades_home", lambda: next(homes))
+    monkeypatch.setattr("hades_state.SessionDB", FakeDB)
+    ad._set_journal_for_tests(None)
+
+    first = ad._open_journal()
+    second = ad._open_journal()
+
+    assert first is not second
+    assert len(created_paths) == 2
+
+
 def test_operation_journal_resolves_relative_profile_before_caching(
     tmp_path,
     monkeypatch,
