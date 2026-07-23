@@ -13546,13 +13546,46 @@ _NATIVE_MAX_RESULT_BYTES = 1_048_576  # 1 MiB UTF-8 default JSON-RPC frame + new
 _TRANSACTION_MAX_PREVIEW_NODES = 256
 
 
+def _native_error(rid, code: int, message: str) -> dict:
+    """Return a JSON-safe native error whose complete frame fits the cap."""
+    try:
+        envelope = _err(rid, code, message)
+        encoded = (json.dumps(envelope, ensure_ascii=False) + "\n").encode("utf-8")
+        if len(encoded) > _NATIVE_MAX_RESULT_BYTES:
+            raise ValueError("native JSON-RPC error frame exceeds wire bound")
+        normalized = json.loads(encoded)
+        if type(normalized) is not dict:
+            raise ValueError("native JSON-RPC error frame did not normalize to a dict")
+        return normalized
+    except Exception:
+        # Never retry with the caller's ID: it may be oversized or impossible
+        # to serialize. Native messages are fixed and bounded at their call
+        # sites, so the null-ID envelope is itself within the transport cap.
+        fallback = _err(None, code, message)
+        try:
+            encoded = (json.dumps(fallback, ensure_ascii=False) + "\n").encode("utf-8")
+            if len(encoded) > _NATIVE_MAX_RESULT_BYTES:
+                raise ValueError("native fallback error frame exceeds wire bound")
+            normalized = json.loads(encoded)
+            if type(normalized) is not dict:
+                raise ValueError("native fallback error frame did not normalize to a dict")
+            return normalized
+        except Exception:
+            # Keep the final guard independent of all caller-provided values.
+            return {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": code, "message": "native RPC error"},
+            }
+
+
 def _native_internal_error(rid, *, method: str, code: int) -> dict:
     commands = {
         "autonomy.exec": "`hades autonomy doctor`",
         "receipt.exec": "`hades receipt list`",
         "transaction.exec": "`hermes transaction list`",
     }
-    return _err(
+    return _native_error(
         rid,
         code,
         f"{method}: internal failure (details withheld; run "
@@ -13624,15 +13657,27 @@ def _native_failure_payload(payload: dict) -> bool:
 
 def _autonomy_contract_doc(payload: dict) -> dict | None:
     """Contract identity (version/hash/profile/mode) when the verb exposed it."""
-    if not (payload.get("contract_version") or payload.get("contract_hash")):
-        return None
-    doc = {
-        "version": payload.get("contract_version"),
-        "hash": payload.get("contract_hash"),
-    }
+    doc: dict[str, Any] = {}
+    if "contract_version" in payload:
+        value = payload["contract_version"]
+        if value is not None and type(value) is not int:
+            return None
+        if value is not None:
+            doc["version"] = value
+    if "contract_hash" in payload:
+        value = payload["contract_hash"]
+        if value is not None and type(value) is not str:
+            return None
+        if value is not None:
+            doc["hash"] = value
     for key in ("profile_id", "mode"):
-        if payload.get(key) is not None:
-            doc[key] = payload[key]
+        if key in payload:
+            value = payload[key]
+            if type(value) is not str:
+                return None
+            doc[key] = value
+    if "version" not in doc and "hash" not in doc:
+        return None
     return doc
 
 
@@ -13655,7 +13700,7 @@ def _autonomy_rule_doc(row: Any) -> dict | None:
         "recipient_classes",
     )
     optional_strings = ("description", "edit_command", "provenance")
-    optional_ints = ("confidence_ppm", "expires_at_ms", "max_uses", "remaining_uses")
+    optional_ints = ("expires_at_ms", "max_uses", "remaining_uses")
     for key in string_lists:
         if key in row:
             value = row[key]
@@ -13668,6 +13713,11 @@ def _autonomy_rule_doc(row: Any) -> dict | None:
             if type(value) is not str:
                 return None
             doc[key] = value
+    if "confidence_ppm" in row:
+        value = row["confidence_ppm"]
+        if type(value) is not int:
+            return None
+        doc["confidence_ppm"] = value
     for key in optional_ints:
         if key in row:
             value = row[key]
@@ -13873,7 +13923,7 @@ def _(rid, params: dict) -> dict:
         or len(argv) > _AUTONOMY_MAX_ARGV_ENTRIES
         or sum(len(entry.encode("utf-8")) for entry in argv) > _AUTONOMY_MAX_ARGV_BYTES
     ):
-        return _err(
+        return _native_error(
             rid,
             4033,
             "autonomy.exec: argv must be a non-empty list[str] of at most "
@@ -13883,7 +13933,7 @@ def _(rid, params: dict) -> dict:
 
     session_id = params.get("session_id")
     if session_id is not None and not isinstance(session_id, str):
-        return _err(rid, 4004, "autonomy.exec: session_id must be a string")
+        return _native_error(rid, 4004, "autonomy.exec: session_id must be a string")
 
     # Profile isolation: a session resumed from another profile carries its
     # own profile_home; bind it for the duration of the call so the shared
@@ -13905,7 +13955,7 @@ def _(rid, params: dict) -> dict:
         # Deliberately redacted: no tracebacks, exception strings, raw
         # recipients, source content, or secrets on the wire.
         logger.exception("autonomy.exec failed")
-        return _err(
+        return _native_error(
             rid,
             5038,
             "autonomy.exec: internal failure (details withheld; run "
@@ -13926,14 +13976,14 @@ def _(rid, params: dict) -> dict:
     # Producer failure text is not a wire-safe boundary. Keep these messages
     # fixed and actionable without forwarding payload.error or output.
     if exit_code == exit_validation:
-        return _err(
+        return _native_error(
             rid,
             4034,
             "autonomy.exec: validation failed (details withheld; run "
             "hades autonomy in terminal)",
         )
     if exit_code == exit_storage:
-        return _err(
+        return _native_error(
             rid,
             5039,
             "autonomy.exec: storage failure (details withheld; run "
@@ -13995,7 +14045,7 @@ def _(rid, params: dict) -> dict:
     ):
         # Deliberately does not echo any argument content: an oversized
         # argument may be a pasted secret and must never round-trip.
-        return _err(
+        return _native_error(
             rid,
             4004,
             "receipt.exec: argv must be a non-empty list[str] of at most "
@@ -14005,7 +14055,7 @@ def _(rid, params: dict) -> dict:
 
     session_id = params.get("session_id")
     if session_id is not None and not isinstance(session_id, str):
-        return _err(rid, 4004, "receipt.exec: session_id must be a string")
+        return _native_error(rid, 4004, "receipt.exec: session_id must be a string")
 
     # Profile isolation: only the session registry's recorded profile_home
     # may steer profile resolution — a caller-supplied path in params is
@@ -14026,7 +14076,7 @@ def _(rid, params: dict) -> dict:
         # Deliberately redacted: no tracebacks, exception strings, raw
         # locators, or signer material on the wire.
         logger.exception("receipt.exec failed")
-        return _err(
+        return _native_error(
             rid,
             5043,
             "receipt.exec: internal failure (details withheld; run "
@@ -14047,21 +14097,21 @@ def _(rid, params: dict) -> dict:
     # Producer failure text is not a wire-safe boundary. Keep these messages
     # fixed and actionable without forwarding payload.error or output.
     if exit_code == exit_validation:
-        return _err(
+        return _native_error(
             rid,
             4005,
             "receipt.exec: validation failed (details withheld; run "
             "hades receipt in terminal)",
         )
     if exit_code == exit_unavailable:
-        return _err(
+        return _native_error(
             rid,
             5041,
             "receipt.exec: signing provider unavailable (details withheld; run "
             "hades receipt in terminal)",
         )
     if exit_code != exit_ok:
-        return _err(
+        return _native_error(
             rid,
             5040,
             "receipt.exec: storage failure (details withheld; run "
@@ -14070,7 +14120,7 @@ def _(rid, params: dict) -> dict:
 
     try:
         if _native_failure_payload(payload):
-            return _err(
+            return _native_error(
                 rid,
                 5040,
                 "receipt.exec: command failed (details withheld; run "
@@ -14121,7 +14171,7 @@ def _(rid, params: dict) -> dict:
         > _TRANSACTION_MAX_ARGV_BYTES
     ):
         # Deliberately does not echo any argument content.
-        return _err(
+        return _native_error(
             rid,
             4006,
             "transaction.exec: argv must be a non-empty list[str] of at "
@@ -14131,7 +14181,7 @@ def _(rid, params: dict) -> dict:
 
     session_id = params.get("session_id")
     if session_id is not None and not isinstance(session_id, str):
-        return _err(rid, 4006, "transaction.exec: session_id must be a string")
+        return _native_error(rid, 4006, "transaction.exec: session_id must be a string")
 
     # Profile isolation mirrors receipt.exec: only the session registry's
     # recorded profile_home steers resolution; caller paths are never
@@ -14149,7 +14199,7 @@ def _(rid, params: dict) -> dict:
     except Exception:
         # Redacted: no tracebacks or raw paths on the wire.
         logger.exception("transaction.exec failed")
-        return _err(
+        return _native_error(
             rid,
             5045,
             "transaction.exec: internal failure (details withheld; run "
@@ -14168,14 +14218,14 @@ def _(rid, params: dict) -> dict:
     except Exception:
         return _native_internal_error(rid, method="transaction.exec", code=5045)
     if exit_code == exit_validation:
-        return _err(
+        return _native_error(
             rid,
             4007,
             "transaction.exec: validation failed (details withheld; run "
             "hades transaction in a terminal)",
         )
     if exit_code != exit_ok:
-        return _err(
+        return _native_error(
             rid,
             5044,
             "transaction.exec: command failed (details withheld; run "
@@ -14183,7 +14233,7 @@ def _(rid, params: dict) -> dict:
         )
     try:
         if _native_failure_payload(payload):
-            return _err(
+            return _native_error(
                 rid,
                 5044,
                 "transaction.exec: command failed (details withheld; run "
