@@ -260,6 +260,7 @@ export interface TransactionExecResponse {
   /** Shared truthful text rendering from hades_cli.transactions. */
   output: string
   preview_hash?: string
+  observation?: { observation_id: string; status: string }
   receipt?: { content_hash: string; receipt_id: string; status: string }
   revision?: number
   rows?: Array<Record<string, unknown>>

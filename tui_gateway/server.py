@@ -267,6 +267,12 @@ _LONG_HANDLERS = frozenset(
         "session.resume",
         "shell.exec",
         "skills.manage",
+        # receipt.exec performs profile-local SQLite/artifact I/O; keep it
+        # off the JSON-RPC reader thread like the other native I/O handlers.
+        "receipt.exec",
+        # transaction.exec performs profile-local SQLite/transaction I/O;
+        # keep the reader available for fast RPCs while it runs.
+        "transaction.exec",
         "slash.exec",
     }
 )
@@ -13565,11 +13571,15 @@ def _(rid, params: dict) -> dict:
             f"{_AUTONOMY_MAX_ARGV_BYTES} UTF-8 bytes total",
         )
 
+    session_id = params.get("session_id")
+    if session_id is not None and not isinstance(session_id, str):
+        return _err(rid, 4004, "autonomy.exec: session_id must be a string")
+
     # Profile isolation: a session resumed from another profile carries its
     # own profile_home; bind it for the duration of the call so the shared
     # service resolves THAT profile's config.yaml/state.db, never the launch
     # profile's. No session (or an unknown one) means the launch profile.
-    session = _sessions.get(params.get("session_id") or "") or {}
+    session = _sessions.get(session_id or "") or {}
     profile_home = session.get("profile_home")
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
@@ -13661,11 +13671,15 @@ def _(rid, params: dict) -> dict:
             f"{_RECEIPT_MAX_ARGV_BYTES} UTF-8 bytes total",
         )
 
+    session_id = params.get("session_id")
+    if session_id is not None and not isinstance(session_id, str):
+        return _err(rid, 4004, "receipt.exec: session_id must be a string")
+
     # Profile isolation: only the session registry's recorded profile_home
     # may steer profile resolution — a caller-supplied path in params is
     # never accepted. No session (or an unknown one) means the launch
     # profile, exactly like autonomy.exec.
-    session = _sessions.get(params.get("session_id") or "") or {}
+    session = _sessions.get(session_id or "") or {}
     profile_home = session.get("profile_home")
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
@@ -13727,6 +13741,89 @@ def _(rid, params: dict) -> dict:
         ("retention_plan_hash", payload.get("retention_plan_hash")),
         ("warning", payload.get("warning")),
     ):
+        if value is not None:
+            response[key] = value
+    return _ok(rid, response)
+
+
+_TRANSACTION_MAX_ARGV_ENTRIES = 64
+_TRANSACTION_MAX_ARGV_BYTES = 64 * 1024
+
+
+@method("transaction.exec")
+def _(rid, params: dict) -> dict:
+    argv = params.get("argv")
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(entry, str) for entry in argv)
+        or len(argv) > _TRANSACTION_MAX_ARGV_ENTRIES
+        or sum(len(entry.encode("utf-8")) for entry in argv)
+        > _TRANSACTION_MAX_ARGV_BYTES
+    ):
+        # Deliberately does not echo any argument content.
+        return _err(
+            rid,
+            4006,
+            "transaction.exec: argv must be a non-empty list[str] of at "
+            f"most {_TRANSACTION_MAX_ARGV_ENTRIES} entries and "
+            f"{_TRANSACTION_MAX_ARGV_BYTES} UTF-8 bytes total",
+        )
+
+    session_id = params.get("session_id")
+    if session_id is not None and not isinstance(session_id, str):
+        return _err(rid, 4006, "transaction.exec: session_id must be a string")
+
+    # Profile isolation mirrors receipt.exec: only the session registry's
+    # recorded profile_home steers resolution; caller paths are never
+    # accepted. Mutations run in THIS live gateway process — never in a
+    # _SlashWorker subprocess.
+    session = _sessions.get(session_id or "") or {}
+    profile_home = session.get("profile_home")
+    home_token = set_hades_home_override(str(profile_home)) if profile_home else None
+    try:
+        import hades_cli.transactions as _transactions_cli
+
+        result = _transactions_cli.run_argv(list(argv), output="text")
+        exit_ok = _transactions_cli.EXIT_OK
+        exit_validation = _transactions_cli.EXIT_VALIDATION
+    except Exception:
+        # Redacted: no tracebacks or raw paths on the wire.
+        logger.exception("transaction.exec failed")
+        return _err(
+            rid,
+            5045,
+            "transaction.exec: internal failure (details withheld; run "
+            "`hermes transaction list` in a terminal)",
+        )
+    finally:
+        if home_token is not None:
+            reset_hades_home_override(home_token)
+
+    payload = result.payload or {}
+    if result.exit_code == exit_validation:
+        return _err(
+            rid, 4007, payload.get("error") or "transaction: validation error"
+        )
+    if result.exit_code != exit_ok:
+        # Bounded, already-redacted error text from the shared surface.
+        return _err(
+            rid, 5044, payload.get("error") or result.output
+            or "transaction: command failed",
+        )
+    response = {
+        "ok": True,
+        "action": str(payload.get("action") or argv[0].strip().lower()),
+        "exit_code": result.exit_code,
+        "output": result.output,
+    }
+    for key in (
+        "transaction", "transactions", "nodes", "preview", "preview_hash",
+        "eligibility", "receipt", "observation", "status", "counts",
+        "committed_nodes", "compensated_nodes", "blocked_node", "revision",
+        "rows", "error",
+    ):
+        value = payload.get(key)
         if value is not None:
             response[key] = value
     return _ok(rid, response)
