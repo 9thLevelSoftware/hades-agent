@@ -494,6 +494,7 @@ class ComputeHost:
                 # propagating the build error to the host turn path.
                 raise
 
+            init_owner_token = object()
             try:
                 from tui_gateway.transport import bind_transport, reset_transport
 
@@ -509,39 +510,55 @@ class ComputeHost:
                         session_db=session_db,
                         source=frame_source,
                         profile_home=profile_home,
+                        init_owner_token=init_owner_token,
                     )
                 finally:
                     reset_transport(token)
+                with server._sessions_lock:
+                    current = server._sessions.get(sid)
+                    if (
+                        isinstance(current, dict)
+                        and current.get("init_owner_token") is init_owner_token
+                    ):
+                        current.pop("init_owner_token", None)
             except Exception:
-                # _init_session can publish a record before a worker/notifier/
-                # poller fails. Snapshot the only record we may own, but fence
-                # the eventual fallback publication with an identity check under
-                # the registry lock. Building the fallback may perform config
-                # I/O, so it deliberately happens outside that critical section.
-                partial = server._sessions.get(sid)
-                owned_partial = partial if (
-                    partial is not None
-                    and isinstance(partial, dict)
-                    and partial.get("agent") is agent
-                    and partial.get("session_key") == key
-                ) else None
-                if partial is not None and owned_partial is None:
-                    if agent is not None:
+                # Only the record stamped by this build's opaque token belongs
+                # to this initializer.  Agent/key equality is deliberately not
+                # considered: a replacement may reuse both values.
+                with server._sessions_lock:
+                    partial = server._sessions.get(sid)
+                    owned_partial = partial if (
+                        isinstance(partial, dict)
+                        and partial.get("init_owner_token") is init_owner_token
+                    ) else None
+
+                def _close_detached_agent() -> None:
+                    if agent is None:
+                        return
+                    try:
+                        agent._end_session_on_close = False
+                    except Exception:
+                        pass
+                    try:
+                        server._close_agent_once(agent)
+                    except Exception:
+                        pass
+                    owned_db = getattr(agent, "_session_db", None)
+                    if session_db is not None and owned_db is not session_db:
                         try:
-                            agent._end_session_on_close = False
+                            session_db.close()
                         except Exception:
                             pass
-                        try:
-                            server._close_agent_once(agent)
-                        except Exception:
-                            pass
-                        owned_db = getattr(agent, "_session_db", None)
-                        if session_db is not None and owned_db is not session_db:
-                            try:
-                                session_db.close()
-                            except Exception:
-                                pass
+
+                if owned_partial is None:
+                    # A replacement already owns this slot, or init never
+                    # published our token.  Leave it untouched and release only
+                    # resources acquired by this caller.
+                    _close_detached_agent()
                     raise RuntimeError("session replaced during session init")
+
+                # Build the fallback outside the lock; publication below is the
+                # single atomic ownership fence.
                 fallback = {
                     "agent": agent,
                     "session_key": key,
@@ -568,34 +585,34 @@ class ComputeHost:
                     "model_override": frame.get("model_override"),
                     "source": server._resolve_session_source(frame_source),
                     "transport": self._transport,
+                    "init_owner_token": init_owner_token,
                 }
                 fallback["agent_ready"].set()
                 with server._sessions_lock:
-                    published = server._sessions.get(sid) is owned_partial
+                    current = server._sessions.get(sid)
+                    published = (
+                        current is owned_partial
+                        and isinstance(current, dict)
+                        and current.get("init_owner_token") is init_owner_token
+                    )
                     if published:
+                        # The fallback is now the successful live record; do
+                        # not leave the opaque construction token in user state.
+                        fallback.pop("init_owner_token", None)
                         server._sessions[sid] = fallback
                 if not published:
                     # The replacement won while fallback fields were built.
                     # Clean only our detached partial/resources, never the
                     # replacement currently occupying the registry slot.
-                    server._discard_partial_initialized_session(
-                        sid, owned_partial, close_agent=False
-                    )
-                    if agent is not None:
-                        try:
-                            agent._end_session_on_close = False
-                        except Exception:
-                            pass
-                        try:
-                            server._close_agent_once(agent)
-                        except Exception:
-                            pass
-                        owned_db = getattr(agent, "_session_db", None)
-                        if session_db is not None and owned_db is not session_db:
-                            try:
-                                session_db.close()
-                            except Exception:
-                                pass
+                    if not (
+                        current is owned_partial
+                        and isinstance(current, dict)
+                        and current.get("init_owner_token") is not init_owner_token
+                    ):
+                        server._discard_partial_initialized_session(
+                            sid, owned_partial, close_agent=False
+                        )
+                    _close_detached_agent()
                     raise RuntimeError("session replaced during session init")
                 # Detach/stop old side machinery only after the fallback is
                 # atomically published, and never while holding the registry lock.

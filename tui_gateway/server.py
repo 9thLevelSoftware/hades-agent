@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 import uuid
-from collections import OrderedDict
+import weakref
 from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
@@ -150,9 +150,9 @@ _cfg_mtime: float | None = None
 _cfg_path = None
 _session_resume_lock = threading.Lock()
 _agent_close_registry_lock = threading.Lock()
-_agent_close_fallback: OrderedDict[int, tuple[object, threading.Lock, bool]] = OrderedDict()
-_AGENT_CLOSE_FALLBACK_MAX = 256
-_AGENT_CLOSE_WRAPPER_MARKER = object()
+_agent_close_weak_registry: dict[
+    int, tuple[weakref.ReferenceType, threading.Lock, bool]
+] = {}
 try:
     _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
 except (ValueError, TypeError):
@@ -626,131 +626,156 @@ def _set_agent_close_policy(session: dict | None, agent=None) -> None:
                 pass
 
 
-def _install_agent_close_wrapper(agent) -> bool:
-    """Install an object-owned close-once wrapper for immutable agents.
+class _ManagedAgentProxy:
+    """Lifecycle owner for agents that cannot carry close state themselves.
 
-    A pure-Python slots object may allow neither weak references nor lifecycle
-    attributes.  In that case a bounded global identity table cannot retain
-    close state through arbitrary live-object churn without either evicting a
-    still-live tombstone or retaining objects forever.  A zero-layout dynamic
-    subclass keeps the state on the object itself instead: the subclass closes
-    the original bound method once and then becomes a stable no-op wrapper.
-    Extension/builtin objects that reject ``__class__`` assignment fall back to
-    the bounded identity registry below.
+    The proxy is deliberately immutable at the wrapped-agent boundary: all
+    public attribute access, assignment, and calls forward to ``_agent`` while
+    the proxy's own lock and closed flag remain private and object-owned.  This
+    makes close-once identity exact without retaining arbitrary agent objects in
+    a process-global table.
     """
+
+    __slots__ = (
+        "_agent",
+        "_close_lock",
+        "_closed",
+        "_session_db",
+        "_owns_session_db",
+    )
+
+    def __init__(self, agent, *, session_db=None, owns_session_db: bool = False):
+        object.__setattr__(self, "_agent", agent)
+        object.__setattr__(self, "_close_lock", threading.Lock())
+        object.__setattr__(self, "_closed", False)
+        object.__setattr__(self, "_session_db", session_db)
+        object.__setattr__(self, "_owns_session_db", bool(owns_session_db))
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_agent"), name)
+
+    def __setattr__(self, name, value):
+        if name in type(self).__slots__:
+            object.__setattr__(self, name, value)
+            return
+        setattr(object.__getattribute__(self, "_agent"), name, value)
+
+    def __call__(self, *args, **kwargs):
+        return object.__getattribute__(self, "_agent")(*args, **kwargs)
+
+    def close(self) -> None:
+        with object.__getattribute__(self, "_close_lock"):
+            if object.__getattribute__(self, "_closed"):
+                return
+            object.__setattr__(self, "_closed", True)
+            agent = object.__getattribute__(self, "_agent")
+            session_db = object.__getattribute__(self, "_session_db")
+            owns_session_db = object.__getattribute__(self, "_owns_session_db")
+            try:
+                close = getattr(agent, "close", None)
+                if close is not None:
+                    close()
+            finally:
+                if owns_session_db and session_db is not None:
+                    session_db.close()
+
+
+def _agent_can_host_close_state(agent) -> bool:
+    """Return whether close-once state can be stamped directly on ``agent``."""
     try:
-        original_close = agent.close
-        agent_type = type(agent)
-        close_lock = threading.RLock()
-        closed = False
-
-        def _close_once(_self):
-            nonlocal closed
-            with close_lock:
-                if closed:
-                    return
-                closed = True
-                original_close()
-
-        wrapper_type = type(
-            f"_TuiCloseOnce_{agent_type.__name__}",
-            (agent_type,),
-            {
-                "__module__": agent_type.__module__,
-                "__slots__": (),
-                "_tui_close_once_marker": _AGENT_CLOSE_WRAPPER_MARKER,
-                "close": _close_once,
-            },
-        )
-        agent.__class__ = wrapper_type
-    except Exception:
-        return False
-    return True
-
-
-def _close_agent_once(agent) -> None:
-    """Close an agent at most once across teardown/build races."""
-    if agent is None or not hasattr(agent, "close"):
-        return
-    if (
-        getattr(type(agent), "_tui_close_once_marker", None)
-        is _AGENT_CLOSE_WRAPPER_MARKER
-    ):
-        # The stable wrapper owns the close lock/state. Calling it here keeps
-        # concurrent callers serialized through the wrapper without rebuilding
-        # any global tombstone.
-        agent.close()
-        return
-    fallback_state = None
-    use_wrapper = False
-    # Install the per-agent lock under the module guard. Mutable agents get a
-    # close stamp on the object itself, so churn does not consume the bounded
-    # fallback registry (and therefore cannot evict an earlier close state).
-    with _agent_close_registry_lock:
-        ident = id(agent)
         lock = getattr(agent, "_tui_close_lock", None)
         if lock is None:
             lock = threading.Lock()
-            try:
-                agent._tui_close_lock = lock
-            except Exception:
-                existing = _agent_close_fallback.get(ident)
-                if existing is not None and existing[0] is agent:
-                    _, lock, _called = existing
-                    fallback_state = ident
-                else:
-                    if len(_agent_close_fallback) >= _AGENT_CLOSE_FALLBACK_MAX:
-                        _agent_close_fallback.popitem(last=False)
-                    _agent_close_fallback[ident] = (agent, lock, False)
-                    fallback_state = ident
-        else:
-            existing = _agent_close_fallback.get(ident)
-            if existing is not None and existing[0] is agent:
-                _, lock, _called = existing
-                fallback_state = ident
-    with lock:
-        if fallback_state is not None:
-            with _agent_close_registry_lock:
-                state = _agent_close_fallback.get(fallback_state)
-                if state is None or state[0] is not agent or state[2]:
-                    return
-                _agent_close_fallback[fallback_state] = (agent, lock, True)
-            use_wrapper = True
-        else:
-            # `_tui_closed` is intentionally a separate stamp from the lock so
-            # the no-weakref slots agents used by the gateway can carry state
-            # without a strong-reference registry entry. Keep accepting the
-            # older stamp for agents that crossed a mixed-version teardown.
+            setattr(agent, "_tui_close_lock", lock)
+        if getattr(agent, "_tui_close_lock", None) is not lock:
+            return False
+        if not hasattr(agent, "_tui_closed"):
+            setattr(agent, "_tui_closed", False)
+        sentinel = object()
+        return getattr(agent, "_tui_closed", sentinel) is not sentinel
+    except Exception:
+        return False
+
+
+def _agent_supports_weakref(agent) -> bool:
+    try:
+        weakref.ref(agent)
+        return True
+    except TypeError:
+        return False
+
+
+def _normalize_agent(agent, *, session_db=None, owns_session_db: bool = False):
+    """Return an agent with a bounded, exact lifecycle owner."""
+    if isinstance(agent, _ManagedAgentProxy):
+        return agent
+    if _agent_can_host_close_state(agent) or _agent_supports_weakref(agent):
+        return agent
+    return _ManagedAgentProxy(
+        agent,
+        session_db=session_db if owns_session_db else None,
+        owns_session_db=owns_session_db,
+    )
+
+
+def _weak_close_state(agent):
+    ident = id(agent)
+
+    def _on_collect(ref, *, _ident=ident):
+        with _agent_close_registry_lock:
+            state = _agent_close_weak_registry.get(_ident)
+            if state is not None and state[0] is ref:
+                _agent_close_weak_registry.pop(_ident, None)
+
+    with _agent_close_registry_lock:
+        state = _agent_close_weak_registry.get(ident)
+        if state is not None and state[0]() is agent:
+            return ident, state[0], state[1]
+        ref = weakref.ref(agent, _on_collect)
+        lock = threading.Lock()
+        _agent_close_weak_registry[ident] = (ref, lock, False)
+        return ident, ref, lock
+
+
+def _close_agent_once(agent) -> None:
+    """Close a managed/mutable/weakref agent at most once.
+
+    An arbitrary immutable, non-weakrefable object passed directly is not safe
+    to identify across id reuse.  Internal callers never do that because
+    ``_make_agent`` normalizes such objects; direct callers fail closed.
+    """
+    if agent is None or not hasattr(agent, "close"):
+        return
+    if isinstance(agent, _ManagedAgentProxy):
+        agent.close()
+        return
+
+    if _agent_can_host_close_state(agent):
+        lock = agent._tui_close_lock
+        with lock:
             if getattr(agent, "_tui_closed", False) or getattr(
                 agent, "_tui_close_called", False
             ):
                 return
-            try:
-                agent._tui_closed = True
-            except Exception:
-                # Some objects expose a lock slot but no writable close stamp.
-                # Promote them to the bounded identity fallback while holding
-                # their per-agent lock; subsequent callers discover this entry
-                # under the module guard before attempting the stamp path.
-                ident = id(agent)
-                with _agent_close_registry_lock:
-                    state = _agent_close_fallback.get(ident)
-                    if state is not None:
-                        if state[0] is not agent or state[2]:
-                            return
-                    else:
-                        if len(_agent_close_fallback) >= _AGENT_CLOSE_FALLBACK_MAX:
-                            _agent_close_fallback.popitem(last=False)
-                        _agent_close_fallback[ident] = (agent, lock, False)
-                    _agent_close_fallback[ident] = (agent, lock, True)
-                use_wrapper = True
-        if use_wrapper and _install_agent_close_wrapper(agent):
-            with _agent_close_registry_lock:
-                state = _agent_close_fallback.get(id(agent))
-                if state is not None and state[0] is agent:
-                    _agent_close_fallback.pop(id(agent), None)
-        # The module guard is released before close/I/O; only the per-agent
-        # lock remains held so concurrent teardown calls serialize.
+            agent._tui_closed = True
+            agent.close()
+        return
+
+    if not _agent_supports_weakref(agent):
+        raise RuntimeError(
+            "unmanaged agent cannot provide exact close-once identity; "
+            "use _make_agent or _ManagedAgentProxy"
+        )
+
+    ident, ref, lock = _weak_close_state(agent)
+    with lock:
+        with _agent_close_registry_lock:
+            state = _agent_close_weak_registry.get(ident)
+            if state is None or state[0] is not ref or ref() is not agent:
+                return
+            if state[2]:
+                return
+            _agent_close_weak_registry[ident] = (ref, lock, True)
         agent.close()
 
 
@@ -5563,23 +5588,30 @@ def _make_agent(
 
     synthetic = maybe_build_synthetic_agent(session_id or key, model_override)
     if synthetic is not None:
-        if session_db is not None and owns_session_db and hasattr(synthetic, "close"):
+        if session_db is not None and owns_session_db:
             # The synthetic seam bypasses AIAgent's normal ownership wiring.
-            # Wrap its no-op close so a profile DB transferred to the agent is
-            # still closed deterministically by the normal lifecycle path.
+            # Prefer to transfer the DB into the synthetic object when it can
+            # host the wrapper; otherwise the managed proxy owns both close
+            # operations without exposing a strong global tombstone.
             try:
-                setattr(synthetic, "_session_db", session_db)
-                setattr(synthetic, "_owns_session_db", True)
                 original_close = synthetic.close
+
                 def _close_synthetic_with_db():
                     try:
                         original_close()
                     finally:
                         session_db.close()
-                synthetic.close = _close_synthetic_with_db
+
+                setattr(synthetic, "_session_db", session_db)
+                setattr(synthetic, "_owns_session_db", True)
+                setattr(synthetic, "close", _close_synthetic_with_db)
             except Exception:
-                pass
-        return synthetic
+                return _ManagedAgentProxy(
+                    synthetic,
+                    session_db=session_db,
+                    owns_session_db=True,
+                )
+        return _normalize_agent(synthetic)
 
     from run_agent import AIAgent
 
@@ -5697,7 +5729,7 @@ def _make_agent(
                 raise RuntimeError("Auth fallback resolved without a model")
             model = resolution.selected_model
     _pr = _load_provider_routing()
-    return AIAgent(
+    return _normalize_agent(AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
         provider=runtime.get("provider"),
@@ -5744,7 +5776,7 @@ def _make_agent(
         skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         fallback_model=_load_fallback_model(),
         **_agent_cbs(sid),
-    )
+    ))
 
 
 def _discard_partial_initialized_session(
@@ -5815,6 +5847,7 @@ def _init_session(
     source: str | None = None,
     *,
     profile_home: Path | str | None = None,
+    init_owner_token=None,
 ):
     now = time.time()
     normalized_profile_home = str(profile_home) if profile_home else None
@@ -5836,6 +5869,7 @@ def _init_session(
             "cols": cols,
             "profile_home": normalized_profile_home,
             "session_db": session_db,
+            "init_owner_token": init_owner_token,
             "slash_worker": None,
             "show_reasoning": _load_show_reasoning(),
             "source": _resolve_session_source(source),
@@ -5918,6 +5952,14 @@ def _init_session(
     _notify_session_boundary("on_session_reset", key, _session_source(_sessions.get(sid, {})))
     _emit("session.info", sid, _session_info(agent, _sessions.get(sid, {})))
     _schedule_mcp_late_refresh(sid, agent)
+    if init_owner_token is not None:
+        with _sessions_lock:
+            current = _sessions.get(sid)
+            if (
+                isinstance(current, dict)
+                and current.get("init_owner_token") is init_owner_token
+            ):
+                current.pop("init_owner_token", None)
 
 
 def _new_session_key() -> str:
