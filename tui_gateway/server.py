@@ -664,6 +664,8 @@ class _ManagedAgentProxy:
         return object.__getattribute__(self, "_agent")(*args, **kwargs)
 
     def close(self) -> None:
+        if object.__getattribute__(self, "_closed"):
+            return
         with object.__getattribute__(self, "_close_lock"):
             if object.__getattribute__(self, "_closed"):
                 return
@@ -680,21 +682,33 @@ class _ManagedAgentProxy:
                     session_db.close()
 
 
+def _agent_close_lock(agent):
+    """Atomically acquire/install the object-owned close lock, if possible."""
+    try:
+        # Lock installation and the decision to use object-owned state must be
+        # one atomic operation.  Without this guard two virgin mutable agents
+        # can each install a different lock; one caller can then fall through
+        # to weak state while the other closes under the stamped lock.
+        with _agent_close_registry_lock:
+            lock = getattr(agent, "_tui_close_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                setattr(agent, "_tui_close_lock", lock)
+            if getattr(agent, "_tui_close_lock", None) is not lock:
+                return None
+            if not hasattr(agent, "_tui_closed"):
+                setattr(agent, "_tui_closed", False)
+            sentinel = object()
+            if getattr(agent, "_tui_closed", sentinel) is sentinel:
+                return None
+            return lock
+    except Exception:
+        return None
+
+
 def _agent_can_host_close_state(agent) -> bool:
     """Return whether close-once state can be stamped directly on ``agent``."""
-    try:
-        lock = getattr(agent, "_tui_close_lock", None)
-        if lock is None:
-            lock = threading.Lock()
-            setattr(agent, "_tui_close_lock", lock)
-        if getattr(agent, "_tui_close_lock", None) is not lock:
-            return False
-        if not hasattr(agent, "_tui_closed"):
-            setattr(agent, "_tui_closed", False)
-        sentinel = object()
-        return getattr(agent, "_tui_closed", sentinel) is not sentinel
-    except Exception:
-        return False
+    return _agent_close_lock(agent) is not None
 
 
 def _agent_supports_weakref(agent) -> bool:
@@ -709,7 +723,7 @@ def _normalize_agent(agent, *, session_db=None, owns_session_db: bool = False):
     """Return an agent with a bounded, exact lifecycle owner."""
     if isinstance(agent, _ManagedAgentProxy):
         return agent
-    if _agent_can_host_close_state(agent) or _agent_supports_weakref(agent):
+    if _agent_close_lock(agent) is not None or _agent_supports_weakref(agent):
         return agent
     return _ManagedAgentProxy(
         agent,
@@ -750,8 +764,19 @@ def _close_agent_once(agent) -> None:
         agent.close()
         return
 
-    if _agent_can_host_close_state(agent):
-        lock = agent._tui_close_lock
+    # The close callback can synchronously re-enter teardown.  Check the
+    # marker before acquiring the non-reentrant object lock; the guarded check
+    # below still arbitrates ordinary concurrent callers.
+    try:
+        if getattr(agent, "_tui_closed", False) or getattr(
+            agent, "_tui_close_called", False
+        ):
+            return
+    except Exception:
+        pass
+
+    lock = _agent_close_lock(agent)
+    if lock is not None:
         with lock:
             if getattr(agent, "_tui_closed", False) or getattr(
                 agent, "_tui_close_called", False
@@ -5284,6 +5309,32 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     session_db = None
     new_worker = None
     new_stop = None
+    new_thread = None
+    candidate_published = False
+    old_resources_cleaned = False
+
+    def _cleanup_old_reset_resources() -> None:
+        """Release the pre-reset generation exactly once, outside session locks."""
+        nonlocal old_resources_cleaned
+        if old_resources_cleaned:
+            return
+        old_resources_cleaned = True
+        if old_stop is not None:
+            old_stop.set()
+        if old_thread is not None and old_thread is not threading.current_thread():
+            with contextlib.suppress(Exception):
+                old_thread.join(timeout=1.0)
+        if old_worker is not None and old_worker is not new_worker:
+            with contextlib.suppress(Exception):
+                old_worker.close()
+        if old_agent is not None and old_agent is not new_agent:
+            try:
+                old_agent._end_session_on_close = False
+            except Exception:
+                pass
+            with contextlib.suppress(Exception):
+                _close_agent_once(old_agent)
+
     candidate = dict(session)
     candidate["agent"] = None
     candidate["session_db"] = None
@@ -5363,8 +5414,10 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
                 "_notif_stop",
             ):
                 session[name] = candidate[name]
+            session.pop("_notif_thread", None)
             if "_notif_thread" in candidate:
                 session["_notif_thread"] = candidate["_notif_thread"]
+        candidate_published = True
 
         with _sessions_lock:
             if _sessions.get(sid) is not session or session.get("agent") is not new_agent:
@@ -5375,46 +5428,42 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
             if _sessions.get(sid) is not session or session.get("agent") is not new_agent:
                 raise RuntimeError("session closed or replaced during reset")
             session["slash_worker"] = new_worker
-        new_stop = _start_notification_poller(
-            sid, session, db=session_db if session_db is not None else None
-        )
+        try:
+            new_stop = _start_notification_poller(
+                sid, session, db=session_db if session_db is not None else None
+            )
+        finally:
+            new_thread = session.get("_notif_thread")
         candidate["_notif_stop"] = new_stop
+        candidate["_notif_thread"] = new_thread
         with _sessions_lock:
             if _sessions.get(sid) is not session or session.get("agent") is not new_agent:
                 raise RuntimeError("session closed or replaced during reset")
             session["_notif_stop"] = new_stop
 
-        if old_stop is not None:
-            old_stop.set()
-        if old_thread is not None and old_thread is not threading.current_thread():
-            with contextlib.suppress(Exception):
-                old_thread.join(timeout=1.0)
-        if old_worker is not None and old_worker is not new_worker:
-            with contextlib.suppress(Exception):
-                old_worker.close()
-        if old_agent is not None and old_agent is not new_agent:
-            try:
-                old_agent._end_session_on_close = False
-            except Exception:
-                pass
-            with contextlib.suppress(Exception):
-                _close_agent_once(old_agent)
+        _cleanup_old_reset_resources()
         with contextlib.suppress(Exception):
             _notify_session_boundary("on_session_reset", key, source)
         with contextlib.suppress(Exception):
             _emit("session.info", sid, info)
         return info
     except Exception:
+        if new_stop is None and candidate_published:
+            new_stop = session.get("_notif_stop")
         if new_stop is not None:
             with contextlib.suppress(Exception):
                 new_stop.set()
-        new_thread = candidate.get("_notif_thread")
+        if new_thread is None and candidate_published:
+            new_thread = session.get("_notif_thread")
         if new_thread is not None and new_thread is not threading.current_thread():
             with contextlib.suppress(Exception):
                 new_thread.join(timeout=1.0)
-        if new_worker is not None:
+        candidate_worker = new_worker
+        if candidate_worker is None and candidate_published:
+            candidate_worker = session.get("slash_worker")
+        if candidate_worker is not None and candidate_worker is not old_worker:
             with contextlib.suppress(Exception):
-                new_worker.close()
+                candidate_worker.close()
         if new_agent is not None:
             try:
                 new_agent._end_session_on_close = False
@@ -5425,6 +5474,8 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
         elif session_db is not None:
             with contextlib.suppress(Exception):
                 session_db.close()
+        if candidate_published:
+            _cleanup_old_reset_resources()
         raise
     finally:
         if context_tokens:
@@ -6835,14 +6886,15 @@ def _(rid, params: dict) -> dict:
     profile_home = _profile_home(profile)
     try:
         with _ResumeSessionDBLease(profile_home) as db_lease:
-            return _session_resume_impl(rid, params, db_lease)
+            return _session_resume_impl(rid, params, db_lease, cols=cols)
     except Exception as exc:
         return _err(rid, 5000, f"resume failed: {exc}")
 
 
-def _session_resume_impl(rid, params: dict, db_lease: _ResumeSessionDBLease) -> dict:
+def _session_resume_impl(
+    rid, params: dict, db_lease: _ResumeSessionDBLease, *, cols: int = 80
+) -> dict:
     target = params.get("session_id", "")
-    cols = int(params.get("cols", 80)) if isinstance(params.get("cols"), (int, str)) else 80
     profile = (params.get("profile") or "").strip() or None
     profile_home = _profile_home(profile)
     db = db_lease.db
