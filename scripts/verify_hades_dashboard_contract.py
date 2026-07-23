@@ -36,126 +36,91 @@ _POST_SYNC_MARKER = "scripts/post-sync-verify.py"
 class _ApiContract:
     name: str
     verb: str
-    route_pattern: str
+    route_expression: str
     route_display: str
-
-
-def _quoted_route_pattern(route: str) -> str:
-    """Match one complete quoted/backticked static route expression."""
-    escaped = re.escape(route)
-    return rf"(?P<quote>[\"'`]){escaped}(?P=quote)"
-
-
-def _static_route_pattern(route: str, *, allow_query_template: bool = False) -> str:
-    """Build a static route pattern, including known query-template forms."""
-    exact = _quoted_route_pattern(route)
-    if not allow_query_template:
-        return exact
-    # A few read methods append a query built by a separate template
-    # interpolation.  The endpoint path itself must still end exactly at the
-    # interpolation boundary; literal suffixes such as ``-v2``, ``/extra``, or
-    # ``?unexpected=1`` do not match this alternative.
-    return rf"(?:{exact}|`{re.escape(route)}\$\{{)"
-
-
-_ENCODED_PARAMETER = (
-    r"\$\{\s*encodeURIComponent\s*\(\s*"
-    r"[A-Za-z_$][\w$]*\s*\)\s*\}"
-)
-
-
-def _dynamic_route_pattern(route_prefix: str, suffix: str = "") -> str:
-    """Match an exact backticked encoded-parameter route template."""
-    return f"`{re.escape(route_prefix)}{_ENCODED_PARAMETER}{re.escape(suffix)}`"
-
-
-def _audit_route_pattern() -> str:
-    """Match the audit endpoint's required literal query prefix.
-
-    The implementation appends an optional verdict interpolation after the
-    required ``limit`` parameter.  Keep that known form while rejecting a
-    changed endpoint path before it.
-    """
-    return r"(?:`/api/autonomy/audit\?limit=\$\{\s*limit\s*\}|['\"]/api/autonomy/audit['\"])"
+    plain_static_route: bool = False
 
 
 _API_CONTRACTS = (
     _ApiContract(
         "getAutonomyStatus",
         "GET",
-        _static_route_pattern("/api/autonomy/status"),
         "/api/autonomy/status",
+        "/api/autonomy/status",
+        True,
     ),
     _ApiContract(
         "getAutonomyRules",
         "GET",
-        _static_route_pattern("/api/autonomy/rules", allow_query_template=True),
+        '`/api/autonomy/rules${qs ? `?${qs}` : ""}`',
         "/api/autonomy/rules",
     ),
     _ApiContract(
         "explainAutonomyRule",
         "GET",
-        _dynamic_route_pattern("/api/autonomy/rules/"),
+        "`/api/autonomy/rules/${encodeURIComponent(ruleId)}`",
         "/api/autonomy/rules/${encodeURIComponent(ruleId)}",
     ),
     _ApiContract(
         "previewAutonomyChange",
         "POST",
-        _static_route_pattern("/api/autonomy/preview"),
         "/api/autonomy/preview",
+        "/api/autonomy/preview",
+        True,
     ),
     _ApiContract(
         "applyAutonomyPreview",
         "POST",
-        _static_route_pattern("/api/autonomy/apply"),
         "/api/autonomy/apply",
+        "/api/autonomy/apply",
+        True,
     ),
     _ApiContract(
         "acceptAutonomySuggestion",
         "POST",
-        _dynamic_route_pattern("/api/autonomy/suggestions/", "/accept"),
+        "`/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/accept`",
         "/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/accept",
     ),
     _ApiContract(
         "rejectAutonomySuggestion",
         "POST",
-        _dynamic_route_pattern("/api/autonomy/suggestions/", "/reject"),
+        "`/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/reject`",
         "/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/reject",
     ),
     _ApiContract(
         "getAutonomyMandates",
         "GET",
-        _static_route_pattern("/api/autonomy/mandates", allow_query_template=True),
+        '`/api/autonomy/mandates${state ? `?state=${encodeURIComponent(state)}` : ""}`',
         "/api/autonomy/mandates",
     ),
     _ApiContract(
         "revokeAutonomyMandate",
         "POST",
-        _dynamic_route_pattern("/api/autonomy/mandates/", "/revoke"),
+        "`/api/autonomy/mandates/${encodeURIComponent(ruleId)}/revoke`",
         "/api/autonomy/mandates/${encodeURIComponent(ruleId)}/revoke",
     ),
     _ApiContract(
         "getAutonomyAudit",
         "GET",
-        _audit_route_pattern(),
+        '`/api/autonomy/audit?limit=${limit}${verdict ? `&verdict=${encodeURIComponent(verdict)}` : ""}`',
         "/api/autonomy/audit",
     ),
     _ApiContract(
         "getReceipts",
         "GET",
-        _static_route_pattern("/api/receipts", allow_query_template=True),
+        '`/api/receipts${qs ? `?${qs}` : ""}`',
         "/api/receipts",
     ),
     _ApiContract(
         "getReceipt",
         "GET",
-        _dynamic_route_pattern("/api/receipts/"),
+        "`/api/receipts/${encodeURIComponent(receiptId)}`",
         "/api/receipts/${encodeURIComponent(receiptId)}",
     ),
     _ApiContract(
         "getReceiptObservations",
         "GET",
-        _dynamic_route_pattern("/api/receipts/", "/observations"),
+        "`/api/receipts/${encodeURIComponent(receiptId)}/observations`",
         "/api/receipts/${encodeURIComponent(receiptId)}/observations",
     ),
 )
@@ -334,6 +299,334 @@ def _strip_ts_comments(text: str) -> str:
     return "".join(chars)
 
 
+def _skip_ts_quoted(text: str, start: int, quote: str) -> int | None:
+    """Return the index after a quoted string, or ``None`` if unterminated."""
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            return index + 1
+        if char in ("\n", "\r"):
+            return None
+        index += 1
+    return None
+
+
+def _skip_ts_comment(text: str, start: int) -> int | None:
+    """Return the index after a comment beginning at ``start``."""
+    if text.startswith("//", start):
+        newline = text.find("\n", start + 2)
+        return len(text) if newline < 0 else newline
+    if text.startswith("/*", start):
+        closing = text.find("*/", start + 2)
+        return None if closing < 0 else closing + 2
+    return None
+
+
+def _skip_ts_template(text: str, start: int) -> int | None:
+    """Skip a template literal, including nested ``${...}`` expressions."""
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "`":
+            return index + 1
+        if char == "$" and index + 1 < len(text) and text[index + 1] == "{":
+            end = _skip_ts_balanced_group(text, index + 1)
+            if end is None:
+                return None
+            index = end
+            continue
+        index += 1
+    return None
+
+
+def _skip_ts_balanced_group(text: str, start: int) -> int | None:
+    """Skip one balanced ``()``, ``{}``, or ``[]`` group lexically."""
+    opening = text[start] if start < len(text) else ""
+    closing_for = {"(": ")", "{": "}", "[": "]"}
+    if opening not in closing_for:
+        return None
+    stack = [opening]
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char in ("'", '"'):
+            end = _skip_ts_quoted(text, index, char)
+            if end is None:
+                return None
+            index = end
+            continue
+        if char == "`":
+            end = _skip_ts_template(text, index)
+            if end is None:
+                return None
+            index = end
+            continue
+        if char in "([{":
+            stack.append(char)
+            index += 1
+            continue
+        if char in ")]}":
+            if not stack or closing_for[stack[-1]] != char:
+                return None
+            stack.pop()
+            index += 1
+            if not stack:
+                return index
+            continue
+        if char == "/" and index + 1 < len(text) and text[index + 1] in "/*":
+            end = _skip_ts_comment(text, index)
+            if end is None:
+                return None
+            index = end
+            continue
+        index += 1
+    return None
+
+
+def _split_top_level(text: str, delimiter: str = ",") -> list[str] | None:
+    """Split text on delimiters outside balanced groups and literals."""
+    pieces: list[str] = []
+    start = 0
+    stack: list[str] = []
+    closing_for = {"(": ")", "{": "}", "[": "]"}
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in ("'", '"'):
+            end = _skip_ts_quoted(text, index, char)
+            if end is None:
+                return None
+            index = end
+            continue
+        if char == "`":
+            end = _skip_ts_template(text, index)
+            if end is None:
+                return None
+            index = end
+            continue
+        if char in "([{":
+            stack.append(char)
+        elif char in ")]}":
+            if not stack or closing_for[stack[-1]] != char:
+                return None
+            stack.pop()
+        elif char == delimiter and not stack:
+            pieces.append(text[start:index].strip())
+            start = index + 1
+        index += 1
+    if stack:
+        return None
+    pieces.append(text[start:].strip())
+    return pieces
+
+
+def _extract_call_arguments(text: str, opening: int) -> tuple[str, ...] | None:
+    """Extract one call's top-level comma-separated argument expressions."""
+    inner_end = _skip_ts_balanced_group(text, opening)
+    if inner_end is None:
+        return None
+    inner = text[opening + 1 : inner_end - 1]
+    if not inner.strip():
+        return ()
+    pieces = _split_top_level(inner)
+    return None if pieces is None else tuple(pieces)
+
+
+def _skip_ts_type_arguments(text: str, start: int) -> int | None:
+    """Skip a simple generic type argument list before a call parenthesis."""
+    if start >= len(text) or text[start] != "<":
+        return start
+    depth = 1
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char in ("'", '"'):
+            end = _skip_ts_quoted(text, index, char)
+            if end is None:
+                return None
+            index = end
+            continue
+        if char == "`":
+            end = _skip_ts_template(text, index)
+            if end is None:
+                return None
+            index = end
+            continue
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
+@dataclass(frozen=True)
+class _TransportCall:
+    helper: str
+    arguments: tuple[str, ...]
+
+
+def _transport_calls(text: str) -> tuple[list[_TransportCall], bool]:
+    """Extract fetchJSON/apiGet calls, reporting malformed lexical calls."""
+    calls: list[_TransportCall] = []
+    malformed = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in ("'", '"'):
+            end = _skip_ts_quoted(text, index, char)
+            if end is None:
+                return calls, True
+            index = end
+            continue
+        if char == "`":
+            end = _skip_ts_template(text, index)
+            if end is None:
+                return calls, True
+            index = end
+            continue
+        if char.isalpha() or char in "_$":
+            end = index + 1
+            while end < len(text) and (text[end].isalnum() or text[end] in "_$"):
+                end += 1
+            word = text[index:end]
+            if word in {"fetchJSON", "apiGet"}:
+                cursor = end
+                while cursor < len(text) and text[cursor].isspace():
+                    cursor += 1
+                if cursor < len(text) and text[cursor] == "<":
+                    cursor = _skip_ts_type_arguments(text, cursor)
+                    if cursor is None:
+                        malformed = True
+                        index = end
+                        continue
+                    while cursor < len(text) and text[cursor].isspace():
+                        cursor += 1
+                if cursor < len(text) and text[cursor] == "(":
+                    arguments = _extract_call_arguments(text, cursor)
+                    if arguments is None:
+                        malformed = True
+                        index = cursor + 1
+                        continue
+                    calls.append(_TransportCall(word, arguments))
+            index = end
+            continue
+        index += 1
+    return calls, malformed
+
+
+def _normalize_ts_expression(expression: str) -> str:
+    """Remove whitespace outside quoted/template literal text."""
+    normalized: list[str] = []
+    index = 0
+    while index < len(expression):
+        char = expression[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char in ("'", '"'):
+            end = _skip_ts_quoted(expression, index, char)
+            if end is None:
+                normalized.append(expression[index:])
+                break
+            normalized.append(expression[index:end])
+            index = end
+            continue
+        if char == "`":
+            end = _skip_ts_template(expression, index)
+            if end is None:
+                normalized.append(expression[index:])
+                break
+            normalized.append(_normalize_ts_template(expression, index, end))
+            index = end
+            continue
+        normalized.append(char)
+        index += 1
+    return "".join(normalized)
+
+
+def _normalize_ts_template(text: str, start: int, end: int) -> str:
+    """Normalize whitespace in template interpolations, not literal chunks."""
+    normalized: list[str] = ["`"]
+    index = start + 1
+    while index < end - 1:
+        char = text[index]
+        if char == "\\":
+            normalized.append(text[index : min(index + 2, end - 1)])
+            index += 2
+            continue
+        if char == "$" and index + 1 < end - 1 and text[index + 1] == "{":
+            interpolation_end = _skip_ts_balanced_group(text, index + 1)
+            if interpolation_end is None or interpolation_end > end:
+                normalized.append(text[index : end - 1])
+                break
+            normalized.append("${")
+            normalized.append(
+                _normalize_ts_expression(text[index + 2 : interpolation_end - 1])
+            )
+            normalized.append("}")
+            index = interpolation_end
+            continue
+        normalized.append(char)
+        index += 1
+    normalized.append("`")
+    return "".join(normalized)
+
+
+def _route_matches(expression: str, contract: _ApiContract) -> bool:
+    actual = _normalize_ts_expression(expression)
+    if contract.plain_static_route:
+        return actual in {
+            _normalize_ts_expression(f'"{contract.route_expression}"'),
+            _normalize_ts_expression(f"'{contract.route_expression}'"),
+            _normalize_ts_expression(f"`{contract.route_expression}`"),
+        }
+    return actual == _normalize_ts_expression(contract.route_expression)
+
+
+def _options_method(options: str) -> str | None:
+    """Return a live top-level ``method`` property from a request object."""
+    stripped = options.strip()
+    if not stripped.startswith("{"):
+        return None
+    end = _skip_ts_balanced_group(stripped, 0)
+    if end is None or stripped[end:].strip():
+        return None
+    fields = _split_top_level(stripped[1 : end - 1])
+    if fields is None:
+        return None
+    property_pattern = re.compile(
+        r"^\s*(?:method|['\"]method['\"])\s*:\s*(['\"])(?P<verb>[A-Za-z]+)\1\s*$"
+    )
+    for field in fields:
+        match = property_pattern.match(field)
+        if match is not None:
+            return match.group("verb")
+    return None
+
+
+def _get_call_is_valid(call: _TransportCall) -> bool:
+    """GET allows no explicit non-GET method on the matching call."""
+    if len(call.arguments) < 2:
+        return True
+    method = _options_method(call.arguments[1])
+    return method is None or method.upper() == "GET"
+
+
+def _post_call_is_valid(call: _TransportCall) -> bool:
+    """POST requires a second argument with a live exact POST property."""
+    return len(call.arguments) >= 2 and _options_method(call.arguments[1]) == "POST"
+
+
 def _check_api(repo_root: Path, failures: list[str]) -> None:
     path = repo_root / "web/src/lib/api.ts"
     text = _read_text(
@@ -367,39 +660,34 @@ def _check_api(repo_root: Path, failures: list[str]) -> None:
         start, end = spans[0]
         method_body = _strip_ts_comments(body[start:end])
 
-        if contract.verb == "GET":
-            if not re.search(r"\b(?:apiGet|fetchJSON)\s*(?:<[^>\n]+>)?\s*\(", method_body):
-                failures.append(
-                    f"api: method {contract.name} expected GET via apiGet/fetchJSON helper"
-                )
-            for method_match in re.finditer(
-                r"\bmethod\s*:\s*[\"'](?P<verb>[A-Za-z]+)[\"']", method_body
-            ):
-                if method_match.group("verb").upper() != "GET":
-                    failures.append(
-                        f"api: method {contract.name} has {method_match.group('verb').upper()} verb; expected GET"
-                    )
-                    break
-        else:
-            if not re.search(r"\bfetch(?:JSON)?\s*(?:<[^>\n]+>)?\s*\(", method_body):
-                failures.append(
-                    f"api: method {contract.name} expected fetch/fetchJSON with POST"
-                )
-            post_match = re.search(
-                r"\bmethod\s*:\s*[\"'](?P<verb>[A-Za-z]+)[\"']", method_body
+        calls, malformed = _transport_calls(method_body)
+        if malformed:
+            failures.append(
+                f"api: method {contract.name} has malformed or unbalanced transport call"
             )
-            if post_match is None:
-                failures.append(
-                    f"api: method {contract.name} missing POST HTTP verb (expected method: POST)"
-                )
-            elif post_match.group("verb").upper() != "POST":
-                failures.append(
-                    f"api: method {contract.name} has {post_match.group('verb').upper()} verb; expected POST"
-                )
+        if not calls:
+            failures.append(
+                f"api: method {contract.name} expected apiGet/fetchJSON transport call"
+            )
 
-        if re.search(contract.route_pattern, method_body) is None:
+        matching = [
+            call for call in calls if call.arguments and _route_matches(call.arguments[0], contract)
+        ]
+        if not matching:
             failures.append(
                 f"api: method {contract.name} missing exact route {contract.route_display}"
+            )
+            continue
+
+        if contract.verb == "GET":
+            if not any(_get_call_is_valid(call) for call in matching):
+                failures.append(
+                    f"api: method {contract.name} expected GET on the matching apiGet/fetchJSON call"
+                )
+        elif not any(_post_call_is_valid(call) for call in matching):
+            failures.append(
+                f"api: method {contract.name} missing POST HTTP verb on the matching call "
+                "(expected method: POST)"
             )
 
 
@@ -441,15 +729,44 @@ def _assignment_to_long_handlers(node: ast.AST) -> ast.Assign | ast.AnnAssign | 
     return None
 
 
-def _string_constants(node: ast.AST | None) -> list[str]:
-    """Collect literal strings from one assignment RHS, including wrappers."""
+def _static_string_values(node: ast.AST | None) -> tuple[list[str] | None, str | None]:
+    """Evaluate the runtime-selected strings in a conservative AST subset."""
     if node is None:
-        return []
-    return [
-        child.value
-        for child in ast.walk(node)
-        if isinstance(child, ast.Constant) and isinstance(child.value, str)
-    ]
+        return None, "missing assignment RHS"
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, str):
+            return [node.value], None
+        return None, f"unsupported literal {node.value!r}"
+    if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+        values: list[str] = []
+        for element in node.elts:
+            nested, reason = _static_string_values(element)
+            if nested is None:
+                return None, reason
+            values.extend(nested)
+        return values, None
+    if isinstance(node, ast.Call):
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in {"frozenset", "set"}
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            return _static_string_values(node.args[0])
+        return None, "unsupported call expression"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        left, left_reason = _static_string_values(node.left)
+        right, right_reason = _static_string_values(node.right)
+        if left is None:
+            return None, left_reason
+        if right is None:
+            return None, right_reason
+        return left + right, None
+    if isinstance(node, ast.IfExp):
+        if not isinstance(node.test, ast.Constant) or not isinstance(node.test.value, bool):
+            return None, "conditional test is not a literal bool"
+        return _static_string_values(node.body if node.test.value else node.orelse)
+    return None, f"unsupported expression {type(node).__name__}"
 
 
 def _check_server(repo_root: Path, failures: list[str]) -> None:
@@ -473,7 +790,7 @@ def _check_server(repo_root: Path, failures: list[str]) -> None:
         return
 
     registrations = {handler: 0 for handler in _REQUIRED_HANDLERS}
-    for node in ast.walk(tree):
+    for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for decorator in node.decorator_list:
@@ -491,7 +808,7 @@ def _check_server(repo_root: Path, failures: list[str]) -> None:
 
     assignments = [
         assignment
-        for node in ast.walk(tree)
+        for node in tree.body
         if (assignment := _assignment_to_long_handlers(node)) is not None
     ]
     if not assignments:
@@ -509,17 +826,55 @@ def _check_server(repo_root: Path, failures: list[str]) -> None:
 
     assignment = assignments[0]
     rhs = assignment.value
-    values = _string_constants(rhs)
-    if not values:
+    values, reason = _static_string_values(rhs)
+    if values is None:
         failures.append(
-            "server: _LONG_HANDLERS assignment RHS has no inspectable string constants"
+            "server: _LONG_HANDLERS assignment RHS is not statically inspectable: "
+            f"{reason or 'unsupported expression'}"
         )
+        return
+    if not values:
+        failures.append("server: _LONG_HANDLERS assignment RHS has no inspectable strings")
     for handler in _REQUIRED_HANDLERS:
         count = values.count(handler)
         if count != 1:
             failures.append(
                 f"server: _LONG_HANDLERS must contain {handler!r} exactly once (found {count})"
             )
+
+
+def _mask_ts_comments_and_strings(text: str) -> str:
+    """Blank comments and all TS string/template contents, retaining newlines."""
+    chars = list(text)
+
+    def blank(start: int, end: int) -> None:
+        for index in range(start, min(end, len(chars))):
+            if chars[index] not in ("\n", "\r"):
+                chars[index] = " "
+
+    index = 0
+    while index < len(chars):
+        char = chars[index]
+        if char == "/" and index + 1 < len(chars) and chars[index + 1] in "/*":
+            end = _skip_ts_comment(text, index)
+            end = len(text) if end is None else end
+            blank(index, end)
+            index = end
+            continue
+        if char in ("'", '"'):
+            end = _skip_ts_quoted(text, index, char)
+            end = len(text) if end is None else end
+            blank(index, end)
+            index = end
+            continue
+        if char == "`":
+            end = _skip_ts_template(text, index)
+            end = len(text) if end is None else end
+            blank(index, end)
+            index = end
+            continue
+        index += 1
+    return "".join(chars)
 
 
 def _check_response_exports(repo_root: Path, failures: list[str]) -> None:
@@ -533,9 +888,10 @@ def _check_response_exports(repo_root: Path, failures: list[str]) -> None:
     )
     if text is None:
         return
+    live_text = _mask_ts_comments_and_strings(text)
     for name in _REQUIRED_RESPONSE_EXPORTS:
         pattern = rf"(?m)^[ \t]*export\s+(?:interface|type)\s+{re.escape(name)}\b"
-        count = len(re.findall(pattern, text))
+        count = len(re.findall(pattern, live_text))
         if count == 0:
             failures.append(f"types: missing response export {name}")
         elif count != 1:
