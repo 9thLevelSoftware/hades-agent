@@ -152,6 +152,7 @@ _session_resume_lock = threading.Lock()
 _agent_close_registry_lock = threading.Lock()
 _agent_close_fallback: OrderedDict[int, tuple[object, threading.Lock, bool]] = OrderedDict()
 _AGENT_CLOSE_FALLBACK_MAX = 256
+_AGENT_CLOSE_WRAPPER_MARKER = object()
 try:
     _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
 except (ValueError, TypeError):
@@ -625,22 +626,74 @@ def _set_agent_close_policy(session: dict | None, agent=None) -> None:
                 pass
 
 
+def _install_agent_close_wrapper(agent) -> bool:
+    """Install an object-owned close-once wrapper for immutable agents.
+
+    A pure-Python slots object may allow neither weak references nor lifecycle
+    attributes.  In that case a bounded global identity table cannot retain
+    close state through arbitrary live-object churn without either evicting a
+    still-live tombstone or retaining objects forever.  A zero-layout dynamic
+    subclass keeps the state on the object itself instead: the subclass closes
+    the original bound method once and then becomes a stable no-op wrapper.
+    Extension/builtin objects that reject ``__class__`` assignment fall back to
+    the bounded identity registry below.
+    """
+    try:
+        original_close = agent.close
+        agent_type = type(agent)
+        close_lock = threading.RLock()
+        closed = False
+
+        def _close_once(_self):
+            nonlocal closed
+            with close_lock:
+                if closed:
+                    return
+                closed = True
+                original_close()
+
+        wrapper_type = type(
+            f"_TuiCloseOnce_{agent_type.__name__}",
+            (agent_type,),
+            {
+                "__module__": agent_type.__module__,
+                "__slots__": (),
+                "_tui_close_once_marker": _AGENT_CLOSE_WRAPPER_MARKER,
+                "close": _close_once,
+            },
+        )
+        agent.__class__ = wrapper_type
+    except Exception:
+        return False
+    return True
+
+
 def _close_agent_once(agent) -> None:
     """Close an agent at most once across teardown/build races."""
     if agent is None or not hasattr(agent, "close"):
         return
+    if (
+        getattr(type(agent), "_tui_close_once_marker", None)
+        is _AGENT_CLOSE_WRAPPER_MARKER
+    ):
+        # The stable wrapper owns the close lock/state. Calling it here keeps
+        # concurrent callers serialized through the wrapper without rebuilding
+        # any global tombstone.
+        agent.close()
+        return
     fallback_state = None
-    # Installing the per-agent lock and looking up the no-__dict__ fallback are
-    # one atomic operation.  A pair of concurrent teardowns must never create
-    # two locks before either can mark the agent closed.
+    use_wrapper = False
+    # Install the per-agent lock under the module guard. Mutable agents get a
+    # close stamp on the object itself, so churn does not consume the bounded
+    # fallback registry (and therefore cannot evict an earlier close state).
     with _agent_close_registry_lock:
+        ident = id(agent)
         lock = getattr(agent, "_tui_close_lock", None)
         if lock is None:
             lock = threading.Lock()
             try:
                 agent._tui_close_lock = lock
             except Exception:
-                ident = id(agent)
                 existing = _agent_close_fallback.get(ident)
                 if existing is not None and existing[0] is agent:
                     _, lock, _called = existing
@@ -650,6 +703,11 @@ def _close_agent_once(agent) -> None:
                         _agent_close_fallback.popitem(last=False)
                     _agent_close_fallback[ident] = (agent, lock, False)
                     fallback_state = ident
+        else:
+            existing = _agent_close_fallback.get(ident)
+            if existing is not None and existing[0] is agent:
+                _, lock, _called = existing
+                fallback_state = ident
     with lock:
         if fallback_state is not None:
             with _agent_close_registry_lock:
@@ -657,15 +715,42 @@ def _close_agent_once(agent) -> None:
                 if state is None or state[0] is not agent or state[2]:
                     return
                 _agent_close_fallback[fallback_state] = (agent, lock, True)
+            use_wrapper = True
         else:
-            if getattr(agent, "_tui_close_called", False):
+            # `_tui_closed` is intentionally a separate stamp from the lock so
+            # the no-weakref slots agents used by the gateway can carry state
+            # without a strong-reference registry entry. Keep accepting the
+            # older stamp for agents that crossed a mixed-version teardown.
+            if getattr(agent, "_tui_closed", False) or getattr(
+                agent, "_tui_close_called", False
+            ):
                 return
             try:
-                agent._tui_close_called = True
+                agent._tui_closed = True
             except Exception:
-                # The fallback entry can only be missing for an object whose
-                # attributes became immutable after registration; fail closed.
-                return
+                # Some objects expose a lock slot but no writable close stamp.
+                # Promote them to the bounded identity fallback while holding
+                # their per-agent lock; subsequent callers discover this entry
+                # under the module guard before attempting the stamp path.
+                ident = id(agent)
+                with _agent_close_registry_lock:
+                    state = _agent_close_fallback.get(ident)
+                    if state is not None:
+                        if state[0] is not agent or state[2]:
+                            return
+                    else:
+                        if len(_agent_close_fallback) >= _AGENT_CLOSE_FALLBACK_MAX:
+                            _agent_close_fallback.popitem(last=False)
+                        _agent_close_fallback[ident] = (agent, lock, False)
+                    _agent_close_fallback[ident] = (agent, lock, True)
+                use_wrapper = True
+        if use_wrapper and _install_agent_close_wrapper(agent):
+            with _agent_close_registry_lock:
+                state = _agent_close_fallback.get(id(agent))
+                if state is not None and state[0] is agent:
+                    _agent_close_fallback.pop(id(agent), None)
+        # The module guard is released before close/I/O; only the per-agent
+        # lock remains held so concurrent teardown calls serialize.
         agent.close()
 
 

@@ -514,16 +514,18 @@ class ComputeHost:
                     reset_transport(token)
             except Exception:
                 # _init_session can publish a record before a worker/notifier/
-                # poller fails. Only clean up a record that still contains our
-                # agent; a reaper may have replaced the slot in the meantime.
+                # poller fails. Snapshot the only record we may own, but fence
+                # the eventual fallback publication with an identity check under
+                # the registry lock. Building the fallback may perform config
+                # I/O, so it deliberately happens outside that critical section.
                 partial = server._sessions.get(sid)
-                owns_partial = bool(
+                owned_partial = partial if (
                     partial is not None
                     and isinstance(partial, dict)
                     and partial.get("agent") is agent
                     and partial.get("session_key") == key
-                )
-                if partial is not None and not owns_partial:
+                ) else None
+                if partial is not None and owned_partial is None:
                     if agent is not None:
                         try:
                             agent._end_session_on_close = False
@@ -540,9 +542,6 @@ class ComputeHost:
                             except Exception:
                                 pass
                     raise RuntimeError("session replaced during session init")
-                server._discard_partial_initialized_session(
-                    sid, partial, close_agent=False
-                )
                 fallback = {
                     "agent": agent,
                     "session_key": key,
@@ -572,7 +571,37 @@ class ComputeHost:
                 }
                 fallback["agent_ready"].set()
                 with server._sessions_lock:
-                    server._sessions[sid] = fallback
+                    published = server._sessions.get(sid) is owned_partial
+                    if published:
+                        server._sessions[sid] = fallback
+                if not published:
+                    # The replacement won while fallback fields were built.
+                    # Clean only our detached partial/resources, never the
+                    # replacement currently occupying the registry slot.
+                    server._discard_partial_initialized_session(
+                        sid, owned_partial, close_agent=False
+                    )
+                    if agent is not None:
+                        try:
+                            agent._end_session_on_close = False
+                        except Exception:
+                            pass
+                        try:
+                            server._close_agent_once(agent)
+                        except Exception:
+                            pass
+                        owned_db = getattr(agent, "_session_db", None)
+                        if session_db is not None and owned_db is not session_db:
+                            try:
+                                session_db.close()
+                            except Exception:
+                                pass
+                    raise RuntimeError("session replaced during session init")
+                # Detach/stop old side machinery only after the fallback is
+                # atomically published, and never while holding the registry lock.
+                server._discard_partial_initialized_session(
+                    sid, owned_partial, close_agent=False
+                )
                 server._register_session_cwd(fallback)
         finally:
             if agent is None and session_db is not None:
