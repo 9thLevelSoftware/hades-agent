@@ -1753,7 +1753,7 @@ class GatewaySlashCommandsMixin:
                                     _persist_model_cfg = {}
                                     _persist_cfg["model"] = _persist_model_cfg
                                 try:
-                                    from hermes_cli.route_identity import should_clear_context_pin
+                                    from hades_cli.route_identity import should_clear_context_pin
 
                                     if should_clear_context_pin(
                                         _persist_model_cfg.get("default")
@@ -2081,7 +2081,7 @@ class GatewaySlashCommandsMixin:
                         model_cfg = {}
                         cfg["model"] = model_cfg
                     try:
-                        from hermes_cli.route_identity import should_clear_context_pin
+                        from hades_cli.route_identity import should_clear_context_pin
 
                         if should_clear_context_pin(
                             model_cfg.get("default") or model_cfg.get("model"),

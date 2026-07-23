@@ -8200,7 +8200,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         """Drop a global context pin when its configured owner changes."""
         try:
             from hermes_cli.config import load_config_readonly
-            from hermes_cli.route_identity import should_clear_context_pin
+            from hades_cli.route_identity import should_clear_context_pin
 
             config = load_config_readonly()
             model_cfg = config.get("model", {}) if isinstance(config, dict) else {}
