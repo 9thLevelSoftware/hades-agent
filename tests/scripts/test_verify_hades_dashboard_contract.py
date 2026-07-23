@@ -155,6 +155,104 @@ def test_api_duplicate_method_is_rejected(tmp_path: Path) -> None:
     assert "duplicate" in failures.lower()
 
 
+def test_static_route_near_miss_is_rejected(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    (root / "web/src/lib/api.ts").write_text(
+        VALID_API.replace("/api/autonomy/status", "/api/autonomy/status-v2", 1),
+        encoding="utf-8",
+    )
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getAutonomyStatus" in failures
+    assert "route" in failures.lower()
+
+
+@pytest.mark.parametrize("comment", ('// "/api/autonomy/status"', '/* "/api/autonomy/status" */'))
+def test_static_route_in_comment_does_not_satisfy_method_contract(
+    tmp_path: Path, comment: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        'getAutonomyStatus: () => apiGet("/api/autonomy/status"),',
+        f'getAutonomyStatus: () => apiGet("/api/autonomy/wrong"), {comment}',
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getAutonomyStatus" in failures
+    assert "route" in failures.lower()
+
+
+@pytest.mark.parametrize(
+    ("method", "route"),
+    [
+        (
+            "acceptAutonomySuggestion",
+            "/api/autonomy/suggestions/${encodeURIComponent(id)}",
+        ),
+        (
+            "rejectAutonomySuggestion",
+            "/api/autonomy/suggestions/${encodeURIComponent(id)}",
+        ),
+        (
+            "revokeAutonomyMandate",
+            "/api/autonomy/mandates/${encodeURIComponent(id)}",
+        ),
+        (
+            "getReceiptObservations",
+            "/api/receipts/${encodeURIComponent(id)}",
+        ),
+    ],
+)
+def test_dynamic_route_without_required_suffix_is_rejected(
+    tmp_path: Path, method: str, route: str
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    api_path = root / "web/src/lib/api.ts"
+    source = api_path.read_text(encoding="utf-8")
+    if method == "acceptAutonomySuggestion":
+        source = source.replace(
+            "/api/autonomy/suggestions/${encodeURIComponent(id)}/accept", route, 1
+        )
+    elif method == "rejectAutonomySuggestion":
+        source = source.replace(
+            "/api/autonomy/suggestions/${encodeURIComponent(id)}/reject", route, 1
+        )
+    elif method == "revokeAutonomyMandate":
+        source = source.replace(
+            "/api/autonomy/mandates/${encodeURIComponent(id)}/revoke", route, 1
+        )
+    else:
+        source = source.replace(
+            "/api/receipts/${encodeURIComponent(id)}/observations", route, 1
+        )
+    api_path.write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert method in failures
+    assert "route" in failures.lower()
+
+
+def test_dynamic_route_in_comment_does_not_satisfy_method_contract(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_API.replace(
+        "`/api/receipts/${encodeURIComponent(id)}/observations`",
+        "`/api/receipts/${encodeURIComponent(id)}/wrong` // "
+        "`/api/receipts/${encodeURIComponent(id)}/observations`",
+        1,
+    )
+    (root / "web/src/lib/api.ts").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "getReceiptObservations" in failures
+    assert "route" in failures.lower()
+
+
 @pytest.mark.parametrize("relative", REQUIRED_RPC_TESTS)
 def test_each_required_rpc_test_file_is_required(tmp_path: Path, relative: str) -> None:
     root, cron_jobs = _make_fixture(tmp_path)
@@ -207,6 +305,64 @@ def test_server_handler_and_long_handler_contracts(
 
     for needle in needles:
         assert needle.lower() in failures.lower()
+
+
+def test_commented_handler_registration_does_not_satisfy_server_contract(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_SERVER.replace(
+        '@method("autonomy.exec")\ndef autonomy_exec',
+        '# @method("autonomy.exec")\ndef autonomy_exec',
+        1,
+    )
+    (root / "tui_gateway/server.py").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "autonomy.exec" in failures
+    assert "registration" in failures.lower()
+
+
+def test_commented_duplicate_handler_registration_does_not_count_as_duplicate(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_SERVER.replace(
+        '@method("receipt.exec")\ndef receipt_exec',
+        '@method("receipt.exec")\n# @method("receipt.exec")\ndef receipt_exec',
+        1,
+    )
+    (root / "tui_gateway/server.py").write_text(source, encoding="utf-8")
+
+    assert verify(root, cron_jobs) == []
+
+
+def test_commented_long_handler_does_not_satisfy_membership(tmp_path: Path) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_SERVER.replace(
+        '        "transaction.exec",',
+        '        # "transaction.exec",',
+        1,
+    )
+    (root / "tui_gateway/server.py").write_text(source, encoding="utf-8")
+
+    failures = _messages(root, cron_jobs)
+
+    assert "transaction.exec" in failures
+    assert "long" in failures.lower()
+
+
+def test_commented_duplicate_long_handler_does_not_count_as_duplicate(
+    tmp_path: Path,
+) -> None:
+    root, cron_jobs = _make_fixture(tmp_path)
+    source = VALID_SERVER.replace(
+        '        "receipt.exec",',
+        '        "receipt.exec",\n        # "receipt.exec",',
+        1,
+    )
+    (root / "tui_gateway/server.py").write_text(source, encoding="utf-8")
+
+    assert verify(root, cron_jobs) == []
 
 
 def test_handler_registration_alone_cannot_satisfy_long_handler_check(tmp_path: Path) -> None:
