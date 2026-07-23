@@ -43,6 +43,8 @@ class _AliasLoader(importlib.abc.Loader):
             module.__spec__ = spec
             module.__loader__ = spec.loader
             module.__package__ = spec.parent
+            module.__file__ = spec.origin
+            module.__cached__ = spec.cached
 
     def _to_real(self, fullname):
         return _REAL + fullname[len(_ALIAS):]
@@ -54,6 +56,9 @@ class _AliasLoader(importlib.abc.Loader):
 
     def get_source(self, fullname):
         return self._real_spec.loader.get_source(self._to_real(fullname))
+
+    def get_filename(self, fullname):
+        return self._real_spec.origin
 
 
 class _AliasFinder(importlib.abc.MetaPathFinder):
