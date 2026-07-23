@@ -269,3 +269,47 @@ def test_storage_failures_map_to_5xxx(rpc_raw, monkeypatch):
     monkeypatch.setattr(autonomy_mod, "run_argv", storage_failure)
     resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
     assert resp["error"]["code"] == 5039
+
+
+@pytest.mark.parametrize(
+    ("exit_name", "error_code", "expected_message"),
+    [
+        (
+            "EXIT_VALIDATION",
+            4034,
+            "autonomy.exec: validation failed (details withheld; run hades autonomy in terminal)",
+        ),
+        (
+            "EXIT_STORAGE",
+            5039,
+            "autonomy.exec: storage failure (details withheld; run hades autonomy doctor in terminal)",
+        ),
+    ],
+)
+def test_cli_failure_payload_error_is_not_forwarded(
+    rpc_raw, monkeypatch, exit_name, error_code, expected_message
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    secret = "autonomy-wire-secret-token"
+    path = "/private/autonomy/secret.yaml"
+    details = f"{secret} {path}\nTraceback (most recent call last)"
+
+    def failed(argv, **kwargs):
+        return autonomy_mod.CliResult(
+            getattr(autonomy_mod, exit_name),
+            f"producer output: {details}",
+            {"ok": False, "error": details, "code": "producer_failure"},
+        )
+
+    monkeypatch.setattr(autonomy_mod, "run_argv", failed)
+    resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
+    error = resp["error"]
+    message = str(error["message"])
+
+    assert error["code"] == error_code
+    assert message == expected_message
+    assert len(message) <= 256
+    assert secret not in str(resp)
+    assert path not in str(resp)
+    assert "Traceback" not in str(resp)

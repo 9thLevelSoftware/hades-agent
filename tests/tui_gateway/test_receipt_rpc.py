@@ -418,3 +418,52 @@ def test_unexpected_failures_map_to_5xxx_and_are_redacted(rpc, monkeypatch):
     assert "secret-token-xyz" not in resp["error"]["message"]
     assert "C:/private" not in resp["error"]["message"]
     assert "Traceback" not in resp["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("exit_name", "error_code", "expected_message"),
+    [
+        (
+            "EXIT_VALIDATION",
+            4005,
+            "receipt.exec: validation failed (details withheld; run hades receipt in terminal)",
+        ),
+        (
+            "EXIT_UNAVAILABLE",
+            5041,
+            "receipt.exec: signing provider unavailable (details withheld; run hades receipt in terminal)",
+        ),
+        (
+            "EXIT_STORAGE",
+            5040,
+            "receipt.exec: storage failure (details withheld; run hades receipt list in terminal)",
+        ),
+    ],
+)
+def test_cli_failure_payload_error_is_not_forwarded(
+    rpc, monkeypatch, exit_name, error_code, expected_message
+):
+    import hades_cli.receipts as receipts_mod
+
+    secret = "receipt-wire-secret-token"
+    path = "/private/receipts/secret.db"
+    details = f"{secret} {path}\nTraceback (most recent call last)"
+
+    def failed(argv, **kwargs):
+        return receipts_mod.ReceiptCommandResult(
+            getattr(receipts_mod, exit_name),
+            f"producer output: {details}",
+            {"ok": False, "error": details, "code": "producer_failure"},
+        )
+
+    monkeypatch.setattr(receipts_mod, "run_argv", failed)
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+    error = resp["error"]
+    message = str(error["message"])
+
+    assert error["code"] == error_code
+    assert message == expected_message
+    assert len(message) <= 256
+    assert secret not in str(resp)
+    assert path not in str(resp)
+    assert "Traceback" not in str(resp)

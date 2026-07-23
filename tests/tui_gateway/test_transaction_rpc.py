@@ -46,14 +46,19 @@ def rpc(server):
     return call
 
 
-def _seed_transaction(tmp_path, transaction_id="tx-1"):
+def _seed_transaction(
+    tmp_path, transaction_id="tx-1", *, target_path=None, content="hello\n"
+):
     plan = tmp_path / "plan.yaml"
     plan.write_text(yaml.dump({
         "transaction": {"title": "rpc test"},
         "nodes": [{
             "node_id": "write", "adapter_id": "workspace.v1",
             "action": "write_file",
-            "args": {"path": "rpc-note.md", "content": "hello\n"},
+            "args": {
+                "path": str(target_path or "rpc-note.md"),
+                "content": content,
+            },
         }],
         "edges": [],
     }), encoding="utf-8")
@@ -271,3 +276,34 @@ def test_transaction_rpc_runs_mutations_in_live_process(
         assert store.get_transaction("tx-live").status == "ready"
     finally:
         db.close()
+
+
+def test_transaction_preview_wire_result_contains_only_safe_node_metadata(
+    rpc, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    secret = "transaction-preview-wire-secret-token"
+    target_path = tmp_path / "preview-target.txt"
+    _seed_transaction(
+        tmp_path,
+        "tx-preview-wire",
+        target_path=target_path,
+        content=secret,
+    )
+
+    result = rpc("transaction.exec", {
+        "session_id": "sid-preview",
+        "argv": ["preview", "tx-preview-wire"],
+    })
+
+    assert result.get("ok") is True, result
+    assert result.get("preview_hash")
+    wire = str(result)
+    assert secret not in wire
+    assert str(tmp_path) not in wire
+    assert result["nodes"]
+    for node in result["nodes"]:
+        assert set(node) == {"node_id", "fidelity", "requires_approval"}
+        assert "summary" not in node
+        assert "before" not in node
+        assert "after" not in node

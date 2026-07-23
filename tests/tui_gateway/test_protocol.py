@@ -2006,7 +2006,9 @@ def test_dispatch_offloads_long_handlers_and_emits_via_stdout(capture):
     assert written == {"jsonrpc": "2.0", "id": "r2", "result": {"output": "hi"}}
 
 
-@pytest.mark.parametrize("method", ["receipt.exec", "transaction.exec"])
+@pytest.mark.parametrize(
+    "method", ["autonomy.exec", "receipt.exec", "transaction.exec"]
+)
 def test_dispatch_routes_native_exec_handlers_to_pool(server, method):
     """Native profile-I/O RPCs must not run on the JSON-RPC reader thread."""
     assert method in server._methods
