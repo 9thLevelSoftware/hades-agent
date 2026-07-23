@@ -117,6 +117,34 @@ VALID_ROLLOUT_PROMPT = (
     "```\n"
 )
 
+PRODUCTION_AUDITED_LINES = (
+    "set -euo pipefail",
+    "cd ~/.hermes/hermes-agent",
+    "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py",
+    "./venv/bin/python3 scripts/post-sync-verify.py --fix",
+)
+
+ROLLOUT_AUDITED_LINES = (
+    "set -euo pipefail",
+    "cd ~/.hermes/hermes-agent",
+    "if [ -f scripts/verify_hades_dashboard_contract.py ]; then",
+    "./venv/bin/python3 scripts/verify_hades_dashboard_contract.py",
+    "else",
+    "verifier_tmp=$(mktemp)",
+    "trap 'rm -f \"$verifier_tmp\"' EXIT",
+    "if ! git show fix/dashboard-api-contract:scripts/verify_hades_dashboard_contract.py > \"$verifier_tmp\"; then",
+    "echo \"dashboard verifier materialization failed\" >&2",
+    "exit 1",
+    "fi",
+    "if [ ! -s \"$verifier_tmp\" ]; then",
+    "echo \"dashboard verifier materialized empty\" >&2",
+    "exit 1",
+    "fi",
+    "./venv/bin/python3 \"$verifier_tmp\" --repo-root \"$PWD\" --cron-jobs ~/.hermes/cron/jobs.json",
+    "fi",
+    "./venv/bin/python3 scripts/post-sync-verify.py --fix",
+)
+
 
 def _write(root: Path, relative: str, content: str) -> None:
     path = root / relative
@@ -165,6 +193,21 @@ def _prompt_failures(tmp_path: Path, prompt: str) -> str:
     payload["jobs"][0]["prompt"] = prompt
     cron_jobs.write_text(json.dumps(payload), encoding="utf-8")
     return _messages(root, cron_jobs)
+
+
+def _replace_exact_line(prompt: str, line: str, replacement: str) -> str:
+    lines = prompt.splitlines(keepends=True)
+    for index, candidate in enumerate(lines):
+        if candidate.endswith("\r\n"):
+            body, ending = candidate[:-2], "\r\n"
+        elif candidate.endswith(("\r", "\n")):
+            body, ending = candidate[:-1], candidate[-1]
+        else:
+            body, ending = candidate, ""
+        if body == line:
+            lines[index] = replacement + ending
+            return "".join(lines)
+    raise AssertionError(f"required shell line not found: {line!r}")
 
 
 def test_fully_valid_minimal_fixture_has_no_failures(tmp_path: Path) -> None:
@@ -1399,7 +1442,22 @@ def test_rollout_gate_safety_mutations_fail(tmp_path: Path, mutation: str) -> No
 
 @pytest.mark.parametrize(
     "unsafe_ref",
-    (";true", "../x", "x..y", "x//y", "x.lock", "fix/dashboard api"),
+    (
+        ";true",
+        "../x",
+        "x..y",
+        "x//y",
+        "x.lock",
+        "fix/dashboard api",
+        "foo.",
+        ".foo",
+        "foo/.bar",
+        "foo/bar.",
+        "foo/bar.lock",
+        "@",
+        "foo@{bar",
+        r"foo\bar",
+    ),
 )
 def test_rollout_gate_rejects_unsafe_safe_refs(tmp_path: Path, unsafe_ref: str) -> None:
     prompt = VALID_ROLLOUT_PROMPT.replace("fix/dashboard-api-contract", unsafe_ref, 1)
@@ -1408,6 +1466,41 @@ def test_rollout_gate_rejects_unsafe_safe_refs(tmp_path: Path, unsafe_ref: str) 
 
     assert "cron" in failures.lower()
     assert "verifier" in failures.lower() or "ref" in failures.lower() or "shape" in failures.lower()
+
+
+@pytest.mark.parametrize("safe_ref", ("fix/dashboard-api-contract", "feature/foo.bar-1"))
+def test_rollout_gate_accepts_valid_safe_refs(tmp_path: Path, safe_ref: str) -> None:
+    prompt = VALID_ROLLOUT_PROMPT.replace("fix/dashboard-api-contract", safe_ref, 1)
+
+    assert _prompt_failures(tmp_path, prompt) == ""
+
+
+@pytest.mark.parametrize(
+    ("prompt", "required_line"),
+    [(VALID_PROMPT, line) for line in PRODUCTION_AUDITED_LINES]
+    + [(VALID_ROLLOUT_PROMPT, line) for line in ROLLOUT_AUDITED_LINES],
+)
+@pytest.mark.parametrize("edge", ("\u00a0", "\u2003", "\x0b", "\x0c", "\x00"))
+@pytest.mark.parametrize("side", ("prefix", "suffix"))
+def test_cron_rejects_non_shell_whitespace_or_control_on_audited_lines(
+    tmp_path: Path, prompt: str, required_line: str, edge: str, side: str
+) -> None:
+    mutation = f"{edge}{required_line}" if side == "prefix" else f"{required_line}{edge}"
+    mutated_prompt = _replace_exact_line(prompt, required_line, mutation)
+
+    failures = _prompt_failures(tmp_path, mutated_prompt)
+
+    assert "cron" in failures.lower()
+    assert "approved" in failures.lower() or "audited" in failures.lower() or "shape" in failures.lower()
+
+
+@pytest.mark.parametrize("prompt", (VALID_PROMPT, VALID_ROLLOUT_PROMPT))
+def test_cron_accepts_ascii_space_and_tab_at_audited_line_edges(
+    tmp_path: Path, prompt: str
+) -> None:
+    indented_prompt = "\n".join(f" \t{line}\t " for line in prompt.splitlines()) + "\n"
+
+    assert _prompt_failures(tmp_path, indented_prompt) == ""
 
 
 def test_decoy_verifier_block_does_not_rescue_invalid_gate(tmp_path: Path) -> None:
