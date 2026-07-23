@@ -204,7 +204,6 @@ def test_distribution_metadata_includes_plugin_skills():
 
 
 @pytest.mark.integration
-@pytest.mark.timeout(300)
 def test_built_artifacts_contain_direct_and_nested_plugin_skills(tmp_path):
     """Wheel and sdist both retain plugin discovery instructions.
 
@@ -236,7 +235,7 @@ def test_built_artifacts_contain_direct_and_nested_plugin_skills(tmp_path):
         cwd=source,
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=300,
     )
     assert build.returncode == 0, f"uv build failed:\n{build.stderr}"
 
