@@ -978,3 +978,58 @@ def test_autonomy_native_scrubs_locator_tokens_from_all_free_text_egress(
     assert probe not in wire
     for fragment in ("//secret", "secret/path", "secret/item", "/etc", "/root"):
         assert fragment not in wire
+
+
+def test_autonomy_native_preserves_wire_safe_domain_ids_and_drops_unsafe_rows(
+    rpc_raw, monkeypatch
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "action": "list",
+            "rules": [
+                {
+                    "rule_id": "team:email",
+                    "source": "stable",
+                    "state": "active",
+                    "effect": "allow",
+                },
+                {
+                    "rule_id": "artifact:secret/path",
+                    "source": "stable",
+                    "state": "active",
+                    "effect": "allow",
+                },
+            ],
+            "verdict": "allow",
+            "code": "explicit_allow",
+            "matched_rule_ids": ["team:email", "artifact:secret/path"],
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc_raw("autonomy.exec", {"argv": ["list"]})
+
+    assert "result" in response and "error" not in response, response
+    payload = response["result"]
+    assert [row["rule_id"] for row in payload["rules"]] == ["team:email"]
+    assert payload["decision"]["matched_rule_ids"] == ["team:email"]
+    assert "artifact:secret/path" not in json.dumps(response, ensure_ascii=False)
+
+    required = {"rule_id", "source", "state", "effect", "verdict", "code"}
+
+    def assert_required_values(value):
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in required:
+                    assert nested is not None, (key, value)
+                assert_required_values(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_required_values(nested)
+
+    assert_required_values(payload)

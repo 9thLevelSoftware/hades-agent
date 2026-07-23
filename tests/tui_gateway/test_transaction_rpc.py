@@ -773,3 +773,114 @@ def test_transaction_native_scrubs_locator_tokens_from_output_and_free_text(
     assert probe not in wire
     for fragment in ("//secret", "secret/path", "secret/item", "/etc", "/root"):
         assert fragment not in wire
+
+
+def test_transaction_native_preserves_wire_safe_domain_ids_and_drops_unsafe_rows(
+    rpc, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "action": "preview",
+            "transaction": {
+                "transaction_id": "project:item-1",
+                "status": "ready",
+                "current_revision": 1,
+                "receipt_id": "receipt:one",
+            },
+            "transactions": [
+                {
+                    "transaction_id": "project:item-1",
+                    "status": "ready",
+                    "current_revision": 1,
+                    "receipt_id": "receipt:one",
+                },
+                {
+                    "transaction_id": "artifact:secret/path",
+                    "status": "ready",
+                    "current_revision": 1,
+                    "receipt_id": "receipt:bad",
+                },
+            ],
+            "eligibility": {
+                "node:publish": {
+                    "can_execute": True,
+                    "code": "ready",
+                    "fidelity": "exact",
+                    "reason": "safe",
+                    "blockers": [],
+                    "required_cascade_node_ids": ["node:cleanup"],
+                },
+                "file:/etc": {
+                    "can_execute": False,
+                    "code": "blocked",
+                    "fidelity": "exact",
+                    "reason": "unsafe",
+                    "blockers": [],
+                    "required_cascade_node_ids": [],
+                },
+            },
+            "receipt": {
+                "receipt_id": "receipt:one",
+                "status": "verified",
+                "content_hash": "sha256:deadbeef",
+            },
+            "observation": {
+                "observation_id": "observation:one",
+                "status": "verified",
+                "content_hash": "sha256:feedface",
+            },
+            "preview_hash": "sha256:cafebabe",
+            "nodes": [
+                {"node_id": "node:publish", "fidelity": "exact", "requires_approval": False},
+                {"node_id": "mailto:user", "fidelity": "exact", "requires_approval": False},
+            ],
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc("transaction.exec", {"argv": ["preview", "project:item-1"]})
+
+    assert response["transaction"]["transaction_id"] == "project:item-1"
+    assert response["transaction"]["receipt_id"] == "receipt:one"
+    assert response["transactions"] == [
+        {
+            "transaction_id": "project:item-1",
+            "status": "ready",
+            "current_revision": 1,
+            "receipt_id": "receipt:one",
+        }
+    ]
+    assert set(response["eligibility"]) == {"node:publish"}
+    assert response["eligibility"]["node:publish"]["required_cascade_node_ids"] == [
+        "node:cleanup"
+    ]
+    assert response["receipt"]["receipt_id"] == "receipt:one"
+    assert response["observation"]["observation_id"] == "observation:one"
+    assert response["nodes"] == [
+        {"node_id": "node:publish", "fidelity": "exact", "requires_approval": False}
+    ]
+    wire = json.dumps(response, ensure_ascii=False)
+    for unsafe in ("artifact:secret/path", "file:/etc", "mailto:user"):
+        assert unsafe not in wire
+
+    required = {
+        "transaction_id", "receipt_id", "node_id", "observation_id",
+        "status", "content_hash", "fidelity", "code",
+    }
+
+    def assert_required_values(value):
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in required:
+                    assert nested is not None, (key, value)
+                assert_required_values(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_required_values(nested)
+
+    assert_required_values(response)

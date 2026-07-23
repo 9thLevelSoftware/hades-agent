@@ -1001,3 +1001,113 @@ def test_receipt_native_scrubs_locator_tokens_from_warning_and_claim_text(
     assert probe not in wire
     for fragment in ("//secret", "secret/path", "secret/item", "/etc", "/root"):
         assert fragment not in wire
+
+
+def test_receipt_native_preserves_wire_safe_domain_ids_and_drops_unsafe_rows(
+    rpc, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "action": "show",
+            "receipts": [
+                {
+                    "receipt_id": "receipt:one",
+                    "status": "verified",
+                    "subject_id": "project:item-1",
+                    "subject_kind": "transaction",
+                    "decided_at": "2026-07-10T00:00:00Z",
+                    "content_hash": "sha256:deadbeef",
+                    "scorer_id": "scorer:one",
+                    "scorer_version": "1.0",
+                },
+                {
+                    "receipt_id": "artifact:secret/path",
+                    "status": "verified",
+                    "subject_id": "project:item-2",
+                    "subject_kind": "transaction",
+                    "decided_at": "2026-07-10T00:00:00Z",
+                    "content_hash": "sha256:deadbeef",
+                    "scorer_id": "scorer:one",
+                    "scorer_version": "1.0",
+                },
+            ],
+            "receipt": {
+                "receipt_id": "receipt:one",
+                "status": "verified",
+                "subject_id": "project:item-1",
+                "subject_kind": "transaction",
+                "content_hash": "sha256:deadbeef",
+                "decided_at": "2026-07-10T00:00:00Z",
+                "scorer_id": "scorer:one",
+                "scorer_version": "1.0",
+                "transaction_id": "project:item-1",
+            },
+            "observations": [
+                {
+                    "observation_id": "observation:one",
+                    "receipt_id": "receipt:one",
+                    "status": "verified",
+                    "observed_at": "2026-07-11T09:00:00Z",
+                },
+                {
+                    "observation_id": "file:/etc",
+                    "receipt_id": "receipt:one",
+                    "status": "verified",
+                    "observed_at": "2026-07-11T09:00:00Z",
+                },
+            ],
+            "claim_edges": [
+                {
+                    "claim_id": "claim:one",
+                    "verdict": "satisfied",
+                    "required": True,
+                    "evidence_ids": ["evidence-1"],
+                    "artifact_ids": ["artifact-1"],
+                },
+                {
+                    "claim_id": "mailto:user",
+                    "verdict": "satisfied",
+                    "required": True,
+                    "evidence_ids": ["evidence-1"],
+                    "artifact_ids": ["artifact-1"],
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc("receipt.exec", {"argv": ["show", "receipt:one"]})
+
+    assert response["receipts"][0]["receipt_id"] == "receipt:one"
+    assert response["receipts"][0]["subject_id"] == "project:item-1"
+    assert response["receipt"]["transaction_id"] == "project:item-1"
+    assert response["observations"][0]["observation_id"] == "observation:one"
+    assert response["claim_edges"][0]["claim_id"] == "claim:one"
+    assert response["claim_edges"][0]["evidence_ids"] == ["evidence-1"]
+    assert response["claim_edges"][0]["artifact_ids"] == ["artifact-1"]
+    wire = json.dumps(response, ensure_ascii=False)
+    for unsafe in ("artifact:secret/path", "file:/etc", "mailto:user"):
+        assert unsafe not in wire
+
+    required = {
+        "receipt_id", "subject_id", "subject_kind", "decided_at", "content_hash",
+        "scorer_id", "scorer_version", "observation_id", "observed_at", "claim_id",
+        "verdict",
+    }
+
+    def assert_required_values(value):
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key in required:
+                    assert nested is not None, (key, value)
+                assert_required_values(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_required_values(nested)
+
+    assert_required_values(response)
