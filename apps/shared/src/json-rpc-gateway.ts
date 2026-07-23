@@ -142,10 +142,6 @@ export class JsonRpcGatewayClient {
       this.handleMessage(message.data)
     })
 
-    // Construct and wire the socket before publishing "connecting". A
-    // synchronous constructor failure must leave the client retryable.
-    this.setState('connecting')
-
     const connection = new Promise<void>((resolve, reject) => {
       let settled = false
       let timer: ReturnType<typeof setTimeout> | undefined
@@ -242,6 +238,12 @@ export class JsonRpcGatewayClient {
       this.setState('closed')
       this.rejectAllPending(new Error(this.options.closedErrorMessage))
     })
+
+    // The pending handshake must own its rejection path before publishing
+    // "connecting": state observers run synchronously and may call close().
+    // Socket construction still happens first so constructor failures leave
+    // the client idle and retryable.
+    this.setState('connecting')
 
     await connection
   }

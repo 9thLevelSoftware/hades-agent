@@ -167,6 +167,36 @@ describe('JsonRpcGatewayClient connect() URL guard', () => {
     await connection
   })
 
+  it('settles a pending connection when a state observer closes re-entrantly', async () => {
+    vi.useFakeTimers()
+    const socket = new HangingSocket()
+    const client = new JsonRpcGatewayClient({
+      connectTimeoutMs: 60_000,
+      socketFactory: () => socket as unknown as WebSocket
+    })
+    let rejection: unknown
+    client.onState(state => {
+      if (state === 'connecting') {
+        client.close()
+      }
+    })
+
+    const connection = client.connect('ws://127.0.0.1:1234/api/ws').catch(error => {
+      rejection = error
+    })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(rejection).toBeInstanceOf(Error)
+    expect(client.connectionState).toBe('closed')
+    expect(socket.removeEventListener).toHaveBeenCalledWith('open', expect.any(Function))
+    expect(socket.removeEventListener).toHaveBeenCalledWith('error', expect.any(Function))
+    expect(socket.removeEventListener).toHaveBeenCalledWith('close', expect.any(Function))
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(client.connectionState).toBe('closed')
+    await connection
+  })
+
   it('keeps connection state idle on rejection', async () => {
     const client = new JsonRpcGatewayClient()
     await client.connect(undefined as unknown as string).catch(() => undefined)
