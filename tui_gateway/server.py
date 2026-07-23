@@ -13554,19 +13554,27 @@ _NATIVE_MAX_SAFE_LIST_ITEMS = 256
 # locations actionable for ordinary navigation.  Native results must do both:
 # force credential redaction regardless of config and remove absolute/local
 # locations from every free-text field before JSON serialization.
+_NATIVE_LOCATION_TOKEN = r'''\S+'''
 _NATIVE_LOCATION_RE = re.compile(
-    r'''file://(?:localhost)?(?:[A-Za-z]:[\\/]|/)[^\s"'<>`)\]},;]+'''
-    r'''|(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/][^\s"'<>`)\]},;]+)'''
-    r'''|\\\\[^\\/\s]+(?:[\\/][^\\/\s]+)+'''
-    r'''|/(?:Users|home|private|tmp|var/tmp|var/folders)(?:/[^\s"'<>`)\]},;]+)*'''
-    # Scrub any standalone POSIX path, not only paths under a reviewed list
-    # of roots.  The look-behind/look-ahead guards keep URL `//` sequences
-    # from turning into a partial path match while still covering one-
-    # component roots such as `/etc` and `/root`.
-    r'''|(?<![A-Za-z0-9_:/])/(?!/)[^\s"'<>`)\]},;]+'''
+    # A scheme token is intentionally broad: native egress must not preserve
+    # either full URI schemes or colon-prefixed path forms.  Requiring a
+    # non-whitespace character after `:` avoids treating ordinary `key: value`
+    # prose as a locator, while the single bounded character class keeps the
+    # match linear on already bounded producer text.
+    rf'''[A-Za-z][A-Za-z0-9+.-]*:{_NATIVE_LOCATION_TOKEN}'''
+    # Protocol-relative locators have no scheme, but are equally actionable.
+    rf'''|//{_NATIVE_LOCATION_TOKEN}'''
+    # UNC paths and generic Windows paths not already consumed by the scheme
+    # alternative.
+    rf'''|\\\\[^\\/\s]+(?:[\\/][^\\/\s]+)+'''
+    # Scrub any standalone POSIX path, including one-component roots such as
+    # `/etc` and `/root`, without consuming the second slash of `//...`.
+    rf'''|(?<![A-Za-z0-9_:/])/(?!/){_NATIVE_LOCATION_TOKEN}'''
 )
 
-_NATIVE_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+_NATIVE_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_NATIVE_SAFE_SHA256_ID_RE = re.compile(r"^sha256:[0-9A-Fa-f]{8,128}$")
+_NATIVE_SAFE_ACTION_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 def _cap_native_text(text: str, *, limit: int = _NATIVE_MAX_SAFE_TEXT_CHARS) -> str:
@@ -13602,7 +13610,7 @@ def _native_safe_text(
             force=True,
             redact_url_credentials=True,
         )
-        text = _NATIVE_LOCATION_RE.sub("[REDACTED_PATH]", text)
+        text = _NATIVE_LOCATION_RE.sub("[REDACTED_LOCATOR]", text)
         return _cap_native_text(text, limit=limit)
     except Exception as exc:
         logger.warning("%s producer text rejected (%s)", method, type(exc).__name__)
@@ -13631,9 +13639,19 @@ def _native_safe_id(value: Any, *, method: str, limit: int = 256) -> str | None:
     # IDs are not free text: redacting malformed values in-place can turn a
     # URI/path into a plausible-looking identifier.  Drop anything outside
     # the deliberately narrow egress grammar instead.
-    if ".." in value or "://" in value or _NATIVE_SAFE_ID_RE.fullmatch(value) is None:
+    if ".." in value:
         return None
-    return value
+    if _NATIVE_SAFE_ID_RE.fullmatch(value) or _NATIVE_SAFE_SHA256_ID_RE.fullmatch(value):
+        return value
+    return None
+
+
+def _native_safe_action(value: Any, *, fallback: str) -> str:
+    """Normalize an action to the closed native command-token grammar."""
+    if not isinstance(value, str):
+        return fallback
+    action = value.strip().lower()
+    return action if _NATIVE_SAFE_ACTION_RE.fullmatch(action) else fallback
 
 
 def _native_safe_id_list(value: Any, *, method: str, limit: int = 256) -> list[str]:
@@ -14097,7 +14115,7 @@ def _(rid, params: dict) -> dict:
         decision = _autonomy_decision_doc(payload) if "verdict" in payload else None
         preview = _autonomy_preview_doc(payload)
         applied = _autonomy_applied_doc(payload)
-        action = _native_safe_id(argv[0].strip().lower(), method="autonomy.exec", limit=128)
+        action = _native_safe_action(argv[0], fallback="autonomy")
         if exit_code == exit_denied:
             # A denial is a structured safety result, but the producer's
             # renderer may include action arguments, paths, or credentials.
@@ -14386,11 +14404,10 @@ def _(rid, params: dict) -> dict:
             observations = [payload["observation"]]
 
         action_value = payload.get("action")
-        action = _native_safe_id(
-            action_value if isinstance(action_value, str) else argv[0].strip().lower(),
-            method="receipt.exec",
-            limit=128,
-        ) or "receipt"
+        action = _native_safe_action(
+            action_value if isinstance(action_value, str) else argv[0],
+            fallback="receipt",
+        )
         safe_observations = _receipt_rows(observations, _receipt_observation_doc)
         safe_receipt = _receipt_detail_doc(
             payload.get("receipt"), observation_count=len(safe_observations)
@@ -14576,7 +14593,7 @@ def _transaction_response(
     method = "transaction.exec"
     response: dict[str, Any] = {
         "ok": ok,
-        "action": _native_safe_id(action, method=method, limit=128) or "transaction",
+        "action": _native_safe_action(action, fallback="command"),
         "exit_code": exit_code,
         "output": _native_safe_text(output, method=method, limit=_NATIVE_MAX_OUTPUT_CHARS),
     }
@@ -14630,12 +14647,11 @@ def _transaction_uncertainty_response(
     if not isinstance(status, str) or status not in _TRANSACTION_UNCERTAIN_STATUSES:
         return None
     action_value = payload.get("action")
-    action = action_value if type(action_value) is str else argv[0]
-    safe_status = _native_safe_id(status, method="transaction.exec") or "unknown_effect"
-    output = (
-        f"transaction {action} ended with {safe_status}; do not retry; "
-        "reconcile required"
+    action = _native_safe_action(
+        action_value if type(action_value) is str else argv[0],
+        fallback="command",
     )
+    output = "transaction effect uncertain — do not retry; reconcile first"
     return _transaction_response(
         payload,
         action=action,
@@ -14731,8 +14747,11 @@ def _(rid, params: dict) -> dict:
                 "hades transaction in a terminal)",
             )
         action_value = payload.get("action")
-        action = action_value if type(action_value) is str else argv[0].strip().lower()
-        include_preview = action.strip().lower() == "preview"
+        action = _native_safe_action(
+            action_value if type(action_value) is str else argv[0],
+            fallback="command",
+        )
+        include_preview = action == "preview"
         if include_preview:
             safe_nodes = _transaction_preview_nodes(payload.get("nodes"))
             preview_hash = payload.get("preview_hash")
