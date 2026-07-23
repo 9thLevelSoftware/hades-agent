@@ -13559,7 +13559,14 @@ _NATIVE_LOCATION_RE = re.compile(
     r'''|(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/][^\s"'<>`)\]},;]+)'''
     r'''|\\\\[^\\/\s]+(?:[\\/][^\\/\s]+)+'''
     r'''|/(?:Users|home|private|tmp|var/tmp|var/folders)(?:/[^\s"'<>`)\]},;]+)*'''
+    # Scrub any standalone POSIX path, not only paths under a reviewed list
+    # of roots.  The look-behind/look-ahead guards keep URL `//` sequences
+    # from turning into a partial path match while still covering one-
+    # component roots such as `/etc` and `/root`.
+    r'''|(?<![A-Za-z0-9_:/])/(?!/)[^\s"'<>`)\]},;]+'''
 )
+
+_NATIVE_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 
 
 def _cap_native_text(text: str, *, limit: int = _NATIVE_MAX_SAFE_TEXT_CHARS) -> str:
@@ -13618,10 +13625,15 @@ def _native_safe_text_list(
 
 
 def _native_safe_id(value: Any, *, method: str, limit: int = 256) -> str | None:
-    """Keep reviewed IDs/hashes exact while bounding and scrubbing odd values."""
-    if not isinstance(value, str):
+    """Keep only bounded, non-locator ASCII IDs on the native wire."""
+    if not isinstance(value, str) or len(value) > limit:
         return None
-    return _native_safe_text(value, method=method, limit=limit)
+    # IDs are not free text: redacting malformed values in-place can turn a
+    # URI/path into a plausible-looking identifier.  Drop anything outside
+    # the deliberately narrow egress grammar instead.
+    if ".." in value or "://" in value or _NATIVE_SAFE_ID_RE.fullmatch(value) is None:
+        return None
+    return value
 
 
 def _native_safe_id_list(value: Any, *, method: str, limit: int = 256) -> list[str]:
@@ -14072,6 +14084,14 @@ def _(rid, params: dict) -> dict:
     if exit_code not in {exit_ok, exit_denied}:
         return _native_internal_error(rid, method="autonomy.exec", code=5038)
     try:
+        verdict = payload.get("verdict")
+        if (
+            exit_code == exit_denied and verdict in {"allow", "ask"}
+        ) or (exit_code == exit_ok and verdict == "deny"):
+            # The exit status and structured decision are two independent
+            # producer signals.  Never forward a contradictory combination:
+            # a stale/misclassified decision must fail closed at this egress.
+            return _native_internal_error(rid, method="autonomy.exec", code=5038)
         if exit_code == exit_ok and _native_failure_payload(payload):
             return _native_internal_error(rid, method="autonomy.exec", code=5038)
         decision = _autonomy_decision_doc(payload) if "verdict" in payload else None
@@ -14690,12 +14710,12 @@ def _(rid, params: dict) -> dict:
             "transaction.exec: validation failed (details withheld; run "
             "hades transaction in a terminal)",
         )
+    uncertainty = _transaction_uncertainty_response(
+        payload, argv=argv, exit_code=exit_code
+    )
+    if uncertainty is not None:
+        return _native_success(rid, uncertainty, method="transaction.exec", code=5045)
     if exit_code != exit_ok:
-        uncertainty = _transaction_uncertainty_response(
-            payload, argv=argv, exit_code=exit_code
-        )
-        if uncertainty is not None:
-            return _native_success(rid, uncertainty, method="transaction.exec", code=5045)
         return _native_error(
             rid,
             5044,
@@ -14704,11 +14724,6 @@ def _(rid, params: dict) -> dict:
         )
     try:
         if _native_failure_payload(payload):
-            uncertainty = _transaction_uncertainty_response(
-                payload, argv=argv, exit_code=exit_code
-            )
-            if uncertainty is not None:
-                return _native_success(rid, uncertainty, method="transaction.exec", code=5045)
             return _native_error(
                 rid,
                 5044,
