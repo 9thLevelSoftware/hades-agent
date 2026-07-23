@@ -5346,8 +5346,12 @@ def _init_session(
     cwd: str | None = None,
     session_db=None,
     source: str | None = None,
+    *,
+    profile_home: Path | str | None = None,
 ):
     now = time.time()
+    normalized_profile_home = str(profile_home) if profile_home else None
+    session_cwd = cwd or _completion_cwd()
     with _sessions_lock:
         _sessions[sid] = {
             "agent": agent,
@@ -5361,8 +5365,9 @@ def _init_session(
             "running": False,
             "attached_images": [],
             "image_counter": 0,
-            "cwd": cwd or _completion_cwd(),
+            "cwd": session_cwd,
             "cols": cols,
+            "profile_home": normalized_profile_home,
             "slash_worker": None,
             "show_reasoning": _load_show_reasoning(),
             "source": _resolve_session_source(source),
@@ -6650,6 +6655,7 @@ def _(rid, params: dict) -> dict:
                     cwd=profile_resume_cwd,
                     session_db=db,
                     source=source,
+                    profile_home=profile_home,
                 )
             finally:
                 if init_home_token is not None:
@@ -6660,11 +6666,6 @@ def _(rid, params: dict) -> dict:
                         "model_override"
                     ]
                 _sessions[sid]["display_history_prefix"] = display_history_prefix
-                # Remember the profile home so each turn re-binds HERMES_HOME (the
-                # agent persists to its own db, but mid-turn home reads — memory,
-                # skills — must resolve to the resumed profile too).
-                if profile_home is not None:
-                    _sessions[sid]["profile_home"] = str(profile_home)
                 _sessions[sid]["active_session_lease"] = lease
         except Exception as e:
             if lease is not None:
@@ -9298,7 +9299,9 @@ def _(rid, params: dict) -> dict:
             agent,
             list(history),
             cols=session.get("cols", 80),
+            cwd=_session_cwd(session),
             source=source,
+            profile_home=(session or {}).get("profile_home"),
         )
         if new_sid in _sessions:
             _sessions[new_sid]["active_session_lease"] = lease
