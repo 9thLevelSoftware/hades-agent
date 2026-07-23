@@ -8200,11 +8200,16 @@ def _env_line_defines_key(line: str, key: str) -> bool:
     return bool(separator) and name.strip() == key
 
 
-def save_env_value(key: str, value: str):
-    """Save or update a value in ~/.hades/.env."""
+def save_env_value(key: str, value: str) -> bool:
+    """Save or update a value in ~/.hades/.env.
+
+    Returns ``True`` after the canonicalized value is durably stored and
+    ``False`` when a managed-install guard deliberately rejects the write.
+    The value itself is never returned.
+    """
     if is_managed():
         managed_error(f"set {key}")
-        return
+        return False
     # Managed scope guard: a managed env key can't be set by the user — the
     # managed .env wins at load anyway. Distinct from is_managed() above.
     from hades_cli import managed_scope
@@ -8217,7 +8222,7 @@ def save_env_value(key: str, value: str):
             f"and cannot be changed.",
             file=sys.stderr,
         )
-        return
+        return False
     if not _ENV_VAR_NAME_RE.match(key):
         raise ValueError(f"Invalid environment variable name: {key!r}")
     _reject_denylisted_env_var(key)
@@ -8293,6 +8298,7 @@ def save_env_value(key: str, value: str):
 
     os.environ[key] = value
     invalidate_env_cache()
+    return True
 
 
 def remove_env_value(key: str) -> bool:

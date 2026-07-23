@@ -261,6 +261,38 @@ def test_save_rotates_only_value_matched_config_mirrors_and_unsuppresses(hades_h
     assert SOURCE not in suppressed.get("zai", [])
 
 
+def test_save_mirrors_the_canonical_value_actually_persisted(hades_home):
+    (hades_home / ".env").write_text(
+        f"ZAI_API_KEY={OLD_KEY}\n",
+        encoding="utf-8",
+    )
+    _write_config(
+        hades_home,
+        {
+            "model": {"api_key": OLD_KEY},
+            "auxiliary": {"vision": {"api_key": OLD_KEY}},
+        },
+    )
+    submitted_value = NEW_KEY + "\r\n\u00e9"
+
+    result = _lifecycle().save_provider_env_credential(
+        "ZAI_API_KEY",
+        submitted_value,
+    )
+
+    from hades_cli.config import load_env
+
+    persisted_value = load_env()["ZAI_API_KEY"]
+    assert persisted_value == NEW_KEY
+    assert _read_config(hades_home)["model"]["api_key"] == persisted_value
+    assert (
+        _read_config(hades_home)["auxiliary"]["vision"]["api_key"]
+        == persisted_value
+    )
+    assert NEW_KEY not in repr(result)
+    assert submitted_value not in repr(result)
+
+
 def test_config_entry_points_route_provider_keys_through_lifecycle(hades_home, capsys):
     (hades_home / ".env").write_text(
         f"ZAI_API_KEY={OLD_KEY}\n",
@@ -363,6 +395,219 @@ def test_env_write_failure_leaves_original_stores_intact(hades_home, monkeypatch
     for name, content in before.items():
         assert (hades_home / name).read_bytes() == content
     assert list(hades_home.glob(".env_*.tmp")) == []
+
+
+def test_save_config_failure_restores_exact_env_and_suppression(
+    hades_home,
+    monkeypatch,
+):
+    env_path = hades_home / ".env"
+    env_path.write_bytes(
+        (
+            "# preserve this comment\r\n"
+            f"export ZAI_API_KEY={OLD_KEY}\r\n"
+            f"ZAI_API_KEY={OLD_KEY}\r\n"
+            "UNCHANGED=value\r\n"
+        ).encode()
+    )
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {},
+            "suppressed_sources": {"zai": [SOURCE]},
+        },
+    )
+    _write_config(hades_home, {"model": {"api_key": OLD_KEY}})
+    before = {
+        name: (hades_home / name).read_bytes()
+        for name in (".env", "auth.json", "config.yaml")
+    }
+    env_mode = stat.S_IMODE(env_path.stat().st_mode)
+    monkeypatch.setenv("ZAI_API_KEY", OLD_KEY)
+
+    import hades_cli.config as config
+
+    def fail_config_write(*_args, **_kwargs):
+        raise OSError("simulated config replace failure")
+
+    monkeypatch.setattr(config, "atomic_config_write", fail_config_write)
+
+    with pytest.raises(OSError, match="simulated config replace failure"):
+        _lifecycle().save_provider_env_credential("ZAI_API_KEY", NEW_KEY)
+
+    for name, content in before.items():
+        assert (hades_home / name).read_bytes() == content
+    assert stat.S_IMODE(env_path.stat().st_mode) == env_mode
+    assert os.environ["ZAI_API_KEY"] == OLD_KEY
+    assert list(hades_home.glob(".credential_rollback_*.tmp")) == []
+
+
+def test_save_partial_unsuppress_failure_restores_missing_env_and_auth(
+    hades_home,
+    monkeypatch,
+):
+    env_path = hades_home / ".env"
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {},
+            "suppressed_sources": {
+                "glm": [SOURCE],
+                "zai": [SOURCE],
+            },
+        },
+    )
+    auth_before = (hades_home / "auth.json").read_bytes()
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+
+    import hades_cli.auth as auth
+
+    real_unsuppress = auth.unsuppress_credential_source
+    calls: list[str] = []
+
+    def fail_second_unsuppress(provider_id, source):
+        calls.append(provider_id)
+        if len(calls) == 2:
+            raise OSError("simulated suppression write failure")
+        return real_unsuppress(provider_id, source)
+
+    monkeypatch.setattr(
+        auth,
+        "unsuppress_credential_source",
+        fail_second_unsuppress,
+    )
+
+    with pytest.raises(OSError, match="simulated suppression write failure"):
+        _lifecycle().save_provider_env_credential("ZAI_API_KEY", NEW_KEY)
+
+    assert len(calls) == 2
+    assert not env_path.exists()
+    assert (hades_home / "auth.json").read_bytes() == auth_before
+    assert "ZAI_API_KEY" not in os.environ
+
+
+@pytest.mark.parametrize("operation", ["save", "remove"])
+def test_managed_env_key_lifecycle_fails_without_mutating_profile_stores(
+    hades_home,
+    tmp_path,
+    monkeypatch,
+    operation,
+):
+    env_path = hades_home / ".env"
+    env_path.write_text(f"ZAI_API_KEY={OLD_KEY}\n", encoding="utf-8")
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {},
+            "credential_pool": {
+                "zai": [_pool_entry("zai-env", SOURCE, OLD_KEY)]
+            },
+            "suppressed_sources": {"zai": [SOURCE]},
+        },
+    )
+    _write_config(hades_home, {"model": {"api_key": OLD_KEY}})
+    before = {
+        name: (hades_home / name).read_bytes()
+        for name in (".env", "auth.json", "config.yaml")
+    }
+
+    managed_dir = tmp_path / "managed"
+    managed_dir.mkdir()
+    (managed_dir / ".env").write_text(
+        "ZAI_API_KEY=organization-owned-value\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed_dir))
+    from hades_cli import managed_scope
+
+    managed_scope.invalidate_managed_cache()
+    try:
+        with pytest.raises(RuntimeError, match="managed"):
+            if operation == "save":
+                _lifecycle().save_provider_env_credential(
+                    "ZAI_API_KEY",
+                    NEW_KEY,
+                )
+            else:
+                _lifecycle().remove_provider_env_credential("ZAI_API_KEY")
+
+        for name, content in before.items():
+            assert (hades_home / name).read_bytes() == content
+    finally:
+        monkeypatch.delenv("HERMES_MANAGED_DIR", raising=False)
+        managed_scope.invalidate_managed_cache()
+
+
+@pytest.mark.parametrize("failure_boundary", ["auth", "config"])
+def test_remove_failure_restores_exact_prior_durable_state(
+    hades_home,
+    monkeypatch,
+    failure_boundary,
+):
+    env_path = hades_home / ".env"
+    env_path.write_bytes(
+        (
+            "# retain delete formatting\r\n"
+            f"export ZAI_API_KEY={OLD_KEY}\r\n"
+            f"ZAI_API_KEY={OLD_KEY}\r\n"
+            "UNCHANGED=value\r\n"
+        ).encode()
+    )
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {
+                "zai": {
+                    "tokens": {
+                        "access_token": "oauth-" + "d" * 24,
+                        "refresh_token": "refresh-" + "e" * 24,
+                    }
+                }
+            },
+            "credential_pool": {
+                "zai": [
+                    _pool_entry("zai-env", SOURCE, OLD_KEY),
+                    _pool_entry("zai-manual", "manual", OTHER_KEY),
+                ]
+            },
+        },
+    )
+    _write_config(hades_home, {"model": {"api_key": OLD_KEY}})
+    before = {
+        name: (hades_home / name).read_bytes()
+        for name in (".env", "auth.json", "config.yaml")
+    }
+    env_mode = stat.S_IMODE(env_path.stat().st_mode)
+    monkeypatch.setenv("ZAI_API_KEY", OLD_KEY)
+
+    if failure_boundary == "auth":
+        import hades_cli.auth as auth
+
+        def fail_auth_write(*_args, **_kwargs):
+            raise OSError("simulated auth replace failure")
+
+        monkeypatch.setattr(auth, "_save_auth_store", fail_auth_write)
+        error = "simulated auth replace failure"
+    else:
+        import hades_cli.config as config
+
+        def fail_config_write(*_args, **_kwargs):
+            raise OSError("simulated config replace failure")
+
+        monkeypatch.setattr(config, "atomic_config_write", fail_config_write)
+        error = "simulated config replace failure"
+
+    with pytest.raises(OSError, match=error):
+        _lifecycle().remove_provider_env_credential("ZAI_API_KEY")
+
+    for name, content in before.items():
+        assert (hades_home / name).read_bytes() == content
+    assert stat.S_IMODE(env_path.stat().st_mode) == env_mode
+    assert os.environ["ZAI_API_KEY"] == OLD_KEY
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not enforced on Windows")

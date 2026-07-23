@@ -12,21 +12,173 @@ preserving unrelated credentials. In particular, removing an env key only
 prunes pool entries whose source is exactly ``env:<VAR>``; OAuth, device-code,
 manual, and borrowed entries survive unchanged.
 
-Each file mutation uses that store's existing atomic writer. The lifecycle is
-deliberately fail-loud: an I/O failure propagates to the caller instead of
-reporting a successful reconciliation. Result dictionaries contain key and
-provider names only, never credential values.
+Each file mutation uses that store's existing atomic writer. A profile-local
+compensation boundary snapshots the exact prior bytes and mode before the
+first mutation, then atomically restores every store if a later write fails.
+The lifecycle is deliberately fail-loud: an I/O failure propagates to the
+caller instead of reporting a successful reconciliation. Result dictionaries
+and rollback errors contain key/provider/store names only, never credential
+values.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from contextlib import contextmanager
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import stat
+import tempfile
+from typing import Any, Iterator
 
 __all__ = [
     "save_provider_env_credential",
     "remove_provider_env_credential",
     "purge_env_credential_references",
 ]
+
+_MISSING_ENV_VALUE = object()
+
+
+@dataclass(frozen=True)
+class _FileSnapshot:
+    """In-memory rollback state for one profile-owned credential store."""
+
+    path: Path
+    existed: bool
+    content: bytes
+    mode: int | None
+    owner: tuple[int, int] | None
+
+
+def _snapshot_file(path: Path) -> _FileSnapshot:
+    try:
+        content = path.read_bytes()
+    except FileNotFoundError:
+        return _FileSnapshot(
+            path=path,
+            existed=False,
+            content=b"",
+            mode=None,
+            owner=None,
+        )
+
+    try:
+        file_stat = path.stat()
+    except OSError:
+        mode = None
+        owner = None
+    else:
+        mode = stat.S_IMODE(file_stat.st_mode)
+        owner = (
+            (file_stat.st_uid, file_stat.st_gid)
+            if hasattr(os, "chown")
+            else None
+        )
+    return _FileSnapshot(
+        path=path,
+        existed=True,
+        content=content,
+        mode=mode,
+        owner=owner,
+    )
+
+
+def _restore_file(snapshot: _FileSnapshot) -> None:
+    """Restore one snapshot without parsing or exposing secret-bearing bytes."""
+    path = snapshot.path
+    if not snapshot.existed:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+
+    from utils import atomic_replace
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=".credential_rollback_",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "wb") as file_handle:
+            file_handle.write(snapshot.content)
+            file_handle.flush()
+            os.fsync(file_handle.fileno())
+        restored_path = Path(atomic_replace(tmp_path, path))
+        if snapshot.owner is not None:
+            try:
+                os.chown(restored_path, *snapshot.owner)
+            except OSError:
+                pass
+        if snapshot.mode is not None:
+            try:
+                os.chmod(restored_path, snapshot.mode)
+            except OSError:
+                pass
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _invalidate_restored_config_caches(config_path: Path) -> None:
+    """Ensure the process cannot retain a value from a compensated write."""
+    from hades_cli import config
+
+    config.invalidate_env_cache()
+    path_key = str(config_path)
+    config._LOAD_CONFIG_CACHE.pop(path_key, None)
+    config._RAW_CONFIG_CACHE.pop(path_key, None)
+    config._LAST_EXPANDED_CONFIG_BY_PATH.pop(path_key, None)
+
+
+@contextmanager
+def _credential_store_transaction(env_var: str) -> Iterator[None]:
+    """Compensate all profile credential stores after any failed mutation."""
+    from hades_cli.auth import _auth_file_path, _auth_store_lock
+    from hades_cli.config import get_config_path, get_env_path
+
+    env_path = get_env_path()
+    auth_path = _auth_file_path()
+    config_path = get_config_path()
+
+    # The auth lock is profile-path-specific and reentrant. Holding it across
+    # the lifecycle prevents a rollback from overwriting a concurrent auth
+    # update while nested auth helpers retain their existing locking contract.
+    with _auth_store_lock():
+        snapshots = (
+            ("env", _snapshot_file(env_path)),
+            ("auth", _snapshot_file(auth_path)),
+            ("config", _snapshot_file(config_path)),
+        )
+        process_env_value = os.environ.get(env_var, _MISSING_ENV_VALUE)
+        try:
+            yield
+        except BaseException as operation_error:
+            rollback_failures: list[str] = []
+            for store_name, snapshot in reversed(snapshots):
+                try:
+                    _restore_file(snapshot)
+                except BaseException:
+                    rollback_failures.append(store_name)
+
+            if process_env_value is _MISSING_ENV_VALUE:
+                os.environ.pop(env_var, None)
+            else:
+                os.environ[env_var] = str(process_env_value)
+            _invalidate_restored_config_caches(config_path)
+
+            if rollback_failures:
+                stores = ", ".join(sorted(rollback_failures))
+                raise RuntimeError(
+                    f"credential lifecycle rollback incomplete for stores: {stores}"
+                ) from operation_error
+            raise
 
 
 def _canonical_provider_id(provider_id: str) -> str:
@@ -37,6 +189,17 @@ def _canonical_provider_id(provider_id: str) -> str:
         return normalize_provider(provider_id) or provider_id
     except Exception:
         return provider_id
+
+
+def _require_env_key_writable(env_var: str, action: str) -> None:
+    """Fail loudly before a managed env writer can return a silent no-op."""
+    from hades_cli import managed_scope
+    from hades_cli.config import is_managed
+
+    if is_managed() or managed_scope.is_env_managed(env_var):
+        raise RuntimeError(
+            f"credential env key {env_var} is managed and cannot be {action}"
+        )
 
 
 def _providers_for_env_var(env_var: str) -> list[str]:
@@ -236,50 +399,71 @@ def save_provider_env_credential(
     """Save an env credential and rotate matching config mirrors."""
     from hades_cli.config import load_env, save_env_value
 
-    old_value = load_env().get(env_var)
-    save_env_value(env_var, value)
+    _require_env_key_writable(env_var, "saved")
+    with _credential_store_transaction(env_var):
+        old_value = load_env().get(env_var)
+        if save_env_value(env_var, value) is not True:
+            raise RuntimeError(
+                f"credential env store did not persist key {env_var}"
+            )
+        persisted_env = load_env()
+        if env_var not in persisted_env:
+            raise RuntimeError(
+                f"credential env store did not persist key {env_var}"
+            )
+        persisted_value = persisted_env[env_var]
 
-    config_updates: list[str] = []
-    if value and old_value and old_value != value:
-        config_updates = _scrub_config_yaml_mirrors(old_value, value)
+        config_updates: list[str] = []
+        if old_value is not None and old_value != persisted_value:
+            config_updates = _scrub_config_yaml_mirrors(
+                old_value,
+                persisted_value,
+            )
 
-    # A deliberate save is an explicit re-add. Lift canonical and legacy alias
-    # suppression markers so the credential pool may seed this source again.
-    from hades_cli.auth import unsuppress_credential_source
+        # A deliberate save is an explicit re-add. Lift canonical and legacy
+        # alias suppression markers so the credential pool may seed this source
+        # again. The transaction restores them if any later alias write fails.
+        from hades_cli.auth import unsuppress_credential_source
 
-    for provider_id in _suppression_provider_ids(env_var):
-        unsuppress_credential_source(provider_id, f"env:{env_var}")
+        for provider_id in _suppression_provider_ids(env_var):
+            unsuppress_credential_source(provider_id, f"env:{env_var}")
 
-    return {
-        "ok": True,
-        "key": env_var,
-        "config_updates": config_updates,
-    }
+        return {
+            "ok": True,
+            "key": env_var,
+            "config_updates": config_updates,
+        }
 
 
 def remove_provider_env_credential(env_var: str) -> dict[str, Any]:
     """Remove an env credential and every exact durable reference to it."""
     from hades_cli.config import load_env, remove_env_value
 
-    old_value = load_env().get(env_var)
-    removed_from_env = remove_env_value(env_var)
-    references = purge_env_credential_references(env_var)
-    config_scrubbed = (
-        _scrub_config_yaml_mirrors(old_value, None)
-        if old_value
-        else []
-    )
+    _require_env_key_writable(env_var, "removed")
+    with _credential_store_transaction(env_var):
+        old_value = load_env().get(env_var)
+        removed_from_env = remove_env_value(env_var)
+        if old_value is not None and not removed_from_env:
+            raise RuntimeError(
+                f"credential env store did not remove key {env_var}"
+            )
+        references = purge_env_credential_references(env_var)
+        config_scrubbed = (
+            _scrub_config_yaml_mirrors(old_value, None)
+            if old_value
+            else []
+        )
 
-    return {
-        "ok": True,
-        "key": env_var,
-        "removed": removed_from_env,
-        "pool_pruned": references["pool_pruned"],
-        "providers": references["providers"],
-        "config_scrubbed": config_scrubbed,
-        "found": bool(
-            removed_from_env
-            or references["pool_pruned"]
-            or config_scrubbed
-        ),
-    }
+        return {
+            "ok": True,
+            "key": env_var,
+            "removed": removed_from_env,
+            "pool_pruned": references["pool_pruned"],
+            "providers": references["providers"],
+            "config_scrubbed": config_scrubbed,
+            "found": bool(
+                removed_from_env
+                or references["pool_pruned"]
+                or config_scrubbed
+            ),
+        }
