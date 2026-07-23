@@ -270,6 +270,8 @@ _LONG_HANDLERS = frozenset(
         # receipt.exec performs profile-local SQLite/artifact I/O; keep it
         # off the JSON-RPC reader thread like the other native I/O handlers.
         "receipt.exec",
+        # autonomy.exec performs profile-local SQLite/config/import/export I/O.
+        "autonomy.exec",
         # transaction.exec performs profile-local SQLite/transaction I/O;
         # keep the reader available for fast RPCs while it runs.
         "transaction.exec",
@@ -13605,13 +13607,22 @@ def _(rid, params: dict) -> dict:
             reset_hades_home_override(home_token)
 
     payload = result.payload or {}
-    # run_argv already maps failures to bounded, redacted messages
-    # (clipped, never a traceback). Surface them on the JSON-RPC error
-    # channel: 4xxx validation/conflict, 5xxx storage/recovery.
+    # Producer failure text is not a wire-safe boundary. Keep these messages
+    # fixed and actionable without forwarding payload.error or output.
     if result.exit_code == exit_validation:
-        return _err(rid, 4034, payload.get("error") or "autonomy: validation error")
+        return _err(
+            rid,
+            4034,
+            "autonomy.exec: validation failed (details withheld; run "
+            "hades autonomy in terminal)",
+        )
     if result.exit_code == exit_storage:
-        return _err(rid, 5039, payload.get("error") or "autonomy: storage failure")
+        return _err(
+            rid,
+            5039,
+            "autonomy.exec: storage failure (details withheld; run "
+            "hades autonomy doctor in terminal)",
+        )
 
     preview = payload if payload.get("applied") is False else None
     applied = payload if payload.get("applied") is True else None
@@ -13705,19 +13716,29 @@ def _(rid, params: dict) -> dict:
             reset_hades_home_override(home_token)
 
     payload = result.payload or {}
-    # run_argv already maps failures to bounded, redacted messages
-    # (clipped, never a traceback): 4xxx validation/unknown-ID/conflict,
-    # 5xxx signing-provider/storage.
+    # Producer failure text is not a wire-safe boundary. Keep these messages
+    # fixed and actionable without forwarding payload.error or output.
     if result.exit_code == exit_validation:
-        return _err(rid, 4005, payload.get("error") or "receipt: validation error")
+        return _err(
+            rid,
+            4005,
+            "receipt.exec: validation failed (details withheld; run "
+            "hades receipt in terminal)",
+        )
     if result.exit_code == exit_unavailable:
         return _err(
             rid,
             5041,
-            payload.get("error") or "receipt: signing provider unavailable",
+            "receipt.exec: signing provider unavailable (details withheld; run "
+            "hades receipt in terminal)",
         )
     if result.exit_code != exit_ok:
-        return _err(rid, 5040, payload.get("error") or "receipt: storage failure")
+        return _err(
+            rid,
+            5040,
+            "receipt.exec: storage failure (details withheld; run "
+            "hades receipt list in terminal)",
+        )
 
     # recheck returns one appended observation; show returns the selected
     # chain. Normalize both to an `observations` list for the Ink viewer.
@@ -13824,7 +13845,45 @@ def _(rid, params: dict) -> dict:
             "transaction.exec: command failed (details withheld; run "
             "hades transaction in a terminal)",
         )
-    output = str(result.output or "")
+    action = str(payload.get("action") or argv[0].strip().lower())
+    safe_preview_nodes = None
+    safe_preview_hash = None
+    if action.strip().lower() == "preview":
+        safe_preview_hash = payload.get("preview_hash")
+        if not isinstance(safe_preview_hash, str):
+            safe_preview_hash = ""
+        safe_preview_hash = safe_preview_hash[:256]
+        safe_preview_nodes = []
+        for row in payload.get("nodes") or []:
+            if not isinstance(row, dict):
+                continue
+            node_id = row.get("node_id")
+            if not isinstance(node_id, str):
+                continue
+            fidelity = row.get("fidelity")
+            if fidelity is not None and not isinstance(fidelity, str):
+                fidelity = None
+            requires_approval = row.get("requires_approval")
+            if not isinstance(requires_approval, bool):
+                requires_approval = False
+            safe_preview_nodes.append(
+                {
+                    "node_id": node_id[:200],
+                    "fidelity": None if fidelity is None else fidelity[:64],
+                    "requires_approval": requires_approval,
+                }
+            )
+        output = "\n".join(
+            [f"preview ready (hash {safe_preview_hash})"]
+            + [
+                "node "
+                f"{node['node_id']} fidelity {node['fidelity'] or '?'} "
+                f"approval {'yes' if node['requires_approval'] else 'no'}"
+                for node in safe_preview_nodes
+            ]
+        )
+    else:
+        output = str(result.output or "")
     if len(output) > _TRANSACTION_MAX_OUTPUT_CHARS:
         output = (
             output[:
@@ -13835,16 +13894,21 @@ def _(rid, params: dict) -> dict:
         )
     response = {
         "ok": True,
-        "action": str(payload.get("action") or argv[0].strip().lower()),
+        "action": action,
         "exit_code": result.exit_code,
         "output": output,
     }
+    if safe_preview_nodes is not None:
+        response["nodes"] = safe_preview_nodes
+        response["preview_hash"] = safe_preview_hash
     for key in (
         "transaction", "transactions", "nodes", "preview", "preview_hash",
         "eligibility", "receipt", "observation", "status", "counts",
         "committed_nodes", "compensated_nodes", "blocked_node", "revision",
         "rows",
     ):
+        if safe_preview_nodes is not None and key in {"nodes", "preview", "preview_hash"}:
+            continue
         value = payload.get(key)
         if value is not None:
             response[key] = value
