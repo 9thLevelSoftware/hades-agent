@@ -937,7 +937,8 @@ CREATE TABLE IF NOT EXISTS messages (
     platform_message_id TEXT,
     observed INTEGER DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
-    compacted INTEGER NOT NULL DEFAULT 0
+    compacted INTEGER NOT NULL DEFAULT 0,
+    api_content TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session_model_usage (
@@ -3160,6 +3161,7 @@ class SessionDB:
         parent_session_id: str = None,
         cwd: str = None,
         profile_name: str = None,
+        git_repo_root: str = None,
     ) -> None:
         """Insert a session row, enriching NULL metadata on conflict.
 
@@ -3183,9 +3185,10 @@ class SessionDB:
             conn.execute(
                 """INSERT INTO sessions (
                    id, source, user_id, session_key, chat_id, chat_type, thread_id,
-                   model, model_config, system_prompt, parent_session_id, cwd, profile_name, started_at
+                   model, model_config, system_prompt, parent_session_id, cwd,
+                   profile_name, git_repo_root, started_at
                 )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        model = COALESCE(sessions.model, excluded.model),
                        model_config = COALESCE(sessions.model_config, excluded.model_config),
@@ -3196,7 +3199,8 @@ class SessionDB:
                        thread_id = COALESCE(sessions.thread_id, excluded.thread_id),
                        parent_session_id = COALESCE(sessions.parent_session_id, excluded.parent_session_id),
                        cwd = COALESCE(sessions.cwd, excluded.cwd),
-                       profile_name = COALESCE(sessions.profile_name, excluded.profile_name)""",
+                       profile_name = COALESCE(sessions.profile_name, excluded.profile_name),
+                       git_repo_root = COALESCE(sessions.git_repo_root, excluded.git_repo_root)""",
                 (
                     session_id,
                     source,
@@ -3211,9 +3215,60 @@ class SessionDB:
                     parent_session_id,
                     cwd,
                     profile_name,
+                    git_repo_root,
                     time.time(),
                 ),
             )
+            if parent_session_id:
+                conn.execute(
+                    """UPDATE sessions
+                       SET cwd = COALESCE(sessions.cwd,
+                                 (SELECT p.cwd FROM sessions p
+                                   WHERE p.id = sessions.parent_session_id)),
+                           git_repo_root = COALESCE(sessions.git_repo_root,
+                                           (SELECT p.git_repo_root FROM sessions p
+                                             WHERE p.id = sessions.parent_session_id)),
+                           git_branch = COALESCE(sessions.git_branch,
+                                        (SELECT p.git_branch FROM sessions p
+                                          WHERE p.id = sessions.parent_session_id))
+                     WHERE id = ? AND parent_session_id IS NOT NULL""",
+                    (session_id,),
+                )
+                # A compression child must remain recoverable if the process
+                # crashes before the gateway records its replacement peer.
+                # Ordinary delegate children deliberately do not inherit these
+                # routing keys, otherwise gateway recovery can target a worker.
+                conn.execute(
+                    """UPDATE sessions
+                       SET user_id = COALESCE(sessions.user_id,
+                                     (SELECT p.user_id FROM sessions p
+                                       WHERE p.id = sessions.parent_session_id)),
+                           session_key = COALESCE(sessions.session_key,
+                                         (SELECT p.session_key FROM sessions p
+                                           WHERE p.id = sessions.parent_session_id)),
+                           chat_id = COALESCE(sessions.chat_id,
+                                     (SELECT p.chat_id FROM sessions p
+                                       WHERE p.id = sessions.parent_session_id)),
+                           chat_type = COALESCE(sessions.chat_type,
+                                       (SELECT p.chat_type FROM sessions p
+                                         WHERE p.id = sessions.parent_session_id)),
+                           thread_id = COALESCE(sessions.thread_id,
+                                       (SELECT p.thread_id FROM sessions p
+                                         WHERE p.id = sessions.parent_session_id)),
+                           display_name = COALESCE(sessions.display_name,
+                                          (SELECT p.display_name FROM sessions p
+                                            WHERE p.id = sessions.parent_session_id)),
+                           origin_json = COALESCE(sessions.origin_json,
+                                         (SELECT p.origin_json FROM sessions p
+                                           WHERE p.id = sessions.parent_session_id))
+                     WHERE id = ? AND parent_session_id IS NOT NULL
+                       AND EXISTS (
+                           SELECT 1 FROM sessions p
+                           WHERE p.id = sessions.parent_session_id
+                             AND p.end_reason = 'compression'
+                       )""",
+                    (session_id,),
+                )
         self._execute_write(_do)
 
     def create_session(self, session_id: str, source: str, **kwargs) -> str:
@@ -5797,6 +5852,7 @@ class SessionDB:
         observed: bool = False,
         effect_disposition: Optional[str] = None,
         timestamp: Any = None,
+        api_content: Optional[str] = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -5848,8 +5904,8 @@ class SessionDB:
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id, observed, active)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, platform_message_id, observed, active, api_content)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -5869,6 +5925,7 @@ class SessionDB:
                     platform_message_id,
                     1 if observed else 0,
                     1,
+                    _scrub_surrogates(api_content) if isinstance(api_content, str) else None,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -5936,13 +5993,14 @@ class SessionDB:
             platform_msg_id = (
                 msg.get("platform_message_id") or msg.get("message_id")
             )
+            api_content = msg.get("api_content")
 
             conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id, observed, active)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, platform_message_id, observed, active, api_content)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -5962,6 +6020,7 @@ class SessionDB:
                     platform_msg_id,
                     1 if msg.get("observed") else 0,
                     1,
+                    _scrub_surrogates(api_content) if isinstance(api_content, str) else None,
                 ),
             )
             inserted += 1
@@ -6033,6 +6092,30 @@ class SessionDB:
                 (session_id,),
             )
             return cursor.fetchone() is not None
+
+    def set_latest_user_api_content(
+        self, session_id: str, content: Any, api_content: str
+    ) -> int:
+        """Backfill the sidecar on the newest matching active user row.
+
+        In-place compaction may persist the current user row before the turn
+        context is assembled.  The exact content guard makes this a no-op if
+        that row is no longer the message which was stamped.
+        """
+        encoded = self._encode_content(content)
+
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE messages SET api_content = ? WHERE id = ("
+                "SELECT id FROM messages "
+                "WHERE session_id = ? AND role = 'user' AND active = 1 "
+                "ORDER BY id DESC LIMIT 1"
+                ") AND content IS ?",
+                (_scrub_surrogates(api_content), session_id, encoded),
+            )
+            return cursor.rowcount
+
+        return self._execute_write(_do)
 
     def archive_and_compact(
         self, session_id: str, compacted_messages: List[Dict[str, Any]]
@@ -6422,6 +6505,123 @@ class SessionDB:
 
             return best if best is not None else session_id
 
+    _CONVERSATION_ROW_COLUMNS = (
+        "role, content, tool_call_id, tool_calls, tool_name, effect_disposition, "
+        "finish_reason, reasoning, reasoning_content, reasoning_details, "
+        "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp, "
+        "api_content"
+    )
+
+    def _rows_to_conversation(
+        self,
+        rows,
+        *,
+        session_id: str,
+        include_ancestors: bool,
+        repair_alternation: bool,
+    ) -> List[Dict[str, Any]]:
+        """Decode an ordered conversation row projection for replay or display."""
+        messages = []
+        for row in rows:
+            content = self._decode_content(row["content"])
+            if row["role"] in {"user", "assistant"} and isinstance(content, str):
+                content = sanitize_context(content).strip()
+            msg = {"role": row["role"], "content": content}
+            # This is intentionally neither sanitized nor stripped: these are
+            # the exact bytes used by the transport on the original turn.
+            if row["api_content"]:
+                msg["api_content"] = row["api_content"]
+            if row["timestamp"]:
+                msg["timestamp"] = row["timestamp"]
+            if row["tool_call_id"]:
+                msg["tool_call_id"] = row["tool_call_id"]
+            if row["tool_name"]:
+                msg["tool_name"] = row["tool_name"]
+            if row["effect_disposition"]:
+                msg["effect_disposition"] = row["effect_disposition"]
+            if row["tool_calls"]:
+                try:
+                    msg["tool_calls"] = json.loads(row["tool_calls"])
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Failed to deserialize tool_calls in conversation replay, falling back to []")
+                    msg["tool_calls"] = []
+            if row["platform_message_id"]:
+                msg["message_id"] = row["platform_message_id"]
+            if row["observed"]:
+                msg["observed"] = True
+            if row["role"] == "assistant":
+                if row["finish_reason"]:
+                    msg["finish_reason"] = row["finish_reason"]
+                if row["reasoning"]:
+                    msg["reasoning"] = row["reasoning"]
+                if row["reasoning_content"] is not None:
+                    msg["reasoning_content"] = row["reasoning_content"]
+                for field in ("reasoning_details", "codex_reasoning_items", "codex_message_items"):
+                    if row[field]:
+                        try:
+                            msg[field] = json.loads(row[field])
+                        except (json.JSONDecodeError, TypeError):
+                            logger.warning("Failed to deserialize %s in conversation replay", field)
+                            msg[field] = None
+            if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
+                continue
+            messages.append(msg)
+        messages = _strip_background_review_harness(messages)
+        if repair_alternation and messages:
+            from agent.agent_runtime_helpers import repair_message_sequence
+
+            repaired = repair_message_sequence(None, messages)
+            if repaired:
+                logger.info(
+                    "Repaired %d message-alternation violation(s) while restoring session %s",
+                    repaired, session_id,
+                )
+        return messages
+
+    def get_resume_conversations(
+        self, session_id: str
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Return the tip replay and full display projections in one lineage read."""
+        session_ids = self._session_lineage_root_to_tip(session_id)
+        with self._lock:
+            placeholders = ",".join("?" for _ in session_ids)
+            rows = self._conn.execute(
+                f"SELECT session_id, {self._CONVERSATION_ROW_COLUMNS} "
+                f"FROM messages WHERE session_id IN ({placeholders}) AND active = 1 "
+                "ORDER BY id",
+                tuple(session_ids),
+            ).fetchall()
+        tip_rows = [row for row in rows if row["session_id"] == session_id]
+        return (
+            self._rows_to_conversation(
+                tip_rows, session_id=session_id, include_ancestors=False,
+                repair_alternation=True,
+            ),
+            self._rows_to_conversation(
+                rows, session_id=session_id, include_ancestors=True,
+                repair_alternation=False,
+            ),
+        )
+
+    def get_ancestor_display_prefix(self, session_id: str) -> List[Dict[str, Any]]:
+        """Return display rows from ancestors only, never repair-removed tip rows."""
+        session_ids = self._session_lineage_root_to_tip(session_id)
+        if len(session_ids) <= 1:
+            return []
+        with self._lock:
+            placeholders = ",".join("?" for _ in session_ids)
+            rows = self._conn.execute(
+                f"SELECT session_id, {self._CONVERSATION_ROW_COLUMNS} "
+                f"FROM messages WHERE session_id IN ({placeholders}) AND active = 1 "
+                "ORDER BY id",
+                tuple(session_ids),
+            ).fetchall()
+        ancestor_rows = [row for row in rows if row["session_id"] != session_id]
+        return self._rows_to_conversation(
+            ancestor_rows, session_id=session_id, include_ancestors=True,
+            repair_alternation=False,
+        )
+
     def get_messages_as_conversation(
         self,
         session_id: str,
@@ -6457,7 +6657,8 @@ class SessionDB:
             rows = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, effect_disposition, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp "
+                "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp, "
+                "api_content "
                 f"FROM messages WHERE session_id IN ({placeholders})"
                 # Order by AUTOINCREMENT id (true insertion order), NOT timestamp:
                 # append_message stamps rows with time.time(), which is not
@@ -6477,6 +6678,8 @@ class SessionDB:
             if row["role"] in {"user", "assistant"} and isinstance(content, str):
                 content = sanitize_context(content).strip()
             msg = {"role": row["role"], "content": content}
+            if row["api_content"]:
+                msg["api_content"] = row["api_content"]
             if row["timestamp"]:
                 msg["timestamp"] = row["timestamp"]
             if row["tool_call_id"]:
@@ -7107,6 +7310,10 @@ class SessionDB:
                     )
                     like_params += [f"%{esc}%", f"%{esc}%", f"%{esc}%"]
                 like_where = [f"({' OR '.join(token_clauses)})"]
+                if not include_inactive:
+                    # Match the FTS/trigram visibility contract: compacted
+                    # archive rows remain searchable, but rewound rows do not.
+                    like_where.append("(m.active = 1 OR m.compacted = 1)")
                 if source_filter is not None:
                     like_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
                     like_params.extend(source_filter)
