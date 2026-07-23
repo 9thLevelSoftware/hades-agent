@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 # ─── Message Deduplication ────────────────────────────────────────────────────
 
 
+_UNCONDITIONAL_DISCARD = object()
+
+
 class MessageDeduplicator:
     """TTL-based message deduplication cache.
 
@@ -42,10 +45,11 @@ class MessageDeduplicator:
 
     def __init__(self, max_size: int = 2000, ttl_seconds: float = 300):
         self._seen: Dict[str, float] = {}
+        self._claim_tokens: Dict[str, object] = {}
         self._max_size = max_size
         self._ttl = ttl_seconds
 
-    def is_duplicate(self, msg_id: str) -> bool:
+    def is_duplicate(self, msg_id: str, *, token: object = None) -> bool:
         """Return True if *msg_id* was already seen within the TTL window."""
         if not msg_id:
             return False
@@ -55,7 +59,12 @@ class MessageDeduplicator:
                 return True
             # Entry has expired — remove it and treat as new
             del self._seen[msg_id]
+            self._claim_tokens.pop(msg_id, None)
         self._seen[msg_id] = now
+        if token is None:
+            self._claim_tokens.pop(msg_id, None)
+        else:
+            self._claim_tokens[msg_id] = token
         if len(self._seen) > self._max_size:
             cutoff = now - self._ttl
             self._seen = {k: v for k, v in self._seen.items() if v > cutoff}
@@ -68,11 +77,40 @@ class MessageDeduplicator:
                     key=lambda item: item[1],
                 )[-self._max_size:]
                 self._seen = dict(newest)
+            self._claim_tokens = {
+                key: claim_token
+                for key, claim_token in self._claim_tokens.items()
+                if key in self._seen
+            }
         return False
+
+    def contains(self, msg_id: str) -> bool:
+        """Return whether *msg_id* is live in the cache without inserting it."""
+        if not msg_id:
+            return False
+        seen_at = self._seen.get(msg_id)
+        if seen_at is None:
+            return False
+        if time.time() - seen_at < self._ttl:
+            return True
+        del self._seen[msg_id]
+        self._claim_tokens.pop(msg_id, None)
+        return False
+
+    def discard(self, msg_id: str, *, token: object = _UNCONDITIONAL_DISCARD) -> None:
+        """Release a claim, optionally only when *token* still owns it."""
+        if token is not _UNCONDITIONAL_DISCARD:
+            if msg_id not in self._claim_tokens:
+                return
+            if self._claim_tokens[msg_id] is not token:
+                return
+        self._seen.pop(msg_id, None)
+        self._claim_tokens.pop(msg_id, None)
 
     def clear(self):
         """Clear all tracked messages."""
         self._seen.clear()
+        self._claim_tokens.clear()
 
 
 # ─── Text Batch Aggregation ──────────────────────────────────────────────────

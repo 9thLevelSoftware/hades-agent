@@ -1,91 +1,95 @@
-"""Regression test for #48031 — /model switch lost after session auto-reset.
+"""Regression coverage for a typed /model switch after auto-reset."""
 
-When `/model X` is the FIRST message after an idle/daily/suspended auto-reset,
-it stores a session model override but the `was_auto_reset` flag is left True
-(the slash-command path doesn't pass through the message handler that consumes
-it). On the NEXT regular message, the auto-reset cleanup block in
-`_handle_message_with_agent` pops the freshly-stored override BEFORE the flag
-is consumed, so the switch is silently lost and resolution falls back to the
-config default — while the session DB still shows the switched model (a
-two-sources-of-truth divergence).
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
-The fix consumes `was_auto_reset` at two sites:
-  1. the cleanup block in gateway/run.py captures it into a local and sets the
-     attribute False immediately (so it can't re-fire next message);
-  2. the slash-command model path in gateway/slash_commands.py consumes it
-     before storing the override (so a /model-first-after-reset isn't wiped).
+import pytest
+import yaml
 
-These are AST invariants — load-bearing pins that fail if either consume is
-removed (mirrors test_35809_auto_reset_clean_context.py's approach).
-"""
-from __future__ import annotations
-
-import ast
-import inspect
-
-from gateway import run as gateway_run
-from gateway import slash_commands as gateway_slash
+from gateway.config import Platform
+from gateway.platforms.base import MessageEvent, MessageType
+from gateway.run import GatewayRunner
+from gateway.session import SessionSource
+from hermes_cli.model_switch import ModelSwitchResult
 
 
-def _assigns_false(node: ast.AST, attr: str) -> bool:
-    """True if `node` contains an assignment `<something>.<attr> = False`."""
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Assign):
-            for tgt in sub.targets:
-                if (
-                    isinstance(tgt, ast.Attribute)
-                    and tgt.attr == attr
-                    and isinstance(sub.value, ast.Constant)
-                    and sub.value.value is False
-                ):
-                    return True
-    return False
-
-
-def test_run_consumes_was_auto_reset_in_cleanup_block():
-    """The auto-reset cleanup block in gateway/run.py must set
-    `session_entry.was_auto_reset = False` so the cleanup (which pops the
-    session model/reasoning overrides) cannot re-fire on the next message and
-    wipe an override stored between turns (#48031)."""
-    tree = ast.parse(inspect.getsource(gateway_run))
-
-    # Find the cleanup branch: an `if <flag>:` block that pops a model/reasoning
-    # override AND clears the flag. We assert at least one such block sets
-    # was_auto_reset False.
-    found = False
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.If):
-            continue
-        names = {
-            n.attr
-            for n in ast.walk(node)
-            if isinstance(n, ast.Attribute)
-        }
-        calls = {
-            n.func.attr
-            for n in ast.walk(node)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-        }
-        # The cleanup block references the reasoning-override setter and pops
-        # pending model notes — fingerprint of the transient-state cleanup.
-        if "_set_session_reasoning_override" in calls and _assigns_false(node, "was_auto_reset"):
-            found = True
-            break
-    assert found, (
-        "gateway/run.py auto-reset cleanup block must consume "
-        "`was_auto_reset` (set it False) so it can't re-fire and wipe a "
-        "model override stored between turns (#48031)."
+def _make_event() -> MessageEvent:
+    return MessageEvent(
+        text="/model gpt-5.5",
+        message_type=MessageType.TEXT,
+        source=SessionSource(platform=Platform.TELEGRAM, chat_id="48031", chat_type="dm"),
     )
 
 
-def test_slash_command_model_path_consumes_was_auto_reset():
-    """The slash-command model path in gateway/slash_commands.py must consume
-    `was_auto_reset` before storing the new model override, so a
-    /model-first-after-auto-reset isn't wiped by the next message's cleanup
-    (#48031)."""
-    src = inspect.getsource(gateway_slash)
-    tree = ast.parse(src)
-    assert _assigns_false(tree, "was_auto_reset"), (
-        "gateway/slash_commands.py model path must set "
-        "`was_auto_reset = False` before storing the model override (#48031)."
+def _successful_switch() -> ModelSwitchResult:
+    return ModelSwitchResult(
+        success=True,
+        new_model="gpt-5.5",
+        target_provider="openrouter",
+        provider_changed=True,
+        api_key="sk-test",
+        base_url="https://openrouter.ai/api/v1",
+        api_mode="chat_completions",
+        provider_label="OpenRouter",
+    )
+
+
+@pytest.mark.asyncio
+async def test_model_switch_after_auto_reset_consumes_marker_and_keeps_override(
+    tmp_path,
+    monkeypatch,
+):
+    """A typed /model first after reset must survive the next regular turn."""
+    hermes_home = tmp_path / ".hades"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"default": "old", "provider": "openrouter"}}),
+        encoding="utf-8",
+    )
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.switch_model",
+        lambda **_kwargs: _successful_switch(),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.resolve_display_context_length",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    event = _make_event()
+    session_key = "agent:main:telegram:dm:48031"
+    session_entry = SimpleNamespace(
+        session_key=session_key,
+        session_id="session-48031",
+        was_auto_reset=True,
+    )
+    session_db = SimpleNamespace(update_session_model=AsyncMock())
+    session_store = SimpleNamespace(
+        get_or_create_session=AsyncMock(return_value=session_entry),
+        set_model_override=AsyncMock(),
+    )
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {}
+    runner._voice_mode = {}
+    runner._running_agents = {}
+    runner._session_model_overrides = {}
+    runner._session_db = session_db
+    runner.session_store = object()
+    session_store._store = runner.session_store
+    runner._async_session_store = session_store
+    runner._normalize_source_for_session_key = lambda source: source
+    runner._evict_cached_agent = MagicMock()
+
+    result = await runner._handle_model_command(event)
+
+    assert result is not None and "gpt-5.5" in result
+    assert session_entry.was_auto_reset is False
+    session_db.update_session_model.assert_awaited_once_with("session-48031", "gpt-5.5")
+    assert runner._session_model_overrides[session_key]["model"] == "gpt-5.5"
+    session_store.set_model_override.assert_awaited_once_with(
+        session_key,
+        runner._session_model_overrides[session_key],
     )
