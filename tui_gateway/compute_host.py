@@ -348,10 +348,24 @@ class ComputeHost:
         if not sid:
             self.emit({"type": "turn.error", "sid": sid, "request_id": request_id, "message": "sid required"})
             return
+        server = None
+        home_token = None
+        context_tokens = []
         try:
             from tui_gateway import server
 
             session = self._ensure_server_session(server, frame)
+            home_token = None
+            context_tokens = []
+            profile_home = str(session.get("profile_home") or "") or None
+            if profile_home:
+                home_token = server.set_hermes_home_override(profile_home)
+            context_tokens = server._set_session_context(
+                str(session.get("session_key") or sid),
+                cwd=str(session.get("cwd") or frame.get("cwd") or "") or None,
+                source=server._session_source(session),
+                ui_session_id=sid,
+            )
             with session["history_lock"]:
                 if session.get("running"):
                     self.emit({"type": "turn.error", "sid": sid, "request_id": request_id, "message": "session busy"})
@@ -413,104 +427,220 @@ class ComputeHost:
             except Exception:
                 pass
             self.emit({"type": "turn.error", "sid": sid, "request_id": request_id, "reason": "exception", "message": str(exc)})
+        finally:
+            if context_tokens and server is not None:
+                server._clear_session_context(context_tokens)
+            if home_token is not None and server is not None:
+                try:
+                    server.reset_hermes_home_override(home_token)
+                except Exception:
+                    pass
 
     def _ensure_server_session(self, server: Any, frame: dict[str, Any]) -> dict:
         sid = str(frame.get("sid") or "")
         key = str(frame.get("session_key") or sid)
-        session = server._sessions.get(sid)
-        if session is not None:
-            session["transport"] = self._transport
-            if frame.get("cols") is not None:
-                session["cols"] = int(frame.get("cols") or 80)
-            if frame.get("cwd"):
-                session["cwd"] = str(frame.get("cwd"))
-            if frame.get("profile_home"):
-                session["profile_home"] = str(frame.get("profile_home"))
-            if isinstance(frame.get("attached_images"), list):
-                session["attached_images"] = list(frame.get("attached_images") or [])
-            return session
+        with server._sessions_lock:
+            session = server._sessions.get(sid)
+            if session is not None:
+                # Transport, workspace, and profile are one session binding. Do
+                # not expose a partially updated pair to another host turn.
+                session["transport"] = self._transport
+                if frame.get("cols") is not None:
+                    session["cols"] = int(frame.get("cols") or 80)
+                if frame.get("cwd"):
+                    session["cwd"] = str(frame.get("cwd"))
+                if frame.get("profile_home"):
+                    session["profile_home"] = str(frame.get("profile_home"))
+                if isinstance(frame.get("attached_images"), list):
+                    session["attached_images"] = list(frame.get("attached_images") or [])
+                return session
 
         history = frame.get("history") if isinstance(frame.get("history"), list) else []
-        profile_home = str(frame.get("profile_home") or "")
+        profile_home = str(frame.get("profile_home") or "") or None
+        frame_cwd = str(frame.get("cwd") or "") or None
+        frame_source = frame.get("source")
         session_db = None
         home_token = None
+        context_tokens = []
+        agent = None
         try:
             if profile_home:
-                from hermes_constants import set_hermes_home_override
                 from hermes_state import SessionDB
 
-                home_token = set_hermes_home_override(profile_home)
+                # Keep the profile override active for every build/init helper,
+                # including config/poller fallback field loaders.
+                home_token = server.set_hermes_home_override(profile_home)
                 session_db = SessionDB(db_path=Path(profile_home) / "state.db")
-            agent = server._make_agent(
-                sid,
+            context_tokens = server._set_session_context(
                 key,
-                session_id=key,
-                model_override=frame.get("model_override"),
-                reasoning_config_override=frame.get("reasoning_config_override"),
-                service_tier_override=frame.get("service_tier_override"),
-                platform_override=frame.get("source"),
-                session_db=session_db,
+                cwd=frame_cwd,
+                source=frame_source,
             )
-        finally:
-            if home_token is not None:
-                try:
-                    from hermes_constants import reset_hermes_home_override
-
-                    reset_hermes_home_override(home_token)
-                except Exception:
-                    pass
-        try:
-            from tui_gateway.transport import bind_transport, reset_transport
-
-            token = bind_transport(self._transport)
             try:
-                server._init_session(
+                agent = server._make_agent(
                     sid,
                     key,
-                    agent,
-                    list(history),
-                    cols=int(frame.get("cols") or 80),
-                    cwd=str(frame.get("cwd") or "") or None,
+                    session_id=key,
+                    model_override=frame.get("model_override"),
+                    reasoning_config_override=frame.get("reasoning_config_override"),
+                    service_tier_override=frame.get("service_tier_override"),
+                    platform_override=frame_source,
                     session_db=session_db,
-                    source=frame.get("source"),
+                    owns_session_db=bool(profile_home and session_db is not None),
                 )
-            finally:
-                reset_transport(token)
-        except Exception:
-            # If _init_session's side machinery (slash worker, approval notify) is
-            # unavailable, keep a minimal host-owned session rather than failing
-            # the turn after the expensive agent build succeeded.
-            server._sessions[sid] = {
-                "agent": agent,
-                "session_key": key,
-                "history": list(history),
-                "history_lock": threading.Lock(),
-                "history_version": int(frame.get("history_version") or 0),
-                "inflight_turn": None,
-                "created_at": time.time(),
-                "last_active": time.time(),
-                "running": False,
-                "attached_images": [],
-                "image_counter": 0,
-                "cwd": str(frame.get("cwd") or os.getcwd()),
-                "cols": int(frame.get("cols") or 80),
-                "slash_worker": None,
-                "show_reasoning": server._load_show_reasoning(),
-                "tool_progress_mode": server._load_tool_progress_mode(),
-                "edit_snapshots": {},
-                "tool_started_at": {},
-                "model_override": frame.get("model_override"),
-                "source": server._sanitize_client_source(frame.get("source")),
-                "transport": self._transport,
-            }
-        session = server._sessions[sid]
-        session["transport"] = self._transport
-        session["profile_home"] = profile_home or session.get("profile_home")
-        if isinstance(frame.get("attached_images"), list):
-            session["attached_images"] = list(frame.get("attached_images") or [])
-        if frame.get("model_override") is not None:
-            session["model_override"] = frame.get("model_override")
-        return session
+            except Exception:
+                # No agent received ownership of a profile DB when construction
+                # fails; the outer finally closes that acquisition before
+                # propagating the build error to the host turn path.
+                raise
+
+            init_owner_token = object()
+            try:
+                from tui_gateway.transport import bind_transport, reset_transport
+
+                token = bind_transport(self._transport)
+                try:
+                    server._init_session(
+                        sid,
+                        key,
+                        agent,
+                        list(history),
+                        cols=int(frame.get("cols") or 80),
+                        cwd=frame_cwd,
+                        session_db=session_db,
+                        source=frame_source,
+                        profile_home=profile_home,
+                        init_owner_token=init_owner_token,
+                    )
+                finally:
+                    reset_transport(token)
+                with server._sessions_lock:
+                    current = server._sessions.get(sid)
+                    if (
+                        isinstance(current, dict)
+                        and current.get("init_owner_token") is init_owner_token
+                    ):
+                        current.pop("init_owner_token", None)
+            except Exception:
+                # Only the record stamped by this build's opaque token belongs
+                # to this initializer.  Agent/key equality is deliberately not
+                # considered: a replacement may reuse both values.
+                with server._sessions_lock:
+                    partial = server._sessions.get(sid)
+                    owned_partial = partial if (
+                        isinstance(partial, dict)
+                        and partial.get("init_owner_token") is init_owner_token
+                    ) else None
+
+                def _close_detached_agent() -> None:
+                    if agent is None:
+                        return
+                    try:
+                        agent._end_session_on_close = False
+                    except Exception:
+                        pass
+                    try:
+                        server._close_agent_once(agent)
+                    except Exception:
+                        pass
+                    owned_db = getattr(agent, "_session_db", None)
+                    if session_db is not None and owned_db is not session_db:
+                        try:
+                            session_db.close()
+                        except Exception:
+                            pass
+
+                if owned_partial is None:
+                    # A replacement already owns this slot, or init never
+                    # published our token.  Leave it untouched and release only
+                    # resources acquired by this caller.
+                    _close_detached_agent()
+                    raise RuntimeError("session replaced during session init")
+
+                # Build the fallback outside the lock; publication below is the
+                # single atomic ownership fence.
+                fallback = {
+                    "agent": agent,
+                    "session_key": key,
+                    "session_db": session_db,
+                    "history": list(history),
+                    "history_lock": threading.Lock(),
+                    "history_version": int(frame.get("history_version") or 0),
+                    "inflight_turn": None,
+                    "created_at": time.time(),
+                    "last_active": time.time(),
+                    "running": False,
+                    "attached_images": [],
+                    "image_counter": 0,
+                    "cwd": frame_cwd or os.getcwd(),
+                    "cols": int(frame.get("cols") or 80),
+                    "profile_home": profile_home,
+                    "slash_worker": None,
+                    "agent_ready": threading.Event(),
+                    "agent_error": None,
+                    "show_reasoning": server._load_show_reasoning(),
+                    "tool_progress_mode": server._load_tool_progress_mode(),
+                    "edit_snapshots": {},
+                    "tool_started_at": {},
+                    "model_override": frame.get("model_override"),
+                    "source": server._resolve_session_source(frame_source),
+                    "transport": self._transport,
+                    "init_owner_token": init_owner_token,
+                }
+                fallback["agent_ready"].set()
+                with server._sessions_lock:
+                    current = server._sessions.get(sid)
+                    published = (
+                        current is owned_partial
+                        and isinstance(current, dict)
+                        and current.get("init_owner_token") is init_owner_token
+                    )
+                    if published:
+                        # The fallback is now the successful live record; do
+                        # not leave the opaque construction token in user state.
+                        fallback.pop("init_owner_token", None)
+                        server._sessions[sid] = fallback
+                if not published:
+                    # The replacement won while fallback fields were built.
+                    # Clean only our detached partial/resources, never the
+                    # replacement currently occupying the registry slot.
+                    if not (
+                        current is owned_partial
+                        and isinstance(current, dict)
+                        and current.get("init_owner_token") is not init_owner_token
+                    ):
+                        server._discard_partial_initialized_session(
+                            sid, owned_partial, close_agent=False
+                        )
+                    _close_detached_agent()
+                    raise RuntimeError("session replaced during session init")
+                # Detach/stop old side machinery only after the fallback is
+                # atomically published, and never while holding the registry lock.
+                server._discard_partial_initialized_session(
+                    sid, owned_partial, close_agent=False
+                )
+                server._register_session_cwd(fallback)
+        finally:
+            if agent is None and session_db is not None:
+                try:
+                    session_db.close()
+                except Exception:
+                    pass
+            if context_tokens:
+                server._clear_session_context(context_tokens)
+            if home_token is not None:
+                try:
+                    server.reset_hermes_home_override(home_token)
+                except Exception:
+                    pass
+        with server._sessions_lock:
+            session = server._sessions[sid]
+            session["transport"] = self._transport
+            if isinstance(frame.get("attached_images"), list):
+                session["attached_images"] = list(frame.get("attached_images") or [])
+            if frame.get("model_override") is not None:
+                session["model_override"] = frame.get("model_override")
+            return session
 
     def _handle_reload_mcp(self, frame: dict[str, Any]) -> None:
         sid = str(frame.get("sid") or "")

@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import importlib
 import json
-import time
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -184,6 +185,7 @@ def test_session_profile_home_override_is_honored(rpc, server, tmp_path):
     server._sessions["sid-other"] = {
         "session_key": "tui-autonomy-other",
         "profile_home": str(other_home),
+        "cwd": str(other_home),
     }
     result = rpc("autonomy.exec", {"session_id": "sid-other", "argv": ["list", "--effective"]})
     assert "profile_home" not in result
@@ -223,6 +225,283 @@ def test_autonomy_rpc_binds_session_workspace_for_native_run_argv(
     assert result["ok"] is True
     assert captured == [workspace.resolve()]
     assert Path.cwd() == launch
+
+
+@pytest.mark.parametrize("transition", ["pop", "replace"])
+def test_autonomy_rpc_keeps_native_profile_workspace_generation_paired(
+    rpc, server, tmp_path, monkeypatch, transition
+):
+    import hades_cli.autonomy as autonomy_mod
+    from hades_cli.workspace_context import get_workspace_root
+    from hades_constants import get_hades_home
+
+    launch = tmp_path / "gateway-launch"
+    profile_a = tmp_path / "profile-a"
+    workspace_a = profile_a / "workspace-a"
+    profile_b = tmp_path / "profile-b"
+    workspace_b = profile_b / "workspace-b"
+    for path in (launch, workspace_a, workspace_b):
+        path.mkdir(parents=True)
+    sid = "sid-autonomy-atomic-context"
+    server._sessions[sid] = {
+        "session_key": "tui-autonomy-atomic-context-a",
+        "profile_home": str(profile_a),
+        "cwd": str(workspace_a),
+    }
+
+    def stale_workspace_lookup(_session_id):
+        if transition == "pop":
+            server._sessions.pop(sid, None)
+            return launch.resolve()
+        server._sessions[sid] = {
+            "session_key": "tui-autonomy-atomic-context-b",
+            "profile_home": str(profile_b),
+            "cwd": str(workspace_b),
+        }
+        return workspace_b.resolve()
+
+    monkeypatch.setattr(server, "_native_workspace_for_session", stale_workspace_lookup)
+    captured: list[tuple[Path, Path]] = []
+
+    def run(argv, **kwargs):
+        captured.append((Path(get_hades_home()).resolve(), get_workspace_root()))
+        return autonomy_mod.CliResult(
+            autonomy_mod.EXIT_OK,
+            "safe",
+            {"ok": True, "action": "status"},
+        )
+
+    monkeypatch.setattr(autonomy_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    response = rpc("autonomy.exec", {"session_id": sid, "argv": ["status"]})
+
+    assert response["ok"] is True
+    assert captured == [(profile_a.resolve(), workspace_a.resolve())]
+    assert Path.cwd() == launch
+
+
+@pytest.mark.parametrize("native_case", ["autonomy", "receipt", "transaction"])
+def test_resume_publishes_profile_and_workspace_before_native_handlers(
+    rpc_raw, server, tmp_path, monkeypatch, native_case
+):
+    """A resumed session must never expose a mixed profile/workspace pair."""
+    from hades_cli.workspace_context import get_workspace_root
+    from hades_constants import get_hades_home
+
+    launch = tmp_path / "gateway-launch"
+    profile_home = tmp_path / "profile-worker"
+    workspace = profile_home / "workspace"
+    launch.mkdir()
+    workspace.mkdir(parents=True)
+
+    class ResumeDB:
+        row = {"id": "stored", "cwd": str(workspace)}
+
+        def get_session(self, _session_id):
+            return dict(self.row)
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def resolve_resume_session_id(self, session_id):
+            return session_id
+
+        def reopen_session(self, _session_id):
+            return None
+
+        def get_resume_conversations(self, _session_id):
+            return [], []
+
+        def get_ancestor_display_prefix(self, _session_id):
+            return []
+
+    db = ResumeDB()
+
+    class Agent:
+        model = "test/model"
+
+    class Worker:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def close(self):
+            return None
+
+    if native_case == "autonomy":
+        import hades_cli.autonomy as native_mod
+
+        native_method = "autonomy.exec"
+        native_payload = {
+            "ok": True,
+            "action": "status",
+            "contract_version": 1,
+            "contract_hash": "test-contract",
+            "rules": [],
+            "suggestions": [],
+            "decisions": [],
+        }
+    elif native_case == "receipt":
+        import hades_cli.receipts as native_mod
+
+        native_method = "receipt.exec"
+        native_payload = {"ok": True, "action": "list", "receipts": []}
+    else:
+        import hades_cli.transactions as native_mod
+
+        native_method = "transaction.exec"
+        native_payload = {"ok": True, "action": "list"}
+
+    monkeypatch.setattr(server, "_profile_home", lambda _profile: profile_home)
+    monkeypatch.setattr("hermes_state.SessionDB", lambda db_path=None: db)
+    monkeypatch.setattr(server, "_make_agent", lambda *_args, **_kwargs: Agent())
+    monkeypatch.setattr(
+        server, "_stored_session_runtime_overrides", lambda _row: {}
+    )
+    monkeypatch.setattr(
+        server, "_claim_active_session_slot", lambda *_args, **_kwargs: (None, None)
+    )
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(
+        server,
+        "_set_session_context",
+        lambda _key, **_kwargs: [],
+    )
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+    monkeypatch.setattr(server, "_SlashWorker", Worker)
+    monkeypatch.setattr(server, "_register_session_cwd", lambda *_args: None)
+    monkeypatch.setattr(server, "_wire_callbacks", lambda *_args: None)
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args: None)
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {})
+    monkeypatch.setattr(server, "_emit", lambda *_args: None)
+    monkeypatch.setattr(server, "_schedule_mcp_late_refresh", lambda *_args: None)
+
+    published = threading.Event()
+    release = threading.Event()
+    original_init_session = server._init_session
+
+    def paused_init_session(*args, **kwargs):
+        original_init_session(*args, **kwargs)
+        published.set()
+        assert release.wait(5), "resume did not release its publication barrier"
+
+    monkeypatch.setattr(server, "_init_session", paused_init_session)
+    resume_result = {}
+    resume_errors = []
+
+    def resume():
+        try:
+            resume_result["response"] = server._methods["session.resume"](
+                "resume",
+                {
+                    "session_id": "stored",
+                    "profile": "worker",
+                    "eager_build": True,
+                },
+            )
+        except BaseException as exc:  # pragma: no cover - diagnostic handoff
+            resume_errors.append(exc)
+
+    resume_thread = threading.Thread(target=resume)
+    monkeypatch.chdir(launch)
+    resume_thread.start()
+    try:
+        assert published.wait(5), "resume never published its initial session record"
+        captured = []
+
+        def run_argv(argv, **kwargs):
+            captured.append((Path(get_hades_home()).resolve(), get_workspace_root()))
+            return SimpleNamespace(
+                exit_code=native_mod.EXIT_OK,
+                output="safe",
+                payload=native_payload,
+            )
+
+        monkeypatch.setattr(native_mod, "run_argv", run_argv)
+        with server._sessions_lock:
+            live_sid = next(iter(server._sessions))
+        response = rpc_raw(
+            native_method, {"session_id": live_sid, "argv": ["list"]}
+        )
+    finally:
+        release.set()
+        resume_thread.join(timeout=5)
+
+    assert not resume_thread.is_alive()
+    assert not resume_errors
+    assert "error" not in response, response
+    assert captured == [(profile_home.resolve(), workspace.resolve())]
+    assert Path.cwd() == launch
+
+
+@pytest.mark.parametrize("cwd", [None, "", 17, "/private/missing-autonomy-workspace"])
+def test_autonomy_rpc_fails_closed_for_invalid_registered_workspace(
+    rpc_raw, server, tmp_path, monkeypatch, cwd
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    launch = tmp_path / "gateway-launch"
+    launch.mkdir()
+    server._sessions["sid-autonomy-invalid-workspace"] = {
+        "session_key": "tui-autonomy-invalid-workspace",
+        "cwd": cwd,
+    }
+    called = False
+
+    def run(*args, **kwargs):
+        nonlocal called
+        called = True
+        return autonomy_mod.CliResult(autonomy_mod.EXIT_OK, "unsafe", {"ok": True})
+
+    monkeypatch.setattr(autonomy_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    response = rpc_raw(
+        "autonomy.exec",
+        {"session_id": "sid-autonomy-invalid-workspace", "argv": ["status"]},
+    )
+
+    assert response["error"]["code"] == 5038
+    assert "gateway-launch" not in str(response)
+    assert "/private/missing-autonomy-workspace" not in str(response)
+    assert called is False
+
+
+def test_autonomy_rpc_fails_closed_when_registered_workspace_is_deleted(
+    rpc_raw, server, tmp_path, monkeypatch
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    launch = tmp_path / "gateway-launch"
+    workspace = tmp_path / "deleted-autonomy-workspace"
+    launch.mkdir()
+    workspace.mkdir()
+    server._sessions["sid-autonomy-deleted-workspace"] = {
+        "session_key": "tui-autonomy-deleted-workspace",
+        "cwd": str(workspace),
+    }
+    workspace.rmdir()
+    called = False
+
+    def run(*args, **kwargs):
+        nonlocal called
+        called = True
+        return autonomy_mod.CliResult(autonomy_mod.EXIT_OK, "unsafe", {"ok": True})
+
+    monkeypatch.setattr(autonomy_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    response = rpc_raw(
+        "autonomy.exec",
+        {"session_id": "sid-autonomy-deleted-workspace", "argv": ["status"]},
+    )
+
+    assert response["error"]["code"] == 5038
+    assert str(workspace) not in str(response)
+    assert str(launch) not in str(response)
+    assert called is False
 
 
 def test_autonomy_relative_action_file_uses_workspace_context(tmp_path, monkeypatch):

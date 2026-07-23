@@ -122,17 +122,21 @@ describe('/transaction slash command', () => {
     expect(text).toContain('/transaction reconcile tx-1')
   })
 
-  it('renders the persistent warning for an uncertain nonzero commit result', async () => {
+  it.each([
+    ['blocked', 'transaction blocked — execution was prevented'],
+    ['failed', 'transaction failed — operation did not complete'],
+    ['partially_compensated', 'transaction partially compensated — compensation incomplete']
+  ])('renders %s as a known failure without uncertainty guidance', async (status, output) => {
     const { run, sys } = buildCtx({
       action: 'commit',
       ok: false,
-      output: 'commit result withheld',
-      status: 'partially_compensated',
+      output,
+      status,
       compensated_nodes: ['write'],
       transaction: {
         current_revision: 1,
         receipt_id: null,
-        status: 'partially_compensated',
+        status,
         transaction_id: 'tx-1'
       }
     })
@@ -140,8 +144,31 @@ describe('/transaction slash command', () => {
     await run('commit tx-1')
 
     const text = printed(sys)
-    expect(text).toContain('do not retry')
-    expect(text).toContain('/transaction reconcile tx-1')
+    expect(text).toContain(output)
+    expect(text).not.toContain('effect uncertain')
+    expect(text).not.toContain('do not retry')
+    expect(text).not.toContain('/transaction reconcile')
+  })
+
+  it('warns for unknown counts even when status is in flight', async () => {
+    const { run, sys } = buildCtx({
+      action: 'reconcile',
+      counts: { landed: 1, not_landed: 0, skipped: 0, unknown: 1 },
+      output: 'reconciled: status committing',
+      status: 'committing',
+      transaction: {
+        current_revision: 1,
+        receipt_id: null,
+        status: 'committing',
+        transaction_id: 'tx-in-flight'
+      }
+    })
+
+    await run('reconcile tx-in-flight')
+
+    const text = printed(sys)
+    expect(text).toContain('warning: unknown_effect')
+    expect(text).toContain('/transaction reconcile tx-in-flight')
   })
 
   it('renders successful compensation as normal output without an uncertainty warning', async () => {

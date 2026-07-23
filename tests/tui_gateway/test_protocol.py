@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -387,6 +388,57 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
         {"role": "assistant", "text": "yo", "reasoning": "thoughts"},
         {"role": "tool", "name": "tool", "context": ""},
     ]
+
+
+def test_session_resume_invalid_cols_defaults_to_80(server, monkeypatch):
+    """The validated handler width must reach the implementation unchanged."""
+    target = "20260723_010101_invalidcols"
+    init_cols = []
+
+    class _DB:
+        def get_session(self, _sid):
+            return {"id": target}
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def resolve_resume_session_id(self, sid):
+            return sid
+
+        def reopen_session(self, _sid):
+            return None
+
+        def get_resume_conversations(self, _sid):
+            history = [{"role": "user", "content": "hello"}]
+            return history, history
+
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_make_agent", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        server,
+        "_init_session",
+        lambda _sid, _key, _agent, _history, *, cols=80, **_kwargs: init_cols.append(cols),
+    )
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "test/model"})
+
+    resp = server.handle_request(
+        {
+            "id": "invalid-cols",
+            "method": "session.resume",
+            "params": {
+                "session_id": target,
+                "cols": "not-a-number",
+                "eager_build": True,
+            },
+        }
+    )
+
+    assert "error" not in resp, resp
+    assert init_cols == [80]
+    assert resp["result"]["message_count"] == 1
 
 
 def test_session_resume_defaults_to_deferred_build(server, monkeypatch):
@@ -1349,6 +1401,457 @@ def test_session_branch_forwards_original_timestamps(server, monkeypatch):
     assert [c.get("timestamp") for c in append_calls] == original_ts
 
 
+def test_session_branch_uses_parent_profile_context_for_db_and_agent(server, monkeypatch, tmp_path):
+    """A cross-profile branch must publish its row and agent through one profile DB."""
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    events = []
+    dbs = []
+    active_override = False
+
+    class _DB:
+        def get_session_title(self, _key):
+            assert active_override
+            return "parent-title"
+
+        def get_next_title_in_lineage(self, base):
+            assert active_override
+            return f"{base} 2"
+
+        def create_session(self, new_key, **kwargs):
+            assert active_override
+            events.append(("create", new_key, kwargs))
+
+        def append_message(self, **kwargs):
+            assert active_override
+            events.append(("append", kwargs))
+
+        def set_session_title(self, key, title):
+            assert active_override
+            events.append(("title", key, title))
+
+    class _SessionDB(_DB):
+        def __init__(self, *, db_path):
+            assert active_override
+            self.db_path = Path(db_path)
+            dbs.append(self)
+
+    def _set_override(home):
+        nonlocal active_override
+        assert Path(home) == profile_home
+        active_override = True
+        events.append(("set", str(home)))
+        return "profile-token"
+
+    def _reset_override(token):
+        nonlocal active_override
+        assert token == "profile-token"
+        events.append(("reset", token))
+        active_override = False
+
+    monkeypatch.setattr(server, "_get_db", lambda: pytest.fail("launch DB must not be opened"))
+    monkeypatch.setattr(server, "set_hermes_home_override", _set_override)
+    monkeypatch.setattr(server, "reset_hermes_home_override", _reset_override)
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_SessionDB))
+    monkeypatch.setattr(
+        server,
+        "_resolve_model",
+        lambda: (pytest.fail("model must resolve in profile context") if not active_override else "profile/model"),
+    )
+    monkeypatch.setattr(server, "_new_session_key", lambda: "20260101_000001_profile")
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *_a, **_k: (None, None))
+    monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda _sid, key, session_id=None, session_db=None, **_kwargs: (
+            pytest.fail("agent must build in profile context")
+            if not active_override
+            or session_db is not dbs[0]
+            or _kwargs.get("owns_session_db") is not True
+            else types.SimpleNamespace(model="profile/model", session_id=session_id or key)
+        ),
+    )
+    init_calls = []
+    monkeypatch.setattr(server, "_init_session", lambda *args, **kwargs: init_calls.append((args, kwargs)))
+
+    parent_sid = "parent-profile"
+    parent_key = "20260101_000000_parent"
+    workspace = tmp_path / "workspace"
+    server._sessions[parent_sid] = {
+        "session_key": parent_key,
+        "history": [{"role": "user", "content": "hello"}],
+        "history_lock": threading.Lock(),
+        "cols": 100,
+        "cwd": str(workspace),
+        "profile_home": str(profile_home),
+    }
+    resp = server.handle_request(
+        {"id": "profile-branch", "method": "session.branch", "params": {"session_id": parent_sid}}
+    )
+
+    assert "error" not in resp, resp
+    assert dbs and dbs[0].db_path == profile_home / "state.db"
+    assert [event[0] for event in events] == ["set", "create", "append", "title", "reset"]
+    create = next(event for event in events if event[0] == "create")
+    assert create[2]["model"] == "profile/model"
+    assert create[2]["cwd"] == str(workspace)
+    assert create[2]["model_config"] == {"_branched_from": parent_key}
+    assert init_calls[0][1]["session_db"] is dbs[0]
+    assert init_calls[0][1]["profile_home"] == str(profile_home)
+    assert init_calls[0][1]["cwd"] == str(workspace)
+    assert active_override is False
+
+
+
+def test_reset_profile_builds_owned_agent_before_swapping_and_closes_old(
+    server, monkeypatch, tmp_path
+):
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    active = False
+    dbs = []
+    closed = []
+    context_calls = []
+
+    class _DB:
+        def __init__(self, *, db_path):
+            assert active
+            self.db_path = Path(db_path)
+            self.closed = False
+            dbs.append(self)
+
+        def close(self):
+            self.closed = True
+
+    old_agent = types.SimpleNamespace(
+        model="old/model", session_id="reset-key", close=lambda: closed.append("old")
+    )
+    new_agent = types.SimpleNamespace(model="new/model", session_id="reset-key")
+
+    def _set_home(home):
+        nonlocal active
+        assert Path(home) == profile_home
+        active = True
+        return "reset-token"
+
+    def _reset_home(token):
+        nonlocal active
+        assert token == "reset-token"
+        active = False
+
+    def _set_context(*args, **kwargs):
+        assert active
+        context_calls.append((args, kwargs))
+        return ["ctx"]
+
+    def _make_agent(*_args, **kwargs):
+        assert active
+        assert kwargs["owns_session_db"] is True
+        assert kwargs["session_db"] is dbs[0]
+        return new_agent
+
+    monkeypatch.setattr(server, "set_hermes_home_override", _set_home)
+    monkeypatch.setattr(server, "reset_hermes_home_override", _reset_home)
+    monkeypatch.setattr(server, "_set_session_context", _set_context)
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
+    monkeypatch.setattr(server, "_restart_slash_worker", lambda *_args: None)
+    monkeypatch.setattr(server, "_start_notification_poller", lambda *_args, **_kwargs: threading.Event())
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "new/model"})
+    monkeypatch.setattr(server, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_DB))
+
+    sid = "reset-profile"
+    session = {
+        "agent": old_agent,
+        "session_key": "reset-key",
+        "profile_home": str(profile_home),
+        "cwd": str(workspace),
+        "source": "telegram",
+        "history": [{"role": "user", "content": "old"}],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "_notif_stop": threading.Event(),
+        "slash_worker": None,
+        "model_override": {"model": "old/model"},
+    }
+    server._sessions[sid] = session
+    try:
+        info = server._reset_session_agent(sid, session)
+    finally:
+        server._sessions.pop(sid, None)
+
+    assert info["model"] == "new/model"
+    assert session["agent"] is new_agent
+    assert session["session_db"] is dbs[0]
+    assert context_calls == [
+        (("reset-key",), {"cwd": str(workspace), "source": "telegram"})
+    ]
+    assert closed == ["old"]
+    assert old_agent._end_session_on_close is False
+    assert active is False
+
+
+def test_deferred_agent_build_discards_stale_constructed_agent(server, monkeypatch, tmp_path):
+    """A deferred profile build must not publish into a reaped session slot."""
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    sid = "deferred-stale"
+    ready = threading.Event()
+    replacement = {"replacement": True}
+    dbs = []
+    agents = []
+    worker_calls = []
+    poller_calls = []
+    notifier_calls = []
+    approval_calls = []
+
+    class _Approval:
+        register_gateway_notify = staticmethod(
+            lambda *_args, **_kwargs: approval_calls.append("register")
+        )
+        load_permanent_allowlist = staticmethod(
+            lambda: approval_calls.append("load")
+        )
+
+    monkeypatch.setitem(sys.modules, "tools.approval", _Approval)
+
+    class _DB:
+        def __init__(self, *, db_path):
+            self.db_path = Path(db_path)
+            self.close_calls = 0
+            dbs.append(self)
+
+        def close(self):
+            self.close_calls += 1
+
+    class _Agent:
+        def __init__(self, session_db):
+            self.model = "profile/model"
+            self.session_db = session_db
+            self._session_db = session_db
+            self._owns_session_db = True
+            self.close_calls = 0
+            agents.append(self)
+
+        def close(self):
+            self.close_calls += 1
+            self.session_db.close()
+
+    original = {
+        "agent": None,
+        "agent_ready": ready,
+        "session_key": "20260723_000001_deferred",
+        "profile_home": str(profile_home),
+        "cwd": str(tmp_path / "workspace"),
+        "source": "telegram",
+    }
+
+    def _reset_home(token):
+        assert token == "home-token"
+
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_DB))
+    monkeypatch.setattr(server, "set_hermes_home_override", lambda _home: "home-token")
+    monkeypatch.setattr(server, "reset_hermes_home_override", _reset_home)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args, **_kwargs: ["context"])
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+
+    def _make_agent(_sid, _key, *, session_db, **_kwargs):
+        agent = _Agent(session_db)
+        with server._sessions_lock:
+            assert server._sessions[sid] is original
+            server._sessions[sid] = replacement
+        return agent
+
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
+    monkeypatch.setattr(server, "_SlashWorker", lambda *_args, **_kwargs: worker_calls.append(True))
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda *_args, **_kwargs: poller_calls.append(True),
+    )
+    monkeypatch.setattr(server, "_wire_callbacks", lambda *_args: notifier_calls.append("callbacks"))
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args: notifier_calls.append("boundary"))
+    monkeypatch.setattr(server, "_emit", lambda *_args: notifier_calls.append("emit"))
+
+    server._sessions[sid] = original
+    server._start_agent_build(sid, original)
+
+    assert ready.wait(timeout=1.0)
+    assert server._sessions[sid] is replacement
+    assert original["agent"] is None
+    assert original.get("session_db") is None
+    assert len(agents) == 1
+    assert agents[0].close_calls == 1
+    assert len(dbs) == 1
+    assert dbs[0].close_calls == 1
+    assert worker_calls == []
+    assert poller_calls == []
+    assert notifier_calls == []
+    assert approval_calls == []
+
+
+def test_reset_discards_replacement_when_session_reaped_during_build(
+    server, monkeypatch, tmp_path
+):
+    """Reset must abandon all candidate resources if its registry slot is replaced."""
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    sid = "reset-reaped"
+    replacement = {"replacement": True}
+    dbs = []
+    agents = []
+    worker_calls = []
+    poller_calls = []
+    config_calls = []
+    lock_probe_results = []
+
+    class _DB:
+        def __init__(self, *, db_path):
+            self.db_path = Path(db_path)
+            self.close_calls = 0
+            dbs.append(self)
+
+        def close(self):
+            self.close_calls += 1
+
+    def _assert_lock_is_free_during_close():
+        acquired = []
+
+        def _probe():
+            got_lock = server._sessions_lock.acquire(timeout=0.5)
+            acquired.append(got_lock)
+            if got_lock:
+                server._sessions_lock.release()
+
+        thread = threading.Thread(target=_probe)
+        thread.start()
+        thread.join(timeout=1.0)
+        lock_probe_results.append(acquired == [True] and not thread.is_alive())
+
+    class _Agent:
+        def __init__(self, session_db):
+            self.model = "new/model"
+            self.session_db = session_db
+            self._session_db = session_db
+            self._owns_session_db = True
+            self.close_calls = 0
+            agents.append(self)
+
+        def close(self):
+            self.close_calls += 1
+            _assert_lock_is_free_during_close()
+            self.session_db.close()
+
+    class _Worker:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            _assert_lock_is_free_during_close()
+
+    old_agent = types.SimpleNamespace(model="old/model", session_id="reset-key")
+    original = {
+        "agent": old_agent,
+        "session_key": "reset-key",
+        "profile_home": str(profile_home),
+        "cwd": str(tmp_path / "workspace"),
+        "source": "telegram",
+        "history": [{"role": "user", "content": "old"}],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "_notif_stop": threading.Event(),
+        "slash_worker": None,
+    }
+
+    def _reset_home(token):
+        assert token == "home-token"
+
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_DB))
+    monkeypatch.setattr(server, "set_hermes_home_override", lambda _home: "home-token")
+    monkeypatch.setattr(server, "reset_hermes_home_override", _reset_home)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args, **_kwargs: ["context"])
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+
+    def _make_agent(_sid, _key, *, session_db, **_kwargs):
+        agent = _Agent(session_db)
+        with server._sessions_lock:
+            server._sessions.pop(sid)
+            server._sessions[sid] = replacement
+        return agent
+
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
+    monkeypatch.setattr(
+        server,
+        "_restart_slash_worker",
+        lambda *_args, **_kwargs: worker_calls.append(_Worker()) or worker_calls[-1],
+    )
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda *_args, **_kwargs: poller_calls.append(threading.Event()) or poller_calls[-1],
+    )
+    monkeypatch.setattr(
+        server,
+        "_config_model_target",
+        lambda: config_calls.append(True) or "new/model",
+    )
+    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "new/model"})
+
+    server._sessions[sid] = original
+    with pytest.raises(RuntimeError, match="closed or replaced during reset"):
+        server._reset_session_agent(sid, original)
+
+    assert server._sessions[sid] is replacement
+    assert replacement == {"replacement": True}
+    assert original["agent"] is old_agent
+    assert original["history"] == [{"role": "user", "content": "old"}]
+    assert not hasattr(old_agent, "_end_session_on_close")
+    assert len(agents) == 1
+    assert agents[0].close_calls == 1
+    assert len(dbs) == 1
+    assert dbs[0].close_calls == 1
+    assert worker_calls == []
+    assert poller_calls == []
+    assert config_calls == []
+    assert lock_probe_results == [True]
+
+
+def test_finalize_ends_profile_agent_database_without_launch_lookup(server, monkeypatch):
+    calls = []
+
+    class _DB:
+        def get_session(self, session_id):
+            calls.append(("get", session_id))
+            return {"source": "tui"}
+
+        def end_session(self, session_id, reason):
+            calls.append(("end", session_id, reason))
+
+    agent = types.SimpleNamespace(session_id="profile-session", _session_db=_DB())
+    monkeypatch.setattr(server, "_get_db", lambda: pytest.fail("launch DB must not be used"))
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_release_active_session_slot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_session_source", lambda _session: "tui")
+
+    server._finalize_session(
+        {"agent": agent, "session_key": "profile-session", "history": []},
+        end_reason="reset",
+    )
+
+    assert calls == [("get", "profile-session"), ("end", "profile-session", "reset")]
+
+
 def test_persist_branch_seed_forwards_original_timestamps(server, monkeypatch):
     """First-turn branch seed persist must carry each copied message's
     original timestamp through to append_message (#28841)."""
@@ -2190,3 +2693,843 @@ def test_broadcast_skin_if_changed_on_any_signature_move(server, monkeypatch):
         server._broadcast_skin_if_changed()
 
     assert [ev for ev, _ in emitted] == ["skin.changed"] * 3
+
+
+def test_gateway_owned_teardown_disables_agent_row_finalization(server, monkeypatch):
+    calls = []
+
+    class DB:
+        def get_session(self, _session_id):
+            return {"source": "telegram"}
+
+        def end_session(self, *args):
+            calls.append(("end", args))
+
+    class Agent:
+        session_id = "gateway-session"
+        _session_db = DB()
+        _end_session_on_close = True
+
+        def close(self):
+            calls.append(("close", self._end_session_on_close))
+            if self._end_session_on_close:
+                self._session_db.end_session(self.session_id, "agent_close")
+
+    agent = Agent()
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args: None)
+    server._teardown_session(
+        {
+            "agent": agent,
+            "session_key": "gateway-session",
+            "history": [],
+            "history_lock": threading.Lock(),
+        }
+    )
+
+    assert calls == [("close", False)]
+
+
+def test_profile_resume_lookup_closes_db_on_early_error(server, monkeypatch, tmp_path):
+    class DB:
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+        def get_session(self, _session_id):
+            return None
+
+        def get_session_by_title(self, _target):
+            return None
+
+    db = DB()
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    monkeypatch.setattr(server, "_profile_home", lambda _profile: profile_home)
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=lambda **_: db))
+
+    response = server._methods["session.resume"](
+        "resume", {"session_id": "missing", "profile": "worker"}
+    )
+
+    assert response["error"]["code"] == 4007
+    assert db.closed == 1
+
+
+def test_deferred_profile_db_open_failure_is_fatal(server, monkeypatch, tmp_path):
+    ready = threading.Event()
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    session = {
+        "agent": None,
+        "agent_error": None,
+        "agent_ready": ready,
+        "agent_build_started": False,
+        "session_key": "profile-session",
+        "profile_home": str(profile_home),
+        "source": "tui",
+        "history_lock": threading.Lock(),
+    }
+    server._sessions["profile-sid"] = session
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_state",
+        types.SimpleNamespace(SessionDB=lambda **_: (_ for _ in ()).throw(OSError("locked"))),
+    )
+    monkeypatch.setattr(
+        server, "_make_agent", lambda *_args, **_kwargs: pytest.fail("must not build")
+    )
+
+    server._start_agent_build("profile-sid", session)
+    assert ready.wait(2)
+    assert "locked" in session["agent_error"]
+
+
+def test_deferred_local_build_constructs_and_attaches_agent(server, monkeypatch):
+    """A launch-profile deferred build must execute the common build path too."""
+    sid = "deferred-local"
+    ready = threading.Event()
+    session = {
+        "agent": None,
+        "agent_error": None,
+        "agent_ready": ready,
+        "session_key": "local-key",
+        "profile_home": None,
+        "cwd": "/tmp",
+        "source": "tui",
+        "history_lock": threading.Lock(),
+    }
+    built = types.SimpleNamespace(model="local/model")
+    builds = []
+
+    class _Worker:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_a: None)
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: builds.append(True) or built)
+    monkeypatch.setattr(server, "_SlashWorker", lambda *_a, **_k: _Worker())
+    monkeypatch.setattr(server, "_attach_worker", lambda _sid, current, worker: current.__setitem__("slash_worker", worker))
+    monkeypatch.setattr(server, "_start_notification_poller", lambda *_a, **_k: threading.Event())
+    monkeypatch.setattr(server, "_wire_callbacks", lambda *_a: None)
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_a: None)
+    monkeypatch.setattr(server, "_emit", lambda *_a: None)
+    monkeypatch.setattr(server, "_schedule_mcp_late_refresh", lambda *_a: None)
+    monkeypatch.setattr(server, "_probe_config_health", lambda *_a: None)
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(server, "_config_model_target", lambda: "local/model")
+    monkeypatch.setattr(server, "_resolve_model", lambda: "local/model")
+    fake_approval = types.SimpleNamespace(
+        register_gateway_notify=lambda *_a, **_k: None,
+        load_permanent_allowlist=lambda: None,
+    )
+    monkeypatch.setitem(sys.modules, "tools.approval", fake_approval)
+
+    server._sessions[sid] = session
+    server._start_agent_build(sid, session)
+
+    assert ready.wait(2)
+    assert builds == [True]
+    assert session["agent"] is built
+    assert session["session_db"] is None
+    assert session.get("agent_error") is None
+
+
+def test_deferred_build_initial_identity_fence_skips_replacement(server, monkeypatch):
+    """A deferred build queued for an old record must not touch its replacement."""
+    sid = "deferred-initial-fence"
+    ready = threading.Event()
+    original = {
+        "agent": None,
+        "agent_ready": ready,
+        "session_key": "old-key",
+        "profile_home": None,
+        "cwd": "/tmp",
+        "source": "tui",
+    }
+    replacement = {"replacement": True}
+    calls = []
+
+    monkeypatch.setattr(
+        server,
+        "_set_session_context",
+        lambda *_a, **_k: calls.append("context") or [],
+    )
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda *_a, **_k: calls.append("agent") or pytest.fail("stale build constructed an agent"),
+    )
+
+    with server._sessions_lock:
+        server._sessions[sid] = replacement
+    server._start_agent_build(sid, original)
+
+    assert ready.wait(2)
+    assert server._sessions[sid] is replacement
+    assert replacement == {"replacement": True}
+    assert calls == []
+
+
+def test_reset_swaps_before_starting_candidate_side_machinery(server, monkeypatch, tmp_path):
+    """Reset must not start worker/poller after a candidate loses its slot."""
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    sid = "reset-side-machinery-fence"
+    replacement = {"replacement": True}
+    worker_calls = []
+    poller_calls = []
+    dbs = []
+    agents = []
+
+    class _DB:
+        def __init__(self, *, db_path):
+            self.close_calls = 0
+            dbs.append(self)
+
+        def close(self):
+            self.close_calls += 1
+
+    class _Agent:
+        model = "new/model"
+
+        def __init__(self, db):
+            self._session_db = db
+            self.close_calls = 0
+            agents.append(self)
+
+        def close(self):
+            self.close_calls += 1
+            self._session_db.close()
+
+    old_agent = types.SimpleNamespace(model="old/model")
+    session = {
+        "agent": old_agent,
+        "session_key": "reset-side-key",
+        "profile_home": str(profile_home),
+        "cwd": str(tmp_path),
+        "source": "tui",
+        "history": [],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+    }
+
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_DB))
+    monkeypatch.setattr(server, "set_hermes_home_override", lambda *_a: "home-token")
+    monkeypatch.setattr(server, "reset_hermes_home_override", lambda *_a: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_a: None)
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, session_db, **_k: _Agent(session_db))
+    monkeypatch.setattr(
+        server,
+        "_session_info",
+        lambda *_a: (server._sessions.__setitem__(sid, replacement) or {"model": "new/model"}),
+    )
+    monkeypatch.setattr(
+        server,
+        "_restart_slash_worker",
+        lambda *_a, **_k: worker_calls.append(True),
+    )
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda *_a, **_k: poller_calls.append(True),
+    )
+    monkeypatch.setattr(server, "_config_model_target", lambda: "new/model")
+    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_a: None)
+    monkeypatch.setattr(server, "_emit", lambda *_a: None)
+
+    with server._sessions_lock:
+        server._sessions[sid] = session
+    with pytest.raises(RuntimeError, match="closed or replaced during reset"):
+        server._reset_session_agent(sid, session)
+
+    assert server._sessions[sid] is replacement
+    assert worker_calls == []
+    assert poller_calls == []
+    assert len(agents) == 1
+    assert agents[0].close_calls == 1
+    assert dbs[0].close_calls == 1
+
+
+def test_reset_publication_failure_cleans_old_and_candidate_resources(
+    server, monkeypatch, tmp_path
+):
+    """A reset that loses its slot after publication must release both generations."""
+    sid = "reset-published-failure"
+    replacement = {"replacement": True}
+    old_stop = threading.Event()
+    old_thread_done = threading.Event()
+
+    def _old_poller():
+        old_stop.wait(5)
+        old_thread_done.set()
+
+    old_thread = threading.Thread(target=_old_poller, daemon=True)
+    old_thread.start()
+
+    class _Closable:
+        def __init__(self, name):
+            self.name = name
+            self.close_calls = 0
+            self._end_session_on_close = True
+
+        def close(self):
+            self.close_calls += 1
+
+    old_agent = _Closable("old-agent")
+    new_agent = _Closable("new-agent")
+    old_worker = _Closable("old-worker")
+    new_worker = _Closable("new-worker")
+    session = {
+        "agent": old_agent,
+        "session_key": "reset-published-key",
+        "profile_home": None,
+        "cwd": str(tmp_path),
+        "source": "tui",
+        "history": [],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "_notif_stop": old_stop,
+        "_notif_thread": old_thread,
+        "slash_worker": old_worker,
+    }
+
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+    monkeypatch.setattr(server, "_make_agent", lambda *_args, **_kwargs: new_agent)
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "new/model"})
+    monkeypatch.setattr(server, "_config_model_target", lambda: "new/model")
+    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+
+    def _reap_after_publication(_sid, _session, build_only=False):
+        assert build_only is True
+        with server._sessions_lock:
+            server._sessions[sid] = replacement
+        return new_worker
+
+    monkeypatch.setattr(server, "_restart_slash_worker", _reap_after_publication)
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda *_args, **_kwargs: pytest.fail("replacement must not receive a poller"),
+    )
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args: None)
+
+    with server._sessions_lock:
+        server._sessions[sid] = session
+    try:
+        with pytest.raises(RuntimeError, match="closed or replaced during reset"):
+            server._reset_session_agent(sid, session)
+
+        old_stop_set = old_stop.is_set()
+        old_thread_alive = old_thread.is_alive()
+        old_thread_finished = old_thread_done.is_set()
+        replacement_snapshot = dict(server._sessions[sid])
+        assert old_stop_set
+        assert not old_thread_alive
+        assert old_thread_finished
+        assert old_worker.close_calls == 1
+        assert old_agent.close_calls == 1
+        assert old_agent._end_session_on_close is False
+        assert new_agent.close_calls == 1
+        assert new_worker.close_calls == 1
+        assert replacement_snapshot == replacement
+    finally:
+        old_stop.set()
+        old_thread.join(timeout=1)
+        server._sessions.pop(sid, None)
+
+
+def test_profile_branch_limit_and_row_error_close_db_once(server, monkeypatch, tmp_path):
+    """Profile branch failures before ownership transfer close their DB once."""
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    close_counts = []
+    lease_releases = []
+
+    class _Lease:
+        def release(self):
+            lease_releases.append(True)
+
+    class _DB:
+        def __init__(self, *, db_path):
+            self.close_calls = 0
+            close_counts.append(self)
+
+        def close(self):
+            self.close_calls += 1
+
+        def get_session_title(self, _key):
+            return "parent"
+
+        def get_next_title_in_lineage(self, title):
+            return title + " 2"
+
+        def create_session(self, *_a, **_k):
+            raise RuntimeError("row write failed")
+
+    parent = {
+        "agent": types.SimpleNamespace(),
+        "agent_ready": threading.Event(),
+        "session_key": "parent-key",
+        "profile_home": str(profile_home),
+        "cwd": str(tmp_path),
+        "source": "tui",
+        "history": [{"role": "user", "content": "hello"}],
+        "history_lock": threading.Lock(),
+        "cols": 80,
+    }
+    parent["agent_ready"].set()
+    server._sessions["branch-parent-errors"] = parent
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_DB))
+    monkeypatch.setattr(server, "set_hermes_home_override", lambda *_a: "home")
+    monkeypatch.setattr(server, "reset_hermes_home_override", lambda *_a: None)
+    monkeypatch.setattr(server, "_new_session_key", lambda: "branch-error-key")
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *_a, **_k: (None, "at limit"))
+    limited = server._methods["session.branch"](
+        "limit", {"session_id": "branch-parent-errors"}
+    )
+    assert limited["error"]["code"] == 4090
+    assert close_counts[0].close_calls == 1
+
+    close_counts.clear()
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *_a, **_k: (_Lease(), None))
+    failed = server._methods["session.branch"](
+        "row", {"session_id": "branch-parent-errors"}
+    )
+    assert failed["error"]["code"] == 5008
+    assert close_counts[0].close_calls == 1
+    assert lease_releases == [True]
+
+
+def test_profile_branch_agent_failure_rolls_back_only_new_row(server, monkeypatch, tmp_path):
+    """A failed branch agent build ends only the newly-created branch row."""
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    dbs = []
+    events = []
+
+    class _Lease:
+        def release(self):
+            events.append(("release",))
+
+    class _DB:
+        def __init__(self, *, db_path):
+            self.close_calls = 0
+            dbs.append(self)
+
+        def close(self):
+            self.close_calls += 1
+
+        def get_session_title(self, _key):
+            return "parent"
+
+        def get_next_title_in_lineage(self, title):
+            return title + " 2"
+
+        def create_session(self, key, **_kwargs):
+            events.append(("create", key))
+
+        def append_message(self, **_kwargs):
+            events.append(("append",))
+
+        def set_session_title(self, key, _title):
+            events.append(("title", key))
+
+        def end_session(self, key, reason):
+            events.append(("end", key, reason))
+
+    parent = {
+        "agent": types.SimpleNamespace(),
+        "agent_ready": threading.Event(),
+        "session_key": "parent-key",
+        "profile_home": str(profile_home),
+        "cwd": str(tmp_path),
+        "source": "tui",
+        "history": [{"role": "user", "content": "hello"}],
+        "history_lock": threading.Lock(),
+        "cols": 80,
+    }
+    parent["agent_ready"].set()
+    server._sessions["branch-agent-error"] = parent
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_DB))
+    monkeypatch.setattr(server, "set_hermes_home_override", lambda *_a: "home")
+    monkeypatch.setattr(server, "reset_hermes_home_override", lambda *_a: events.append(("reset",)))
+    monkeypatch.setattr(server, "_new_session_key", lambda: "branch-new-key")
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *_a, **_k: (_Lease(), None))
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("agent failed")))
+    failed = server._methods["session.branch"](
+        "agent", {"session_id": "branch-agent-error"}
+    )
+
+    assert failed["error"]["code"] == 5000
+    assert ("end", "branch-new-key", "branch_agent_init_failed") in events
+    assert not any(event[0] == "end" and event[1] == "parent-key" for event in events)
+    assert events.count(("release",)) == 1
+    assert dbs[0].close_calls == 1
+    assert ("reset",) in events
+
+
+def test_eager_resume_loser_disables_end_on_close_before_close(server, monkeypatch):
+    """A concurrent eager-resume loser must not end the winner's durable row."""
+    target = "resume-race-target"
+    calls = []
+    winner = types.SimpleNamespace(model="winner/model")
+    winner_session = {"agent": winner, "session_key": target, "history": []}
+    live_calls = iter([None, ("winner-sid", winner_session)])
+
+    class _DB:
+        def get_session(self, _sid):
+            return {"id": target, "source": "tui"}
+
+        def resolve_resume_session_id(self, _sid):
+            return target
+
+        def reopen_session(self, _sid):
+            return None
+
+        def get_resume_conversations(self, _sid):
+            return ([], [])
+
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
+        def end_session(self, *args):
+            calls.append(("end", args))
+
+    class _Lease:
+        db = _DB()
+
+        def release(self):
+            calls.append(("release",))
+
+        def transfer_to_agent(self, _agent):
+            return None
+
+    class _Loser:
+        model = "loser/model"
+
+        def __init__(self):
+            self._end_session_on_close = True
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            calls.append(("close", self._end_session_on_close))
+            if self._end_session_on_close:
+                _Lease.db.end_session(target, "agent_close")
+
+    loser = _Loser()
+    monkeypatch.setattr(server, "_find_live_session_by_key", lambda _key: next(live_calls))
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *_a, **_k: (_Lease(), None))
+    monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_a: None)
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: loser)
+    monkeypatch.setattr(server, "_stored_session_runtime_overrides", lambda _row: {})
+    monkeypatch.setattr(server, "_live_session_payload", lambda *_a, **_k: {"session_id": "winner-sid"})
+    monkeypatch.setattr(server, "current_transport", lambda: server._stdio_transport)
+
+    response = server._session_resume_impl(
+        "race",
+        {"session_id": target, "eager_build": True},
+        _Lease(),
+    )
+
+    assert response["result"]["session_id"] == "winner-sid"
+    assert loser.close_calls == 1
+    assert ("close", False) in calls
+    assert not any(event[0] == "end" for event in calls)
+    assert calls.count(("release",)) == 1
+
+
+def test_close_agent_once_is_atomic_for_non_weakref_concurrent_agent(server):
+    """Two teardown threads close a managed proxy exactly once."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _Agent:
+        __slots__ = ("close_calls",)
+
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            entered.set()
+            release.wait(2)
+
+    agent = _Agent()
+    managed = server._ManagedAgentProxy(agent)
+    first = threading.Thread(target=server._close_agent_once, args=(managed,))
+    second = threading.Thread(target=server._close_agent_once, args=(managed,))
+    first.start()
+    assert entered.wait(1)
+    second.start()
+    time.sleep(0.05)
+    assert agent.close_calls == 1
+    release.set()
+    first.join(1)
+    second.join(1)
+    assert not first.is_alive() and not second.is_alive()
+    assert agent.close_calls == 1
+
+
+def test_close_agent_once_serializes_virgin_mutable_agent_lock_installation(
+    server, monkeypatch
+):
+    """Concurrent first close calls must select one object-owned lock."""
+    real_lock = threading.Lock
+    factory_barrier = threading.Barrier(2)
+    factory_guard = real_lock()
+    factory_calls = [0]
+    close_count_lock = real_lock()
+    thread_state = threading.local()
+    installed_locks = []
+
+    class _Lock:
+        def __init__(self):
+            self._raw = real_lock()
+
+        def acquire(self, *args, **kwargs):
+            return self._raw.acquire(*args, **kwargs)
+
+        def release(self):
+            return self._raw.release()
+
+        def __enter__(self):
+            self.acquire()
+            thread_state.inside_close_lock = True
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            thread_state.inside_close_lock = False
+            self.release()
+            return False
+
+    def _lock_factory():
+        with factory_guard:
+            factory_calls[0] += 1
+            call_number = factory_calls[0]
+        if call_number <= 2:
+            try:
+                factory_barrier.wait(timeout=1)
+            except threading.BrokenBarrierError:
+                pass
+        lock = _Lock()
+        thread_state.expected_lock = lock
+        return lock
+
+    class _Agent:
+        def __init__(self):
+            self.close_calls = 0
+
+        def __setattr__(self, name, value):
+            if name == "_tui_close_lock":
+                installed_locks.append(value)
+            object.__setattr__(self, name, value)
+
+        def __getattribute__(self, name):
+            if name == "_tui_close_lock":
+                expected = getattr(thread_state, "expected_lock", None)
+                if expected is not None:
+                    return expected
+            if name == "_tui_closed":
+                expected = getattr(thread_state, "expected_lock", None)
+                if expected is not None and getattr(
+                    thread_state, "inside_close_lock", False
+                ):
+                    return False
+            return object.__getattribute__(self, name)
+
+        def close(self):
+            with close_count_lock:
+                self.close_calls += 1
+
+    agent = _Agent()
+    errors = []
+    threads = [
+        threading.Thread(
+            target=lambda: server._close_agent_once(agent),
+        )
+        for _ in range(2)
+    ]
+    monkeypatch.setattr(server.threading, "Lock", _lock_factory)
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+        if thread.is_alive():
+            errors.append("close thread did not finish")
+
+    assert not errors
+    assert len(installed_locks) == 1
+    assert agent.close_calls == 1
+    assert agent._tui_closed is True
+
+
+def test_close_agent_once_is_safe_when_agent_close_reenters(server):
+    """The close-once marker must short-circuit a recursive teardown."""
+
+    class _Agent:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            server._close_agent_once(self)
+
+    agent = _Agent()
+    thread = threading.Thread(target=server._close_agent_once, args=(agent,), daemon=True)
+    thread.start()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert agent.close_calls == 1
+
+
+def test_close_agent_once_survives_non_weakref_slots_agent_churn(server):
+    """Close stamps on mutable non-weakref slots agents survive registry churn."""
+
+    class _Agent:
+        __slots__ = ("close_calls", "_tui_close_lock", "_tui_closed")
+
+        def __init__(self):
+            self.close_calls = 0
+            self._tui_close_lock = None
+            self._tui_closed = False
+
+        def close(self):
+            self.close_calls += 1
+
+    agents = [_Agent() for _ in range(257)]
+    for agent in agents:
+        server._close_agent_once(agent)
+
+    server._close_agent_once(agents[0])
+
+    assert [agent.close_calls for agent in agents] == [1] * len(agents)
+
+
+def test_close_agent_once_survives_immutable_nonweakref_churn(server):
+    """Agents normalized by _make_agent use object-owned proxy state."""
+
+    class _Agent:
+        __slots__ = ("close_calls",)
+
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    agents = []
+    managed_agents = []
+
+    def _build(*_args, **_kwargs):
+        agent = _Agent()
+        agents.append(agent)
+        return agent
+
+    synthetic_module = types.SimpleNamespace(maybe_build_synthetic_agent=_build)
+    with patch.dict(sys.modules, {"tui_gateway.synthetic_turn": synthetic_module}):
+        for index in range(257):
+            managed = server._make_agent(f"sid-{index}", f"key-{index}")
+            managed_agents.append(managed)
+            assert managed is not agents[-1]
+            server._close_agent_once(managed)
+
+    server._close_agent_once(managed_agents[0])
+
+    assert [agent.close_calls for agent in agents] == [1] * len(agents)
+    assert len(server._agent_close_weak_registry) == 0
+
+
+def test_close_agent_once_rejects_unmanaged_immutable_nonweakref_agent(server):
+    """Direct unsupported immutable agents fail closed before close."""
+
+    class _Agent:
+        __slots__ = ("close_calls",)
+
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    agent = _Agent()
+    with pytest.raises(RuntimeError, match="managed agent"):
+        server._close_agent_once(agent)
+    assert agent.close_calls == 0
+
+
+def test_synthetic_profile_agent_closes_transferred_db(server, monkeypatch):
+    """The synthetic build seam must preserve profile DB ownership."""
+    db = types.SimpleNamespace(close_calls=0)
+    db.close = lambda: setattr(db, "close_calls", db.close_calls + 1)
+    synthetic = types.SimpleNamespace(close_calls=0, model="synthetic/model")
+    synthetic.close = lambda: setattr(synthetic, "close_calls", synthetic.close_calls + 1)
+    monkeypatch.setitem(
+        sys.modules,
+        "tui_gateway.synthetic_turn",
+        types.SimpleNamespace(maybe_build_synthetic_agent=lambda *_a, **_k: synthetic),
+    )
+
+    built = server._make_agent(
+        "synthetic-sid",
+        "synthetic-key",
+        session_db=db,
+        owns_session_db=True,
+    )
+    server._close_agent_once(built)
+
+    assert built is synthetic
+    assert synthetic.close_calls == 1
+    assert db.close_calls == 1
+
+
+def test_immutable_synthetic_profile_agent_uses_managed_proxy(server, monkeypatch):
+    """Immutable synthetic agents transfer DB ownership into the proxy."""
+    db = types.SimpleNamespace(close_calls=0)
+    db.close = lambda: setattr(db, "close_calls", db.close_calls + 1)
+
+    class _Agent:
+        __slots__ = ("close_calls", "model", "session_id", "platform")
+
+        def __init__(self):
+            self.close_calls = 0
+            self.model = "immutable/model"
+            self.session_id = "immutable-session"
+            self.platform = "tui"
+
+        def close(self):
+            self.close_calls += 1
+
+    synthetic = _Agent()
+    monkeypatch.setitem(
+        sys.modules,
+        "tui_gateway.synthetic_turn",
+        types.SimpleNamespace(maybe_build_synthetic_agent=lambda *_a, **_k: synthetic),
+    )
+
+    built = server._make_agent(
+        "immutable-sid",
+        "immutable-key",
+        session_db=db,
+        owns_session_db=True,
+    )
+
+    assert isinstance(built, server._ManagedAgentProxy)
+    assert built.model == "immutable/model"
+    assert built.session_id == "immutable-session"
+    assert built.platform == "tui"
+    built.close()
+    built.close()
+    assert synthetic.close_calls == 1
+    assert db.close_calls == 1

@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,246 @@ def test_compute_host_frame_protocol_round_trip():
         host.close()
 
 
+def test_compute_host_new_session_passes_profile_home_to_init(monkeypatch, tmp_path):
+    from tui_gateway import server
+
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
+    sid = "profile-session"
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    workspace = tmp_path / "workspace"
+    init_calls = []
+    try:
+        monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: object())
+
+        def _init(_sid, _key, _agent, _history, **kwargs):
+            init_calls.append(kwargs)
+            server._sessions[_sid] = {
+                "agent": _agent,
+                "session_key": _key,
+                "init_owner_token": kwargs["init_owner_token"],
+                "history": list(_history),
+                "history_lock": threading.Lock(),
+                "cwd": kwargs["cwd"],
+                "profile_home": str(kwargs["profile_home"]),
+            }
+
+        monkeypatch.setattr(server, "_init_session", _init)
+        session = host._ensure_server_session(
+            server,
+            {
+                "sid": sid,
+                "session_key": "profile-key",
+                "profile_home": str(profile_home),
+                "cwd": str(workspace),
+                "history": [],
+            },
+        )
+
+        assert init_calls[0]["profile_home"] == str(profile_home)
+        assert "init_owner_token" not in session
+        assert session["profile_home"] == str(profile_home)
+        assert session["cwd"] == str(workspace)
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+
+def test_compute_host_fallback_publishes_profile_and_cwd_together(monkeypatch, tmp_path):
+    from tui_gateway import server
+
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
+    sid = "fallback-profile-session"
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    workspace = tmp_path / "workspace"
+    try:
+        monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: object())
+
+        def _fail_init(_sid, _key, _agent, _history, **kwargs):
+            server._sessions[_sid] = {
+                "agent": _agent,
+                "session_key": _key,
+                "init_owner_token": kwargs["init_owner_token"],
+                "history": list(_history),
+                "history_lock": threading.Lock(),
+            }
+            raise RuntimeError("side machinery")
+
+        monkeypatch.setattr(server, "_init_session", _fail_init)
+        session = host._ensure_server_session(
+            server,
+            {
+                "sid": sid,
+                "session_key": "fallback-key",
+                "profile_home": str(profile_home),
+                "cwd": str(workspace),
+                "history": [],
+            },
+        )
+
+        assert session["profile_home"] == str(profile_home)
+        assert session["cwd"] == str(workspace)
+        assert server._sessions[sid]["profile_home"] == str(profile_home)
+        assert server._sessions[sid]["cwd"] == str(workspace)
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+
+def test_compute_host_keeps_profile_context_through_agent_and_init(
+    monkeypatch, tmp_path
+):
+    from tui_gateway import server
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    active_override = False
+    context_calls = []
+    init_calls = []
+
+    class _SessionDB:
+        def __init__(self, *, db_path):
+            assert active_override
+            self.db_path = Path(db_path)
+
+    def _set_home(home):
+        nonlocal active_override
+        assert Path(home) == profile_home
+        active_override = True
+        return "profile-token"
+
+    def _reset_home(token):
+        nonlocal active_override
+        assert token == "profile-token"
+        active_override = False
+
+    def _set_context(*args, **kwargs):
+        assert active_override
+        context_calls.append((args, kwargs))
+        return ["context-token"]
+
+    def _make_agent(*_args, **kwargs):
+        assert active_override
+        assert kwargs["session_db"].db_path == profile_home / "state.db"
+        assert kwargs["owns_session_db"] is True
+        return types.SimpleNamespace(model="profile/model")
+
+    def _init_session(*args, **kwargs):
+        assert active_override
+        init_calls.append(kwargs)
+        server._sessions[args[0]] = {
+            "agent": args[2],
+            "session_key": args[1],
+            "init_owner_token": kwargs["init_owner_token"],
+            "history": list(args[3]),
+            "history_lock": threading.Lock(),
+            "cwd": kwargs["cwd"],
+            "profile_home": str(kwargs["profile_home"]),
+        }
+
+    monkeypatch.setattr(server, "set_hermes_home_override", _set_home)
+    monkeypatch.setattr(server, "reset_hermes_home_override", _reset_home)
+    monkeypatch.setattr(server, "_set_session_context", _set_context)
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+    monkeypatch.setattr(server, "_make_agent", _make_agent)
+    monkeypatch.setattr(server, "_init_session", _init_session)
+    monkeypatch.setitem(
+        sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_SessionDB)
+    )
+
+    host = ComputeHost(stdout=io.StringIO(), max_workers=1, heartbeat_secs=0)
+    sid = "profile-context-session"
+    try:
+        session = host._ensure_server_session(
+            server,
+            {
+                "sid": sid,
+                "session_key": "profile-key",
+                "profile_home": str(profile_home),
+                "cwd": str(workspace),
+                "source": "telegram",
+                "history": [],
+            },
+        )
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+    assert context_calls == [
+        (("profile-key",), {"cwd": str(workspace), "source": "telegram"})
+    ]
+    assert init_calls[0]["session_db"].db_path == profile_home / "state.db"
+    assert session["cwd"] == str(workspace)
+    assert session["profile_home"] == str(profile_home)
+    assert active_override is False
+
+
+def test_compute_host_discards_partial_init_side_machinery_before_fallback(
+    monkeypatch, tmp_path
+):
+    from tui_gateway import server
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    stop = threading.Event()
+    closed = []
+
+    class _Worker:
+        def close(self):
+            closed.append(True)
+
+    agent = types.SimpleNamespace(
+        model="profile/model", close=lambda: closed.append("agent")
+    )
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: agent)
+
+    def _partial_init(sid, key, built_agent, history, **kwargs):
+        server._sessions[sid] = {
+            "agent": built_agent,
+            "session_key": key,
+            "init_owner_token": kwargs["init_owner_token"],
+            "history": list(history),
+            "history_lock": threading.Lock(),
+            "_notif_stop": stop,
+            "slash_worker": _Worker(),
+            "cwd": kwargs["cwd"],
+            "profile_home": str(kwargs["profile_home"]),
+        }
+        raise RuntimeError("poller startup")
+
+    monkeypatch.setattr(server, "_init_session", _partial_init)
+    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+
+    host = ComputeHost(stdout=io.StringIO(), max_workers=1, heartbeat_secs=0)
+    sid = "partial-profile-session"
+    try:
+        session = host._ensure_server_session(
+            server,
+            {
+                "sid": sid,
+                "session_key": "partial-key",
+                "profile_home": str(profile_home),
+                "cwd": str(tmp_path),
+                "history": [],
+            },
+        )
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+    assert session["agent"] is agent
+    assert "_notif_stop" not in session
+    assert session["slash_worker"] is None
+    assert stop.is_set()
+    assert closed == [True]
+
+
 def test_compute_host_interrupt_control_is_not_queued_behind_turn():
     out = io.StringIO()
     host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
@@ -146,6 +387,72 @@ def test_compute_host_parent_guard_exits_when_parent_pid_changes(monkeypatch):
     assert orphan["old_ppid"] == 111
     assert orphan["ppid"] == 222
     assert isinstance(orphan["host_ns"], int)
+
+
+def test_compute_host_first_turn_binds_profile_context_before_row_creation(
+    monkeypatch, tmp_path
+):
+    from tui_gateway import server
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    active = False
+    calls = []
+    session = {
+        "session_key": "profile-key",
+        "profile_home": str(profile_home),
+        "cwd": str(tmp_path),
+        "source": "telegram",
+        "history": [],
+        "history_lock": threading.Lock(),
+        "running": False,
+        "agent": types.SimpleNamespace(model="profile/model"),
+    }
+
+    def set_home(_home):
+        nonlocal active
+        active = True
+        return "home-token"
+
+    def reset_home(_token):
+        nonlocal active
+        active = False
+
+    def set_context(*args, **kwargs):
+        assert active
+        calls.append(("context", args, kwargs))
+        return ["context-token"]
+
+    def clear_context(_tokens):
+        assert active
+        calls.append(("clear",))
+
+    def ensure_row(current):
+        assert active
+        assert server._resolve_model() == "profile/model"
+        calls.append(("row", current["profile_home"], current["cwd"]))
+
+    monkeypatch.setattr(server, "set_hermes_home_override", set_home)
+    monkeypatch.setattr(server, "reset_hermes_home_override", reset_home)
+    monkeypatch.setattr(server, "_set_session_context", set_context)
+    monkeypatch.setattr(server, "_clear_session_context", clear_context)
+    monkeypatch.setattr(server, "_session_source", lambda _session: "telegram")
+    monkeypatch.setattr(server, "_ensure_session_db_row", ensure_row)
+    monkeypatch.setattr(server, "_start_inflight_turn", lambda *_args: None)
+    monkeypatch.setattr(server, "_run_prompt_submit", lambda *_args: None)
+    monkeypatch.setattr(server, "_clear_inflight_turn", lambda *_args: None)
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {})
+    monkeypatch.setattr(server, "_resolve_model", lambda: "profile/model")
+
+    host = ComputeHost(stdout=io.StringIO(), max_workers=1, heartbeat_secs=0)
+    monkeypatch.setattr(host, "_ensure_server_session", lambda *_args: session)
+    try:
+        host._run_real_turn({"sid": "profile-sid", "request_id": "turn", "text": "hello"})
+    finally:
+        host.close()
+
+    assert [entry[0] for entry in calls] == ["context", "row", "clear"]
+    assert active is False
 
 
 def test_mutator_route_table_matches_prd_inventory():
@@ -563,3 +870,174 @@ def test_compute_host_compact_alias_routes_to_compress_mirror(monkeypatch):
     assert calls == {"focus": "focus topic"}
     assert events == ["sync", "notify"]
     assert ack["route_name"] == "slash.compress"
+
+
+def test_compute_host_partial_init_does_not_overwrite_replacement(monkeypatch):
+    """A failed init that lost its registry slot must not publish a fallback."""
+    from tui_gateway import server
+
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
+    sid = "partial-replacement"
+    replacement = {"replacement": True}
+    close_calls = []
+
+    class _Agent:
+        model = "test/model"
+
+        def close(self):
+            close_calls.append("agent")
+
+    agent = _Agent()
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: agent)
+
+    def _lost_init(*_args, **_kwargs):
+        with server._sessions_lock:
+            server._sessions[sid] = replacement
+        raise RuntimeError("init lost ownership")
+
+    monkeypatch.setattr(server, "_init_session", _lost_init)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_a: None)
+
+    try:
+        with pytest.raises(RuntimeError, match="replaced during session init"):
+            host._ensure_server_session(
+                server,
+                {
+                    "sid": sid,
+                    "session_key": "partial-key",
+                    "cwd": "/tmp",
+                    "history": [],
+                },
+            )
+        assert server._sessions[sid] is replacement
+        assert replacement == {"replacement": True}
+        assert close_calls == ["agent"]
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+
+def test_compute_host_partial_init_rechecks_identity_before_fallback_publish(
+    monkeypatch,
+):
+    """A replacement racing fallback construction must remain the winner."""
+    from tui_gateway import server
+
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
+    sid = "partial-fallback-barrier"
+    replacement = {"replacement": True}
+    stop = threading.Event()
+    worker_closed = []
+
+    class _Worker:
+        def close(self):
+            worker_closed.append(True)
+
+    class _Agent:
+        model = "test/model"
+
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    agent = _Agent()
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: agent)
+
+    def _partial_init(init_sid, key, built_agent, history, **_kwargs):
+        with server._sessions_lock:
+            server._sessions[init_sid] = {
+                "agent": built_agent,
+                "session_key": key,
+                "init_owner_token": _kwargs["init_owner_token"],
+                "history": list(history),
+                "history_lock": threading.Lock(),
+                "_notif_stop": stop,
+                "slash_worker": _Worker(),
+            }
+        raise RuntimeError("side machinery")
+
+    def _replace_during_fallback_build():
+        with server._sessions_lock:
+            server._sessions[sid] = replacement
+        return False
+
+    monkeypatch.setattr(server, "_init_session", _partial_init)
+    monkeypatch.setattr(server, "_load_show_reasoning", _replace_during_fallback_build)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+
+    try:
+        with pytest.raises(RuntimeError, match="replaced during session init"):
+            host._ensure_server_session(
+                server,
+                {
+                    "sid": sid,
+                    "session_key": "partial-key",
+                    "cwd": "/tmp",
+                    "history": [],
+                },
+            )
+        assert server._sessions[sid] is replacement
+        assert replacement == {"replacement": True}
+        assert agent.close_calls == 1
+        assert stop.is_set()
+        assert worker_closed == [True]
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+
+def test_compute_host_same_agent_and_key_replacement_without_token_wins(
+    monkeypatch,
+):
+    """A same-identity replacement without our opaque token is not ours."""
+    from tui_gateway import server
+
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
+    sid = "same-agent-key-replacement"
+    close_calls = []
+
+    class _Agent:
+        model = "test/model"
+
+        def close(self):
+            close_calls.append("agent")
+
+    agent = _Agent()
+    replacement = {
+        "agent": agent,
+        "session_key": "same-key",
+        "replacement": True,
+    }
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: agent)
+
+    def _lost_init(init_sid, _key, _built_agent, _history, **_kwargs):
+        with server._sessions_lock:
+            server._sessions[init_sid] = replacement
+        raise RuntimeError("init lost ownership")
+
+    monkeypatch.setattr(server, "_init_session", _lost_init)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_a: None)
+
+    try:
+        with pytest.raises(RuntimeError, match="replaced during session init"):
+            host._ensure_server_session(
+                server,
+                {
+                    "sid": sid,
+                    "session_key": "same-key",
+                    "cwd": "/tmp",
+                    "history": [],
+                },
+            )
+        assert server._sessions[sid] is replacement
+        assert close_calls == ["agent"]
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()

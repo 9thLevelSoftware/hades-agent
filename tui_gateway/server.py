@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
@@ -148,6 +149,10 @@ _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
 _session_resume_lock = threading.Lock()
+_agent_close_registry_lock = threading.Lock()
+_agent_close_weak_registry: dict[
+    int, tuple[weakref.ReferenceType, threading.Lock, bool]
+] = {}
 try:
     _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
 except (ValueError, TypeError):
@@ -605,6 +610,200 @@ def _is_gateway_owned_source(source: str) -> bool:
         return False
 
 
+def _set_agent_close_policy(session: dict | None, agent=None) -> None:
+    """Prevent a viewer teardown from finalizing a gateway-owned row."""
+    if not session:
+        return
+    if session.get("_gateway_owned_session") or _is_gateway_owned_source(
+        str(session.get("source") or "")
+    ):
+        session["_gateway_owned_session"] = True
+        candidate = agent if agent is not None else session.get("agent")
+        if candidate is not None:
+            try:
+                candidate._end_session_on_close = False
+            except Exception:
+                pass
+
+
+class _ManagedAgentProxy:
+    """Lifecycle owner for agents that cannot carry close state themselves.
+
+    The proxy is deliberately immutable at the wrapped-agent boundary: all
+    public attribute access, assignment, and calls forward to ``_agent`` while
+    the proxy's own lock and closed flag remain private and object-owned.  This
+    makes close-once identity exact without retaining arbitrary agent objects in
+    a process-global table.
+    """
+
+    __slots__ = (
+        "_agent",
+        "_close_lock",
+        "_closed",
+        "_session_db",
+        "_owns_session_db",
+    )
+
+    def __init__(self, agent, *, session_db=None, owns_session_db: bool = False):
+        object.__setattr__(self, "_agent", agent)
+        object.__setattr__(self, "_close_lock", threading.Lock())
+        object.__setattr__(self, "_closed", False)
+        object.__setattr__(self, "_session_db", session_db)
+        object.__setattr__(self, "_owns_session_db", bool(owns_session_db))
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_agent"), name)
+
+    def __setattr__(self, name, value):
+        if name in type(self).__slots__:
+            object.__setattr__(self, name, value)
+            return
+        setattr(object.__getattribute__(self, "_agent"), name, value)
+
+    def __call__(self, *args, **kwargs):
+        return object.__getattribute__(self, "_agent")(*args, **kwargs)
+
+    def close(self) -> None:
+        if object.__getattribute__(self, "_closed"):
+            return
+        with object.__getattribute__(self, "_close_lock"):
+            if object.__getattribute__(self, "_closed"):
+                return
+            object.__setattr__(self, "_closed", True)
+            agent = object.__getattribute__(self, "_agent")
+            session_db = object.__getattribute__(self, "_session_db")
+            owns_session_db = object.__getattribute__(self, "_owns_session_db")
+            try:
+                close = getattr(agent, "close", None)
+                if close is not None:
+                    close()
+            finally:
+                if owns_session_db and session_db is not None:
+                    session_db.close()
+
+
+def _agent_close_lock(agent):
+    """Atomically acquire/install the object-owned close lock, if possible."""
+    try:
+        # Lock installation and the decision to use object-owned state must be
+        # one atomic operation.  Without this guard two virgin mutable agents
+        # can each install a different lock; one caller can then fall through
+        # to weak state while the other closes under the stamped lock.
+        with _agent_close_registry_lock:
+            lock = getattr(agent, "_tui_close_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                setattr(agent, "_tui_close_lock", lock)
+            if getattr(agent, "_tui_close_lock", None) is not lock:
+                return None
+            if not hasattr(agent, "_tui_closed"):
+                setattr(agent, "_tui_closed", False)
+            sentinel = object()
+            if getattr(agent, "_tui_closed", sentinel) is sentinel:
+                return None
+            return lock
+    except Exception:
+        return None
+
+
+def _agent_can_host_close_state(agent) -> bool:
+    """Return whether close-once state can be stamped directly on ``agent``."""
+    return _agent_close_lock(agent) is not None
+
+
+def _agent_supports_weakref(agent) -> bool:
+    try:
+        weakref.ref(agent)
+        return True
+    except TypeError:
+        return False
+
+
+def _normalize_agent(agent, *, session_db=None, owns_session_db: bool = False):
+    """Return an agent with a bounded, exact lifecycle owner."""
+    if isinstance(agent, _ManagedAgentProxy):
+        return agent
+    if _agent_close_lock(agent) is not None or _agent_supports_weakref(agent):
+        return agent
+    return _ManagedAgentProxy(
+        agent,
+        session_db=session_db if owns_session_db else None,
+        owns_session_db=owns_session_db,
+    )
+
+
+def _weak_close_state(agent):
+    ident = id(agent)
+
+    def _on_collect(ref, *, _ident=ident):
+        with _agent_close_registry_lock:
+            state = _agent_close_weak_registry.get(_ident)
+            if state is not None and state[0] is ref:
+                _agent_close_weak_registry.pop(_ident, None)
+
+    with _agent_close_registry_lock:
+        state = _agent_close_weak_registry.get(ident)
+        if state is not None and state[0]() is agent:
+            return ident, state[0], state[1]
+        ref = weakref.ref(agent, _on_collect)
+        lock = threading.Lock()
+        _agent_close_weak_registry[ident] = (ref, lock, False)
+        return ident, ref, lock
+
+
+def _close_agent_once(agent) -> None:
+    """Close a managed/mutable/weakref agent at most once.
+
+    An arbitrary immutable, non-weakrefable object passed directly is not safe
+    to identify across id reuse.  Internal callers never do that because
+    ``_make_agent`` normalizes such objects; direct callers fail closed.
+    """
+    if agent is None or not hasattr(agent, "close"):
+        return
+    if isinstance(agent, _ManagedAgentProxy):
+        agent.close()
+        return
+
+    # The close callback can synchronously re-enter teardown.  Check the
+    # marker before acquiring the non-reentrant object lock; the guarded check
+    # below still arbitrates ordinary concurrent callers.
+    try:
+        if getattr(agent, "_tui_closed", False) or getattr(
+            agent, "_tui_close_called", False
+        ):
+            return
+    except Exception:
+        pass
+
+    lock = _agent_close_lock(agent)
+    if lock is not None:
+        with lock:
+            if getattr(agent, "_tui_closed", False) or getattr(
+                agent, "_tui_close_called", False
+            ):
+                return
+            agent._tui_closed = True
+            agent.close()
+        return
+
+    if not _agent_supports_weakref(agent):
+        raise RuntimeError(
+            "unmanaged agent cannot provide exact close-once identity; "
+            "use _make_agent or _ManagedAgentProxy"
+        )
+
+    ident, ref, lock = _weak_close_state(agent)
+    with lock:
+        with _agent_close_registry_lock:
+            state = _agent_close_weak_registry.get(ident)
+            if state is None or state[0] is not ref or ref() is not agent:
+                return
+            if state[2]:
+                return
+            _agent_close_weak_registry[ident] = (ref, lock, True)
+        agent.close()
+
+
 def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> None:
     """Best-effort finalize hook + memory commit for a session.
 
@@ -681,27 +880,29 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     session_id = getattr(agent, "session_id", None) or session_key
     _notify_session_boundary("on_session_finalize", session_id, _session_source(session))
 
-    # Mark session ended in DB so it doesn't linger as a ghost row in /resume.
-    # Use session_id (from agent.session_id) not session_key — after compression,
-    # session_key may be stale (the ended parent) while session_id is the live
-    # continuation. Fix for #20001.
+    # Mark session ended in the DB that owns this agent/session. Profile agents
+    # hold their own SessionDB handle; consulting the launch singleton here would
+    # end the wrong row and leave the profile row open. The session fallback is
+    # for lightweight host records/tests whose agent has no DB attribute.
     _tui_owns_lifecycle = True
     if session_id:
         try:
-            db = _get_db()
-            if db is not None:
-                # Don't end gateway-originated sessions — the gateway owns
-                # their lifecycle.  The TUI is a viewer, not the owner.
-                # Ending a gateway session in state.db triggers a Groundhog
-                # Day routing loop: the gateway's #54878 self-heal detects
-                # the stale entry, recovers to the parent session, context
-                # compression splits back to the reaped child, and the cycle
-                # repeats on every inbound message.  (#60609)
-                row = db.get_session(session_id)
-                source = (row or {}).get("source", "")
-                _tui_owns_lifecycle = not _is_gateway_owned_source(source)
-                if _tui_owns_lifecycle:
-                    db.end_session(session_id, end_reason)
+            with contextlib.ExitStack() as db_stack:
+                db = getattr(agent, "_session_db", None) or session.get("session_db")
+                if db is None:
+                    if session.get("profile_home"):
+                        db = db_stack.enter_context(_session_db(session))
+                    elif _get_db is not None:
+                        db = _get_db()
+                if db is not None:
+                    row = db.get_session(session_id)
+                    source = (row or {}).get("source", "")
+                    _tui_owns_lifecycle = not _is_gateway_owned_source(source)
+                    if not _tui_owns_lifecycle:
+                        session["_gateway_owned_session"] = True
+                        _set_agent_close_policy(session, agent)
+                    if _tui_owns_lifecycle:
+                        db.end_session(session_id, end_reason)
         except Exception:
             pass
 
@@ -772,7 +973,8 @@ def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") ->
     try:
         agent = session.get("agent")
         if agent is not None and hasattr(agent, "close"):
-            agent.close()
+            _set_agent_close_policy(session, agent)
+            _close_agent_once(agent)
     except Exception:
         pass
     # NOTE: the slash-worker is closed inside _finalize_session (the single
@@ -1105,6 +1307,36 @@ def _profile_home(profile: str | None) -> Path | None:
     if home.resolve() == Path(_hermes_home).resolve():
         return None
     return home if (home / "state.db").exists() or home.exists() else None
+
+
+class _ResumeSessionDBLease:
+    """Own a profile resume lookup DB until eager construction transfers it."""
+
+    def __init__(self, profile_home: Path | None):
+        self.profile_home = profile_home
+        self.db = None
+        self._transferred = False
+
+    def __enter__(self):
+        if self.profile_home is None:
+            self.db = _get_db()
+        else:
+            from hermes_state import SessionDB
+
+            self.db = SessionDB(db_path=self.profile_home / "state.db")
+        return self
+
+    def transfer_to_agent(self, agent) -> None:
+        if self.profile_home is not None:
+            if agent is None:
+                raise RuntimeError("cannot transfer a resume DB without an agent")
+            self._transferred = True
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        if self.profile_home is not None and not self._transferred and self.db is not None:
+            with contextlib.suppress(Exception):
+                self.db.close()
+        return False
 
 
 def _profile_scoped(handler):
@@ -1568,6 +1800,55 @@ def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     return _err(rid, 5032, err) if err else None
 
 
+def _cleanup_failed_agent_build(
+    sid: str,
+    session: dict,
+    *,
+    agent=None,
+    session_db=None,
+    notify_registered: bool = False,
+) -> None:
+    """Rollback a deferred build without ending its durable row."""
+    worker = stop = thread = None
+    with _sessions_lock:
+        if _sessions.get(sid) is session:
+            worker = session.pop("slash_worker", None)
+            stop = session.pop("_notif_stop", None)
+            thread = session.pop("_notif_thread", None)
+            session["agent"] = None
+            session["session_db"] = None
+        else:
+            worker = session.get("slash_worker")
+            stop = session.get("_notif_stop")
+            thread = session.get("_notif_thread")
+    if stop is not None:
+        with contextlib.suppress(Exception):
+            stop.set()
+    if thread is not None and thread is not threading.current_thread():
+        with contextlib.suppress(Exception):
+            thread.join(timeout=1.0)
+    if worker is not None:
+        with contextlib.suppress(Exception):
+            worker.close()
+    if notify_registered:
+        try:
+            from tools.approval import unregister_gateway_notify
+
+            unregister_gateway_notify(session.get("session_key", ""))
+        except Exception:
+            pass
+    if agent is not None:
+        try:
+            agent._end_session_on_close = False
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            _close_agent_once(agent)
+    elif session_db is not None:
+        with contextlib.suppress(Exception):
+            session_db.close()
+
+
 def _start_agent_build(sid: str, session: dict) -> None:
     """Start building the real AIAgent for a TUI session, once.
 
@@ -1602,6 +1883,12 @@ def _start_agent_build(sid: str, session: dict) -> None:
     def _build() -> None:
         with _sessions_lock:
             current = _sessions.get(sid)
+            if current is not session:
+                # The timer/thread was queued for an older record.  Fence it
+                # before opening a profile DB or constructing any agent: a
+                # reaped slot may already belong to an unrelated session.
+                ready.set()
+                return
         if current is None:
             ready.set()
             return
@@ -1609,54 +1896,71 @@ def _start_agent_build(sid: str, session: dict) -> None:
         worker = None
         notify_registered = False
         home_token = None
+        session_db = None
+        agent = None
         profile_home = current.get("profile_home")
+        tokens = []
         try:
-            tokens = _set_session_context(key)
+            tokens = _set_session_context(
+                key,
+                cwd=_session_cwd(current),
+                source=_session_source(current),
+            )
             # Build against the session's profile (global-remote): bind its
             # HERMES_HOME so config/skills/model resolve to it, and hand the
             # agent that profile's db so turns persist to the right state.db.
             session_db = None
             if profile_home:
                 home_token = set_hermes_home_override(profile_home)
-                try:
-                    from hermes_state import SessionDB
+                from hermes_state import SessionDB
 
+                try:
                     session_db = SessionDB(db_path=Path(profile_home) / "state.db")
-                except Exception:
-                    session_db = None
-            try:
-                # Lazy-resumed (watch) sessions carry the stored conversation
-                # id — pass it through so the upgrade continues that session
-                # instead of starting a fresh one under the same key.
-                kw = {"session_db": session_db}
-                if resume_sid := current.get("resume_session_id"):
-                    kw["session_id"] = resume_sid
-                kw["platform_override"] = _session_source(current)
-                resume_overrides = current.get("resume_runtime_overrides")
-                if isinstance(resume_overrides, dict) and resume_overrides:
-                    # Cold deferred resume: restore the full persisted runtime
-                    # identity (model/provider/base_url/api_mode/reasoning/tier)
-                    # exactly as the eager resume path's _stored_session_runtime_
-                    # overrides splat did, so a deferred build can't drop the
-                    # provider and fail with "No LLM provider configured".
-                    kw.update(resume_overrides)
-                else:
-                    # Model/effort/fast the desktop picked for a brand-new chat
-                    # ride in as per-session overrides so the first build uses
-                    # them directly (no global config, no build-then-switch).
-                    if override := current.get("model_override"):
-                        kw["model_override"] = override
-                    if (reasoning := current.get("create_reasoning_override")) is not None:
-                        kw["reasoning_config_override"] = reasoning
-                    if (tier := current.get("create_service_tier_override")) is not None:
-                        kw["service_tier_override"] = tier
-                agent = _make_agent(sid, key, **kw)
-            finally:
-                _clear_session_context(tokens)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"profile SessionDB unavailable for deferred session: {exc}"
+                    ) from exc
+            # Lazy-resumed (watch) sessions carry the stored conversation id.
+            # Lazy-resumed (watch) sessions carry the stored conversation id —
+            # pass it through so the upgrade continues that session instead of
+            # starting a fresh one under the same key.
+            kw = {
+                "session_db": session_db,
+                "owns_session_db": bool(profile_home and session_db is not None),
+            }
+            if resume_sid := current.get("resume_session_id"):
+                kw["session_id"] = resume_sid
+            kw["platform_override"] = _session_source(current)
+            resume_overrides = current.get("resume_runtime_overrides")
+            if isinstance(resume_overrides, dict) and resume_overrides:
+                # Cold deferred resume: restore the full persisted runtime
+                # identity (model/provider/base_url/api_mode/reasoning/tier)
+                # exactly as the eager resume path's _stored_session_runtime_
+                # overrides splat did, so a deferred build can't drop the
+                # provider and fail with "No LLM provider configured".
+                kw.update(resume_overrides)
+            else:
+                # Model/effort/fast the desktop picked for a brand-new chat
+                # ride in as per-session overrides so the first build uses
+                # them directly (no global config, no build-then-switch).
+                if override := current.get("model_override"):
+                    kw["model_override"] = override
+                if (reasoning := current.get("create_reasoning_override")) is not None:
+                    kw["reasoning_config_override"] = reasoning
+                if (tier := current.get("create_service_tier_override")) is not None:
+                    kw["service_tier_override"] = tier
+            agent = _make_agent(sid, key, **kw)
+            with _sessions_lock:
+                if _sessions.get(sid) is not current:
+                    raise RuntimeError("session closed during deferred agent build")
 
             # Session DB row deferred to first run_conversation() call.
             # pending_title applied post-first-message (see cli.exec handler).
-            current["agent"] = agent
+            with _sessions_lock:
+                if _sessions.get(sid) is not current:
+                    raise RuntimeError("session closed during deferred agent setup")
+                current["agent"] = agent
+                current["session_db"] = session_db
             # Baseline for the per-turn config sync; the profile home
             # override is still active here.
             current["config_model_seen"] = _config_model_target()
@@ -1708,9 +2012,12 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 seed_credits_at_session_start(agent)
             except Exception:
                 pass
+            current["_notif_stop"] = _start_notification_poller(
+                sid, current, db=session_db if session_db is not None else None
+            )
             with _sessions_lock:
-                if sid in _sessions:
-                    _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
+                if _sessions.get(sid) is not current:
+                    raise RuntimeError("session closed during deferred agent setup")
             _notify_session_boundary("on_session_reset", key, _session_source(current))
 
             info = _session_info(agent, current)
@@ -1725,23 +2032,25 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # _schedule_mcp_late_refresh. Cache-safe (pre-first-turn only).
             _schedule_mcp_late_refresh(sid, agent)
         except Exception as e:
-            current["agent_error"] = str(e)
-            _emit("error", sid, {"message": f"agent init failed: {e}"})
+            with _sessions_lock:
+                still_current = _sessions.get(sid) is current
+            if still_current:
+                current["agent_error"] = str(e)
+            _cleanup_failed_agent_build(
+                sid,
+                current,
+                agent=agent,
+                session_db=session_db,
+                notify_registered=notify_registered,
+            )
+            if still_current:
+                with contextlib.suppress(Exception):
+                    _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
+            if tokens:
+                _clear_session_context(tokens)
             if home_token is not None:
                 reset_hermes_home_override(home_token)
-            # _attach_worker already closed the worker if this session was
-            # reaped mid-build; only the late notify registration can still
-            # leak (session.close unregistered before _build registered it).
-            with _sessions_lock:
-                replaced = _sessions.get(sid) is not current
-            if replaced and notify_registered:
-                try:
-                    from tools.approval import unregister_gateway_notify
-
-                    unregister_gateway_notify(key)
-                except Exception:
-                    pass
             ready.set()
 
     threading.Thread(target=_build, daemon=True).start()
@@ -1856,20 +2165,58 @@ def _session_cwd(session: dict | None) -> str:
     return _completion_cwd()
 
 
-def _native_workspace_for_session(session_id: str | None) -> Path:
-    """Resolve native CLI workspace from the registered session only.
+class _NativeSessionContext(NamedTuple):
+    """Immutable profile/workspace pair captured for one native invocation."""
 
-    Caller parameters are deliberately absent from this boundary.  An active
-    session's validated ``cwd`` wins; unknown/no-session calls use the same
-    validated gateway fallback as completion, and finally the launch cwd.
+    profile_home: str | None
+    workspace: Path
+
+
+def _native_context_for_session(session_id: str | None) -> _NativeSessionContext:
+    """Atomically snapshot native profile and workspace context for a session.
+
+    Registry membership and both session fields are copied under one lock.  The
+    copied cwd is validated only after releasing the lock, so session teardown
+    cannot turn a coherent snapshot into a mixed profile/workspace invocation,
+    and the lock is never held across native CLI execution.
     """
+    session_key = session_id or ""
     with _sessions_lock:
-        session = dict(_sessions.get(session_id or "") or {})
-    candidate = session.get("cwd") or _completion_cwd({"session_id": session_id})
+        registered = session_id is not None and session_key in _sessions
+        if registered:
+            raw_session = _sessions[session_key]
+            if type(raw_session) is not dict:
+                raise ValueError("registered session context is invalid")
+            snapshot = dict(raw_session)
+            raw_profile_home = snapshot.get("profile_home")
+            profile_home = str(raw_profile_home) if raw_profile_home else None
+            raw_cwd = snapshot.get("cwd")
+        else:
+            profile_home = None
+            raw_cwd = None
+
+    if registered:
+        # A registry entry is an active session binding, not a hint.  Never
+        # reinterpret a missing, malformed, or deleted cwd as the gateway's
+        # launch directory: that could route native reads/writes elsewhere.
+        if type(raw_cwd) is not str or not raw_cwd.strip():
+            raise ValueError("registered session workspace is invalid")
+        return _NativeSessionContext(profile_home, resolve_workspace_root(raw_cwd))
+
+    # Unknown/no-session calls use launch-profile fallback only.  Do not pass
+    # the caller's session ID to completion: a same-ID session opened after
+    # this snapshot must not replace the fallback workspace generation.
+    candidate = _completion_cwd()
     try:
-        return resolve_workspace_root(candidate)
+        workspace = resolve_workspace_root(candidate)
     except ValueError:
-        return resolve_workspace_root()
+        workspace = resolve_workspace_root()
+    return _NativeSessionContext(None, workspace)
+
+
+def _native_workspace_for_session(session_id: str | None) -> Path:
+    """Compatibility wrapper for callers that only need the workspace."""
+    return _native_context_for_session(session_id).workspace
 
 
 def _heal_dead_cwd(cwd: str) -> str:
@@ -2343,6 +2690,7 @@ def _set_session_context(
     session_key: str,
     cwd: str | None = None,
     *,
+    source: str | None = None,
     ui_session_id: str = "",
 ) -> list:
     try:
@@ -2353,15 +2701,20 @@ def _set_session_context(
         # know the parent workspace pass it explicitly so spawned agents inherit
         # it instead of falling back to the gateway launch dir.
         resolved = cwd if cwd is not None else _cwd_for_session_key(session_key)
-        source = _resolve_session_platform()
-        with _sessions_lock:
-            for sess in list(_sessions.values()):
-                if sess.get("session_key") == session_key:
-                    source = _session_source(sess)
-                    break
+        resolved_source = (
+            _resolve_session_source(source)
+            if source
+            else _resolve_session_platform()
+        )
+        if source is None:
+            with _sessions_lock:
+                for sess in list(_sessions.values()):
+                    if sess.get("session_key") == session_key:
+                        resolved_source = _session_source(sess)
+                        break
         return set_session_vars(
             session_key=session_key,
-            source=source,
+            source=resolved_source,
             cwd=resolved,
             ui_session_id=ui_session_id,
         )
@@ -3250,9 +3603,9 @@ def _tool_progress_enabled(sid: str) -> bool:
     return _session_tool_progress_mode(sid) != "off"
 
 
-def _restart_slash_worker(sid: str, session: dict):
+def _restart_slash_worker(sid: str, session: dict, build_only: bool = False):
     worker = session.get("slash_worker")
-    if worker:
+    if worker and not build_only:
         try:
             worker.close()
         except Exception:
@@ -3264,13 +3617,13 @@ def _restart_slash_worker(sid: str, session: dict):
             profile_home=session.get("profile_home"),
         )
     except Exception:
-        session["slash_worker"] = None
-        return
-    # Route through the same store-iff-still-mapped guard as the spawn sites:
-    # the post-turn restart runs as `running` flips false, exactly when a
-    # close_on_disconnect reap can pop this session — a bare store would orphan
-    # the fresh worker (it self-heals only on gateway exit via the watchdog).
+        if not build_only:
+            session["slash_worker"] = None
+        return None
+    if build_only:
+        return new_worker
     _attach_worker(sid, session, new_worker)
+    return new_worker
 
 
 def _persist_model_switch(result) -> None:
@@ -4939,43 +5292,196 @@ def _preview_restart_callbacks(parent: str, task_id: str) -> dict:
 
 
 def _reset_session_agent(sid: str, session: dict) -> dict:
-    tokens = _set_session_context(session["session_key"])
+    key = session["session_key"]
+    cwd = _session_cwd(session)
+    source = _session_source(session)
+    profile_home = str(session.get("profile_home") or "") or None
+
+    with _sessions_lock:
+        if _sessions.get(sid) is not session:
+            raise RuntimeError("session closed or replaced during reset")
+        old_agent = session.get("agent")
+        old_stop = session.get("_notif_stop")
+        old_thread = session.get("_notif_thread")
+        old_worker = session.get("slash_worker")
+
+    new_agent = None
+    session_db = None
+    new_worker = None
+    new_stop = None
+    new_thread = None
+    candidate_published = False
+    old_resources_cleaned = False
+
+    def _cleanup_old_reset_resources() -> None:
+        """Release the pre-reset generation exactly once, outside session locks."""
+        nonlocal old_resources_cleaned
+        if old_resources_cleaned:
+            return
+        old_resources_cleaned = True
+        if old_stop is not None:
+            old_stop.set()
+        if old_thread is not None and old_thread is not threading.current_thread():
+            with contextlib.suppress(Exception):
+                old_thread.join(timeout=1.0)
+        if old_worker is not None and old_worker is not new_worker:
+            with contextlib.suppress(Exception):
+                old_worker.close()
+        if old_agent is not None and old_agent is not new_agent:
+            try:
+                old_agent._end_session_on_close = False
+            except Exception:
+                pass
+            with contextlib.suppress(Exception):
+                _close_agent_once(old_agent)
+
+    candidate = dict(session)
+    candidate["agent"] = None
+    candidate["session_db"] = None
+    candidate["slash_worker"] = None
+    candidate["_notif_stop"] = None
+    candidate.pop("_notif_thread", None)
+    candidate["cwd"] = cwd
+    candidate["source"] = source
+    candidate["attached_images"] = []
+    candidate["edit_snapshots"] = {}
+    candidate["image_counter"] = 0
+    candidate["running"] = False
+    candidate["tool_started_at"] = {}
+    candidate["history"] = []
+    candidate["history_version"] = int(session.get("history_version", 0)) + 1
+    home_token = None
+    context_tokens = []
     try:
-        # /new is a full conversation boundary: session-scoped runtime
-        # overrides (/model, /reasoning, /fast) do NOT carry forward — the
-        # fresh agent re-derives model/provider, reasoning, and service tier
-        # from config.yaml (#48055, #23131). Session pins are cleared below so
-        # a rebuild can't resurrect them. (Global process state is still never
-        # touched — see the cross-session-contamination note in
-        # _apply_model_switch.)
-        session.pop("model_override", None)
-        session.pop("create_reasoning_override", None)
-        session.pop("create_service_tier_override", None)
-        session.pop("one_turn_model_restore", None)
+        if profile_home:
+            from hermes_state import SessionDB
+
+            home_token = set_hermes_home_override(profile_home)
+            session_db = SessionDB(db_path=Path(profile_home) / "state.db")
+        context_tokens = _set_session_context(key, cwd=cwd, source=source)
         new_agent = _make_agent(
             sid,
-            session["session_key"],
-            session_id=session["session_key"],
-            platform_override=_session_source(session),
+            key,
+            session_id=key,
+            platform_override=source,
+            session_db=session_db,
+            owns_session_db=bool(profile_home and session_db is not None),
         )
+        # The session may have been reaped and its registry slot reused while
+        # the replacement agent was being constructed.  Do not publish any
+        # candidate config, worker, or poller for a record we no longer own;
+        # the exception path closes this agent (and its owned profile DB).
+        with _sessions_lock:
+            if _sessions.get(sid) is not session:
+                raise RuntimeError("session closed or replaced during reset")
+        if _is_gateway_owned_source(source):
+            _set_agent_close_policy({"_gateway_owned_session": True}, new_agent)
+        candidate["agent"] = new_agent
+        candidate["session_db"] = session_db
+        candidate["config_model_seen"] = _config_model_target()
+        candidate["show_reasoning"] = _load_show_reasoning()
+        candidate["tool_progress_mode"] = _load_tool_progress_mode()
+        info = _session_info(new_agent, candidate)
+
+        # Commit the candidate identity before starting any side machinery.
+        # A reaper can replace the registry slot while _session_info runs; in
+        # that case the candidate is discarded without spawning a worker or
+        # poller for a dead record.
+        with _sessions_lock:
+            if _sessions.get(sid) is not session:
+                raise RuntimeError("session closed or replaced during reset")
+            for name in (
+                "model_override",
+                "create_reasoning_override",
+                "create_service_tier_override",
+                "one_turn_model_restore",
+            ):
+                session.pop(name, None)
+            for name in (
+                "agent",
+                "session_db",
+                "config_model_seen",
+                "attached_images",
+                "edit_snapshots",
+                "image_counter",
+                "running",
+                "show_reasoning",
+                "tool_progress_mode",
+                "tool_started_at",
+                "history",
+                "history_version",
+                "slash_worker",
+                "_notif_stop",
+            ):
+                session[name] = candidate[name]
+            session.pop("_notif_thread", None)
+            if "_notif_thread" in candidate:
+                session["_notif_thread"] = candidate["_notif_thread"]
+        candidate_published = True
+
+        with _sessions_lock:
+            if _sessions.get(sid) is not session or session.get("agent") is not new_agent:
+                raise RuntimeError("session closed or replaced during reset")
+        new_worker = _restart_slash_worker(sid, session, True)
+        candidate["slash_worker"] = new_worker
+        with _sessions_lock:
+            if _sessions.get(sid) is not session or session.get("agent") is not new_agent:
+                raise RuntimeError("session closed or replaced during reset")
+            session["slash_worker"] = new_worker
+        try:
+            new_stop = _start_notification_poller(
+                sid, session, db=session_db if session_db is not None else None
+            )
+        finally:
+            new_thread = session.get("_notif_thread")
+        candidate["_notif_stop"] = new_stop
+        candidate["_notif_thread"] = new_thread
+        with _sessions_lock:
+            if _sessions.get(sid) is not session or session.get("agent") is not new_agent:
+                raise RuntimeError("session closed or replaced during reset")
+            session["_notif_stop"] = new_stop
+
+        _cleanup_old_reset_resources()
+        with contextlib.suppress(Exception):
+            _notify_session_boundary("on_session_reset", key, source)
+        with contextlib.suppress(Exception):
+            _emit("session.info", sid, info)
+        return info
+    except Exception:
+        if new_stop is None and candidate_published:
+            new_stop = session.get("_notif_stop")
+        if new_stop is not None:
+            with contextlib.suppress(Exception):
+                new_stop.set()
+        if new_thread is None and candidate_published:
+            new_thread = session.get("_notif_thread")
+        if new_thread is not None and new_thread is not threading.current_thread():
+            with contextlib.suppress(Exception):
+                new_thread.join(timeout=1.0)
+        candidate_worker = new_worker
+        if candidate_worker is None and candidate_published:
+            candidate_worker = session.get("slash_worker")
+        if candidate_worker is not None and candidate_worker is not old_worker:
+            with contextlib.suppress(Exception):
+                candidate_worker.close()
+        if new_agent is not None:
+            try:
+                new_agent._end_session_on_close = False
+            except Exception:
+                pass
+            with contextlib.suppress(Exception):
+                _close_agent_once(new_agent)
+        elif session_db is not None:
+            with contextlib.suppress(Exception):
+                session_db.close()
+        if candidate_published:
+            _cleanup_old_reset_resources()
+        raise
     finally:
-        _clear_session_context(tokens)
-    session["agent"] = new_agent
-    session["config_model_seen"] = _config_model_target()
-    session["attached_images"] = []
-    session["edit_snapshots"] = {}
-    session["image_counter"] = 0
-    session["running"] = False
-    session["show_reasoning"] = _load_show_reasoning()
-    session["tool_progress_mode"] = _load_tool_progress_mode()
-    session["tool_started_at"] = {}
-    with session["history_lock"]:
-        session["history"] = []
-        session["history_version"] = int(session.get("history_version", 0)) + 1
-    info = _session_info(new_agent, session)
-    _emit("session.info", sid, info)
-    _restart_slash_worker(sid, session)
-    return info
+        if context_tokens:
+            _clear_session_context(context_tokens)
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
 
 
 def _schedule_mcp_late_refresh(sid: str, agent) -> None:
@@ -5124,6 +5630,7 @@ def _make_agent(
     reasoning_config_override: dict | None = None,
     service_tier_override: str | None = None,
     platform_override: str | None = None,
+    owns_session_db: bool = False,
 ):
     # AC-4 test seam: dead unless explicitly armed by the isolated certify
     # harness. Both inline and compute-host paths construct through _make_agent,
@@ -5132,7 +5639,30 @@ def _make_agent(
 
     synthetic = maybe_build_synthetic_agent(session_id or key, model_override)
     if synthetic is not None:
-        return synthetic
+        if session_db is not None and owns_session_db:
+            # The synthetic seam bypasses AIAgent's normal ownership wiring.
+            # Prefer to transfer the DB into the synthetic object when it can
+            # host the wrapper; otherwise the managed proxy owns both close
+            # operations without exposing a strong global tombstone.
+            try:
+                original_close = synthetic.close
+
+                def _close_synthetic_with_db():
+                    try:
+                        original_close()
+                    finally:
+                        session_db.close()
+
+                setattr(synthetic, "_session_db", session_db)
+                setattr(synthetic, "_owns_session_db", True)
+                setattr(synthetic, "close", _close_synthetic_with_db)
+            except Exception:
+                return _ManagedAgentProxy(
+                    synthetic,
+                    session_db=session_db,
+                    owns_session_db=True,
+                )
+        return _normalize_agent(synthetic)
 
     from run_agent import AIAgent
 
@@ -5250,7 +5780,7 @@ def _make_agent(
                 raise RuntimeError("Auth fallback resolved without a model")
             model = resolution.selected_model
     _pr = _load_provider_routing()
-    return AIAgent(
+    return _normalize_agent(AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
         provider=runtime.get("provider"),
@@ -5289,6 +5819,7 @@ def _make_agent(
         platform=_resolve_agent_platform(platform_override),
         session_id=session_id or key,
         session_db=session_db if session_db is not None else _get_db(),
+        owns_session_db=owns_session_db,
         ephemeral_system_prompt=system_prompt or None,
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
@@ -5296,7 +5827,64 @@ def _make_agent(
         skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         fallback_model=_load_fallback_model(),
         **_agent_cbs(sid),
-    )
+    ))
+
+
+def _discard_partial_initialized_session(
+    sid: str, session: dict | None, *, close_agent: bool = False
+) -> None:
+    """Detach and clean side machinery from a failed session initialization.
+
+    This is deliberately not a finalize path: it must not end the session row,
+    release its active-session lease, or close an agent that a caller intends to
+    reuse as a fallback. The caller may opt into closing the agent when the
+    build has no viable owner (branch/resume rollback).
+    """
+    if not session:
+        return
+    with _sessions_lock:
+        if _sessions.get(sid) is session:
+            _sessions.pop(sid, None)
+    stop = session.pop("_notif_stop", None)
+    if stop is not None:
+        try:
+            stop.set()
+        except Exception:
+            pass
+    thread = session.pop("_notif_thread", None)
+    if thread is not None and thread is not threading.current_thread():
+        try:
+            thread.join(timeout=1.0)
+        except Exception:
+            pass
+    worker = session.pop("slash_worker", None)
+    if worker is not None:
+        try:
+            worker.close()
+        except Exception:
+            pass
+    try:
+        from tools.approval import unregister_gateway_notify
+
+        if key := session.get("session_key"):
+            unregister_gateway_notify(key)
+    except Exception:
+        pass
+    try:
+        from tools.terminal_tool import clear_task_env_overrides
+
+        if key := session.get("session_key"):
+            clear_task_env_overrides(key)
+    except Exception:
+        pass
+    if close_agent:
+        agent = session.get("agent")
+        if agent is not None and hasattr(agent, "close"):
+            _set_agent_close_policy(session, agent)
+            try:
+                _close_agent_once(agent)
+            except Exception:
+                pass
 
 
 def _init_session(
@@ -5308,8 +5896,13 @@ def _init_session(
     cwd: str | None = None,
     session_db=None,
     source: str | None = None,
+    *,
+    profile_home: Path | str | None = None,
+    init_owner_token=None,
 ):
     now = time.time()
+    normalized_profile_home = str(profile_home) if profile_home else None
+    session_cwd = cwd or _completion_cwd()
     with _sessions_lock:
         _sessions[sid] = {
             "agent": agent,
@@ -5323,8 +5916,11 @@ def _init_session(
             "running": False,
             "attached_images": [],
             "image_counter": 0,
-            "cwd": cwd or _completion_cwd(),
+            "cwd": session_cwd,
             "cols": cols,
+            "profile_home": normalized_profile_home,
+            "session_db": session_db,
+            "init_owner_token": init_owner_token,
             "slash_worker": None,
             "show_reasoning": _load_show_reasoning(),
             "source": _resolve_session_source(source),
@@ -5395,10 +5991,26 @@ def _init_session(
     _wire_callbacks(sid)
     with _sessions_lock:
         if sid in _sessions:
-            _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
+            poller_db = db if normalized_profile_home else None
+            if poller_db is None:
+                _sessions[sid]["_notif_stop"] = _start_notification_poller(
+                    sid, _sessions[sid]
+                )
+            else:
+                _sessions[sid]["_notif_stop"] = _start_notification_poller(
+                    sid, _sessions[sid], db=poller_db
+                )
     _notify_session_boundary("on_session_reset", key, _session_source(_sessions.get(sid, {})))
     _emit("session.info", sid, _session_info(agent, _sessions.get(sid, {})))
     _schedule_mcp_late_refresh(sid, agent)
+    if init_owner_token is not None:
+        with _sessions_lock:
+            current = _sessions.get(sid)
+            if (
+                isinstance(current, dict)
+                and current.get("init_owner_token") is init_owner_token
+            ):
+                current.pop("init_owner_token", None)
 
 
 def _new_session_key() -> str:
@@ -6270,19 +6882,22 @@ def _(rid, params: dict) -> dict:
         cols = int(params.get("cols", 80))
     except (TypeError, ValueError):
         cols = 80
-    # ``profile`` (app-global remote mode): resume a session that lives in another
-    # local profile's state.db. None/own profile → the launch profile (unchanged).
     profile = (params.get("profile") or "").strip() or None
     profile_home = _profile_home(profile)
+    try:
+        with _ResumeSessionDBLease(profile_home) as db_lease:
+            return _session_resume_impl(rid, params, db_lease, cols=cols)
+    except Exception as exc:
+        return _err(rid, 5000, f"resume failed: {exc}")
 
-    # In a profile scope, the agent OWNS a long-lived db handle bound to that
-    # profile (do NOT auto-close it here). Otherwise reuse the shared launch db.
-    if profile_home is not None:
-        from hermes_state import SessionDB
 
-        db = SessionDB(db_path=profile_home / "state.db")
-    else:
-        db = _get_db()
+def _session_resume_impl(
+    rid, params: dict, db_lease: _ResumeSessionDBLease, *, cols: int = 80
+) -> dict:
+    target = params.get("session_id", "")
+    profile = (params.get("profile") or "").strip() or None
+    profile_home = _profile_home(profile)
+    db = db_lease.db
     if db is None:
         return _db_unavailable_error(rid, code=5000)
 
@@ -6521,6 +7136,7 @@ def _(rid, params: dict) -> dict:
     # _session_resume_lock across it would stall session.close on the main
     # dispatch thread (it's not a _LONG_HANDLER), blocking fast-path RPCs.
     sid = uuid.uuid4().hex[:8]
+    agent = None
     source = _resolve_session_source(str(params.get("source") or "").strip() or None)
     lease, limit_message = _claim_active_session_slot(
         target, live_session_id=sid, surface=source
@@ -6547,7 +7163,11 @@ def _(rid, params: dict) -> dict:
         display_history_prefix = db.get_ancestor_display_prefix(target)
         history = sanitize_replay_history(raw_history)
         messages = _history_to_messages(display_history)
-        tokens = _set_session_context(target)
+        tokens = _set_session_context(
+            target,
+            cwd=profile_resume_cwd,
+            source=source,
+        )
         try:
             # Pass the profile's db so the agent persists turns to the right
             # state.db; home override is active here so config/skills/model
@@ -6560,9 +7180,14 @@ def _(rid, params: dict) -> dict:
                 target,
                 session_id=target,
                 session_db=db,
+                owns_session_db=bool(profile_home and db is not None),
                 platform_override=source,
                 **stored_runtime_overrides,
             )
+            if profile_home is not None:
+                db_lease.transfer_to_agent(agent)
+            if _is_gateway_owned_source((found or {}).get("source", "")):
+                _set_agent_close_policy({"_gateway_owned_session": True}, agent)
         finally:
             _clear_session_context(tokens)
     except Exception as e:
@@ -6579,11 +7204,17 @@ def _(rid, params: dict) -> dict:
     with _session_resume_lock:
         live = _find_live_session_by_key(target)
         if live is not None:
-            try:
-                if hasattr(agent, "close"):
-                    agent.close()
-            except Exception:
-                pass
+            if hasattr(agent, "close"):
+                try:
+                    # This agent lost the race and must not finalize the
+                    # durable row now owned by the live winner.
+                    agent._end_session_on_close = False
+                except Exception:
+                    pass
+                try:
+                    _close_agent_once(agent)
+                except Exception:
+                    pass
             if lease is not None:
                 lease.release()
             other_sid, other_session = live
@@ -6612,6 +7243,7 @@ def _(rid, params: dict) -> dict:
                     cwd=profile_resume_cwd,
                     session_db=db,
                     source=source,
+                    profile_home=profile_home,
                 )
             finally:
                 if init_home_token is not None:
@@ -6622,13 +7254,17 @@ def _(rid, params: dict) -> dict:
                         "model_override"
                     ]
                 _sessions[sid]["display_history_prefix"] = display_history_prefix
-                # Remember the profile home so each turn re-binds HERMES_HOME (the
-                # agent persists to its own db, but mid-turn home reads — memory,
-                # skills — must resolve to the resumed profile too).
-                if profile_home is not None:
-                    _sessions[sid]["profile_home"] = str(profile_home)
                 _sessions[sid]["active_session_lease"] = lease
         except Exception as e:
+            partial = _sessions.get(sid)
+            if partial is not None:
+                _discard_partial_initialized_session(sid, partial, close_agent=True)
+            elif agent is not None:
+                _set_agent_close_policy(
+                    {"_gateway_owned_session": _is_gateway_owned_source((found or {}).get("source", ""))},
+                    agent,
+                )
+                _close_agent_once(agent)
             if lease is not None:
                 lease.release()
             return _err(rid, 5000, f"resume failed: {e}")
@@ -9191,84 +9827,159 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5008)
-    old_key = session["session_key"]
+    if session is None:
+        return _err(rid, 4001, "session not found")
+
+    # Capture the parent binding before doing any I/O.  Profile and workspace are
+    # one routing identity; copying both under the registry lock prevents a
+    # concurrent session update from pairing one profile with another workspace.
+    with _sessions_lock:
+        old_key = session["session_key"]
+        profile_home = session.get("profile_home")
+        parent_cwd = session.get("cwd")
+        parent_cols = session.get("cols", 80)
+        source = _session_source(session)
     with session["history_lock"]:
         history = [dict(msg) for msg in session.get("history", [])]
     if not history:
         return _err(rid, 4008, "nothing to branch — send a message first")
-    new_key = _new_session_key()
-    new_sid = uuid.uuid4().hex[:8]
-    source = _session_source(session)
-    lease, limit_message = _claim_active_session_slot(
-        new_key, live_session_id=new_sid, surface=source
-    )
-    if limit_message is not None:
-        return _err(rid, 4090, limit_message)
-    branch_name = params.get("name", "")
+    parent_cwd = parent_cwd or _session_cwd(session)
+    profile_home = str(profile_home) if profile_home else None
+
+    home_token = None
+    lease = None
+    agent = None
+    row_created = False
+    db_owned_by_agent = False
+    db = None
     try:
-        if branch_name:
-            title = branch_name
+        # A cross-profile branch must never consult the launch-profile singleton
+        # DB. Keep this override active through title/model resolution, row
+        # creation, agent construction, and _init_session side machinery.
+        if profile_home:
+            home_token = set_hermes_home_override(profile_home)
+            from hermes_state import SessionDB
+
+            db = SessionDB(db_path=Path(profile_home) / "state.db")
         else:
-            current = db.get_session_title(old_key) or "branch"
-            title = (
-                db.get_next_title_in_lineage(current)
-                if hasattr(db, "get_next_title_in_lineage")
-                else f"{current} (branch)"
-            )
-        db.create_session(
-            new_key,
-            source=source,
-            model=_resolve_model(),
-            # Stable _branched_from marker so list_sessions_rich() keeps the
-            # branch visible in /resume and /sessions. The TUI branch leaves
-            # the parent live (no end_reason='branched'), so the legacy
-            # end_reason heuristic never matches it — the marker is the only
-            # thing that surfaces TUI branches. See issue #20856.
-            model_config={"_branched_from": old_key},
-            parent_session_id=old_key,
-            cwd=_session_cwd(session),
+            db = _get_db()
+        if db is None:
+            return _db_unavailable_error(rid, code=5008)
+
+        new_key = _new_session_key()
+        new_sid = uuid.uuid4().hex[:8]
+        lease, limit_message = _claim_active_session_slot(
+            new_key, live_session_id=new_sid, surface=source
         )
-        for msg in history:
-            db.append_message(
-                session_id=new_key,
-                role=msg.get("role", "user"),
-                content=msg.get("content"),
-                timestamp=msg.get("timestamp"),
+        if limit_message is not None:
+            if lease is not None:
+                lease.release()
+                lease = None
+            return _err(rid, 4090, limit_message)
+        branch_name = params.get("name", "")
+        try:
+            if branch_name:
+                title = branch_name
+            else:
+                current = db.get_session_title(old_key) or "branch"
+                title = (
+                    db.get_next_title_in_lineage(current)
+                    if hasattr(db, "get_next_title_in_lineage")
+                    else f"{current} (branch)"
+                )
+            db.create_session(
+                new_key,
+                source=source,
+                model=_resolve_model(),
+                # Stable _branched_from marker so list_sessions_rich() keeps the
+                # branch visible in /resume and /sessions. The TUI branch leaves
+                # the parent live (no end_reason='branched'), so the legacy
+                # end_reason heuristic never matches it — the marker is the only
+                # thing that surfaces TUI branches. See issue #20856.
+                model_config={"_branched_from": old_key},
+                parent_session_id=old_key,
+                cwd=parent_cwd,
             )
-        db.set_session_title(new_key, title)
+            row_created = True
+            for msg in history:
+                db.append_message(
+                    session_id=new_key,
+                    role=msg.get("role", "user"),
+                    content=msg.get("content"),
+                    timestamp=msg.get("timestamp"),
+                )
+            db.set_session_title(new_key, title)
+        except Exception as e:
+            if row_created:
+                with contextlib.suppress(Exception):
+                    db.end_session(new_key, "branch_row_rollback")
+            if lease is not None:
+                lease.release()
+                lease = None
+            return _err(rid, 5008, f"branch failed: {e}")
+
+        try:
+            agent = None
+            tokens = _set_session_context(
+                new_key,
+                cwd=parent_cwd,
+                source=source,
+            )
+            try:
+                agent = _make_agent(
+                    new_sid,
+                    new_key,
+                    session_id=new_key,
+                    platform_override=source,
+                    session_db=db,
+                    owns_session_db=bool(profile_home),
+                )
+                db_owned_by_agent = bool(profile_home)
+            finally:
+                _clear_session_context(tokens)
+            _init_session(
+                new_sid,
+                new_key,
+                agent,
+                list(history),
+                cols=parent_cols,
+                cwd=parent_cwd,
+                source=source,
+                session_db=db,
+                profile_home=profile_home,
+            )
+            with _sessions_lock:
+                if new_sid in _sessions:
+                    _sessions[new_sid]["active_session_lease"] = lease
+        except Exception as e:
+            if row_created:
+                with contextlib.suppress(Exception):
+                    db.end_session(new_key, "branch_agent_init_failed")
+            partial = _sessions.get(new_sid)
+            if partial is not None:
+                _discard_partial_initialized_session(
+                    new_sid, partial, close_agent=True
+                )
+            elif agent is not None:
+                with contextlib.suppress(Exception):
+                    agent._end_session_on_close = False
+                with contextlib.suppress(Exception):
+                    _close_agent_once(agent)
+            if lease is not None:
+                lease.release()
+                lease = None
+            return _err(rid, 5000, f"agent init failed on branch: {e}")
+        return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
     except Exception as e:
         if lease is not None:
             lease.release()
         return _err(rid, 5008, f"branch failed: {e}")
-    try:
-        tokens = _set_session_context(new_key)
-        try:
-            agent = _make_agent(
-                new_sid,
-                new_key,
-                session_id=new_key,
-                platform_override=source,
-            )
-        finally:
-            _clear_session_context(tokens)
-        _init_session(
-            new_sid,
-            new_key,
-            agent,
-            list(history),
-            cols=session.get("cols", 80),
-            source=source,
-        )
-        if new_sid in _sessions:
-            _sessions[new_sid]["active_session_lease"] = lease
-    except Exception as e:
-        if lease is not None:
-            lease.release()
-        return _err(rid, 5000, f"agent init failed on branch: {e}")
-    return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
+    finally:
+        if profile_home and db is not None and not db_owned_by_agent:
+            with contextlib.suppress(Exception):
+                db.close()
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
 
 
 @method("session.interrupt")
@@ -10131,7 +10842,9 @@ def _wire_agent_terminal_output() -> None:
         process_registry.on_close = _emit_agent_terminal_close
 
 
-def _start_notification_poller(sid: str, session: dict) -> threading.Event:
+def _start_notification_poller(
+    sid: str, session: dict, db=None
+) -> threading.Event:
     """Start the background notification poller for a TUI session."""
     _wire_agent_terminal_output()
     # Re-cover orphan async delegations from a prior process (Task 8). The
@@ -10146,7 +10859,7 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
         )
         from tools.process_registry import process_registry as _pr_tui
 
-        _db = _get_db()
+        _db = db if db is not None else _get_db()
         if _db is not None:
             _op_journal = OperationJournal(_db)
             _moved = _op_journal.reconcile_after_restart(owner_fenced=True)
@@ -10170,6 +10883,7 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
         daemon=True,
     )
     t.start()
+    session["_notif_thread"] = t
     return stop
 
 
@@ -14145,13 +14859,17 @@ def _(rid, params: dict) -> dict:
     if session_id is not None and not isinstance(session_id, str):
         return _native_error(rid, 4004, "autonomy.exec: session_id must be a string")
 
-    # Profile isolation: a session resumed from another profile carries its
-    # own profile_home; bind it for the duration of the call so the shared
-    # service resolves THAT profile's config.yaml/state.db, never the launch
-    # profile's. No session (or an unknown one) means the launch profile.
-    session = _sessions.get(session_id or "") or {}
-    profile_home = session.get("profile_home")
-    workspace = _native_workspace_for_session(session_id)
+    # Profile/workspace isolation: snapshot both fields from one registry
+    # generation before either value can be used. No session (or an unknown
+    # one) means the launch profile plus its validated fallback workspace.
+    try:
+        native_context = _native_context_for_session(session_id)
+    except Exception:
+        # Workspace resolution is a security boundary.  In particular, an
+        # active session whose cwd disappeared must not fall back to launch cwd.
+        return _native_internal_error(rid, method="autonomy.exec", code=5038)
+    profile_home = native_context.profile_home
+    workspace = native_context.workspace
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.autonomy as _autonomy_cli
@@ -14468,13 +15186,15 @@ def _(rid, params: dict) -> dict:
     if session_id is not None and not isinstance(session_id, str):
         return _native_error(rid, 4004, "receipt.exec: session_id must be a string")
 
-    # Profile isolation: only the session registry's recorded profile_home
-    # may steer profile resolution — a caller-supplied path in params is
-    # never accepted. No session (or an unknown one) means the launch
-    # profile, exactly like autonomy.exec.
-    session = _sessions.get(session_id or "") or {}
-    profile_home = session.get("profile_home")
-    workspace = _native_workspace_for_session(session_id)
+    # Profile/workspace isolation: snapshot both fields from one registry
+    # generation before either value can be used. Caller-supplied paths are
+    # never accepted; absent sessions use launch-profile fallback.
+    try:
+        native_context = _native_context_for_session(session_id)
+    except Exception:
+        return _native_internal_error(rid, method="receipt.exec", code=5043)
+    profile_home = native_context.profile_home
+    workspace = native_context.workspace
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.receipts as _receipts_cli
@@ -14589,12 +15309,19 @@ def _(rid, params: dict) -> dict:
 
 _TRANSACTION_MAX_ARGV_ENTRIES = 64
 _TRANSACTION_MAX_ARGV_BYTES = 64 * 1024
-_TRANSACTION_UNCERTAIN_STATUSES = frozenset({
-    "unknown_effect",
+_TRANSACTION_UNCERTAIN_STATUSES = frozenset({"unknown_effect"})
+_TRANSACTION_KNOWN_FAILURES = frozenset({
     "blocked",
-    "partially_compensated",
     "failed",
+    "partially_compensated",
 })
+_TRANSACTION_KNOWN_FAILURE_OUTPUTS = {
+    "blocked": "transaction blocked — execution was prevented",
+    "failed": "transaction failed — operation did not complete",
+    "partially_compensated": (
+        "transaction partially compensated — compensation incomplete"
+    ),
+}
 
 
 def _transaction_doc(row: Any) -> dict | None:
@@ -14813,7 +15540,13 @@ def _transaction_uncertainty_response(
     exit_code: int,
 ) -> dict | None:
     status = payload.get("status")
-    if not isinstance(status, str) or status not in _TRANSACTION_UNCERTAIN_STATUSES:
+    counts = payload.get("counts")
+    unknown_count = 0
+    if type(counts) is dict and type(counts.get("unknown")) is int:
+        unknown_count = counts["unknown"]
+    if (
+        not isinstance(status, str) or status not in _TRANSACTION_UNCERTAIN_STATUSES
+    ) and unknown_count <= 0:
         return None
     action_value = payload.get("action")
     action = _native_safe_action(
@@ -14826,6 +15559,36 @@ def _transaction_uncertainty_response(
         action=action,
         exit_code=exit_code,
         output=output,
+        ok=False,
+    )
+    transaction_id = _native_safe_domain_id(
+        argv[1] if len(argv) > 1 else None,
+        method="transaction.exec",
+    )
+    if transaction_id is not None:
+        response["transaction_id"] = transaction_id
+    return response
+
+
+def _transaction_known_failure_response(
+    payload: dict,
+    *,
+    argv: list[str],
+    exit_code: int,
+) -> dict | None:
+    status = payload.get("status")
+    if not isinstance(status, str) or status not in _TRANSACTION_KNOWN_FAILURES:
+        return None
+    action_value = payload.get("action")
+    action = _native_safe_action(
+        action_value if type(action_value) is str else argv[0],
+        fallback="command",
+    )
+    response = _transaction_response(
+        payload,
+        action=action,
+        exit_code=exit_code,
+        output=_TRANSACTION_KNOWN_FAILURE_OUTPUTS[status],
         ok=False,
     )
     transaction_id = _native_safe_domain_id(
@@ -14861,13 +15624,15 @@ def _(rid, params: dict) -> dict:
     if session_id is not None and not isinstance(session_id, str):
         return _native_error(rid, 4006, "transaction.exec: session_id must be a string")
 
-    # Profile isolation mirrors receipt.exec: only the session registry's
-    # recorded profile_home steers resolution; caller paths are never
-    # accepted. Mutations run in THIS live gateway process — never in a
-    # _SlashWorker subprocess.
-    session = _sessions.get(session_id or "") or {}
-    profile_home = session.get("profile_home")
-    workspace = _native_workspace_for_session(session_id)
+    # Profile/workspace isolation: snapshot both fields from one registry
+    # generation before either value can be used. Mutations run in THIS live
+    # gateway process — never in a _SlashWorker subprocess.
+    try:
+        native_context = _native_context_for_session(session_id)
+    except Exception:
+        return _native_internal_error(rid, method="transaction.exec", code=5045)
+    profile_home = native_context.profile_home
+    workspace = native_context.workspace
     home_token = set_hades_home_override(str(profile_home)) if profile_home else None
     try:
         import hades_cli.transactions as _transactions_cli
@@ -14897,6 +15662,16 @@ def _(rid, params: dict) -> dict:
         payload = _normalize_native_payload(result.payload, method="transaction.exec")
     except Exception:
         return _native_internal_error(rid, method="transaction.exec", code=5045)
+    uncertainty = _transaction_uncertainty_response(
+        payload, argv=argv, exit_code=exit_code
+    )
+    if uncertainty is not None:
+        return _native_success(rid, uncertainty, method="transaction.exec", code=5045)
+    known_failure = _transaction_known_failure_response(
+        payload, argv=argv, exit_code=exit_code
+    )
+    if known_failure is not None:
+        return _native_success(rid, known_failure, method="transaction.exec", code=5045)
     if exit_code == exit_validation:
         return _native_error(
             rid,
@@ -14904,11 +15679,6 @@ def _(rid, params: dict) -> dict:
             "transaction.exec: validation failed (details withheld; run "
             "hades transaction in a terminal)",
         )
-    uncertainty = _transaction_uncertainty_response(
-        payload, argv=argv, exit_code=exit_code
-    )
-    if uncertainty is not None:
-        return _native_success(rid, uncertainty, method="transaction.exec", code=5045)
     if exit_code != exit_ok:
         return _native_error(
             rid,
