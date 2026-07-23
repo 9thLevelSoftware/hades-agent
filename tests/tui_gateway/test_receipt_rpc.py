@@ -467,3 +467,108 @@ def test_cli_failure_payload_error_is_not_forwarded(
     assert secret not in str(resp)
     assert path not in str(resp)
     assert "Traceback" not in str(resp)
+
+
+def test_exit_ok_false_payload_is_a_bounded_command_error(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    secret = "receipt-false-success-secret"
+    path = "/private/receipts/false-success.db"
+    details = f"{secret} {path}\nTraceback (most recent call last)"
+    failed = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        f"producer output: {details}",
+        {"ok": False, "error": details},
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: failed)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5040
+    assert secret not in str(resp)
+    assert path not in str(resp)
+    assert "Traceback" not in str(resp)
+
+
+def test_exit_ok_failure_only_payload_error_is_a_bounded_command_error(
+    rpc, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    secret = "receipt-failure-only-secret"
+    failed = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK, secret, {"error": secret}
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: failed)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5040
+    assert secret not in str(resp)
+
+
+@pytest.mark.parametrize("payload", ["not-a-dict", ["not", "a", "dict"]])
+def test_malformed_payload_is_a_fixed_error(rpc, monkeypatch, payload):
+    import hades_cli.receipts as receipts_mod
+
+    result = receipts_mod.ReceiptCommandResult(receipts_mod.EXIT_OK, "safe", payload)
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5043
+    assert "-32000" not in str(resp)
+
+
+def test_payload_dict_subclass_get_exception_is_not_on_wire(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    secret = "receipt-malicious-get-secret"
+
+    class MaliciousPayload(dict):
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError(f"{secret} /private/receipts\nTraceback")
+
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK, "safe", MaliciousPayload(ok=True)
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5043
+    assert secret not in str(resp)
+    assert "/private/receipts" not in str(resp)
+    assert "Traceback" not in str(resp)
+
+
+def test_success_output_is_bounded_with_deterministic_suffix(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    suffix = "... [truncated]"
+    output = "receipt output\n" + ("x" * 20_000)
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK, output, {"ok": True, "action": "list"}
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["output"] == output[: 16_384 - len(suffix)] + suffix
+    assert len(resp["output"]) <= 16_384
+
+
+def test_success_envelope_is_bounded(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        "short",
+        {"ok": True, "receipts": [{"receipt_id": "r", "detail": "x" * 1_100_000}]},
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5043
+    assert len(str(resp)) < 2_000

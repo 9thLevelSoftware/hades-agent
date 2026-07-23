@@ -313,3 +313,147 @@ def test_cli_failure_payload_error_is_not_forwarded(
     assert secret not in str(resp)
     assert path not in str(resp)
     assert "Traceback" not in str(resp)
+
+
+def test_exit_ok_false_payload_is_a_bounded_internal_error(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    secret = "autonomy-false-success-secret"
+    path = "/private/autonomy/false-success.yaml"
+    details = f"{secret} {path}\nTraceback (most recent call last)"
+    failed = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        f"producer output: {details}",
+        {"ok": False, "error": details},
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: failed)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
+
+    assert resp["error"]["code"] == 5038
+    assert "result" not in resp
+    assert secret not in str(resp)
+    assert path not in str(resp)
+    assert "Traceback" not in str(resp)
+
+
+def test_exit_ok_failure_only_payload_error_is_a_bounded_internal_error(
+    rpc_raw, monkeypatch
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    secret = "autonomy-failure-only-secret"
+    failed = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        secret,
+        {"error": secret},
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: failed)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
+
+    assert resp["error"]["code"] == 5038
+    assert secret not in str(resp)
+
+
+def test_exit_denied_remains_a_structured_result(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    denied = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_DENIED,
+        "denied by policy",
+        {"ok": False, "verdict": "deny", "code": "explicit_deny"},
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: denied)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["evaluate"]})
+
+    assert "result" in resp
+    assert "error" not in resp
+    assert resp["result"]["ok"] is False
+    assert resp["result"]["exit_code"] == autonomy_mod.EXIT_DENIED
+
+
+def test_unknown_exit_code_is_a_bounded_internal_error(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    secret = "autonomy-unknown-exit-secret"
+    unknown = autonomy_mod.CliResult(
+        97,
+        f"output {secret} /private/autonomy/unknown",
+        {"ok": True, "output": secret},
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: unknown)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
+
+    assert resp["error"]["code"] == 5038
+    assert secret not in str(resp)
+    assert "-32000" not in str(resp)
+
+
+@pytest.mark.parametrize("payload", ["not-a-dict", ["not", "a", "dict"]])
+def test_malformed_payload_is_a_fixed_error(rpc_raw, monkeypatch, payload):
+    import hades_cli.autonomy as autonomy_mod
+
+    result = autonomy_mod.CliResult(autonomy_mod.EXIT_OK, "safe", payload)
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
+
+    assert resp["error"]["code"] == 5038
+    assert "-32000" not in str(resp)
+
+
+def test_payload_dict_subclass_get_exception_is_not_on_wire(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    secret = "autonomy-malicious-get-secret"
+
+    class MaliciousPayload(dict):
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError(f"{secret} /private/autonomy\nTraceback")
+
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK, "safe", MaliciousPayload(ok=True)
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
+
+    assert resp["error"]["code"] == 5038
+    assert secret not in str(resp)
+    assert "/private/autonomy" not in str(resp)
+    assert "Traceback" not in str(resp)
+
+
+def test_success_output_is_bounded_with_deterministic_suffix(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    suffix = "... [truncated]"
+    output = "autonomy output\n" + ("x" * 20_000)
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK, output, {"ok": True, "action": "status"}
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
+
+    assert resp["result"]["output"] == output[: 16_384 - len(suffix)] + suffix
+    assert len(resp["result"]["output"]) <= 16_384
+
+
+def test_success_envelope_is_bounded(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        "short",
+        {"ok": True, "rules": ["x" * 1_100_000]},
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["status"]})
+
+    assert resp["error"]["code"] == 5038
+    assert len(str(resp)) < 2_000

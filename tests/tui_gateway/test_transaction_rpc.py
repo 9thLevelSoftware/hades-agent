@@ -307,3 +307,81 @@ def test_transaction_preview_wire_result_contains_only_safe_node_metadata(
         assert "summary" not in node
         assert "before" not in node
         assert "after" not in node
+
+
+def test_transaction_preview_node_count_is_bounded(rpc, monkeypatch):
+    import hades_cli.transactions as transactions_mod
+
+    rows = [
+        {
+            "node_id": f"node-{idx}",
+            "fidelity": "exact",
+            "requires_approval": False,
+        }
+        for idx in range(10_000)
+    ]
+    successful = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        "preview output",
+        {"ok": True, "action": "preview", "preview_hash": "hash", "nodes": rows},
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: successful)
+
+    resp = rpc("transaction.exec", {"argv": ["preview", "tx-many"], "session_id": "sid"})
+
+    assert resp["action"] == "preview"
+    assert len(resp["nodes"]) <= 256
+    assert len(resp["output"]) <= 16_384
+
+
+@pytest.mark.parametrize("payload", ["not-a-dict", ["not", "a", "dict"]])
+def test_malformed_payload_is_a_fixed_error(rpc, monkeypatch, payload):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK, "safe", payload
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("transaction.exec", {"argv": ["show", "tx"], "session_id": "sid"})
+
+    assert resp["error"]["code"] == 5045
+    assert "-32000" not in str(resp)
+
+
+def test_payload_dict_subclass_get_exception_is_not_on_wire(rpc, monkeypatch):
+    import hades_cli.transactions as transactions_mod
+
+    secret = "transaction-malicious-get-secret"
+
+    class MaliciousPayload(dict):
+        def get(self, *_args, **_kwargs):
+            raise RuntimeError(f"{secret} /private/transaction\nTraceback")
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK, "safe", MaliciousPayload(ok=True)
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("transaction.exec", {"argv": ["show", "tx"], "session_id": "sid"})
+
+    assert resp["error"]["code"] == 5045
+    assert secret not in str(resp)
+    assert "/private/transaction" not in str(resp)
+    assert "Traceback" not in str(resp)
+
+
+def test_success_envelope_is_bounded(rpc, monkeypatch):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        "short",
+        {"ok": True, "action": "show", "transactions": [{"detail": "x" * 1_100_000}]},
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("transaction.exec", {"argv": ["show", "tx"], "session_id": "sid"})
+
+    assert resp["error"]["code"] == 5045
+    assert len(str(resp)) < 2_000
