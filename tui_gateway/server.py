@@ -9230,86 +9230,128 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    db = _get_db()
-    if db is None:
-        return _db_unavailable_error(rid, code=5008)
-    old_key = session["session_key"]
+    if session is None:
+        return _err(rid, 4001, "session not found")
+
+    # Capture the parent binding before doing any I/O.  Profile and workspace are
+    # one routing identity; copying both under the registry lock prevents a
+    # concurrent session update from pairing one profile with another workspace.
+    with _sessions_lock:
+        old_key = session["session_key"]
+        profile_home = session.get("profile_home")
+        parent_cwd = session.get("cwd")
+        parent_cols = session.get("cols", 80)
+        source = _session_source(session)
     with session["history_lock"]:
         history = [dict(msg) for msg in session.get("history", [])]
     if not history:
         return _err(rid, 4008, "nothing to branch — send a message first")
-    new_key = _new_session_key()
-    new_sid = uuid.uuid4().hex[:8]
-    source = _session_source(session)
-    lease, limit_message = _claim_active_session_slot(
-        new_key, live_session_id=new_sid, surface=source
-    )
-    if limit_message is not None:
-        return _err(rid, 4090, limit_message)
-    branch_name = params.get("name", "")
+    parent_cwd = parent_cwd or _session_cwd(session)
+    profile_home = str(profile_home) if profile_home else None
+
+    home_token = None
+    lease = None
     try:
-        if branch_name:
-            title = branch_name
+        # A cross-profile branch must never consult the launch-profile singleton
+        # DB. Keep this override active through title/model resolution, row
+        # creation, agent construction, and _init_session side machinery.
+        if profile_home:
+            home_token = set_hermes_home_override(profile_home)
+            from hermes_state import SessionDB
+
+            db = SessionDB(db_path=Path(profile_home) / "state.db")
         else:
-            current = db.get_session_title(old_key) or "branch"
-            title = (
-                db.get_next_title_in_lineage(current)
-                if hasattr(db, "get_next_title_in_lineage")
-                else f"{current} (branch)"
-            )
-        db.create_session(
-            new_key,
-            source=source,
-            model=_resolve_model(),
-            # Stable _branched_from marker so list_sessions_rich() keeps the
-            # branch visible in /resume and /sessions. The TUI branch leaves
-            # the parent live (no end_reason='branched'), so the legacy
-            # end_reason heuristic never matches it — the marker is the only
-            # thing that surfaces TUI branches. See issue #20856.
-            model_config={"_branched_from": old_key},
-            parent_session_id=old_key,
-            cwd=_session_cwd(session),
+            db = _get_db()
+        if db is None:
+            return _db_unavailable_error(rid, code=5008)
+
+        new_key = _new_session_key()
+        new_sid = uuid.uuid4().hex[:8]
+        lease, limit_message = _claim_active_session_slot(
+            new_key, live_session_id=new_sid, surface=source
         )
-        for msg in history:
-            db.append_message(
-                session_id=new_key,
-                role=msg.get("role", "user"),
-                content=msg.get("content"),
-                timestamp=msg.get("timestamp"),
+        if limit_message is not None:
+            if lease is not None:
+                lease.release()
+                lease = None
+            return _err(rid, 4090, limit_message)
+        branch_name = params.get("name", "")
+        try:
+            if branch_name:
+                title = branch_name
+            else:
+                current = db.get_session_title(old_key) or "branch"
+                title = (
+                    db.get_next_title_in_lineage(current)
+                    if hasattr(db, "get_next_title_in_lineage")
+                    else f"{current} (branch)"
+                )
+            db.create_session(
+                new_key,
+                source=source,
+                model=_resolve_model(),
+                # Stable _branched_from marker so list_sessions_rich() keeps the
+                # branch visible in /resume and /sessions. The TUI branch leaves
+                # the parent live (no end_reason='branched'), so the legacy
+                # end_reason heuristic never matches it — the marker is the only
+                # thing that surfaces TUI branches. See issue #20856.
+                model_config={"_branched_from": old_key},
+                parent_session_id=old_key,
+                cwd=parent_cwd,
             )
-        db.set_session_title(new_key, title)
+            for msg in history:
+                db.append_message(
+                    session_id=new_key,
+                    role=msg.get("role", "user"),
+                    content=msg.get("content"),
+                    timestamp=msg.get("timestamp"),
+                )
+            db.set_session_title(new_key, title)
+        except Exception as e:
+            if lease is not None:
+                lease.release()
+                lease = None
+            return _err(rid, 5008, f"branch failed: {e}")
+
+        try:
+            tokens = _set_session_context(new_key)
+            try:
+                agent = _make_agent(
+                    new_sid,
+                    new_key,
+                    session_id=new_key,
+                    platform_override=source,
+                    session_db=db,
+                )
+            finally:
+                _clear_session_context(tokens)
+            _init_session(
+                new_sid,
+                new_key,
+                agent,
+                list(history),
+                cols=parent_cols,
+                cwd=parent_cwd,
+                source=source,
+                session_db=db,
+                profile_home=profile_home,
+            )
+            with _sessions_lock:
+                if new_sid in _sessions:
+                    _sessions[new_sid]["active_session_lease"] = lease
+        except Exception as e:
+            if lease is not None:
+                lease.release()
+                lease = None
+            return _err(rid, 5000, f"agent init failed on branch: {e}")
+        return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
     except Exception as e:
         if lease is not None:
             lease.release()
         return _err(rid, 5008, f"branch failed: {e}")
-    try:
-        tokens = _set_session_context(new_key)
-        try:
-            agent = _make_agent(
-                new_sid,
-                new_key,
-                session_id=new_key,
-                platform_override=source,
-            )
-        finally:
-            _clear_session_context(tokens)
-        _init_session(
-            new_sid,
-            new_key,
-            agent,
-            list(history),
-            cols=session.get("cols", 80),
-            cwd=_session_cwd(session),
-            source=source,
-            profile_home=(session or {}).get("profile_home"),
-        )
-        if new_sid in _sessions:
-            _sessions[new_sid]["active_session_lease"] = lease
-    except Exception as e:
-        if lease is not None:
-            lease.release()
-        return _err(rid, 5000, f"agent init failed on branch: {e}")
-    return _ok(rid, {"session_id": new_sid, "title": title, "parent": old_key})
+    finally:
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
 
 
 @method("session.interrupt")

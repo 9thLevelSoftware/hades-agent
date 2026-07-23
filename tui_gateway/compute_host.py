@@ -417,21 +417,24 @@ class ComputeHost:
     def _ensure_server_session(self, server: Any, frame: dict[str, Any]) -> dict:
         sid = str(frame.get("sid") or "")
         key = str(frame.get("session_key") or sid)
-        session = server._sessions.get(sid)
-        if session is not None:
-            session["transport"] = self._transport
-            if frame.get("cols") is not None:
-                session["cols"] = int(frame.get("cols") or 80)
-            if frame.get("cwd"):
-                session["cwd"] = str(frame.get("cwd"))
-            if frame.get("profile_home"):
-                session["profile_home"] = str(frame.get("profile_home"))
-            if isinstance(frame.get("attached_images"), list):
-                session["attached_images"] = list(frame.get("attached_images") or [])
-            return session
+        with server._sessions_lock:
+            session = server._sessions.get(sid)
+            if session is not None:
+                # Transport, workspace, and profile are one session binding. Do
+                # not expose a partially updated pair to another host turn.
+                session["transport"] = self._transport
+                if frame.get("cols") is not None:
+                    session["cols"] = int(frame.get("cols") or 80)
+                if frame.get("cwd"):
+                    session["cwd"] = str(frame.get("cwd"))
+                if frame.get("profile_home"):
+                    session["profile_home"] = str(frame.get("profile_home"))
+                if isinstance(frame.get("attached_images"), list):
+                    session["attached_images"] = list(frame.get("attached_images") or [])
+                return session
 
         history = frame.get("history") if isinstance(frame.get("history"), list) else []
-        profile_home = str(frame.get("profile_home") or "")
+        profile_home = str(frame.get("profile_home") or "") or None
         session_db = None
         home_token = None
         try:
@@ -473,6 +476,7 @@ class ComputeHost:
                     cwd=str(frame.get("cwd") or "") or None,
                     session_db=session_db,
                     source=frame.get("source"),
+                    profile_home=profile_home,
                 )
             finally:
                 reset_transport(token)
@@ -480,7 +484,7 @@ class ComputeHost:
             # If _init_session's side machinery (slash worker, approval notify) is
             # unavailable, keep a minimal host-owned session rather than failing
             # the turn after the expensive agent build succeeded.
-            server._sessions[sid] = {
+            fallback = {
                 "agent": agent,
                 "session_key": key,
                 "history": list(history),
@@ -494,23 +498,26 @@ class ComputeHost:
                 "image_counter": 0,
                 "cwd": str(frame.get("cwd") or os.getcwd()),
                 "cols": int(frame.get("cols") or 80),
+                "profile_home": profile_home,
                 "slash_worker": None,
                 "show_reasoning": server._load_show_reasoning(),
                 "tool_progress_mode": server._load_tool_progress_mode(),
                 "edit_snapshots": {},
                 "tool_started_at": {},
                 "model_override": frame.get("model_override"),
-                "source": server._sanitize_client_source(frame.get("source")),
+                "source": server._resolve_session_source(frame.get("source")),
                 "transport": self._transport,
             }
-        session = server._sessions[sid]
-        session["transport"] = self._transport
-        session["profile_home"] = profile_home or session.get("profile_home")
-        if isinstance(frame.get("attached_images"), list):
-            session["attached_images"] = list(frame.get("attached_images") or [])
-        if frame.get("model_override") is not None:
-            session["model_override"] = frame.get("model_override")
-        return session
+            with server._sessions_lock:
+                server._sessions[sid] = fallback
+        with server._sessions_lock:
+            session = server._sessions[sid]
+            session["transport"] = self._transport
+            if isinstance(frame.get("attached_images"), list):
+                session["attached_images"] = list(frame.get("attached_images") or [])
+            if frame.get("model_override") is not None:
+                session["model_override"] = frame.get("model_override")
+            return session
 
     def _handle_reload_mcp(self, frame: dict[str, Any]) -> None:
         sid = str(frame.get("sid") or "")
