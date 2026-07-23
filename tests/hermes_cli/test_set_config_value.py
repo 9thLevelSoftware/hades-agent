@@ -134,10 +134,10 @@ class TestFalsyValues:
 
     def test_empty_string_routes_to_env(self, _isolated_hermes_home):
         """Blanking a registered API key removes its dotenv assignment."""
-        set_config_value("DEEPSEEK_API_KEY", "sk-before-clear")
-        set_config_value("DEEPSEEK_API_KEY", "")
+        set_config_value("OPENROUTER_API_KEY", "sk-before-clear")
+        set_config_value("OPENROUTER_API_KEY", "")
         env_content = _read_env(_isolated_hermes_home)
-        assert "DEEPSEEK_API_KEY=" not in env_content
+        assert "OPENROUTER_API_KEY=" not in env_content
 
     def test_empty_string_routes_to_config(self, _isolated_hermes_home):
         """Blanking a config key should write an empty string to config.yaml."""

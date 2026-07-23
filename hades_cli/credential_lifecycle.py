@@ -207,17 +207,40 @@ def _require_env_key_writable(env_var: str, action: str) -> None:
 
 
 def _providers_for_env_var(env_var: str) -> list[str]:
-    """Return canonical providers whose registered key vars include *env_var*."""
+    """Return canonical providers whose credential vars include *env_var*.
+
+    ``PROVIDER_REGISTRY`` remains the primary credential authority. The
+    unified provider catalog is the fallback for Keys-tab API-key providers
+    intentionally omitted from that registry (currently OpenRouter). Evaluate
+    both at call time so profile/plugin-scoped catalogs are never frozen into
+    process-global dispatch state.
+    """
+    providers: set[str] = set()
     try:
         from hades_cli.auth import PROVIDER_REGISTRY
     except Exception:
-        return []
+        PROVIDER_REGISTRY = {}
 
-    providers: set[str] = set()
     for provider_id, provider_config in PROVIDER_REGISTRY.items():
         try:
             if env_var in (provider_config.api_key_env_vars or ()):
                 providers.add(_canonical_provider_id(provider_id))
+        except (AttributeError, TypeError):
+            continue
+
+    try:
+        from hades_cli.provider_catalog import provider_catalog
+
+        catalog = provider_catalog()
+    except Exception:
+        catalog = ()
+    for descriptor in catalog:
+        try:
+            if (
+                descriptor.tab == "keys"
+                and env_var in (descriptor.api_key_env_vars or ())
+            ):
+                providers.add(_canonical_provider_id(descriptor.slug))
         except (AttributeError, TypeError):
             continue
     return sorted(providers)

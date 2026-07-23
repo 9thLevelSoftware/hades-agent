@@ -144,6 +144,180 @@ class TestProfileScopedEnv:
         assert resp.status_code == 200
         assert "doomed" not in (isolated_profiles["worker_beta"] / ".env").read_text()
 
+    def test_openrouter_put_replaces_through_catalog_lifecycle(
+        self,
+        client,
+        isolated_profiles,
+    ):
+        worker = isolated_profiles["worker_beta"]
+        default = isolated_profiles["default"]
+        old_key = "dashboard-openrouter-old-" + "h" * 24
+        new_key = "dashboard-openrouter-new-" + "i" * 24
+        source = "env:OPENROUTER_API_KEY"
+        (worker / ".env").write_text(
+            f"OPENROUTER_API_KEY={old_key}\n",
+            encoding="utf-8",
+        )
+        (worker / "auth.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "providers": {},
+                    "suppressed_sources": {"openrouter": [source]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (worker / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "model": {"provider": "custom", "api_key": old_key},
+                    "auxiliary": {"vision": {"api": old_key}},
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        default_before = (default / "config.yaml").read_bytes()
+
+        response = client.put(
+            "/api/env",
+            json={
+                "key": "OPENROUTER_API_KEY",
+                "value": new_key,
+                "profile": "worker_beta",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "ok": True,
+            "key": "OPENROUTER_API_KEY",
+        }
+        assert old_key not in response.text
+        assert new_key not in response.text
+        env_text = (worker / ".env").read_text(encoding="utf-8")
+        assert old_key not in env_text
+        assert new_key in env_text
+        config = _cfg(worker)
+        assert config["model"]["api_key"] == new_key
+        assert config["auxiliary"]["vision"]["api"] == new_key
+        auth_store = json.loads(
+            (worker / "auth.json").read_text(encoding="utf-8")
+        )
+        assert source not in auth_store.get("suppressed_sources", {}).get(
+            "openrouter", []
+        )
+        assert (default / "config.yaml").read_bytes() == default_before
+
+    def test_openrouter_delete_clears_through_catalog_lifecycle(
+        self,
+        client,
+        isolated_profiles,
+    ):
+        worker = isolated_profiles["worker_beta"]
+        secret = "dashboard-openrouter-clear-" + "j" * 24
+        manual_secret = "dashboard-openrouter-manual-" + "k" * 24
+        source = "env:OPENROUTER_API_KEY"
+        (worker / ".env").write_text(
+            f"export OPENROUTER_API_KEY={secret}\nSIBLING=keep\n",
+            encoding="utf-8",
+        )
+        (worker / "auth.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "providers": {},
+                    "credential_pool": {
+                        "openrouter": [
+                            {
+                                "id": "env",
+                                "label": "OPENROUTER_API_KEY",
+                                "auth_type": "api_key",
+                                "priority": 0,
+                                "source": source,
+                                "access_token": secret,
+                            },
+                            {
+                                "id": "manual",
+                                "label": "manual",
+                                "auth_type": "api_key",
+                                "priority": 1,
+                                "source": "manual",
+                                "access_token": manual_secret,
+                            },
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (worker / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "model": {"provider": "custom", "api_key": secret},
+                    "auxiliary": {"vision": {"api_key": secret}},
+                    "custom_providers": {
+                        "mirror": {"api": secret},
+                        "manual": {"api_key": manual_secret},
+                    },
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        (worker / "provider_models_cache.json").write_text(
+            json.dumps(
+                {
+                    "openrouter": {"models": ["openai/gpt-5"]},
+                    "deepseek": {"models": ["preserve-me"]},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        response = client.request(
+            "DELETE",
+            "/api/env",
+            json={
+                "key": "OPENROUTER_API_KEY",
+                "profile": "worker_beta",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "ok": True,
+            "key": "OPENROUTER_API_KEY",
+        }
+        assert secret not in response.text
+        env_text = (worker / ".env").read_text(encoding="utf-8")
+        assert "OPENROUTER_API_KEY=" not in env_text
+        assert "SIBLING=keep" in env_text
+        auth_store = json.loads(
+            (worker / "auth.json").read_text(encoding="utf-8")
+        )
+        assert [
+            entry["source"]
+            for entry in auth_store["credential_pool"]["openrouter"]
+        ] == ["manual"]
+        assert source in auth_store["suppressed_sources"]["openrouter"]
+        config = _cfg(worker)
+        assert "api_key" not in config["model"]
+        assert "api_key" not in config["auxiliary"]["vision"]
+        assert "api" not in config["custom_providers"]["mirror"]
+        assert (
+            config["custom_providers"]["manual"]["api_key"]
+            == manual_secret
+        )
+        cache = json.loads(
+            (worker / "provider_models_cache.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert "openrouter" not in cache
+        assert cache["deepseek"]["models"] == ["preserve-me"]
+
     def test_registered_provider_put_delete_uses_full_lifecycle(
         self,
         client,

@@ -18,6 +18,7 @@ OLD_KEY = "credential-" + "a" * 24
 NEW_KEY = "credential-" + "b" * 24
 OTHER_KEY = "credential-" + "c" * 24
 SOURCE = "env:ZAI_API_KEY"
+OPENROUTER_SOURCE = "env:OPENROUTER_API_KEY"
 
 
 def _lifecycle():
@@ -70,6 +71,7 @@ def hades_home(tmp_path, monkeypatch):
     yield home
     invalidate_env_cache()
     os.environ.pop("ZAI_API_KEY", None)
+    os.environ.pop("OPENROUTER_API_KEY", None)
 
 
 def test_remove_reconciles_every_store_and_preserves_non_env_auth(hades_home):
@@ -204,6 +206,217 @@ def test_remove_finds_and_prunes_a_pool_only_stale_credential(hades_home):
     assert result["removed"] is False
     assert result["pool_pruned"] == ["zai"]
     assert "zai" not in _read_auth(hades_home).get("credential_pool", {})
+
+
+def test_every_keys_tab_catalog_credential_has_a_lifecycle_provider():
+    from hades_cli.provider_catalog import provider_catalog
+    from hades_cli.providers import normalize_provider
+
+    lifecycle = _lifecycle()
+    catalog_credentials = []
+    for descriptor in provider_catalog():
+        if descriptor.tab != "keys":
+            continue
+        for env_var in descriptor.api_key_env_vars:
+            catalog_credentials.append((descriptor.slug, env_var))
+            assert normalize_provider(descriptor.slug) in (
+                lifecycle._providers_for_env_var(env_var)
+            )
+            assert lifecycle.is_provider_env_credential(env_var) is True
+
+    assert ("openrouter", "OPENROUTER_API_KEY") in catalog_credentials
+
+
+def test_catalog_fallback_excludes_account_aliases_and_arbitrary_keys():
+    from hades_cli.auth import PROVIDER_REGISTRY
+    from hades_cli.provider_catalog import provider_catalog
+
+    registry_keys = {
+        env_var
+        for provider_config in PROVIDER_REGISTRY.values()
+        for env_var in (provider_config.api_key_env_vars or ())
+    }
+    lifecycle = _lifecycle()
+    for descriptor in provider_catalog():
+        if descriptor.tab == "keys":
+            continue
+        for env_var in descriptor.api_key_env_vars:
+            if env_var not in registry_keys:
+                assert lifecycle.is_provider_env_credential(env_var) is False
+
+    assert (
+        lifecycle.is_provider_env_credential("CUSTOM_DASHBOARD_SECRET")
+        is False
+    )
+
+
+def test_catalog_fallback_is_call_time_and_deterministic(monkeypatch):
+    from types import SimpleNamespace
+
+    catalog_module = importlib.import_module("hades_cli.provider_catalog")
+    snapshots = iter(
+        (
+            (
+                SimpleNamespace(
+                    slug="zeta-plugin",
+                    tab="keys",
+                    api_key_env_vars=("PLUGIN_DYNAMIC_API_KEY",),
+                ),
+                SimpleNamespace(
+                    slug="alpha-plugin",
+                    tab="keys",
+                    api_key_env_vars=("PLUGIN_DYNAMIC_API_KEY",),
+                ),
+            ),
+            (
+                SimpleNamespace(
+                    slug="beta-plugin",
+                    tab="keys",
+                    api_key_env_vars=("PLUGIN_DYNAMIC_API_KEY",),
+                ),
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "provider_catalog",
+        lambda: next(snapshots),
+    )
+
+    lifecycle = _lifecycle()
+    assert lifecycle._providers_for_env_var("PLUGIN_DYNAMIC_API_KEY") == [
+        "alpha-plugin",
+        "zeta-plugin",
+    ]
+    assert lifecycle._providers_for_env_var("PLUGIN_DYNAMIC_API_KEY") == [
+        "beta-plugin"
+    ]
+
+
+def test_public_save_reconciles_catalog_only_openrouter_credential(hades_home):
+    (hades_home / ".env").write_text(
+        f"OPENROUTER_API_KEY={OLD_KEY}\n",
+        encoding="utf-8",
+    )
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {},
+            "suppressed_sources": {
+                "openrouter": [OPENROUTER_SOURCE],
+            },
+        },
+    )
+    _write_config(
+        hades_home,
+        {
+            "model": {"provider": "custom", "api_key": OLD_KEY},
+            "auxiliary": {"vision": {"api": OLD_KEY}},
+            "custom_providers": {
+                "mirror": {"api_key": OLD_KEY},
+                "manual": {"api_key": OTHER_KEY},
+            },
+        },
+    )
+
+    from hades_cli.config import save_env_value
+
+    assert save_env_value("OPENROUTER_API_KEY", NEW_KEY) is True
+
+    env_text = (hades_home / ".env").read_text(encoding="utf-8")
+    assert OLD_KEY not in env_text
+    assert NEW_KEY in env_text
+    config = _read_config(hades_home)
+    assert config["model"]["api_key"] == NEW_KEY
+    assert config["auxiliary"]["vision"]["api"] == NEW_KEY
+    assert config["custom_providers"]["mirror"]["api_key"] == NEW_KEY
+    assert config["custom_providers"]["manual"]["api_key"] == OTHER_KEY
+    suppressed = _read_auth(hades_home).get("suppressed_sources", {})
+    assert OPENROUTER_SOURCE not in suppressed.get("openrouter", [])
+
+
+def test_public_remove_reconciles_catalog_only_openrouter_credential(
+    hades_home,
+    capsys,
+):
+    (hades_home / ".env").write_text(
+        f"export OPENROUTER_API_KEY={OLD_KEY}\nSIBLING=keep\n",
+        encoding="utf-8",
+    )
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {},
+            "credential_pool": {
+                "openrouter": [
+                    _pool_entry(
+                        "openrouter-env",
+                        OPENROUTER_SOURCE,
+                        OLD_KEY,
+                    ),
+                    _pool_entry(
+                        "openrouter-manual",
+                        "manual",
+                        OTHER_KEY,
+                    ),
+                ]
+            },
+        },
+    )
+    _write_config(
+        hades_home,
+        {
+            "model": {"provider": "custom", "api_key": OLD_KEY},
+            "auxiliary": {"vision": {"api_key": OLD_KEY}},
+            "custom_providers": [
+                {"name": "mirror", "api": OLD_KEY},
+                {"name": "manual", "api_key": OTHER_KEY},
+            ],
+        },
+    )
+    (hades_home / "provider_models_cache.json").write_text(
+        json.dumps(
+            {
+                "openrouter": {"models": ["openai/gpt-5"]},
+                "deepseek": {"models": ["preserve-me"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    from hades_cli.config import remove_env_value
+
+    assert remove_env_value("OPENROUTER_API_KEY") is True
+
+    env_text = (hades_home / ".env").read_text(encoding="utf-8")
+    assert "OPENROUTER_API_KEY=" not in env_text
+    assert "SIBLING=keep" in env_text
+    auth_store = _read_auth(hades_home)
+    assert [
+        entry["source"]
+        for entry in auth_store["credential_pool"]["openrouter"]
+    ] == ["manual"]
+    assert (
+        OPENROUTER_SOURCE
+        in auth_store["suppressed_sources"]["openrouter"]
+    )
+    config = _read_config(hades_home)
+    assert "api_key" not in config["model"]
+    assert "api_key" not in config["auxiliary"]["vision"]
+    assert "api" not in config["custom_providers"][0]
+    assert config["custom_providers"][1]["api_key"] == OTHER_KEY
+    cache = json.loads(
+        (hades_home / "provider_models_cache.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "openrouter" not in cache
+    assert cache["deepseek"]["models"] == ["preserve-me"]
+    captured = capsys.readouterr()
+    assert OLD_KEY not in captured.out
+    assert OLD_KEY not in captured.err
 
 
 def test_remove_scrubs_every_rotated_pool_only_value_without_exposing_them(
