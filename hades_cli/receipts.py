@@ -530,7 +530,7 @@ def _cmd_recheck(services: _Services, args: argparse.Namespace) -> _Outcome:
 
 
 def _resolve_output_path(raw: str) -> Path:
-    """Bound relative ``--output`` paths to the working directory."""
+    """Bound relative ``--output`` paths to the active workspace."""
     path = Path(str(raw))
     if path.is_absolute():
         return path
@@ -538,8 +538,8 @@ def _resolve_output_path(raw: str) -> Path:
     resolved = (workspace / path).resolve()
     if resolved != workspace and workspace not in resolved.parents:
         raise _usage(
-            "relative --output paths must stay inside the current working "
-            "directory; pass an absolute path to export elsewhere"
+            "relative --output paths must stay inside the active workspace; pass "
+            "an absolute path to export elsewhere"
         )
     return resolved
 

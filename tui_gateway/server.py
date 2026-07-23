@@ -13685,6 +13685,21 @@ def _native_safe_id(value: Any, *, method: str, limit: int = 256) -> str | None:
     return None
 
 
+def _native_safe_domain_id(value: Any, *, method: str, limit: int = 256) -> str | None:
+    """Keep a reusable domain identifier only when redaction leaves it exact."""
+    if type(value) is not str or not value or len(value) > limit:
+        return None
+    if any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F for char in value):
+        return None
+    try:
+        safe = _native_safe_text(value, method=method, limit=limit)
+    except ValueError:
+        return None
+    if len(safe) > limit or len(safe.encode("utf-8")) > _NATIVE_MAX_SAFE_TEXT_BYTES:
+        return None
+    return value if safe == value else None
+
+
 def _native_safe_action(value: Any, *, fallback: str) -> str:
     """Normalize an action to the closed native command-token grammar."""
     if not isinstance(value, str):
@@ -13700,6 +13715,18 @@ def _native_safe_id_list(value: Any, *, method: str, limit: int = 256) -> list[s
         safe
         for item in value[:_NATIVE_MAX_SAFE_LIST_ITEMS]
         if (safe := _native_safe_id(item, method=method, limit=limit)) is not None
+    ]
+
+
+def _native_safe_domain_id_list(
+    value: Any, *, method: str, limit: int = 256
+) -> list[str]:
+    if type(value) is not list:
+        return []
+    return [
+        safe
+        for item in value[:_NATIVE_MAX_SAFE_LIST_ITEMS]
+        if (safe := _native_safe_domain_id(item, method=method, limit=limit)) is not None
     ]
 
 
@@ -13817,12 +13844,20 @@ def _autonomy_contract_doc(payload: dict) -> dict | None:
             return None
         if value is not None:
             doc["hash"] = _native_safe_id(value, method="autonomy.exec")
+            if doc["hash"] is None:
+                return None
     for key in ("profile_id", "mode"):
         if key in payload:
             value = payload[key]
             if type(value) is not str:
                 return None
-            doc[key] = _native_safe_id(value, method="autonomy.exec")
+            doc[key] = (
+                _native_safe_domain_id(value, method="autonomy.exec")
+                if key == "profile_id"
+                else _native_safe_id(value, method="autonomy.exec")
+            )
+            if doc[key] is None:
+                return None
     if "version" not in doc and "hash" not in doc:
         return None
     return doc
@@ -13837,11 +13872,13 @@ def _autonomy_rule_doc(row: Any) -> dict | None:
         return None
     method = "autonomy.exec"
     doc: dict[str, Any] = {
-        "rule_id": _native_safe_id(row["rule_id"], method=method),
+        "rule_id": _native_safe_domain_id(row["rule_id"], method=method),
         "source": _native_safe_id(row["source"], method=method),
         "state": _native_safe_id(row["state"], method=method),
         "effect": _native_safe_id(row["effect"], method=method),
     }
+    if any(doc[key] is None for key in ("rule_id", "source", "state", "effect")):
+        return None
     for key in ("action_classes", "data_classes", "recipient_classes"):
         if key in row:
             value = row[key]
@@ -13892,10 +13929,13 @@ def _autonomy_evidence_rows(value: Any) -> list[dict] | None:
             or type(row["stage"]) is not str
         ):
             return None
-        docs.append({
+        doc = {
             "kind": _native_safe_id(row["kind"], method="autonomy.exec"),
             "stage": _native_safe_id(row["stage"], method="autonomy.exec"),
-        })
+        }
+        if any(value is None for value in doc.values()):
+            return None
+        docs.append(doc)
     return docs
 
 
@@ -13916,6 +13956,8 @@ def _autonomy_decision_doc(row: Any, *, audit: bool = False) -> dict | None:
         "verdict": _native_safe_id(row["verdict"], method=method),
         "code": _native_safe_id(row["code"], method=method),
     }
+    if any(doc[key] is None for key in ("verdict", "code")):
+        return None
     for key in ("authority_hash", "context_hash", "reason", "stage"):
         if key in row:
             value = row[key]
@@ -13926,6 +13968,8 @@ def _autonomy_decision_doc(row: Any, *, audit: bool = False) -> dict | None:
                 if key == "reason"
                 else _native_safe_id(value, method=method)
             )
+            if doc[key] is None:
+                return None
     if "authority_version" in row:
         value = row["authority_version"]
         if type(value) is not int:
@@ -13939,7 +13983,7 @@ def _autonomy_decision_doc(row: Any, *, audit: bool = False) -> dict | None:
             doc[key] = (
                 _native_safe_text_list(value, method=method)
                 if key == "edit_targets"
-                else _native_safe_id_list(value, method=method)
+                else _native_safe_domain_id_list(value, method=method)
             )
     if "expires_at_ms" in row:
         value = row["expires_at_ms"]
@@ -13983,7 +14027,9 @@ def _autonomy_decision_doc(row: Any, *, audit: bool = False) -> dict | None:
                 value = row[key]
                 if type(value) is not str:
                     return None
-                doc[key] = _native_safe_id(value, method=method)
+                doc[key] = _native_safe_domain_id(value, method=method)
+                if doc[key] is None:
+                    return None
         if "created_at_ms" in row:
             value = row["created_at_ms"]
             if type(value) is not int:
@@ -14023,10 +14069,16 @@ def _autonomy_preview_doc(row: Any) -> dict | None:
             row["after_contract_hash"], method="autonomy.exec"
         ),
     }
+    if any(doc[key] is None for key in ("before_contract_hash", "after_contract_hash")):
+        return None
     if "profile_id" in row:
         if type(row["profile_id"]) is not str:
             return None
-        doc["profile_id"] = _native_safe_id(row["profile_id"], method="autonomy.exec")
+        doc["profile_id"] = _native_safe_domain_id(
+            row["profile_id"], method="autonomy.exec"
+        )
+        if doc["profile_id"] is None:
+            return None
     for key in ("added_rule_ids", "removed_rule_ids", "changed_rule_ids", "warnings"):
         if key in row:
             value = row[key]
@@ -14035,7 +14087,7 @@ def _autonomy_preview_doc(row: Any) -> dict | None:
             doc[key] = (
                 _native_safe_text_list(value, method="autonomy.exec")
                 if key == "warnings"
-                else _native_safe_id_list(value, method="autonomy.exec")
+                else _native_safe_domain_id_list(value, method="autonomy.exec")
             )
     return doc
 
@@ -14056,10 +14108,14 @@ def _autonomy_applied_doc(row: Any) -> dict | None:
         "contract_version": row["contract_version"],
         "contract_hash": _native_safe_id(row["contract_hash"], method="autonomy.exec"),
     }
+    if doc["contract_hash"] is None:
+        return None
     if "config_hash" in row:
         if type(row["config_hash"]) is not str:
             return None
         doc["config_hash"] = _native_safe_id(row["config_hash"], method="autonomy.exec")
+        if doc["config_hash"] is None:
+            return None
     return doc
 
 
@@ -14215,22 +14271,27 @@ def _receipt_summary_doc(row: Any) -> dict | None:
         return None
     method = "receipt.exec"
     doc = {
-        "receipt_id": _native_safe_id(row["receipt_id"], method=method),
+        "receipt_id": _native_safe_domain_id(row["receipt_id"], method=method),
         "status": _native_safe_id(row["status"], method=method),
-        "subject_id": _native_safe_scalar(row["subject_id"], method=method),
+        "subject_id": _native_safe_domain_id(row["subject_id"], method=method),
         "subject_kind": _native_safe_id(row["subject_kind"], method=method),
         "decided_at": _native_safe_scalar(row["decided_at"], method=method),
         "content_hash": _native_safe_id(row["content_hash"], method=method),
-        "scorer_id": _native_safe_id(row["scorer_id"], method=method),
+        "scorer_id": _native_safe_domain_id(row["scorer_id"], method=method),
         "scorer_version": _native_safe_id(row["scorer_version"], method=method),
     }
+    if any(doc[key] is None for key in required):
+        return None
     if "session_id" in row:
         value = row["session_id"]
         if value is not None and type(value) is not str:
             return None
-        doc["session_id"] = (
-            None if value is None else _native_safe_id(value, method=method)
-        )
+        if value is None:
+            doc["session_id"] = None
+        else:
+            safe = _native_safe_domain_id(value, method=method)
+            if safe is not None:
+                doc["session_id"] = safe
     return doc
 
 
@@ -14246,19 +14307,28 @@ def _receipt_detail_doc(row: Any, *, observation_count: int = 0) -> dict | None:
         return None
     method = "receipt.exec"
     doc: dict[str, Any] = {
-        key: (
-            _native_safe_scalar(row[key], method=method)
-            if key in {"subject_id", "decided_at"}
-            else _native_safe_id(row[key], method=method)
-        )
-        for key in required
+        "receipt_id": _native_safe_domain_id(row["receipt_id"], method=method),
+        "status": _native_safe_id(row["status"], method=method),
+        "subject_id": _native_safe_domain_id(row["subject_id"], method=method),
+        "subject_kind": _native_safe_id(row["subject_kind"], method=method),
+        "content_hash": _native_safe_id(row["content_hash"], method=method),
+        "decided_at": _native_safe_scalar(row["decided_at"], method=method),
+        "scorer_id": _native_safe_domain_id(row["scorer_id"], method=method),
+        "scorer_version": _native_safe_id(row["scorer_version"], method=method),
     }
+    if any(doc[key] is None for key in required):
+        return None
     for key in ("session_id", "turn_id", "mission_id", "transaction_id"):
         if key in row:
             value = row[key]
             if value is not None and type(value) is not str:
                 return None
-            doc[key] = None if value is None else _native_safe_id(value, method=method)
+            if value is None:
+                doc[key] = None
+            else:
+                safe = _native_safe_domain_id(value, method=method)
+                if safe is not None:
+                    doc[key] = safe
     uncertainty = row.get("uncertainty")
     if uncertainty is not None:
         if type(uncertainty) is not list or not all(type(item) is str for item in uncertainty):
@@ -14287,19 +14357,28 @@ def _receipt_observation_doc(row: Any) -> dict | None:
         return None
     method = "receipt.exec"
     doc: dict[str, Any] = {
-        key: (
-            _native_safe_scalar(row[key], method=method)
-            if key == "observed_at"
-            else _native_safe_id(row[key], method=method)
-        )
-        for key in required
+        "observation_id": _native_safe_domain_id(row["observation_id"], method=method),
+        "receipt_id": _native_safe_domain_id(row["receipt_id"], method=method),
+        "status": _native_safe_id(row["status"], method=method),
+        "observed_at": _native_safe_scalar(row["observed_at"], method=method),
     }
+    if any(doc[key] is None for key in required):
+        return None
     for key in ("previous_observation_id", "content_hash", "scorer_id", "scorer_version"):
         if key in row:
             value = row[key]
             if value is not None and type(value) is not str:
                 return None
-            doc[key] = None if value is None else _native_safe_id(value, method=method)
+            if value is None:
+                doc[key] = None
+            else:
+                safe = (
+                    _native_safe_domain_id(value, method=method)
+                    if key in {"previous_observation_id", "scorer_id"}
+                    else _native_safe_id(value, method=method)
+                )
+                if safe is not None:
+                    doc[key] = safe
     uncertainty = row.get("uncertainty")
     if uncertainty is not None:
         if type(uncertainty) is not list or not all(type(item) is str for item in uncertainty):
@@ -14320,15 +14399,19 @@ def _receipt_claim_edge_doc(row: Any) -> dict | None:
         return None
     method = "receipt.exec"
     doc = {
-        "claim_id": _native_safe_id(row["claim_id"], method=method),
+        "claim_id": _native_safe_domain_id(row["claim_id"], method=method),
         "verdict": _native_safe_id(row["verdict"], method=method),
         "required": row["required"],
     }
+    if any(doc[key] is None for key in ("claim_id", "verdict")):
+        return None
     for key in ("claim_kind",):
         if key in row:
             if type(row[key]) is not str:
                 return None
             doc[key] = _native_safe_id(row[key], method=method)
+            if doc[key] is None:
+                return None
     for key in ("evidence_ids", "artifact_ids"):
         if key in row:
             value = row[key]
@@ -14521,15 +14604,21 @@ def _transaction_doc(row: Any) -> dict | None:
         return None
     method = "transaction.exec"
     doc: dict[str, Any] = {
-        "transaction_id": _native_safe_id(row["transaction_id"], method=method),
+        "transaction_id": _native_safe_domain_id(row["transaction_id"], method=method),
         "status": _native_safe_id(row["status"], method=method),
         "current_revision": row["current_revision"],
     }
+    if doc["transaction_id"] is None or doc["status"] is None:
+        return None
     if "receipt_id" in row:
         value = row["receipt_id"]
         if value is not None and type(value) is not str:
             return None
-        doc["receipt_id"] = None if value is None else _native_safe_id(value, method=method)
+        doc["receipt_id"] = (
+            None if value is None else _native_safe_domain_id(value, method=method)
+        )
+        if value is not None and doc["receipt_id"] is None:
+            return None
     return doc
 
 
@@ -14563,13 +14652,18 @@ def _transaction_eligibility(value: Any) -> dict[str, dict]:
             or not all(type(item) is str for item in row["required_cascade_node_ids"])
         ):
             continue
-        result[_native_safe_id(node_id, method=method) or "node"] = {
+        safe_node_id = _native_safe_domain_id(node_id, method=method)
+        safe_code = _native_safe_id(row["code"], method=method)
+        safe_fidelity = _native_safe_id(row["fidelity"], method=method)
+        if safe_node_id is None or safe_code is None or safe_fidelity is None:
+            continue
+        result[safe_node_id] = {
             "can_execute": row["can_execute"],
-            "code": _native_safe_id(row["code"], method=method),
-            "fidelity": _native_safe_id(row["fidelity"], method=method),
+            "code": safe_code,
+            "fidelity": safe_fidelity,
             "reason": _native_safe_text(row["reason"], method=method),
             "blockers": _native_safe_text_list(row["blockers"], method=method),
-            "required_cascade_node_ids": _native_safe_id_list(
+            "required_cascade_node_ids": _native_safe_domain_id_list(
                 row["required_cascade_node_ids"], method=method
             ),
         }
@@ -14586,11 +14680,14 @@ def _transaction_receipt_doc(row: Any) -> dict | None:
     ):
         return None
     method = "transaction.exec"
-    return {
-        "receipt_id": _native_safe_id(row["receipt_id"], method=method),
+    doc = {
+        "receipt_id": _native_safe_domain_id(row["receipt_id"], method=method),
         "status": _native_safe_id(row["status"], method=method),
         "content_hash": _native_safe_id(row["content_hash"], method=method),
     }
+    if any(value is None for value in doc.values()):
+        return None
+    return doc
 
 
 def _transaction_observation_doc(row: Any) -> dict | None:
@@ -14600,13 +14697,17 @@ def _transaction_observation_doc(row: Any) -> dict | None:
         return None
     method = "transaction.exec"
     doc = {
-        "observation_id": _native_safe_id(row["observation_id"], method=method),
+        "observation_id": _native_safe_domain_id(row["observation_id"], method=method),
         "status": _native_safe_id(row["status"], method=method),
     }
+    if any(value is None for value in doc.values()):
+        return None
     if "content_hash" in row:
         if type(row["content_hash"]) is not str:
             return None
-        doc["content_hash"] = _native_safe_id(row["content_hash"], method=method)
+        safe_hash = _native_safe_id(row["content_hash"], method=method)
+        if safe_hash is not None:
+            doc["content_hash"] = safe_hash
     return doc
 
 
@@ -14617,18 +14718,25 @@ def _transaction_preview_nodes(value: Any) -> list[dict]:
     for row in value[:_TRANSACTION_MAX_PREVIEW_NODES]:
         if type(row) is not dict or type(row.get("node_id")) is not str:
             continue
+        safe_node_id = _native_safe_domain_id(
+            row["node_id"], method="transaction.exec", limit=200
+        )
+        if safe_node_id is None:
+            continue
         fidelity = row.get("fidelity")
         if fidelity is not None and type(fidelity) is not str:
             fidelity = None
+        safe_fidelity = (
+            None
+            if fidelity is None
+            else _native_safe_id(fidelity, method="transaction.exec", limit=64)
+        )
         requires_approval = row.get("requires_approval")
         if type(requires_approval) is not bool:
             requires_approval = False
         nodes.append({
-            "node_id": _native_safe_id(row["node_id"], method="transaction.exec", limit=200),
-            "fidelity": (
-                None if fidelity is None
-                else _native_safe_id(fidelity, method="transaction.exec", limit=64)
-            ),
+            "node_id": safe_node_id,
+            "fidelity": safe_fidelity,
             "requires_approval": requires_approval,
         })
     return nodes
@@ -14666,7 +14774,9 @@ def _transaction_response(
     if observation is not None:
         response["observation"] = observation
     if isinstance(payload.get("status"), str):
-        response["status"] = _native_safe_id(payload["status"], method=method)
+        safe_status = _native_safe_id(payload["status"], method=method)
+        if safe_status is not None:
+            response["status"] = safe_status
     if type(payload.get("counts")) is dict:
         counts: dict[str, int] = {}
         for key, value in list(payload["counts"].items())[:64]:
@@ -14675,9 +14785,9 @@ def _transaction_response(
         response["counts"] = counts
     for key in ("committed_nodes", "compensated_nodes"):
         if payload.get(key) is not None:
-            response[key] = _native_safe_id_list(payload[key], method=method)
+            response[key] = _native_safe_domain_id_list(payload[key], method=method)
     if payload.get("blocked_node") is not None:
-        value = _native_safe_id(payload.get("blocked_node"), method=method)
+        value = _native_safe_domain_id(payload.get("blocked_node"), method=method)
         if value is not None:
             response["blocked_node"] = value
     if type(payload.get("revision")) is int:
@@ -14686,7 +14796,9 @@ def _transaction_response(
         response["nodes"] = _transaction_preview_nodes(payload.get("nodes"))
         preview_hash = payload.get("preview_hash")
         if isinstance(preview_hash, str):
-            response["preview_hash"] = _native_safe_id(preview_hash, method=method)
+            value = _native_safe_id(preview_hash, method=method)
+            if value is not None:
+                response["preview_hash"] = value
     return response
 
 

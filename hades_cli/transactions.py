@@ -97,7 +97,7 @@ def _load_bounded_yaml(path_value: str, label: str) -> dict:
 
 
 class _Services:
-    def __init__(self, *, workspace_root: Path | None = None):
+    def __init__(self):
         from agent.effects.adapters import register_builtin_adapters
         from agent.effects.adapters.message_outbox import MessageOutboxAdapter
         from agent.effects.authority import consume_bound_approval
@@ -107,17 +107,14 @@ class _Services:
         from agent.operation_journal import OperationJournal
         from hades_state import SessionDB
 
-        self.workspace_root = (
-            resolve_workspace_root() if workspace_root is None
-            else resolve_workspace_root(workspace_root)
-        )
+        workspace_root = resolve_workspace_root()
         self.db = SessionDB(get_hades_home() / "state.db")
         self.store = TransactionStore(self.db)
         self.journal = OperationJournal(self.db)
         self.adapters = EffectAdapterRegistry()
         register_builtin_adapters(
             self.adapters,
-            workspace_root=self.workspace_root,
+            workspace_root=workspace_root,
             transaction_lookup=self.store.get_effect_by_operation_id,
         )
         self.adapters.register(MessageOutboxAdapter(db_factory=lambda: self.db))

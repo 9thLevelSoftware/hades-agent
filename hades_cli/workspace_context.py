@@ -56,17 +56,3 @@ def workspace_context(root: str | Path | None) -> Iterator[Path]:
         yield normalized
     finally:
         _WORKSPACE_ROOT.reset(token)
-
-
-# Explicit aliases make the boundary readable at call sites and keep the API
-# useful to callers that prefer "current" terminology.
-current_workspace_root = get_workspace_root
-bind_workspace = workspace_context
-
-__all__ = [
-    "bind_workspace",
-    "current_workspace_root",
-    "get_workspace_root",
-    "resolve_workspace_root",
-    "workspace_context",
-]
