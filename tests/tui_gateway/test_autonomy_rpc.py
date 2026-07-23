@@ -226,6 +226,59 @@ def test_autonomy_rpc_binds_session_workspace_for_native_run_argv(
     assert Path.cwd() == launch
 
 
+@pytest.mark.parametrize("transition", ["pop", "replace"])
+def test_autonomy_rpc_keeps_native_profile_workspace_generation_paired(
+    rpc, server, tmp_path, monkeypatch, transition
+):
+    import hades_cli.autonomy as autonomy_mod
+    from hades_cli.workspace_context import get_workspace_root
+    from hades_constants import get_hades_home
+
+    launch = tmp_path / "gateway-launch"
+    profile_a = tmp_path / "profile-a"
+    workspace_a = profile_a / "workspace-a"
+    profile_b = tmp_path / "profile-b"
+    workspace_b = profile_b / "workspace-b"
+    for path in (launch, workspace_a, workspace_b):
+        path.mkdir(parents=True)
+    sid = "sid-autonomy-atomic-context"
+    server._sessions[sid] = {
+        "session_key": "tui-autonomy-atomic-context-a",
+        "profile_home": str(profile_a),
+        "cwd": str(workspace_a),
+    }
+
+    def stale_workspace_lookup(_session_id):
+        if transition == "pop":
+            server._sessions.pop(sid, None)
+            return launch.resolve()
+        server._sessions[sid] = {
+            "session_key": "tui-autonomy-atomic-context-b",
+            "profile_home": str(profile_b),
+            "cwd": str(workspace_b),
+        }
+        return workspace_b.resolve()
+
+    monkeypatch.setattr(server, "_native_workspace_for_session", stale_workspace_lookup)
+    captured: list[tuple[Path, Path]] = []
+
+    def run(argv, **kwargs):
+        captured.append((Path(get_hades_home()).resolve(), get_workspace_root()))
+        return autonomy_mod.CliResult(
+            autonomy_mod.EXIT_OK,
+            "safe",
+            {"ok": True, "action": "status"},
+        )
+
+    monkeypatch.setattr(autonomy_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    response = rpc("autonomy.exec", {"session_id": sid, "argv": ["status"]})
+
+    assert response["ok"] is True
+    assert captured == [(profile_a.resolve(), workspace_a.resolve())]
+    assert Path.cwd() == launch
+
+
 @pytest.mark.parametrize("cwd", [None, "", 17, "/private/missing-autonomy-workspace"])
 def test_autonomy_rpc_fails_closed_for_invalid_registered_workspace(
     rpc_raw, server, tmp_path, monkeypatch, cwd
