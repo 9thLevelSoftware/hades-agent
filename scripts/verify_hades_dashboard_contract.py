@@ -11,6 +11,7 @@ problems become actionable diagnostics instead of tracebacks.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -34,61 +35,128 @@ _POST_SYNC_MARKER = "scripts/post-sync-verify.py"
 @dataclass(frozen=True)
 class _ApiContract:
     name: str
-    route: str
     verb: str
-    dynamic_route: bool = False
-    encoded_parameter: bool = False
+    route_pattern: str
+    route_display: str
+
+
+def _quoted_route_pattern(route: str) -> str:
+    """Match one complete quoted/backticked static route expression."""
+    escaped = re.escape(route)
+    return rf"(?P<quote>[\"'`]){escaped}(?P=quote)"
+
+
+def _static_route_pattern(route: str, *, allow_query_template: bool = False) -> str:
+    """Build a static route pattern, including known query-template forms."""
+    exact = _quoted_route_pattern(route)
+    if not allow_query_template:
+        return exact
+    # A few read methods append a query built by a separate template
+    # interpolation.  The endpoint path itself must still end exactly at the
+    # interpolation boundary; literal suffixes such as ``-v2``, ``/extra``, or
+    # ``?unexpected=1`` do not match this alternative.
+    return rf"(?:{exact}|`{re.escape(route)}\$\{{)"
+
+
+_ENCODED_PARAMETER = (
+    r"\$\{\s*encodeURIComponent\s*\(\s*"
+    r"[A-Za-z_$][\w$]*\s*\)\s*\}"
+)
+
+
+def _dynamic_route_pattern(route_prefix: str, suffix: str = "") -> str:
+    """Match an exact backticked encoded-parameter route template."""
+    return f"`{re.escape(route_prefix)}{_ENCODED_PARAMETER}{re.escape(suffix)}`"
+
+
+def _audit_route_pattern() -> str:
+    """Match the audit endpoint's required literal query prefix.
+
+    The implementation appends an optional verdict interpolation after the
+    required ``limit`` parameter.  Keep that known form while rejecting a
+    changed endpoint path before it.
+    """
+    return r"(?:`/api/autonomy/audit\?limit=\$\{\s*limit\s*\}|['\"]/api/autonomy/audit['\"])"
 
 
 _API_CONTRACTS = (
-    _ApiContract("getAutonomyStatus", "/api/autonomy/status", "GET"),
-    _ApiContract("getAutonomyRules", "/api/autonomy/rules", "GET"),
+    _ApiContract(
+        "getAutonomyStatus",
+        "GET",
+        _static_route_pattern("/api/autonomy/status"),
+        "/api/autonomy/status",
+    ),
+    _ApiContract(
+        "getAutonomyRules",
+        "GET",
+        _static_route_pattern("/api/autonomy/rules", allow_query_template=True),
+        "/api/autonomy/rules",
+    ),
     _ApiContract(
         "explainAutonomyRule",
-        "/api/autonomy/rules/",
         "GET",
-        dynamic_route=True,
-        encoded_parameter=True,
+        _dynamic_route_pattern("/api/autonomy/rules/"),
+        "/api/autonomy/rules/${encodeURIComponent(ruleId)}",
     ),
-    _ApiContract("previewAutonomyChange", "/api/autonomy/preview", "POST"),
-    _ApiContract("applyAutonomyPreview", "/api/autonomy/apply", "POST"),
+    _ApiContract(
+        "previewAutonomyChange",
+        "POST",
+        _static_route_pattern("/api/autonomy/preview"),
+        "/api/autonomy/preview",
+    ),
+    _ApiContract(
+        "applyAutonomyPreview",
+        "POST",
+        _static_route_pattern("/api/autonomy/apply"),
+        "/api/autonomy/apply",
+    ),
     _ApiContract(
         "acceptAutonomySuggestion",
-        "/api/autonomy/suggestions/",
         "POST",
-        dynamic_route=True,
-        encoded_parameter=True,
+        _dynamic_route_pattern("/api/autonomy/suggestions/", "/accept"),
+        "/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/accept",
     ),
     _ApiContract(
         "rejectAutonomySuggestion",
-        "/api/autonomy/suggestions/",
         "POST",
-        dynamic_route=True,
-        encoded_parameter=True,
+        _dynamic_route_pattern("/api/autonomy/suggestions/", "/reject"),
+        "/api/autonomy/suggestions/${encodeURIComponent(suggestionId)}/reject",
     ),
-    _ApiContract("getAutonomyMandates", "/api/autonomy/mandates", "GET"),
+    _ApiContract(
+        "getAutonomyMandates",
+        "GET",
+        _static_route_pattern("/api/autonomy/mandates", allow_query_template=True),
+        "/api/autonomy/mandates",
+    ),
     _ApiContract(
         "revokeAutonomyMandate",
-        "/api/autonomy/mandates/",
         "POST",
-        dynamic_route=True,
-        encoded_parameter=True,
+        _dynamic_route_pattern("/api/autonomy/mandates/", "/revoke"),
+        "/api/autonomy/mandates/${encodeURIComponent(ruleId)}/revoke",
     ),
-    _ApiContract("getAutonomyAudit", "/api/autonomy/audit", "GET"),
-    _ApiContract("getReceipts", "/api/receipts", "GET"),
+    _ApiContract(
+        "getAutonomyAudit",
+        "GET",
+        _audit_route_pattern(),
+        "/api/autonomy/audit",
+    ),
+    _ApiContract(
+        "getReceipts",
+        "GET",
+        _static_route_pattern("/api/receipts", allow_query_template=True),
+        "/api/receipts",
+    ),
     _ApiContract(
         "getReceipt",
-        "/api/receipts/",
         "GET",
-        dynamic_route=True,
-        encoded_parameter=True,
+        _dynamic_route_pattern("/api/receipts/"),
+        "/api/receipts/${encodeURIComponent(receiptId)}",
     ),
     _ApiContract(
         "getReceiptObservations",
-        "/api/receipts/",
         "GET",
-        dynamic_route=True,
-        encoded_parameter=True,
+        _dynamic_route_pattern("/api/receipts/", "/observations"),
+        "/api/receipts/${encodeURIComponent(receiptId)}/observations",
     ),
 )
 
@@ -195,6 +263,77 @@ def _api_properties(body: str) -> dict[str, list[tuple[int, int]]]:
     return properties
 
 
+def _strip_ts_comments(text: str) -> str:
+    """Blank TypeScript comments without touching quoted route expressions.
+
+    This deliberately remains a small lexical state machine rather than a
+    TypeScript parser.  It preserves all characters inside single-quoted,
+    double-quoted, and backticked strings (including escaped delimiters),
+    while replacing comment characters with spaces and retaining newlines so
+    diagnostics and method boundaries remain stable.
+    """
+    chars = list(text)
+    state = "normal"
+    quote = ""
+    index = 0
+    while index < len(chars):
+        char = chars[index]
+        next_char = chars[index + 1] if index + 1 < len(chars) else ""
+
+        if state == "normal":
+            if char == "/" and next_char == "/":
+                chars[index] = " "
+                chars[index + 1] = " "
+                index += 2
+                state = "line_comment"
+                continue
+            if char == "/" and next_char == "*":
+                chars[index] = " "
+                chars[index + 1] = " "
+                index += 2
+                state = "block_comment"
+                continue
+            if char in ("'", '"', "`"):
+                quote = char
+                state = "quoted"
+            index += 1
+            continue
+
+        if state == "line_comment":
+            if char in ("\n", "\r"):
+                state = "normal"
+            else:
+                chars[index] = " "
+            index += 1
+            continue
+
+        if state == "block_comment":
+            if char == "*" and next_char == "/":
+                chars[index] = " "
+                chars[index + 1] = " "
+                index += 2
+                state = "normal"
+                continue
+            if char not in ("\n", "\r"):
+                chars[index] = " "
+            index += 1
+            continue
+
+        # quoted string/template literal: preserve route text and escaped
+        # delimiters.  Template interpolation is intentionally kept intact;
+        # the API contract only needs its route expression and this avoids
+        # mistaking comment-looking text inside a template string for source.
+        if char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            state = "normal"
+            quote = ""
+        index += 1
+
+    return "".join(chars)
+
+
 def _check_api(repo_root: Path, failures: list[str]) -> None:
     path = repo_root / "web/src/lib/api.ts"
     text = _read_text(
@@ -226,7 +365,7 @@ def _check_api(repo_root: Path, failures: list[str]) -> None:
             )
             continue
         start, end = spans[0]
-        method_body = body[start:end]
+        method_body = _strip_ts_comments(body[start:end])
 
         if contract.verb == "GET":
             if not re.search(r"\b(?:apiGet|fetchJSON)\s*(?:<[^>\n]+>)?\s*\(", method_body):
@@ -258,17 +397,9 @@ def _check_api(repo_root: Path, failures: list[str]) -> None:
                     f"api: method {contract.name} has {post_match.group('verb').upper()} verb; expected POST"
                 )
 
-        if contract.route not in method_body:
+        if re.search(contract.route_pattern, method_body) is None:
             failures.append(
-                f"api: method {contract.name} missing route marker {contract.route}"
-            )
-        if contract.dynamic_route and "${" not in method_body:
-            failures.append(
-                f"api: method {contract.name} missing route template marker (${{...}})"
-            )
-        if contract.encoded_parameter and "encodeURIComponent" not in method_body:
-            failures.append(
-                f"api: method {contract.name} missing encoded route parameter marker"
+                f"api: method {contract.name} missing exact route {contract.route_display}"
             )
 
 
@@ -283,6 +414,44 @@ def _check_rpc_tests(repo_root: Path, failures: list[str]) -> None:
         )
 
 
+def _method_decorator_handler(decorator: ast.AST) -> str | None:
+    """Return the literal handler from a strict ``@method("...")`` call."""
+    if not isinstance(decorator, ast.Call):
+        return None
+    if not isinstance(decorator.func, ast.Name) or decorator.func.id != "method":
+        return None
+    if len(decorator.args) != 1 or decorator.keywords:
+        return None
+    argument = decorator.args[0]
+    if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+        return argument.value
+    return None
+
+
+def _assignment_to_long_handlers(node: ast.AST) -> ast.Assign | ast.AnnAssign | None:
+    """Return an assignment whose target is exactly ``_LONG_HANDLERS``."""
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    else:
+        return None
+    if any(isinstance(target, ast.Name) and target.id == "_LONG_HANDLERS" for target in targets):
+        return node
+    return None
+
+
+def _string_constants(node: ast.AST | None) -> list[str]:
+    """Collect literal strings from one assignment RHS, including wrappers."""
+    if node is None:
+        return []
+    return [
+        child.value
+        for child in ast.walk(node)
+        if isinstance(child, ast.Constant) and isinstance(child.value, str)
+    ]
+
+
 def _check_server(repo_root: Path, failures: list[str]) -> None:
     path = repo_root / "tui_gateway/server.py"
     text = _read_text(
@@ -295,28 +464,58 @@ def _check_server(repo_root: Path, failures: list[str]) -> None:
     if text is None:
         return
 
+    label = _path_label(path, repo_root)
+    try:
+        tree = ast.parse(text, filename=label)
+    except SyntaxError as exc:
+        location = f"line {exc.lineno}" if exc.lineno is not None else "unknown line"
+        failures.append(f"server: invalid Python syntax in {label} at {location}: {exc.msg}")
+        return
+
+    registrations = {handler: 0 for handler in _REQUIRED_HANDLERS}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            handler = _method_decorator_handler(decorator)
+            if handler in registrations:
+                registrations[handler] += 1
+
     for handler in _REQUIRED_HANDLERS:
-        decorator_pattern = rf"@method\(\s*[\"']{re.escape(handler)}[\"']\s*\)"
-        count = len(re.findall(decorator_pattern, text))
+        count = registrations[handler]
         if count != 1:
             failures.append(
                 f"server: handler registration {handler!r} must appear exactly once "
                 f"(found {count}; missing or duplicate registration)"
             )
 
-    block = re.search(
-        r"(?ms)^[ \t]*_LONG_HANDLERS\b(?P<body>.*?)^[ \t]*\}\s*\)",
-        text,
-    )
-    if block is None:
+    assignments = [
+        assignment
+        for node in ast.walk(tree)
+        if (assignment := _assignment_to_long_handlers(node)) is not None
+    ]
+    if not assignments:
         failures.append(
-            "server: could not locate _LONG_HANDLERS block; registration text alone is insufficient"
+            "server: could not locate live _LONG_HANDLERS assignment; "
+            "registration text alone is insufficient"
         )
         return
-    block_body = block.group("body")
+    if len(assignments) != 1:
+        failures.append(
+            "server: _LONG_HANDLERS assignment must appear exactly once "
+            f"(found {len(assignments)}; duplicate or ambiguous assignment)"
+        )
+        return
+
+    assignment = assignments[0]
+    rhs = assignment.value
+    values = _string_constants(rhs)
+    if not values:
+        failures.append(
+            "server: _LONG_HANDLERS assignment RHS has no inspectable string constants"
+        )
     for handler in _REQUIRED_HANDLERS:
-        literal_pattern = rf"[\"']{re.escape(handler)}[\"']"
-        count = len(re.findall(literal_pattern, block_body))
+        count = values.count(handler)
         if count != 1:
             failures.append(
                 f"server: _LONG_HANDLERS must contain {handler!r} exactly once (found {count})"
