@@ -142,4 +142,97 @@ describe("Hades management API contract", () => {
     expect(requestUrl.searchParams.get("limit")).toBe("10");
     expect(requestUrl.searchParams.get("profile")).toBe("alpha");
   });
+
+  it("does not let a preview caller override the active management profile", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({});
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    const change = {
+      set_rules: [{ rule_id: "rule-new" }],
+      remove_rule_ids: ["rule-old"],
+      profile: "beta",
+    };
+    await api.previewAutonomyChange(change);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    const requestUrl = new URL(String(url), "http://test");
+    expect(requestUrl.pathname).toBe("/api/autonomy/preview");
+    expect(requestUrl.searchParams.get("profile")).toBe("alpha");
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    const requestBody = JSON.parse(String(init?.body));
+    expect(requestBody.profile).toBe("alpha");
+    expect(requestBody.set_rules).toEqual(change.set_rules);
+    expect(requestBody.remove_rule_ids).toEqual(change.remove_rule_ids);
+  });
+
+  it("does not let an apply caller override the active management profile", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({});
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    const change = {
+      remove_rule_ids: ["rule-old"],
+      expected_contract_hash: "contract-hash",
+      profile: "beta",
+    };
+    await api.applyAutonomyPreview(change);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    const requestUrl = new URL(String(url), "http://test");
+    expect(requestUrl.pathname).toBe("/api/autonomy/apply");
+    expect(requestUrl.searchParams.get("profile")).toBe("alpha");
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    const requestBody = JSON.parse(String(init?.body));
+    expect(requestBody.profile).toBe("alpha");
+    expect(requestBody.remove_rule_ids).toEqual(change.remove_rule_ids);
+    expect(requestBody.expected_contract_hash).toBe(
+      change.expected_contract_hash,
+    );
+  });
+
+  it("does not let an accept caller override the active management profile", async () => {
+    vi.stubGlobal("window", {});
+
+    const fetchMock = jsonFetchMock({});
+    vi.stubGlobal("fetch", fetchMock);
+    setManagementProfile("alpha");
+
+    const body = {
+      destination: "mandate" as const,
+      expected_contract_hash: "contract-hash",
+      profile: "beta",
+    };
+    await api.acceptAutonomySuggestion("suggestion-1", body);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    const requestUrl = new URL(String(url), "http://test");
+    expect(requestUrl.pathname).toBe(
+      "/api/autonomy/suggestions/suggestion-1/accept",
+    );
+    expect(requestUrl.searchParams.get("profile")).toBe("alpha");
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    const requestBody = JSON.parse(String(init?.body));
+    expect(requestBody.profile).toBe("alpha");
+    expect(requestBody.destination).toBe(body.destination);
+    expect(requestBody.expected_contract_hash).toBe(
+      body.expected_contract_hash,
+    );
+  });
 });
