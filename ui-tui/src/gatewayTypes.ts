@@ -236,6 +236,43 @@ export interface ReceiptClaimEdge {
   verdict: string
 }
 
+export interface TransactionExecResponse {
+  action: string
+  blocked_node?: string
+  committed_nodes?: string[]
+  compensated_nodes?: string[]
+  counts?: Record<string, number>
+  eligibility?: Record<
+    string,
+    {
+      blockers: string[]
+      can_execute: boolean
+      code: string
+      fidelity: string
+      reason: string
+      required_cascade_node_ids: string[]
+    }
+  >
+  error?: string
+  exit_code: number
+  nodes?: Array<Record<string, unknown>>
+  ok: boolean
+  /** Shared truthful text rendering from hades_cli.transactions. */
+  output: string
+  preview_hash?: string
+  receipt?: { content_hash: string; receipt_id: string; status: string }
+  revision?: number
+  rows?: Array<Record<string, unknown>>
+  status?: string
+  transaction?: {
+    current_revision: number
+    receipt_id: string | null
+    status: string
+    transaction_id: string
+  }
+  transactions?: Array<Record<string, unknown>>
+}
+
 export interface ReceiptExecResponse {
   action: string
   claim_edges?: ReceiptClaimEdge[]
