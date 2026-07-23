@@ -149,7 +149,11 @@ def _remove_env_source(provider: str, removed) -> RemovalResult:
          EnvironmentFile, launchd plist) → hint them where to unset it
       3. Var lives in both → clear from .env, hint about shell
     """
-    from hades_cli.config import get_env_path, remove_env_value
+    from hades_cli.config import (
+        _env_line_defines_key,
+        get_env_path,
+        remove_env_value,
+    )
 
     result = RemovalResult()
     env_var = removed.source[len("env:"):]
@@ -163,7 +167,7 @@ def _remove_env_source(provider: str, removed) -> RemovalResult:
         env_path = get_env_path()
         if env_path.exists():
             env_in_dotenv = any(
-                line.strip().startswith(f"{env_var}=")
+                _env_line_defines_key(line, env_var)
                 for line in env_path.read_text(errors="replace").splitlines()
             )
     except OSError:

@@ -8200,12 +8200,13 @@ def _env_line_defines_key(line: str, key: str) -> bool:
     return bool(separator) and name.strip() == key
 
 
-def save_env_value(key: str, value: str) -> bool:
-    """Save or update a value in ~/.hades/.env.
+def _save_env_value_raw(key: str, value: str) -> bool:
+    """Low-level atomic writer for one value in ~/.hades/.env.
 
     Returns ``True`` after the canonicalized value is durably stored and
     ``False`` when a managed-install guard deliberately rejects the write.
-    The value itself is never returned.
+    Provider lifecycle code calls this primitive to avoid public-dispatch
+    recursion. Other callers should use :func:`save_env_value`.
     """
     if is_managed():
         managed_error(f"set {key}")
@@ -8301,10 +8302,12 @@ def save_env_value(key: str, value: str) -> bool:
     return True
 
 
-def remove_env_value(key: str) -> bool:
-    """Remove a key from ~/.hades/.env and os.environ.
+def _remove_env_value_raw(key: str) -> bool:
+    """Low-level removal of a key from ~/.hades/.env and os.environ.
 
-    Returns True if the key was found and removed, False otherwise.
+    Returns True if the key was found and removed, False otherwise. Provider
+    lifecycle code calls this primitive to avoid public-dispatch recursion.
+    Other callers should use :func:`remove_env_value`.
     """
     if is_managed():
         managed_error(f"remove {key}")
@@ -8378,6 +8381,40 @@ def remove_env_value(key: str) -> bool:
     return found
 
 
+def save_env_value(key: str, value: str) -> bool:
+    """Persist an env value, reconciling registered provider credentials.
+
+    Arbitrary environment variables retain the historical low-level writer.
+    Registered provider credential keys route through the canonical lifecycle
+    so CLI, setup, dashboard, and callback front doors cannot bypass
+    suppression/config/cache reconciliation. An explicit empty provider value
+    means remove; it never writes ``KEY=`` and never unsuppresses the source.
+    """
+    from hades_cli.credential_lifecycle import (
+        is_provider_env_credential,
+        remove_provider_env_credential,
+        save_provider_env_credential,
+    )
+
+    if not is_provider_env_credential(key):
+        return _save_env_value_raw(key, value)
+    if value == "":
+        return bool(remove_provider_env_credential(key)["ok"])
+    return bool(save_provider_env_credential(key, value)["ok"])
+
+
+def remove_env_value(key: str) -> bool:
+    """Remove an env value, reconciling registered provider credentials."""
+    from hades_cli.credential_lifecycle import (
+        is_provider_env_credential,
+        remove_provider_env_credential,
+    )
+
+    if not is_provider_env_credential(key):
+        return _remove_env_value_raw(key)
+    return bool(remove_provider_env_credential(key)["found"])
+
+
 def save_anthropic_oauth_token(value: str, save_fn=None):
     """Persist an Anthropic OAuth/setup token and clear the API-key slot."""
     writer = save_fn or save_env_value
@@ -8400,9 +8437,8 @@ def save_anthropic_api_key(value: str, save_fn=None):
 
 
 def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:
-    from hades_cli.credential_lifecycle import save_provider_env_credential
-
-    save_provider_env_credential(key, value)
+    if save_env_value(key, value) is not True:
+        raise RuntimeError(f"environment store did not persist key {key}")
     return {
         "success": True,
         "stored_as": key,
@@ -8999,9 +9035,11 @@ def set_config_value(key: str, value: str):
     ]
     
     if key.upper() in api_keys or key.upper().endswith(('_API_KEY', '_TOKEN')) or key.upper().startswith('TERMINAL_SSH'):
-        from hades_cli.credential_lifecycle import save_provider_env_credential
-
-        save_provider_env_credential(key.upper(), value)
+        env_key = key.upper()
+        if save_env_value(env_key, value) is not True:
+            raise RuntimeError(
+                f"environment store did not persist key {env_key}"
+            )
         print(f"✓ Set {key} in {get_env_path()}")
         return
     

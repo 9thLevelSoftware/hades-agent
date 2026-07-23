@@ -4087,7 +4087,7 @@ def _prompt_api_key(pconfig, existing_key: str, provider_id: str = "") -> tuple:
     cleared the key and is now unconfigured.
     """
     from hades_cli.auth import LMSTUDIO_NOAUTH_PLACEHOLDER
-    from hades_cli.config import save_env_value
+    from hades_cli.config import remove_env_value, save_env_value
     from hades_cli.secret_prompt import masked_secret_prompt
 
     key_env = pconfig.api_key_env_vars[0] if pconfig.api_key_env_vars else ""
@@ -4147,7 +4147,7 @@ def _prompt_api_key(pconfig, existing_key: str, provider_id: str = "") -> tuple:
         return new_key, False
 
     if choice.startswith("c"):
-        save_env_value(key_env, "")
+        remove_env_value(key_env)
         print(
             f"  API key cleared.  Re-run `hermes setup` to configure {pconfig.name} again."
         )

@@ -206,6 +206,78 @@ def test_remove_finds_and_prunes_a_pool_only_stale_credential(hades_home):
     assert "zai" not in _read_auth(hades_home).get("credential_pool", {})
 
 
+def test_remove_scrubs_every_rotated_pool_only_value_without_exposing_them(
+    hades_home,
+    capsys,
+    caplog,
+):
+    stale_values = (
+        "rotated-zai-one-" + "d" * 24,
+        "rotated-zai-two-" + "e" * 24,
+        "rotated-glm-alias-" + "f" * 24,
+    )
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {},
+            "credential_pool": {
+                "zai": [
+                    _pool_entry("zai-old", SOURCE, stale_values[0]),
+                    _pool_entry("zai-newer", SOURCE, stale_values[1]),
+                    _pool_entry("zai-manual", "manual", OTHER_KEY),
+                ],
+                "glm": [
+                    _pool_entry("glm-legacy", SOURCE, stale_values[2]),
+                    _pool_entry("glm-manual", "manual", OTHER_KEY),
+                ],
+            },
+        },
+    )
+    _write_config(
+        hades_home,
+        {
+            "model": {"provider": "custom", "api_key": stale_values[0]},
+            "auxiliary": {
+                "vision": {"api": stale_values[1]},
+                "web": {"api_key": OTHER_KEY},
+            },
+            "custom_providers": [
+                {"name": "legacy", "api_key": stale_values[2]},
+                {"name": "manual", "api_key": OTHER_KEY},
+            ],
+        },
+    )
+    assert not (hades_home / ".env").exists()
+
+    result = _lifecycle().remove_provider_env_credential("ZAI_API_KEY")
+
+    assert result["found"] is True
+    assert result["removed"] is False
+    assert result["pool_pruned"] == ["zai", "glm"]
+    assert set(result["config_scrubbed"]) == {
+        "model.api_key",
+        "auxiliary.vision.api",
+        "custom_providers.0.api_key",
+    }
+    pool = _read_auth(hades_home)["credential_pool"]
+    assert [entry["source"] for entry in pool["zai"]] == ["manual"]
+    assert [entry["source"] for entry in pool["glm"]] == ["manual"]
+    config = _read_config(hades_home)
+    assert "api_key" not in config["model"]
+    assert "api" not in config["auxiliary"]["vision"]
+    assert config["auxiliary"]["web"]["api_key"] == OTHER_KEY
+    assert "api_key" not in config["custom_providers"][0]
+    assert config["custom_providers"][1]["api_key"] == OTHER_KEY
+
+    captured = capsys.readouterr()
+    for stale_value in stale_values:
+        assert stale_value not in repr(result)
+        assert stale_value not in captured.out
+        assert stale_value not in captured.err
+        assert stale_value not in caplog.text
+
+
 def test_save_rotates_only_value_matched_config_mirrors_and_unsuppresses(hades_home):
     (hades_home / ".env").write_text(
         f"export ZAI_API_KEY={OLD_KEY}\n",
@@ -440,6 +512,51 @@ def test_save_config_failure_restores_exact_env_and_suppression(
         assert (hades_home / name).read_bytes() == content
     assert stat.S_IMODE(env_path.stat().st_mode) == env_mode
     assert os.environ["ZAI_API_KEY"] == OLD_KEY
+    assert list(hades_home.glob(".credential_rollback_*.tmp")) == []
+
+
+def test_remove_config_failure_restores_exact_provider_cache(
+    hades_home,
+    monkeypatch,
+):
+    env_path = hades_home / ".env"
+    env_path.write_text(f"ZAI_API_KEY={OLD_KEY}\n", encoding="utf-8")
+    _write_auth(
+        hades_home,
+        {
+            "version": 1,
+            "providers": {},
+            "credential_pool": {
+                "zai": [_pool_entry("zai-env", SOURCE, OLD_KEY)]
+            },
+        },
+    )
+    _write_config(hades_home, {"model": {"api_key": OLD_KEY}})
+    cache_path = hades_home / "provider_models_cache.json"
+    cache_path.write_bytes(
+        (
+            '{\r\n'
+            '  "zai": {"models": ["glm-4.5"]},\r\n'
+            '  "deepseek": {"models": ["preserve-me"]}\r\n'
+            '}\r\n'
+        ).encode()
+    )
+    cache_before = cache_path.read_bytes()
+    cache_mode = stat.S_IMODE(cache_path.stat().st_mode)
+
+    import hades_cli.config as config
+
+    def fail_config_write(*_args, **_kwargs):
+        raise OSError("simulated late config failure")
+
+    monkeypatch.setattr(config, "atomic_config_write", fail_config_write)
+
+    with pytest.raises(OSError, match="simulated late config failure"):
+        _lifecycle().remove_provider_env_credential("ZAI_API_KEY")
+
+    assert cache_path.exists()
+    assert cache_path.read_bytes() == cache_before
+    assert stat.S_IMODE(cache_path.stat().st_mode) == cache_mode
     assert list(hades_home.glob(".credential_rollback_*.tmp")) == []
 
 

@@ -29,9 +29,10 @@ import os
 from pathlib import Path
 import stat
 import tempfile
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 __all__ = [
+    "is_provider_env_credential",
     "save_provider_env_credential",
     "remove_provider_env_credential",
     "purge_env_credential_references",
@@ -142,10 +143,12 @@ def _credential_store_transaction(env_var: str) -> Iterator[None]:
     """Compensate all profile credential stores after any failed mutation."""
     from hades_cli.auth import _auth_file_path, _auth_store_lock
     from hades_cli.config import get_config_path, get_env_path
+    from hades_constants import get_hades_home
 
     env_path = get_env_path()
     auth_path = _auth_file_path()
     config_path = get_config_path()
+    models_cache_path = get_hades_home() / "provider_models_cache.json"
 
     # The auth lock is profile-path-specific and reentrant. Holding it across
     # the lifecycle prevents a rollback from overwriting a concurrent auth
@@ -155,6 +158,7 @@ def _credential_store_transaction(env_var: str) -> Iterator[None]:
             ("env", _snapshot_file(env_path)),
             ("auth", _snapshot_file(auth_path)),
             ("config", _snapshot_file(config_path)),
+            ("models_cache", _snapshot_file(models_cache_path)),
         )
         process_env_value = os.environ.get(env_var, _MISSING_ENV_VALUE)
         try:
@@ -219,8 +223,15 @@ def _providers_for_env_var(env_var: str) -> list[str]:
     return sorted(providers)
 
 
-def _prune_env_pool_entries(env_var: str) -> list[str]:
-    """Remove only credential-pool entries sourced from ``env:<env_var>``."""
+def is_provider_env_credential(env_var: str) -> bool:
+    """Return whether *env_var* is a registered provider credential key."""
+    return bool(_providers_for_env_var(env_var))
+
+
+def _prune_env_pool_entries(
+    env_var: str,
+) -> tuple[list[str], tuple[str, ...]]:
+    """Prune exact env entries and briefly retain their stale mirror values."""
     from hades_cli.auth import (
         _auth_store_lock,
         _load_auth_store,
@@ -229,25 +240,29 @@ def _prune_env_pool_entries(env_var: str) -> list[str]:
 
     source = f"env:{env_var}"
     pruned: list[str] = []
+    stale_values: list[str] = []
     with _auth_store_lock():
         auth_store = _load_auth_store()
         pool = auth_store.get("credential_pool")
         if not isinstance(pool, dict):
-            return pruned
+            return pruned, ()
 
         changed = False
         for provider_id in list(pool):
             entries = pool[provider_id]
             if not isinstance(entries, list):
                 continue
-            kept = [
-                entry
-                for entry in entries
-                if not (
+            kept: list[Any] = []
+            for entry in entries:
+                if (
                     isinstance(entry, dict)
                     and entry.get("source") == source
-                )
-            ]
+                ):
+                    access_token = entry.get("access_token")
+                    if isinstance(access_token, str) and access_token:
+                        stale_values.append(access_token)
+                    continue
+                kept.append(entry)
             if len(kept) == len(entries):
                 continue
 
@@ -260,15 +275,23 @@ def _prune_env_pool_entries(env_var: str) -> list[str]:
 
         if changed:
             _save_auth_store(auth_store)
-    return pruned
+    return pruned, tuple(stale_values)
 
 
 def _scrub_config_yaml_mirrors(
-    old_value: str,
+    old_values: str | Iterable[str],
     new_value: str | None,
 ) -> list[str]:
     """Update value-matched inline credential mirrors in raw ``config.yaml``."""
-    if not old_value:
+    if isinstance(old_values, str):
+        matched_values = {old_values} if old_values else set()
+    else:
+        matched_values = {
+            value
+            for value in old_values
+            if isinstance(value, str) and value
+        }
+    if not matched_values:
         return []
 
     from hades_cli.config import (
@@ -298,7 +321,7 @@ def _scrub_config_yaml_mirrors(
             return
         # ``api`` is the legacy alias retained by older configurations.
         for field in ("api_key", "api"):
-            if section.get(field) != old_value:
+            if section.get(field) not in matched_values:
                 continue
             if new_value:
                 section[field] = new_value
@@ -352,13 +375,13 @@ def _suppression_provider_ids(env_var: str) -> list[str]:
     return sorted(provider_ids)
 
 
-def purge_env_credential_references(
+def _purge_env_credential_references(
     env_var: str,
     *,
     clear_models_cache: bool = True,
-) -> dict[str, Any]:
-    """Remove auth-pool and model-cache references to an env credential."""
-    pruned = _prune_env_pool_entries(env_var)
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Remove references and return private stale values for config scrubbing."""
+    pruned, stale_values = _prune_env_pool_entries(env_var)
     affected_providers = sorted(
         set(pruned) | set(_providers_for_env_var(env_var))
     )
@@ -386,10 +409,26 @@ def purge_env_credential_references(
         for provider_id in affected_providers:
             clear_provider_models_cache(provider_id)
 
-    return {
-        "pool_pruned": pruned,
-        "providers": affected_providers,
-    }
+    return (
+        {
+            "pool_pruned": pruned,
+            "providers": affected_providers,
+        },
+        stale_values,
+    )
+
+
+def purge_env_credential_references(
+    env_var: str,
+    *,
+    clear_models_cache: bool = True,
+) -> dict[str, Any]:
+    """Remove auth-pool and model-cache references without exposing secrets."""
+    references, _stale_values = _purge_env_credential_references(
+        env_var,
+        clear_models_cache=clear_models_cache,
+    )
+    return references
 
 
 def save_provider_env_credential(
@@ -397,12 +436,12 @@ def save_provider_env_credential(
     value: str,
 ) -> dict[str, Any]:
     """Save an env credential and rotate matching config mirrors."""
-    from hades_cli.config import load_env, save_env_value
+    from hades_cli.config import _save_env_value_raw, load_env
 
     _require_env_key_writable(env_var, "saved")
     with _credential_store_transaction(env_var):
         old_value = load_env().get(env_var)
-        if save_env_value(env_var, value) is not True:
+        if _save_env_value_raw(env_var, value) is not True:
             raise RuntimeError(
                 f"credential env store did not persist key {env_var}"
             )
@@ -437,22 +476,26 @@ def save_provider_env_credential(
 
 def remove_provider_env_credential(env_var: str) -> dict[str, Any]:
     """Remove an env credential and every exact durable reference to it."""
-    from hades_cli.config import load_env, remove_env_value
+    from hades_cli.config import _remove_env_value_raw, load_env
 
     _require_env_key_writable(env_var, "removed")
     with _credential_store_transaction(env_var):
         old_value = load_env().get(env_var)
-        removed_from_env = remove_env_value(env_var)
+        removed_from_env = _remove_env_value_raw(env_var)
         if old_value is not None and not removed_from_env:
             raise RuntimeError(
                 f"credential env store did not remove key {env_var}"
             )
-        references = purge_env_credential_references(env_var)
-        config_scrubbed = (
-            _scrub_config_yaml_mirrors(old_value, None)
-            if old_value
-            else []
+        references, stale_values = _purge_env_credential_references(env_var)
+        mirror_values = list(stale_values)
+        if old_value:
+            mirror_values.append(old_value)
+        config_scrubbed = _scrub_config_yaml_mirrors(
+            mirror_values,
+            None,
         )
+        stale_values = ()
+        mirror_values.clear()
 
         return {
             "ok": True,

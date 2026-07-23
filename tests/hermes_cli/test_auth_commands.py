@@ -1645,6 +1645,64 @@ def test_auth_remove_env_seeded_dotenv_only_no_shell_hint(tmp_path, monkeypatch,
     assert (hermes_home / ".env").read_text().strip() == ""
 
 
+def test_auth_remove_export_assignment_is_dotenv_only_and_idempotent(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """Export-prefixed dotenv assignments use the same exact-key detector as
+    the canonical writer, and a second lifecycle pass stays a harmless no-op.
+    """
+    hermes_home = tmp_path / "hades"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HADES_HOME", str(hermes_home))
+    secret = "deepseek-export-" + "g" * 24
+    (hermes_home / ".env").write_text(
+        f"export DEEPSEEK_API_KEY={secret}\nSIBLING=keep\n",
+        encoding="utf-8",
+    )
+    # Mimic load_env() populating os.environ from this profile-local file.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "deepseek": [
+                    {
+                        "id": "env-1",
+                        "label": "DEEPSEEK_API_KEY",
+                        "auth_type": "api_key",
+                        "priority": 0,
+                        "source": "env:DEEPSEEK_API_KEY",
+                        "access_token": secret,
+                    }
+                ]
+            },
+        },
+    )
+
+    from types import SimpleNamespace
+    from hades_cli.auth_commands import auth_remove_command
+
+    args = SimpleNamespace(provider="deepseek", target="1")
+    auth_remove_command(args)
+    # The auth command removes the pool entry first, then the source cleanup
+    # may re-enter the canonical lifecycle. That second pass must be safe.
+    from hades_cli.config import remove_env_value
+
+    assert remove_env_value("DEEPSEEK_API_KEY") is False
+
+    output = capsys.readouterr()
+    assert "Cleared DEEPSEEK_API_KEY from .env" in output.out
+    assert "still set in your shell environment" not in output.out
+    assert secret not in output.out
+    assert secret not in output.err
+    env_text = (hermes_home / ".env").read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY=" not in env_text
+    assert "SIBLING=keep" in env_text
+
+
 def test_auth_add_clears_env_suppression_for_provider(tmp_path, monkeypatch):
     """Re-adding a credential via `hermes auth add <provider>` clears any
     env:<VAR> suppression marker — strong signal the user wants auth back.
