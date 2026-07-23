@@ -29,6 +29,9 @@ _WARNED_KEYS: set[str] = set()
 # directly (otherwise the "credentials detected ✓" line looks identical to
 # the .env case and they don't know Bitwarden is wired up).
 _SECRET_SOURCES: dict[str, str] = {}
+# Applied values are immutable per-home snapshots. ``os.environ`` is shared
+# across profiles and may be overwritten by a later home's source apply.
+_SECRET_SOURCE_VALUES_BY_HOME: dict[str, dict[str, str]] = {}
 
 # HADES_HOME paths we've already pulled external secrets for during this
 # process.  ``load_hermes_dotenv()`` is called at module-import time from
@@ -53,6 +56,14 @@ def get_secret_source(env_var: str) -> str | None:
     return _SECRET_SOURCES.get(env_var)
 
 
+def get_secret_source_values(
+    hades_home: str | os.PathLike,
+) -> dict[str, str]:
+    """Return the external-secret value snapshot for ``hades_home``."""
+    home_key = str(Path(hades_home).resolve())
+    return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(home_key, {}))
+
+
 def reset_secret_source_cache() -> None:
     """Forget which HADES_HOME paths have already had external secrets applied.
 
@@ -64,6 +75,8 @@ def reset_secret_source_cache() -> None:
     that want to refresh after a config change.
     """
     _APPLIED_HOMES.clear()
+    _SECRET_SOURCES.clear()
+    _SECRET_SOURCE_VALUES_BY_HOME.clear()
 
 
 def format_secret_source_suffix(env_var: str) -> str:
@@ -218,7 +231,7 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
         pass  # best-effort — don't block gateway startup
 
 
-def load_hermes_dotenv(
+def load_hades_dotenv(
     *,
     hermes_home: str | os.PathLike | None = None,
     project_env: str | os.PathLike | None = None,
@@ -269,6 +282,10 @@ def load_hermes_dotenv(
     _apply_managed_env()
 
     return loaded
+
+
+# Kept for unchanged callers while Hades entrypoints use the canonical name.
+load_hermes_dotenv = load_hades_dotenv
 
 
 def _apply_managed_env() -> None:
@@ -329,7 +346,6 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     home_key = str(Path(home_path).resolve())
     if home_key in _APPLIED_HOMES:
         return
-    _APPLIED_HOMES.add(home_key)
 
     try:
         cfg = _load_secrets_config(home_path)
@@ -348,6 +364,14 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     except Exception:  # noqa: BLE001 — belt-and-braces; apply_all shouldn't raise
         return
 
+    if not report.sources:
+        return
+
+    # Mark only after an enabled source was actually attempted. Config and
+    # disabled-source no-ops remain retryable, while failed fetches remain
+    # deduplicated for the rest of this process.
+    _APPLIED_HOMES.add(home_key)
+
     if report.applied_any:
         # Re-run the ASCII sanitization pass: vault values are
         # user-supplied and might have the same copy-paste corruption as
@@ -357,15 +381,18 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         # flows can label detected credentials with "(from Bitwarden)" /
         # "(from 1Password)" — otherwise users see "credentials ✓" with
         # no hint the value came from a vault rather than .env.
+        values: dict[str, str] = {}
         for name, applied in report.provenance.items():
             _SECRET_SOURCES[name] = applied.source
+            if name in os.environ:
+                values[name] = os.environ[name]
+        _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values
 
     for src in report.sources:
         if src.applied:
             print(
                 f"  {src.label}: applied {len(src.applied)} "
-                f"secret{'s' if len(src.applied) != 1 else ''} "
-                f"({', '.join(sorted(src.applied))})",
+                f"secret{'s' if len(src.applied) != 1 else ''}",
                 file=sys.stderr,
             )
         if src.result.error:

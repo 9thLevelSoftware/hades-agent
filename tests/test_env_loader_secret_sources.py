@@ -37,6 +37,10 @@ def test_get_secret_source_returns_none_for_untracked_var():
     assert env_loader.get_secret_source("ANTHROPIC_API_KEY") is None
 
 
+def test_load_hades_dotenv_is_the_canonical_public_name():
+    assert env_loader.load_hades_dotenv is env_loader.load_hermes_dotenv
+
+
 def test_get_secret_source_returns_label_for_tracked_var():
     env_loader._SECRET_SOURCES["ANTHROPIC_API_KEY"] = "bitwarden"
     assert env_loader.get_secret_source("ANTHROPIC_API_KEY") == "bitwarden"
