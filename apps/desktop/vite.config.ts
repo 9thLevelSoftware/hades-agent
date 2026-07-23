@@ -61,6 +61,7 @@ export default defineConfig({
       '@hermes/plugin-sdk': path.resolve(__dirname, './src/sdk/index.ts'),
       '@hades/shared/billing': path.resolve(__dirname, '../shared/src/billing-types.ts'),
       '@hades/shared': path.resolve(__dirname, '../shared/src'),
+      '@hermes/shared': path.resolve(__dirname, '../shared/src'),
       react: path.resolve(__dirname, '../../node_modules/react'),
       'react-dom': path.resolve(__dirname, '../../node_modules/react-dom'),
       'react/jsx-dev-runtime': path.resolve(__dirname, '../../node_modules/react/jsx-dev-runtime.js'),
