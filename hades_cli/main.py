@@ -9599,6 +9599,14 @@ def _discard_lockfile_churn(git_cmd, repo_root):
         pass
 
 
+def _is_windows_source_recovery_tree(project_root: Path) -> bool:
+    """Whether a no-git Windows tree is a damaged source install, not a wheel."""
+    return (
+        (project_root / "pyproject.toml").is_file()
+        and (project_root / "scripts" / "install.ps1").is_file()
+    )
+
+
 def cmd_update(args):
     """Update Hades Agent to the latest version.
 
@@ -9837,14 +9845,21 @@ def _cmd_update_impl(args, gateway_mode: bool):
     git_dir = PROJECT_ROOT / ".git"
 
     if not git_dir.exists():
+        from hades_cli.config import detect_install_method
+
+        method = detect_install_method(PROJECT_ROOT)
+        if method == "pip" and not (
+            sys.platform == "win32"
+            and _is_windows_source_recovery_tree(PROJECT_ROOT)
+        ):
+            try:
+                _cmd_update_pip(args)
+            finally:
+                _resume_windows_gateways_after_update(_windows_gateway_resume)
+            return
         if sys.platform == "win32":
             use_zip_update = True
         else:
-            from hades_cli.config import detect_install_method
-            method = detect_install_method(PROJECT_ROOT)
-            if method == "pip":
-                _cmd_update_pip(args)
-                return
             print("✗ Not a git repository. Please reinstall:")
             print(
                 "  curl -fsSL https://raw.githubusercontent.com/9thLevelSoftware/hades-agent/main/scripts/install.sh | bash"

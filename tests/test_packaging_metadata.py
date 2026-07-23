@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 # setuptools is declared in the [dev] extra and is the build backend, but
 # guard the import so a runner without it skips these packaging checks
@@ -256,6 +257,20 @@ def test_built_artifacts_contain_direct_and_nested_plugin_skills(tmp_path):
     )
     assert not missing_sdist, f"sdist omitted plugin skills: {missing_sdist}"
     assert set(REPO_ROOT.glob("*.egg-info")) == source_egg_info_before
+
+
+def test_linux_packaged_wheel_job_runs_plugin_skill_artifact_proof():
+    """The slow artifact inspection stays in the dedicated Linux E2E job."""
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["e2e"]["steps"]
+    assert any(
+        "python -m pytest -m integration" in step.get("run", "")
+        and "tests/test_packaging_metadata.py::test_built_artifacts_contain_direct_and_nested_plugin_skills"
+        in step.get("run", "")
+        for step in steps
+    )
 
 
 # Minimum non-vulnerable Starlette: CVE-2026-48710 ("BadHost") was fixed in

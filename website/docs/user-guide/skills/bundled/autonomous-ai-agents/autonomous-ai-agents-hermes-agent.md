@@ -66,7 +66,7 @@ Good verification targets:
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 
 # Or via PyPI (ships the TUI bundle + shell launcher)
-pip install hermes-agent       # or: uv pip install hermes-agent
+pip install hades-agent       # or: uv pip install hades-agent
 
 # Interactive chat (default surface; set display.interface: tui to launch the Ink TUI instead)
 hermes
