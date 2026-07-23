@@ -1521,6 +1521,36 @@ def _shell_fenced_commands(prompt: str) -> _ShellScan:
 
 _SHELL_CONTROL_CHARS = frozenset(";|&<>")
 
+_PRODUCTION_VERIFIER_LINES = (
+    "set -euo pipefail",
+    "cd ~/.hermes/hermes-agent",
+    _INTEGRATION_COMMAND,
+)
+_ROLLOUT_VERIFIER_LINES = (
+    "set -euo pipefail",
+    "cd ~/.hermes/hermes-agent",
+    "if [ -f scripts/verify_hades_dashboard_contract.py ]; then",
+    _INTEGRATION_COMMAND,
+    "else",
+    "verifier_tmp=$(mktemp)",
+    "trap 'rm -f \"$verifier_tmp\"' EXIT",
+    None,
+    'echo "dashboard verifier materialization failed" >&2',
+    "exit 1",
+    "fi",
+    'if [ ! -s "$verifier_tmp" ]; then',
+    'echo "dashboard verifier materialized empty" >&2',
+    "exit 1",
+    "fi",
+    './venv/bin/python3 "$verifier_tmp" --repo-root "$PWD" --cron-jobs ~/.hermes/cron/jobs.json',
+    "fi",
+)
+_SAFE_GIT_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+_ROLLOUT_GIT_SHOW_RE = re.compile(
+    r'if ! git show (?P<ref>[A-Za-z0-9][A-Za-z0-9._/-]*):scripts/verify_hades_dashboard_contract\.py'
+    r' > "\$verifier_tmp"; then'
+)
+
 
 def _strict_shell_tokens(line: str) -> list[str] | None:
     """Tokenize a candidate command only when no shell syntax is present."""
@@ -1534,27 +1564,6 @@ def _strict_shell_tokens(line: str) -> list[str] | None:
         return None
 
 
-def _is_script_command(line: str, script: str) -> bool:
-    """Recognize the verifier command without shell suffixes or free text."""
-    tokens = _strict_shell_tokens(line)
-    expected = _strict_shell_tokens(script)
-    if tokens is None or expected is None or tokens[: len(expected)] != expected:
-        return False
-    tail = tokens[len(expected) :]
-    if script != _INTEGRATION_COMMAND:
-        return not tail
-    allowed_options = {"--repo-root", "--cron-jobs"}
-    index = 0
-    while index < len(tail):
-        if tail[index] not in allowed_options or index + 1 >= len(tail):
-            return False
-        value = tail[index + 1]
-        if not value or value.startswith("-"):
-            return False
-        index += 2
-    return True
-
-
 def _is_post_sync_command(line: str) -> bool:
     """Recognize an executable post-sync command, not prose or comments."""
     tokens = _strict_shell_tokens(line)
@@ -1564,15 +1573,38 @@ def _is_post_sync_command(line: str) -> bool:
     )
 
 
-def _is_unconditional_terminator(command: _ShellCommand) -> bool:
-    """Recognize a standalone exit/return that would bypass verification."""
-    if command.conditional_depth:
+def _is_safe_git_ref(ref: str) -> bool:
+    """Accept only the bounded ref token audited for the rollout fallback."""
+    if _SAFE_GIT_REF_RE.fullmatch(ref) is None:
         return False
-    return bool(
-        re.fullmatch(
-            r"(?:exit|return)(?:[ \t]+[0-9]+)?(?:[ \t]+#.*)?", command.text
-        )
-    )
+    if ".." in ref or ref.startswith("/") or ref.endswith("/") or "//" in ref:
+        return False
+    if any(component.endswith(".lock") for component in ref.split("/")):
+        return False
+    return not any(character.isspace() or character in ";|&<>$`'\"\\()"
+                   for character in ref)
+
+
+def _approved_verifier_block(commands: Iterable[_ShellCommand]) -> bool:
+    """Match exactly one audited production or rollout verifier shell shape."""
+    normalized = tuple(command.text.strip() for command in commands)
+    if normalized == _PRODUCTION_VERIFIER_LINES:
+        return True
+    if len(normalized) != len(_ROLLOUT_VERIFIER_LINES):
+        return False
+    for index, expected in enumerate(_ROLLOUT_VERIFIER_LINES):
+        if expected is not None and normalized[index] != expected:
+            return False
+    materialization = _ROLLOUT_GIT_SHOW_RE.fullmatch(normalized[7])
+    return materialization is not None and _is_safe_git_ref(materialization.group("ref"))
+
+
+def _shell_blocks(commands: Iterable[_ShellCommand]) -> list[list[_ShellCommand]]:
+    """Group executable shell lines by fenced shell block, preserving order."""
+    blocks: dict[int, list[_ShellCommand]] = {}
+    for command in commands:
+        blocks.setdefault(command.block_id, []).append(command)
+    return sorted(blocks.values(), key=lambda block: block[0].line_number)
 
 
 def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
@@ -1655,64 +1687,50 @@ def _check_cron(repo_root: Path, cron_jobs: Path, failures: list[str]) -> None:
         )
 
     shell_commands = shell_scan.commands
-    verifier_commands = [
-        command
-        for command in shell_commands
-        if _is_script_command(command.text, _INTEGRATION_COMMAND)
-    ]
-    verifier_line: int | None = None
-    selected_verifier: _ShellCommand | None = None
-    for verifier in verifier_commands:
-        preceding_cd = [
-            command
-            for command in shell_commands
-            if command.block_id == verifier.block_id
-            and command.line_number < verifier.line_number
-            and command.text == "cd ~/.hermes/hermes-agent"
-        ]
-        if not preceding_cd:
-            continue
-        cd = max(preceding_cd, key=lambda command: command.line_number)
-        terminators = [
-            command
-            for command in shell_commands
-            if command.block_id == verifier.block_id
-            and cd.line_number < command.line_number < verifier.line_number
-            and _is_unconditional_terminator(command)
-        ]
-        if terminators:
-            failures.append(
-                "cron: hades-fork-integration prompt contains an unconditional exit/return "
-                "between the required repo cd and verifier command"
-            )
-            continue
-        verifier_line = verifier.line_number
-        selected_verifier = verifier
-        break
-    if verifier_line is None:
-        failures.append(
-            "cron: hades-fork-integration prompt must contain an exact executable verifier "
-            "command after a prior exact `cd ~/.hermes/hermes-agent` in the same bash/sh/shell fenced block"
-        )
-    elif selected_verifier is None:
-        failures.append(
-            "cron: hades-fork-integration prompt is missing exact verifier command "
-            f"{_INTEGRATION_COMMAND!r} in a shell fenced block"
-        )
-
     post_sync_positions = [
         command.line_number
         for command in shell_commands
         if _is_post_sync_command(command.text)
     ]
+    verifier_line: int | None = None
     if not post_sync_positions:
         failures.append(
             "cron: hades-fork-integration prompt is missing the post-sync-verify.py anchor"
         )
-    elif verifier_line is not None and min(post_sync_positions) <= verifier_line:
-        failures.append(
-            "cron: verifier command must appear before the first post-sync-verify.py command"
+
+    heading_line = shell_scan.heading_lines[0] if len(shell_scan.heading_lines) == 1 else None
+    if heading_line is not None:
+        blocks = _shell_blocks(shell_commands)
+        first_post_sync = min(post_sync_positions) if post_sync_positions else None
+        blocks_under_heading = [
+            block for block in blocks if block[0].line_number > heading_line
+        ]
+        gate_blocks = [
+            block
+            for block in blocks_under_heading
+            if first_post_sync is None or block[0].line_number < first_post_sync
+        ]
+        approved_blocks = [
+            block for block in blocks_under_heading if _approved_verifier_block(block)
+        ]
+        shape_error = (
+            "cron: hades-fork-integration prompt must contain exactly one approved "
+            "verifier shell block (exact executable command shape; extra control flow/exit "
+            "and other commands are rejected) under the standalone heading before the first "
+            "post-sync-verify.py command"
         )
+        if len(approved_blocks) != 1 or len(gate_blocks) != 1:
+            failures.append(shape_error)
+        elif approved_blocks[0] != gate_blocks[0]:
+            failures.append(shape_error)
+        else:
+            verifier_line = gate_blocks[0][2].line_number
+
+    if verifier_line is not None and post_sync_positions:
+        if min(post_sync_positions) <= verifier_line:
+            failures.append(
+                "cron: verifier command must appear before the first post-sync-verify.py command"
+            )
 
 
 def verify(repo_root: Path, cron_jobs: Path) -> list[str]:
