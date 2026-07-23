@@ -348,10 +348,24 @@ class ComputeHost:
         if not sid:
             self.emit({"type": "turn.error", "sid": sid, "request_id": request_id, "message": "sid required"})
             return
+        server = None
+        home_token = None
+        context_tokens = []
         try:
             from tui_gateway import server
 
             session = self._ensure_server_session(server, frame)
+            home_token = None
+            context_tokens = []
+            profile_home = str(session.get("profile_home") or "") or None
+            if profile_home:
+                home_token = server.set_hermes_home_override(profile_home)
+            context_tokens = server._set_session_context(
+                str(session.get("session_key") or sid),
+                cwd=str(session.get("cwd") or frame.get("cwd") or "") or None,
+                source=server._session_source(session),
+                ui_session_id=sid,
+            )
             with session["history_lock"]:
                 if session.get("running"):
                     self.emit({"type": "turn.error", "sid": sid, "request_id": request_id, "message": "session busy"})
@@ -413,6 +427,14 @@ class ComputeHost:
             except Exception:
                 pass
             self.emit({"type": "turn.error", "sid": sid, "request_id": request_id, "reason": "exception", "message": str(exc)})
+        finally:
+            if context_tokens and server is not None:
+                server._clear_session_context(context_tokens)
+            if home_token is not None and server is not None:
+                try:
+                    server.reset_hermes_home_override(home_token)
+                except Exception:
+                    pass
 
     def _ensure_server_session(self, server: Any, frame: dict[str, Any]) -> dict:
         sid = str(frame.get("sid") or "")
