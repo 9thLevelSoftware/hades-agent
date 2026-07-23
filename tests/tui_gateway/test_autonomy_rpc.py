@@ -20,6 +20,7 @@ Real-path invariants against a temporary ``HADES_HOME``:
 from __future__ import annotations
 
 import importlib
+import json
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -372,6 +373,99 @@ def test_exit_denied_remains_a_structured_result(rpc_raw, monkeypatch):
     assert "error" not in resp
     assert resp["result"]["ok"] is False
     assert resp["result"]["exit_code"] == autonomy_mod.EXIT_DENIED
+
+
+def test_exit_denied_structured_payload_is_allowlisted(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    secret = "autonomy-denied-wire-secret"
+    denied = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_DENIED,
+        "safe denial output",
+        {
+            "ok": False,
+            "verdict": "deny",
+            "code": "explicit_deny",
+            "reason": "policy denied",
+            "error": secret,
+            "arbitrary_extra": "producer-only field",
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: denied)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["evaluate"]})
+
+    assert "result" in resp
+    assert "error" not in resp
+    assert resp["result"]["ok"] is False
+    assert resp["result"]["decision"]["verdict"] == "deny"
+    assert resp["result"]["decision"]["code"] == "explicit_deny"
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert secret not in wire
+    assert "arbitrary_extra" not in wire
+    assert '"error"' not in wire
+
+
+def test_exit_ok_allow_decision_is_allowlisted(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    secret = "autonomy-allow-wire-secret"
+    allowed = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        "safe allow output",
+        {
+            "ok": True,
+            "verdict": "allow",
+            "code": "explicit_allow",
+            "matched_rule_ids": ["allow-send"],
+            "error": secret,
+            "arbitrary_extra": "producer-only field",
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: allowed)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["evaluate"]})
+
+    assert "result" in resp
+    assert resp["result"]["ok"] is True
+    assert resp["result"]["decision"]["verdict"] == "allow"
+    assert resp["result"]["decision"]["code"] == "explicit_allow"
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert secret not in wire
+    assert "arbitrary_extra" not in wire
+    assert '"error"' not in wire
+
+
+def test_exit_ok_preview_is_allowlisted(rpc_raw, monkeypatch):
+    import hades_cli.autonomy as autonomy_mod
+
+    secret = "autonomy-preview-wire-secret"
+    preview = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        "safe preview output",
+        {
+            "ok": True,
+            "applied": False,
+            "before_contract_hash": "before-hash",
+            "after_contract_hash": "after-hash",
+            "added_rule_ids": ["allow-send-2"],
+            "error": secret,
+            "arbitrary_extra": "producer-only field",
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: preview)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["rule", "add"]})
+
+    assert "result" in resp
+    assert resp["result"]["ok"] is True
+    assert resp["result"]["preview"]["applied"] is False
+    assert resp["result"]["preview"]["before_contract_hash"] == "before-hash"
+    assert resp["result"]["preview"]["after_contract_hash"] == "after-hash"
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert secret not in wire
+    assert "arbitrary_extra" not in wire
+    assert '"error"' not in wire
 
 
 def test_unknown_exit_code_is_a_bounded_internal_error(rpc_raw, monkeypatch):

@@ -23,6 +23,7 @@ Real-path invariants against the per-test ``HADES_HOME``:
 from __future__ import annotations
 
 import importlib
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -572,3 +573,51 @@ def test_success_envelope_is_bounded(rpc, monkeypatch):
 
     assert resp["error"]["code"] == 5043
     assert len(str(resp)) < 2_000
+
+
+def test_success_frame_bound_includes_default_rpc_envelope_and_newline(
+    rpc, home, monkeypatch
+):
+    import hades_cli.receipts as receipts_mod
+
+    rows = [
+        {"receipt_id": f"r{i:05d}", "detail": "x" * 20}
+        for i in range(17_500)
+    ]
+    payload = {"ok": True, "action": "list", "receipts": rows}
+    expected_inner = {
+        "ok": True,
+        "action": "list",
+        "exit_code": receipts_mod.EXIT_OK,
+        "output": "short",
+        "profile_home": str(home),
+        "receipts": rows,
+    }
+    compact_payload_bytes = len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    compact_inner_bytes = len(
+        json.dumps(expected_inner, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    expected_frame = (
+        json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "result": expected_inner},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    cap = 1_048_576
+    assert compact_payload_bytes < cap
+    assert compact_inner_bytes < cap
+    assert len(expected_frame) > cap
+
+    result = receipts_mod.ReceiptCommandResult(receipts_mod.EXIT_OK, "short", payload)
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
+
+    assert resp["error"]["code"] == 5043
+    final_frame = json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n"
+    assert len(final_frame) <= cap
