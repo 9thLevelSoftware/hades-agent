@@ -96,6 +96,7 @@ def test_compute_host_new_session_passes_profile_home_to_init(monkeypatch, tmp_p
             server._sessions[_sid] = {
                 "agent": _agent,
                 "session_key": _key,
+                "init_owner_token": kwargs["init_owner_token"],
                 "history": list(_history),
                 "history_lock": threading.Lock(),
                 "cwd": kwargs["cwd"],
@@ -115,6 +116,7 @@ def test_compute_host_new_session_passes_profile_home_to_init(monkeypatch, tmp_p
         )
 
         assert init_calls[0]["profile_home"] == str(profile_home)
+        assert "init_owner_token" not in session
         assert session["profile_home"] == str(profile_home)
         assert session["cwd"] == str(workspace)
     finally:
@@ -134,7 +136,14 @@ def test_compute_host_fallback_publishes_profile_and_cwd_together(monkeypatch, t
     try:
         monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: object())
 
-        def _fail_init(*_args, **_kwargs):
+        def _fail_init(_sid, _key, _agent, _history, **kwargs):
+            server._sessions[_sid] = {
+                "agent": _agent,
+                "session_key": _key,
+                "init_owner_token": kwargs["init_owner_token"],
+                "history": list(_history),
+                "history_lock": threading.Lock(),
+            }
             raise RuntimeError("side machinery")
 
         monkeypatch.setattr(server, "_init_session", _fail_init)
@@ -204,6 +213,7 @@ def test_compute_host_keeps_profile_context_through_agent_and_init(
         server._sessions[args[0]] = {
             "agent": args[2],
             "session_key": args[1],
+            "init_owner_token": kwargs["init_owner_token"],
             "history": list(args[3]),
             "history_lock": threading.Lock(),
             "cwd": kwargs["cwd"],
@@ -270,6 +280,7 @@ def test_compute_host_discards_partial_init_side_machinery_before_fallback(
         server._sessions[sid] = {
             "agent": built_agent,
             "session_key": key,
+            "init_owner_token": kwargs["init_owner_token"],
             "history": list(history),
             "history_lock": threading.Lock(),
             "_notif_stop": stop,
@@ -942,6 +953,7 @@ def test_compute_host_partial_init_rechecks_identity_before_fallback_publish(
             server._sessions[init_sid] = {
                 "agent": built_agent,
                 "session_key": key,
+                "init_owner_token": _kwargs["init_owner_token"],
                 "history": list(history),
                 "history_lock": threading.Lock(),
                 "_notif_stop": stop,
@@ -974,6 +986,58 @@ def test_compute_host_partial_init_rechecks_identity_before_fallback_publish(
         assert agent.close_calls == 1
         assert stop.is_set()
         assert worker_closed == [True]
+    finally:
+        server._sessions.pop(sid, None)
+        host.close()
+
+
+def test_compute_host_same_agent_and_key_replacement_without_token_wins(
+    monkeypatch,
+):
+    """A same-identity replacement without our opaque token is not ours."""
+    from tui_gateway import server
+
+    out = io.StringIO()
+    host = ComputeHost(stdout=out, max_workers=1, heartbeat_secs=0)
+    sid = "same-agent-key-replacement"
+    close_calls = []
+
+    class _Agent:
+        model = "test/model"
+
+        def close(self):
+            close_calls.append("agent")
+
+    agent = _Agent()
+    replacement = {
+        "agent": agent,
+        "session_key": "same-key",
+        "replacement": True,
+    }
+    monkeypatch.setattr(server, "_make_agent", lambda *_a, **_k: agent)
+
+    def _lost_init(init_sid, _key, _built_agent, _history, **_kwargs):
+        with server._sessions_lock:
+            server._sessions[init_sid] = replacement
+        raise RuntimeError("init lost ownership")
+
+    monkeypatch.setattr(server, "_init_session", _lost_init)
+    monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_a: None)
+
+    try:
+        with pytest.raises(RuntimeError, match="replaced during session init"):
+            host._ensure_server_session(
+                server,
+                {
+                    "sid": sid,
+                    "session_key": "same-key",
+                    "cwd": "/tmp",
+                    "history": [],
+                },
+            )
+        assert server._sessions[sid] is replacement
+        assert close_calls == ["agent"]
     finally:
         server._sessions.pop(sid, None)
         host.close()

@@ -3108,7 +3108,7 @@ def test_eager_resume_loser_disables_end_on_close_before_close(server, monkeypat
 
 
 def test_close_agent_once_is_atomic_for_non_weakref_concurrent_agent(server):
-    """Two teardown threads close a non-weakref agent exactly once."""
+    """Two teardown threads close a managed proxy exactly once."""
     entered = threading.Event()
     release = threading.Event()
 
@@ -3124,8 +3124,9 @@ def test_close_agent_once_is_atomic_for_non_weakref_concurrent_agent(server):
             release.wait(2)
 
     agent = _Agent()
-    first = threading.Thread(target=server._close_agent_once, args=(agent,))
-    second = threading.Thread(target=server._close_agent_once, args=(agent,))
+    managed = server._ManagedAgentProxy(agent)
+    first = threading.Thread(target=server._close_agent_once, args=(managed,))
+    second = threading.Thread(target=server._close_agent_once, args=(managed,))
     first.start()
     assert entered.wait(1)
     second.start()
@@ -3162,7 +3163,7 @@ def test_close_agent_once_survives_non_weakref_slots_agent_churn(server):
 
 
 def test_close_agent_once_survives_immutable_nonweakref_churn(server):
-    """Stable wrappers retain close-once state without strong registry churn."""
+    """Agents normalized by _make_agent use object-owned proxy state."""
 
     class _Agent:
         __slots__ = ("close_calls",)
@@ -3173,13 +3174,44 @@ def test_close_agent_once_survives_immutable_nonweakref_churn(server):
         def close(self):
             self.close_calls += 1
 
-    agents = [_Agent() for _ in range(257)]
-    for agent in agents:
-        server._close_agent_once(agent)
+    agents = []
+    managed_agents = []
 
-    server._close_agent_once(agents[0])
+    def _build(*_args, **_kwargs):
+        agent = _Agent()
+        agents.append(agent)
+        return agent
+
+    synthetic_module = types.SimpleNamespace(maybe_build_synthetic_agent=_build)
+    with patch.dict(sys.modules, {"tui_gateway.synthetic_turn": synthetic_module}):
+        for index in range(257):
+            managed = server._make_agent(f"sid-{index}", f"key-{index}")
+            managed_agents.append(managed)
+            assert managed is not agents[-1]
+            server._close_agent_once(managed)
+
+    server._close_agent_once(managed_agents[0])
 
     assert [agent.close_calls for agent in agents] == [1] * len(agents)
+    assert len(server._agent_close_weak_registry) == 0
+
+
+def test_close_agent_once_rejects_unmanaged_immutable_nonweakref_agent(server):
+    """Direct unsupported immutable agents fail closed before close."""
+
+    class _Agent:
+        __slots__ = ("close_calls",)
+
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    agent = _Agent()
+    with pytest.raises(RuntimeError, match="managed agent"):
+        server._close_agent_once(agent)
+    assert agent.close_calls == 0
 
 
 def test_synthetic_profile_agent_closes_transferred_db(server, monkeypatch):
@@ -3203,5 +3235,46 @@ def test_synthetic_profile_agent_closes_transferred_db(server, monkeypatch):
     server._close_agent_once(built)
 
     assert built is synthetic
+    assert synthetic.close_calls == 1
+    assert db.close_calls == 1
+
+
+def test_immutable_synthetic_profile_agent_uses_managed_proxy(server, monkeypatch):
+    """Immutable synthetic agents transfer DB ownership into the proxy."""
+    db = types.SimpleNamespace(close_calls=0)
+    db.close = lambda: setattr(db, "close_calls", db.close_calls + 1)
+
+    class _Agent:
+        __slots__ = ("close_calls", "model", "session_id", "platform")
+
+        def __init__(self):
+            self.close_calls = 0
+            self.model = "immutable/model"
+            self.session_id = "immutable-session"
+            self.platform = "tui"
+
+        def close(self):
+            self.close_calls += 1
+
+    synthetic = _Agent()
+    monkeypatch.setitem(
+        sys.modules,
+        "tui_gateway.synthetic_turn",
+        types.SimpleNamespace(maybe_build_synthetic_agent=lambda *_a, **_k: synthetic),
+    )
+
+    built = server._make_agent(
+        "immutable-sid",
+        "immutable-key",
+        session_db=db,
+        owns_session_db=True,
+    )
+
+    assert isinstance(built, server._ManagedAgentProxy)
+    assert built.model == "immutable/model"
+    assert built.session_id == "immutable-session"
+    assert built.platform == "tui"
+    built.close()
+    built.close()
     assert synthetic.close_calls == 1
     assert db.close_calls == 1
