@@ -1228,7 +1228,7 @@ hermes completion fish > ~/.config/fish/completions/hermes.fish
 hermes update [--check] [--backup] [--restart-gateway]
 ```
 
-拉取最新的 `hermes-agent` 代码并在受管理的 venv 中重新安装依赖，然后重新运行安装后 hook（MCP 服务器、skill 同步、补全安装）。可在运行中的安装上安全执行。使用 `--check` 查看你的检出是否落后于 `origin/main`，而不安装。
+拉取最新的 `hades-agent` 代码并在受管理的 venv 中重新安装依赖，然后重新运行安装后 hook（MCP 服务器、skill 同步、补全安装）。可在运行中的安装上安全执行。使用 `--check` 查看你的检出是否落后于 `origin/main`，而不安装。
 
 | 选项 | 说明 |
 |--------|-------------|

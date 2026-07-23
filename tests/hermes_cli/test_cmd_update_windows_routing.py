@@ -52,11 +52,15 @@ def test_windows_no_git_source_tree_keeps_zip_recovery(tmp_path, monkeypatch):
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'hades-agent'\n")
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "install.ps1").write_text("# source installer\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".install_method").write_text("git\n")
     monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(hm.sys, "platform", "win32")
 
     with (
         patch("hades_cli.config.load_config", return_value={}),
+        patch("hades_cli.config.get_hades_home", return_value=home),
         patch.object(hm, "_run_pre_update_backup"),
         patch.object(hm, "_pause_windows_gateways_for_update", return_value=None),
         patch.object(hm, "_cmd_update_pip") as package_update,

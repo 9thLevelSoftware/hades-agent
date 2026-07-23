@@ -1640,7 +1640,7 @@ hermes completion fish > ~/.config/fish/completions/hermes.fish
 hermes update [--gateway] [--check] [--no-backup] [--backup] [--yes]
 ```
 
-Pulls the latest `hermes-agent` code and reinstalls dependencies in the managed venv, then re-runs the post-install hooks (MCP servers, skills sync, completion install). Safe to run on a live install. Use `--check` to see whether your checkout is behind `origin/main` without installing.
+Pulls the latest `hades-agent` code and reinstalls dependencies in the managed venv, then re-runs the post-install hooks (MCP servers, skills sync, completion install). Safe to run on a live install. Use `--check` to see whether your checkout is behind `origin/main` without installing.
 
 `hermes update` pulls the configured update branch (default: `main`). If your checkout is on another branch, Hermes may check out the update branch before pulling. Commit branch work before updating when you want to keep it outside the update autostash flow.
 

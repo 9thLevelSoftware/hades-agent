@@ -167,9 +167,9 @@ acp_registry/agent.json
 acp_registry/icon.svg
 ```
 
-上游 registry PR 将这些文件复制到 `agentclientprotocol/registry` 中的顶层 `hermes-agent/` 目录。
+上游 registry PR 将这些文件复制到 `agentclientprotocol/registry` 中的顶层 `hades-agent/` 目录。
 
-Registry 条目使用直接指向 `hermes-agent` PyPI 发行版的 `uvx` 发行版：
+Registry 条目使用直接指向 `hades-agent` PyPI 发行版的 `uvx` 发行版：
 
 ```text
 uvx --from 'hades-agent[acp]==<version>' hades-acp

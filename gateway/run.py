@@ -10175,7 +10175,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             if not check_whatsapp_cloud_requirements():
                 logger.warning(
-                    "WhatsApp Cloud: aiohttp/httpx missing — reinstall hermes-agent"
+                    "WhatsApp Cloud: aiohttp/httpx missing — reinstall hades-agent"
                 )
                 return None
             return WhatsAppCloudAdapter(config)

@@ -14,11 +14,13 @@ from hades_cli import upstream_guard
 
 _UPSTREAM_INSTALL_HINT = re.compile(
     r"\b(?:"
-    r"(?:uv\s+)?pip\s+install(?:\s+--[^\s]+)*|"
+    r"(?:uv\s+)?pip(?:3)?\s+install(?:\s+--[^\s]+)*|"
     r"uv\s+tool\s+install(?:\s+--[^\s]+)*|"
     r"pipx\s+install(?:\s+--[^\s]+)*|"
     r"uvx\s+--from|"
-    r"install(?:\s+the)?(?:\s+extra)?\s*:?"
+    r"(?:re)?install(?:\s+the)?(?:\s+extra)?\s*:?|"
+    r"(?:重新)?安装\s*:?|"
+    r"インストール\s*:?"
     r")\s+[`'\"]?hermes-agent(?:\[[^\]]+\])?",
     re.IGNORECASE,
 )
@@ -40,7 +42,8 @@ def _active_user_facing_files(repo_root: Path):
     for root_name in source_roots:
         root = repo_root / root_name
         if root.is_dir():
-            yield from root.rglob("*.py")
+            for suffix in ("*.py", "*.sh", "*.ps1"):
+                yield from root.rglob(suffix)
     for root in (
         repo_root / "skills",
         repo_root / "optional-skills",
@@ -153,6 +156,9 @@ def test_no_positive_upstream_install_hints_remain_in_active_user_surfaces():
         ("Install hermes-agent[google_chat].", True),
         ("pip install 'hermes-agent[messaging]'", True),
         ("pip install --force-reinstall hermes-agent", True),
+        ("reinstall hermes-agent", True),
+        ("重新安装 hermes-agent", True),
+        ("インストール hermes-agent", True),
         ("pip uninstall hermes-agent", False),
         ("Legacy hermes-agent[all] compatibility remains supported.", False),
     ],
@@ -174,3 +180,10 @@ def test_upstream_install_hint_pattern_ignores_compatibility_and_uninstall(line,
 )
 def test_upstream_install_hint_detection_preserves_negative_guidance(line, is_hint):
     assert _has_positive_upstream_install_hint(line) is is_hint
+
+
+def test_active_hint_scan_includes_shell_and_powershell_installers():
+    repo_root = Path(__file__).resolve().parent.parent
+    active = set(_active_user_facing_files(repo_root))
+    assert repo_root / "scripts" / "install.sh" in active
+    assert repo_root / "scripts" / "install.ps1" in active

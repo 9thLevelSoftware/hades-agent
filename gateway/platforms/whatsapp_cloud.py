@@ -407,7 +407,7 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             self._set_fatal_error(
                 "whatsapp_cloud_deps_missing",
                 "aiohttp and httpx are required for whatsapp_cloud — "
-                "reinstall hermes-agent.",
+                "reinstall hades-agent.",
                 retryable=False,
             )
             return False

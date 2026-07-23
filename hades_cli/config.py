@@ -385,6 +385,21 @@ def _install_method_project_root(project_root: Optional[Path] = None) -> Path:
     return Path(__file__).parent.parent.resolve()
 
 
+def _is_platform_source_tree(root: Path) -> bool:
+    """Whether ``root`` is a source install for the running platform.
+
+    A wheel or uv-tool environment can contain incidental project metadata, so
+    the installer for *this* platform is required as well.  This deliberately
+    mirrors the no-git Windows recovery predicate in ``hades_cli.main`` while
+    keeping install-method detection independent of the CLI module.
+    """
+    installer = "install.ps1" if sys.platform == "win32" else "install.sh"
+    return (
+        (root / "pyproject.toml").is_file()
+        and (root / "scripts" / installer).is_file()
+    )
+
+
 def detect_install_method(project_root: Optional[Path] = None) -> str:
     """Detect how Hermes was installed: 'docker', 'nixos', 'homebrew', 'git', or 'pip'.
 
@@ -392,8 +407,8 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     1. Code-scoped stamp ``<install tree>/.install_method`` (next to the
        running code) — the authoritative marker.
     2. Legacy home-scoped stamp ``$HADES_HOME/.install_method`` — read for
-       backward compatibility, but a ``docker`` value is IGNORED when we are
-       not actually running inside a container (see below).
+       backward compatibility; a ``git`` value is accepted only for a
+       platform-source tree (see below).
     3. HERMES_MANAGED env / .managed marker (NixOS, Homebrew)
     4. .git directory presence -> 'git'
     5. Fallback -> 'pip'
@@ -413,10 +428,14 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     its own truthful marker.
 
     Self-healing for already-poisoned homes: a legacy ``docker`` value in the
-    home-scoped stamp is only honoured when we are genuinely in a container.
-    On a host install that read a contaminating ``docker`` stamp, we fall
-    through to managed/.git/pip detection instead — so existing shared-home
-    setups recover without the user touching anything.
+    home-scoped stamp is only honoured when we are genuinely in a container,
+    and a legacy ``git`` value is accepted only when the running root still
+    proves it is a platform-specific source tree.  A package or uv-tool install
+    has no checkout to inspect, so an old shared-home ``git`` stamp must not
+    send its updater down the git path; a source checkout's ``.git`` remains
+    the authoritative signal.  On a host install that read a contaminating
+    ``docker`` stamp, we fall through to managed/.git/pip detection instead —
+    so existing shared-home setups recover without the user touching anything.
 
     Note: running inside a container is NOT treated as "docker" on its own.
     The supported installs self-identify via the code-scoped stamp:
@@ -438,10 +457,11 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     except OSError:
         pass
 
-    # 2. Legacy home-scoped stamp — back-compat. Ignore a ``docker`` value
-    #    when we are not actually containerised: that is the signature of a
-    #    host install whose shared $HADES_HOME was stamped by a co-located
-    #    container, and honouring it wrongly blocks ``hermes update``.
+    # 2. Legacy home-scoped stamp — back-compat. A shared ``git`` stamp is
+    #    intentionally not authoritative for a package/tool, but it remains
+    #    useful for a damaged source tree that lost its .git directory. Ignore
+    #    a ``docker`` value when we are not actually containerised for the
+    #    same reason.
     try:
         method = (
             (get_hades_home() / ".install_method")
@@ -449,7 +469,10 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
             .strip()
             .lower()
         )
-        if method and not (method == "docker" and not _running_in_container()):
+        if method == "git":
+            if _is_platform_source_tree(root):
+                return method
+        elif method and not (method == "docker" and not _running_in_container()):
             return method
     except OSError:
         pass

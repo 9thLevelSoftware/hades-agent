@@ -169,9 +169,9 @@ acp_registry/agent.json
 acp_registry/icon.svg
 ```
 
-The upstream registry PR copies those files into the top-level `hermes-agent/` directory in `agentclientprotocol/registry`.
+The upstream registry PR copies those files into the top-level `hades-agent/` directory in `agentclientprotocol/registry`.
 
-The registry entry uses a `uvx` distribution that points directly at the `hermes-agent` PyPI release:
+The registry entry uses a `uvx` distribution that points directly at the `hades-agent` PyPI release:
 
 ```text
 uvx --from 'hades-agent[acp]==<version>' hades-acp
