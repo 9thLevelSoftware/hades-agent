@@ -20,12 +20,41 @@ class FakeSocket {
   send = vi.fn()
 }
 
+class EarlyCloseSocket {
+  readyState = 0
+  private readonly handlers = new Map<string, Set<() => void>>()
+
+  addEventListener = vi.fn((type: string, handler: () => void) => {
+    let handlers = this.handlers.get(type)
+    if (!handlers) {
+      handlers = new Set()
+      this.handlers.set(type, handlers)
+    }
+    handlers.add(handler)
+
+    if (type === 'open') {
+      setTimeout(() => {
+        this.readyState = 3
+        for (const closeHandler of [...(this.handlers.get('close') ?? [])]) {
+          closeHandler()
+        }
+      }, 0)
+    }
+  })
+  removeEventListener = vi.fn((type: string, handler: () => void) => {
+    this.handlers.get(type)?.delete(handler)
+  })
+  close = vi.fn()
+  send = vi.fn()
+}
+
 describe('JsonRpcGatewayClient connect() URL guard', () => {
   beforeEach(() => {
     vi.stubGlobal('WebSocket', FakeSocket) // jsdom has none; class reads WebSocket.OPEN
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
   })
 
@@ -82,6 +111,25 @@ describe('JsonRpcGatewayClient connect() URL guard', () => {
     await expect(client.connect('ws://127.0.0.1:1234/api/ws')).resolves.toBeUndefined()
     expect(client.connectionState).toBe('open')
     expect(socketFactory).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects immediately when the socket closes before opening', async () => {
+    vi.useFakeTimers()
+    const client = new JsonRpcGatewayClient({
+      connectTimeoutMs: 60_000,
+      socketFactory: () => new EarlyCloseSocket() as unknown as WebSocket
+    })
+    let rejection: unknown
+    const connection = client.connect('ws://127.0.0.1:1234/api/ws').catch(error => {
+      rejection = error
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(rejection).toBeInstanceOf(Error)
+    expect((rejection as Error).message).toMatch(/connection failed/)
+    expect(client.connectionState).toBe('closed')
+    await connection
   })
 
   it('keeps connection state idle on rejection', async () => {

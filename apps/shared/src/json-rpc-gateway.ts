@@ -136,21 +136,11 @@ export class JsonRpcGatewayClient {
       this.handleMessage(message.data)
     })
 
-    socket.addEventListener('close', () => {
-      if (this.socket !== socket) {
-        return
-      }
-
-      this.socket = null
-      this.setState('closed')
-      this.rejectAllPending(new Error(this.options.closedErrorMessage))
-    })
-
     // Construct and wire the socket before publishing "connecting". A
     // synchronous constructor failure must leave the client retryable.
     this.setState('connecting')
 
-    await new Promise<void>((resolve, reject) => {
+    const connection = new Promise<void>((resolve, reject) => {
       let settled = false
       let timer: ReturnType<typeof setTimeout> | undefined
 
@@ -161,6 +151,7 @@ export class JsonRpcGatewayClient {
 
         socket.removeEventListener('open', onOpen)
         socket.removeEventListener('error', onError)
+        socket.removeEventListener('close', onClose)
       }
 
       const onOpen = () => {
@@ -185,8 +176,19 @@ export class JsonRpcGatewayClient {
         reject(new Error(this.options.connectErrorMessage))
       }
 
+      const onClose = () => {
+        if (settled || this.socket !== socket) {
+          return
+        }
+
+        settled = true
+        cleanup()
+        reject(new Error(this.options.connectErrorMessage))
+      }
+
       socket.addEventListener('open', onOpen, { once: true })
       socket.addEventListener('error', onError, { once: true })
+      socket.addEventListener('close', onClose, { once: true })
 
       if (this.options.connectTimeoutMs > 0) {
         timer = setTimeout(() => {
@@ -214,6 +216,21 @@ export class JsonRpcGatewayClient {
         }, this.options.connectTimeoutMs)
       }
     })
+
+    // Register the persistent lifecycle handler after the one-shot handshake
+    // listener. An early close rejects `connection` first, then publishes the
+    // durable closed state and clears the socket.
+    socket.addEventListener('close', () => {
+      if (this.socket !== socket) {
+        return
+      }
+
+      this.socket = null
+      this.setState('closed')
+      this.rejectAllPending(new Error(this.options.closedErrorMessage))
+    })
+
+    await connection
   }
 
   close(): void {
