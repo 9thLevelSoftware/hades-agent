@@ -13686,8 +13686,12 @@ def _native_safe_id(value: Any, *, method: str, limit: int = 256) -> str | None:
 
 
 def _native_safe_domain_id(value: Any, *, method: str, limit: int = 256) -> str | None:
-    """Keep a reusable domain identifier only when redaction leaves it exact."""
+    """Keep a reusable domain identifier only when it cannot be a path."""
     if type(value) is not str or not value or len(value) > limit:
+        return None
+    # Domain IDs are not free text: reject path separators and traversal
+    # markers before redaction can make a locator look like an exact ID.
+    if "/" in value or "\\" in value or ".." in value:
         return None
     if any(ord(char) < 32 or 0x7F <= ord(char) <= 0x9F for char in value):
         return None
