@@ -40,7 +40,7 @@ class TestClassifySandboxMirrorTarget:
 
         result = classify_sandbox_mirror_target(str(target))
         assert result is not None
-        assert result["target_path"] == str(target.resolve())
+        assert Path(result["target_path"]).resolve() == target.resolve()
         assert result["mirror_root"].endswith(
             "sandboxes/docker/default/home/.hades"
         )
@@ -60,6 +60,8 @@ class TestClassifySandboxMirrorTarget:
 
         result = classify_sandbox_mirror_target(str(target))
         assert result is not None
+        # The classifier is model-facing as well as diagnostic, so these
+        # values must retain one stable spelling on Windows and POSIX.
         assert result["mirror_root"].endswith(
             "sandboxes/docker/default/home/.hermes"
         )
