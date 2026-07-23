@@ -1111,3 +1111,90 @@ def test_receipt_native_preserves_wire_safe_domain_ids_and_drops_unsafe_rows(
                 assert_required_values(nested)
 
     assert_required_values(response)
+
+
+def test_receipt_native_rejects_path_bearing_required_domain_ids(rpc, monkeypatch):
+    import hades_cli.receipts as receipts_mod
+
+    safe_ids = ["receipt:one", "project:item-1", "scorer:one", "团队:项目"]
+    invalid_ids = [
+        "team:email/secret",
+        "foo:bar/baz",
+        r"team:email\secret",
+        "safe/../bad",
+        "artifact:secret/path",
+        "",
+        "control\nid",
+        "x" * 257,
+    ]
+
+    def summary(receipt_id, subject_id="project:item-1", scorer_id="scorer:one"):
+        return {
+            "receipt_id": receipt_id,
+            "status": "verified",
+            "subject_id": subject_id,
+            "subject_kind": "transaction",
+            "decided_at": "2026-07-10T00:00:00Z",
+            "content_hash": "sha256:deadbeef",
+            "scorer_id": scorer_id,
+            "scorer_version": "1.0",
+        }
+
+    summaries = [summary(safe_ids[0], safe_ids[1], safe_ids[2])]
+    summaries.extend(summary(invalid_id) for invalid_id in invalid_ids)
+    summaries.extend([
+        summary(safe_ids[0], invalid_ids[0]),
+        summary(safe_ids[0], safe_ids[1], invalid_ids[1]),
+    ])
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "action": "show",
+            "receipts": summaries,
+            "receipt": summary(safe_ids[0], invalid_ids[2], safe_ids[2]),
+            "observations": [
+                {
+                    "observation_id": safe_ids[0],
+                    "receipt_id": safe_ids[0],
+                    "status": "verified",
+                    "observed_at": "2026-07-11T09:00:00Z",
+                },
+                {
+                    "observation_id": invalid_ids[3],
+                    "receipt_id": safe_ids[0],
+                    "status": "verified",
+                    "observed_at": "2026-07-11T09:00:00Z",
+                },
+            ],
+            "claim_edges": [
+                {
+                    "claim_id": safe_ids[1],
+                    "verdict": "satisfied",
+                    "required": True,
+                    "evidence_ids": ["evidence-1"],
+                    "artifact_ids": ["artifact-1"],
+                },
+                {
+                    "claim_id": invalid_ids[4],
+                    "verdict": "satisfied",
+                    "required": True,
+                    "evidence_ids": ["evidence-1"],
+                    "artifact_ids": ["artifact-1"],
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc("receipt.exec", {"argv": ["show", safe_ids[0]]})
+
+    assert response["receipts"] == [summaries[0]]
+    assert "receipt" not in response
+    assert [row["observation_id"] for row in response["observations"]] == [safe_ids[0]]
+    assert [row["claim_id"] for row in response["claim_edges"]] == [safe_ids[1]]
+    wire = json.dumps(response, ensure_ascii=False)
+    for invalid_id in invalid_ids:
+        if invalid_id:
+            assert invalid_id not in wire

@@ -884,3 +884,87 @@ def test_transaction_native_preserves_wire_safe_domain_ids_and_drops_unsafe_rows
                 assert_required_values(nested)
 
     assert_required_values(response)
+
+
+def test_transaction_native_rejects_path_bearing_required_domain_ids(
+    rpc, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+
+    safe_ids = ["project:item-1", "receipt:one", "node:publish", "团队:项目"]
+    invalid_ids = [
+        "team:email/secret",
+        "foo:bar/baz",
+        r"team:email\secret",
+        "safe/../bad",
+        "artifact:secret/path",
+        "",
+        "control\nid",
+        "x" * 257,
+    ]
+
+    def transaction(transaction_id):
+        return {
+            "transaction_id": transaction_id,
+            "status": "ready",
+            "current_revision": 1,
+            "receipt_id": safe_ids[1],
+        }
+
+    def eligibility(node_id):
+        return {
+            "can_execute": True,
+            "code": "ready",
+            "fidelity": "exact",
+            "reason": "safe",
+            "blockers": [],
+            "required_cascade_node_ids": [safe_ids[2]],
+        }
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "action": "preview",
+            "transaction": transaction(safe_ids[0]),
+            "transactions": [
+                transaction(safe_ids[0]),
+                *(transaction(invalid_id) for invalid_id in invalid_ids),
+            ],
+            "eligibility": {
+                safe_ids[2]: eligibility(safe_ids[2]),
+                **{invalid_id: eligibility(invalid_id) for invalid_id in invalid_ids},
+            },
+            "receipt": {
+                "receipt_id": safe_ids[1],
+                "status": "verified",
+                "content_hash": "sha256:deadbeef",
+            },
+            "observation": {
+                "observation_id": safe_ids[3],
+                "status": "verified",
+                "content_hash": "sha256:feedface",
+            },
+            "preview_hash": "sha256:cafebabe",
+            "nodes": [
+                {"node_id": safe_ids[2], "fidelity": "exact", "requires_approval": False},
+                *[
+                    {"node_id": invalid_id, "fidelity": "exact", "requires_approval": False}
+                    for invalid_id in invalid_ids
+                ],
+            ],
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc("transaction.exec", {"argv": ["preview", safe_ids[0]]})
+
+    assert response["transaction"]["transaction_id"] == safe_ids[0]
+    assert [row["transaction_id"] for row in response["transactions"]] == [safe_ids[0]]
+    assert set(response["eligibility"]) == {safe_ids[2]}
+    assert [node["node_id"] for node in response["nodes"]] == [safe_ids[2]]
+    wire = json.dumps(response, ensure_ascii=False)
+    for invalid_id in invalid_ids:
+        if invalid_id:
+            assert invalid_id not in wire

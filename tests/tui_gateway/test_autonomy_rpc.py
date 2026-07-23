@@ -1033,3 +1033,54 @@ def test_autonomy_native_preserves_wire_safe_domain_ids_and_drops_unsafe_rows(
                 assert_required_values(nested)
 
     assert_required_values(payload)
+
+
+def test_autonomy_native_rejects_path_bearing_required_domain_ids(
+    rpc_raw, monkeypatch
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    safe_ids = ["team:email", "project:item-1", "receipt:one", "团队:项目"]
+    invalid_ids = [
+        "team:email/secret",
+        "foo:bar/baz",
+        r"team:email\secret",
+        "safe/../bad",
+        "artifact:secret/path",
+        "",
+        "control\nid",
+        "x" * 257,
+    ]
+
+    def rule(rule_id):
+        return {
+            "rule_id": rule_id,
+            "source": "stable",
+            "state": "active",
+            "effect": "allow",
+        }
+
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        "safe",
+        {
+            "ok": True,
+            "action": "list",
+            "rules": [rule(rule_id) for rule_id in [*safe_ids, *invalid_ids]],
+            "verdict": "allow",
+            "code": "explicit_allow",
+            "matched_rule_ids": [*safe_ids, *invalid_ids],
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    response = rpc_raw("autonomy.exec", {"argv": ["list"]})
+
+    assert "result" in response and "error" not in response, response
+    payload = response["result"]
+    assert [row["rule_id"] for row in payload["rules"]] == safe_ids
+    assert payload["decision"]["matched_rule_ids"] == safe_ids
+    wire = json.dumps(response, ensure_ascii=False)
+    for invalid_id in invalid_ids:
+        if invalid_id:
+            assert invalid_id not in wire
