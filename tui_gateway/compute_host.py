@@ -514,9 +514,32 @@ class ComputeHost:
                     reset_transport(token)
             except Exception:
                 # _init_session can publish a record before a worker/notifier/
-                # poller fails. Detach and stop all partial side machinery, but
-                # retain the successfully built agent for the host fallback.
+                # poller fails. Only clean up a record that still contains our
+                # agent; a reaper may have replaced the slot in the meantime.
                 partial = server._sessions.get(sid)
+                owns_partial = bool(
+                    partial is not None
+                    and isinstance(partial, dict)
+                    and partial.get("agent") is agent
+                    and partial.get("session_key") == key
+                )
+                if partial is not None and not owns_partial:
+                    if agent is not None:
+                        try:
+                            agent._end_session_on_close = False
+                        except Exception:
+                            pass
+                        try:
+                            server._close_agent_once(agent)
+                        except Exception:
+                            pass
+                        owned_db = getattr(agent, "_session_db", None)
+                        if session_db is not None and owned_db is not session_db:
+                            try:
+                                session_db.close()
+                            except Exception:
+                                pass
+                    raise RuntimeError("session replaced during session init")
                 server._discard_partial_initialized_session(
                     sid, partial, close_agent=False
                 )

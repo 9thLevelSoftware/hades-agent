@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
@@ -148,6 +149,9 @@ _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
 _session_resume_lock = threading.Lock()
+_agent_close_registry_lock = threading.Lock()
+_agent_close_fallback: OrderedDict[int, tuple[object, threading.Lock, bool]] = OrderedDict()
+_AGENT_CLOSE_FALLBACK_MAX = 256
 try:
     _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
 except (ValueError, TypeError):
@@ -625,20 +629,43 @@ def _close_agent_once(agent) -> None:
     """Close an agent at most once across teardown/build races."""
     if agent is None or not hasattr(agent, "close"):
         return
-    lock = getattr(agent, "_tui_close_lock", None)
-    if lock is None:
-        lock = threading.Lock()
-        try:
-            agent._tui_close_lock = lock
-        except Exception:
-            pass
+    fallback_state = None
+    # Installing the per-agent lock and looking up the no-__dict__ fallback are
+    # one atomic operation.  A pair of concurrent teardowns must never create
+    # two locks before either can mark the agent closed.
+    with _agent_close_registry_lock:
+        lock = getattr(agent, "_tui_close_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            try:
+                agent._tui_close_lock = lock
+            except Exception:
+                ident = id(agent)
+                existing = _agent_close_fallback.get(ident)
+                if existing is not None and existing[0] is agent:
+                    _, lock, _called = existing
+                    fallback_state = ident
+                else:
+                    if len(_agent_close_fallback) >= _AGENT_CLOSE_FALLBACK_MAX:
+                        _agent_close_fallback.popitem(last=False)
+                    _agent_close_fallback[ident] = (agent, lock, False)
+                    fallback_state = ident
     with lock:
-        if getattr(agent, "_tui_close_called", False):
-            return
-        try:
-            agent._tui_close_called = True
-        except Exception:
-            pass
+        if fallback_state is not None:
+            with _agent_close_registry_lock:
+                state = _agent_close_fallback.get(fallback_state)
+                if state is None or state[0] is not agent or state[2]:
+                    return
+                _agent_close_fallback[fallback_state] = (agent, lock, True)
+        else:
+            if getattr(agent, "_tui_close_called", False):
+                return
+            try:
+                agent._tui_close_called = True
+            except Exception:
+                # The fallback entry can only be missing for an object whose
+                # attributes became immutable after registration; fail closed.
+                return
         agent.close()
 
 
@@ -1721,6 +1748,12 @@ def _start_agent_build(sid: str, session: dict) -> None:
     def _build() -> None:
         with _sessions_lock:
             current = _sessions.get(sid)
+            if current is not session:
+                # The timer/thread was queued for an older record.  Fence it
+                # before opening a profile DB or constructing any agent: a
+                # reaped slot may already belong to an unrelated session.
+                ready.set()
+                return
         if current is None:
             ready.set()
             return
@@ -1753,35 +1786,35 @@ def _start_agent_build(sid: str, session: dict) -> None:
                         f"profile SessionDB unavailable for deferred session: {exc}"
                     ) from exc
             # Lazy-resumed (watch) sessions carry the stored conversation id.
-                # Lazy-resumed (watch) sessions carry the stored conversation
-                # id — pass it through so the upgrade continues that session
-                # instead of starting a fresh one under the same key.
-                kw = {
-                    "session_db": session_db,
-                    "owns_session_db": bool(profile_home and session_db is not None),
-                }
-                if resume_sid := current.get("resume_session_id"):
-                    kw["session_id"] = resume_sid
-                kw["platform_override"] = _session_source(current)
-                resume_overrides = current.get("resume_runtime_overrides")
-                if isinstance(resume_overrides, dict) and resume_overrides:
-                    # Cold deferred resume: restore the full persisted runtime
-                    # identity (model/provider/base_url/api_mode/reasoning/tier)
-                    # exactly as the eager resume path's _stored_session_runtime_
-                    # overrides splat did, so a deferred build can't drop the
-                    # provider and fail with "No LLM provider configured".
-                    kw.update(resume_overrides)
-                else:
-                    # Model/effort/fast the desktop picked for a brand-new chat
-                    # ride in as per-session overrides so the first build uses
-                    # them directly (no global config, no build-then-switch).
-                    if override := current.get("model_override"):
-                        kw["model_override"] = override
-                    if (reasoning := current.get("create_reasoning_override")) is not None:
-                        kw["reasoning_config_override"] = reasoning
-                    if (tier := current.get("create_service_tier_override")) is not None:
-                        kw["service_tier_override"] = tier
-                agent = _make_agent(sid, key, **kw)
+            # Lazy-resumed (watch) sessions carry the stored conversation id —
+            # pass it through so the upgrade continues that session instead of
+            # starting a fresh one under the same key.
+            kw = {
+                "session_db": session_db,
+                "owns_session_db": bool(profile_home and session_db is not None),
+            }
+            if resume_sid := current.get("resume_session_id"):
+                kw["session_id"] = resume_sid
+            kw["platform_override"] = _session_source(current)
+            resume_overrides = current.get("resume_runtime_overrides")
+            if isinstance(resume_overrides, dict) and resume_overrides:
+                # Cold deferred resume: restore the full persisted runtime
+                # identity (model/provider/base_url/api_mode/reasoning/tier)
+                # exactly as the eager resume path's _stored_session_runtime_
+                # overrides splat did, so a deferred build can't drop the
+                # provider and fail with "No LLM provider configured".
+                kw.update(resume_overrides)
+            else:
+                # Model/effort/fast the desktop picked for a brand-new chat
+                # ride in as per-session overrides so the first build uses
+                # them directly (no global config, no build-then-switch).
+                if override := current.get("model_override"):
+                    kw["model_override"] = override
+                if (reasoning := current.get("create_reasoning_override")) is not None:
+                    kw["reasoning_config_override"] = reasoning
+                if (tier := current.get("create_service_tier_override")) is not None:
+                    kw["service_tier_override"] = tier
+            agent = _make_agent(sid, key, **kw)
             with _sessions_lock:
                 if _sessions.get(sid) is not current:
                     raise RuntimeError("session closed during deferred agent build")
@@ -5187,14 +5220,12 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
         candidate["config_model_seen"] = _config_model_target()
         candidate["show_reasoning"] = _load_show_reasoning()
         candidate["tool_progress_mode"] = _load_tool_progress_mode()
-        new_worker = _restart_slash_worker(sid, candidate, True)
-        candidate["slash_worker"] = new_worker
-        new_stop = _start_notification_poller(
-            sid, candidate, db=session_db if session_db is not None else None
-        )
-        candidate["_notif_stop"] = new_stop
         info = _session_info(new_agent, candidate)
 
+        # Commit the candidate identity before starting any side machinery.
+        # A reaper can replace the registry slot while _session_info runs; in
+        # that case the candidate is discarded without spawning a worker or
+        # poller for a dead record.
         with _sessions_lock:
             if _sessions.get(sid) is not session:
                 raise RuntimeError("session closed or replaced during reset")
@@ -5224,6 +5255,24 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
                 session[name] = candidate[name]
             if "_notif_thread" in candidate:
                 session["_notif_thread"] = candidate["_notif_thread"]
+
+        with _sessions_lock:
+            if _sessions.get(sid) is not session or session.get("agent") is not new_agent:
+                raise RuntimeError("session closed or replaced during reset")
+        new_worker = _restart_slash_worker(sid, session, True)
+        candidate["slash_worker"] = new_worker
+        with _sessions_lock:
+            if _sessions.get(sid) is not session or session.get("agent") is not new_agent:
+                raise RuntimeError("session closed or replaced during reset")
+            session["slash_worker"] = new_worker
+        new_stop = _start_notification_poller(
+            sid, session, db=session_db if session_db is not None else None
+        )
+        candidate["_notif_stop"] = new_stop
+        with _sessions_lock:
+            if _sessions.get(sid) is not session or session.get("agent") is not new_agent:
+                raise RuntimeError("session closed or replaced during reset")
+            session["_notif_stop"] = new_stop
 
         if old_stop is not None:
             old_stop.set()
@@ -5429,6 +5478,22 @@ def _make_agent(
 
     synthetic = maybe_build_synthetic_agent(session_id or key, model_override)
     if synthetic is not None:
+        if session_db is not None and owns_session_db and hasattr(synthetic, "close"):
+            # The synthetic seam bypasses AIAgent's normal ownership wiring.
+            # Wrap its no-op close so a profile DB transferred to the agent is
+            # still closed deterministically by the normal lifecycle path.
+            try:
+                setattr(synthetic, "_session_db", session_db)
+                setattr(synthetic, "_owns_session_db", True)
+                original_close = synthetic.close
+                def _close_synthetic_with_db():
+                    try:
+                        original_close()
+                    finally:
+                        session_db.close()
+                synthetic.close = _close_synthetic_with_db
+            except Exception:
+                pass
         return synthetic
 
     from run_agent import AIAgent
@@ -6960,11 +7025,17 @@ def _session_resume_impl(rid, params: dict, db_lease: _ResumeSessionDBLease) -> 
     with _session_resume_lock:
         live = _find_live_session_by_key(target)
         if live is not None:
-            try:
-                if hasattr(agent, "close"):
-                    agent.close()
-            except Exception:
-                pass
+            if hasattr(agent, "close"):
+                try:
+                    # This agent lost the race and must not finalize the
+                    # durable row now owned by the live winner.
+                    agent._end_session_on_close = False
+                except Exception:
+                    pass
+                try:
+                    _close_agent_once(agent)
+                except Exception:
+                    pass
             if lease is not None:
                 lease.release()
             other_sid, other_session = live
@@ -9599,6 +9670,9 @@ def _(rid, params: dict) -> dict:
     home_token = None
     lease = None
     agent = None
+    row_created = False
+    db_owned_by_agent = False
+    db = None
     try:
         # A cross-profile branch must never consult the launch-profile singleton
         # DB. Keep this override active through title/model resolution, row
@@ -9647,6 +9721,7 @@ def _(rid, params: dict) -> dict:
                 parent_session_id=old_key,
                 cwd=parent_cwd,
             )
+            row_created = True
             for msg in history:
                 db.append_message(
                     session_id=new_key,
@@ -9656,6 +9731,9 @@ def _(rid, params: dict) -> dict:
                 )
             db.set_session_title(new_key, title)
         except Exception as e:
+            if row_created:
+                with contextlib.suppress(Exception):
+                    db.end_session(new_key, "branch_row_rollback")
             if lease is not None:
                 lease.release()
                 lease = None
@@ -9677,6 +9755,7 @@ def _(rid, params: dict) -> dict:
                     session_db=db,
                     owns_session_db=bool(profile_home),
                 )
+                db_owned_by_agent = bool(profile_home)
             finally:
                 _clear_session_context(tokens)
             _init_session(
@@ -9694,21 +9773,19 @@ def _(rid, params: dict) -> dict:
                 if new_sid in _sessions:
                     _sessions[new_sid]["active_session_lease"] = lease
         except Exception as e:
+            if row_created:
+                with contextlib.suppress(Exception):
+                    db.end_session(new_key, "branch_agent_init_failed")
             partial = _sessions.get(new_sid)
             if partial is not None:
                 _discard_partial_initialized_session(
                     new_sid, partial, close_agent=True
                 )
             elif agent is not None:
-                try:
-                    agent.close()
-                except Exception:
-                    pass
-            elif profile_home:
-                try:
-                    db.close()
-                except Exception:
-                    pass
+                with contextlib.suppress(Exception):
+                    agent._end_session_on_close = False
+                with contextlib.suppress(Exception):
+                    _close_agent_once(agent)
             if lease is not None:
                 lease.release()
                 lease = None
@@ -9719,6 +9796,9 @@ def _(rid, params: dict) -> dict:
             lease.release()
         return _err(rid, 5008, f"branch failed: {e}")
     finally:
+        if profile_home and db is not None and not db_owned_by_agent:
+            with contextlib.suppress(Exception):
+                db.close()
         if home_token is not None:
             reset_hermes_home_override(home_token)
 
