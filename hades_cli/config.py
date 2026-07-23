@@ -506,25 +506,29 @@ def stamp_install_method(method: str, project_root: Optional[Path] = None) -> No
 
 
 def is_uv_tool_install() -> bool:
-    """Return True when the *running* Hermes lives in a ``uv tool`` layout.
+    """Return True when the *running* Hades lives in a ``uv tool`` layout.
 
-    ``uv tool install hermes-agent`` places the install at
-    ``.../uv/tools/hermes-agent/...`` (default ``~/.local/share/uv/tools``,
-    or ``$UV_TOOL_DIR/...``). Such installs live outside any virtualenv, so
-    ``uv pip install`` fails with ``No virtual environment found`` and the
-    update path must use ``uv tool upgrade`` instead.
+    Canonical installs live at ``.../uv/tools/hades-agent/...``. The legacy
+    ``.../uv/tools/hermes-agent/...`` layout is also accepted so an existing
+    compatibility install can update itself to the Hades distribution. Such
+    installs live outside any virtualenv, so ``uv pip install`` fails with
+    ``No virtual environment found`` and the update path must use
+    ``uv tool upgrade`` instead.
 
     Detection is intentionally restricted to properties of the running
     interpreter (``sys.prefix`` / ``sys.executable``). We deliberately do
-    NOT consult ``uv tool list``: it would also return True when
-    ``hermes-agent`` happens to be uv-tool-installed on the machine while
-    the *active* Hermes is a regular pip/venv install, causing
-    ``hermes update`` to upgrade the wrong copy. It would also block on a
-    subprocess call (~seconds) just to compute a recommendation string.
+    NOT consult ``uv tool list``: it would also return True when another copy
+    is uv-tool-installed on the machine while the active Hades is a regular
+    pip/venv install, causing an update to target the wrong copy. It would
+    also block on a subprocess call (~seconds) just to compute a
+    recommendation string.
     """
     def _has_uv_tool_marker(path: str) -> bool:
-        norm = os.path.normpath(path).replace(os.sep, "/").lower()
-        return "/uv/tools/hermes-agent/" in norm + "/"
+        normalized = "/" + path.replace("\\", "/").strip("/").casefold() + "/"
+        return any(
+            f"/uv/tools/{distribution}/" in normalized
+            for distribution in ("hades-agent", "hermes-agent")
+        )
 
     if _has_uv_tool_marker(sys.prefix):
         return True
@@ -543,12 +547,12 @@ def recommended_update_command_for_method(method: str) -> str:
         return "docker pull nousresearch/hermes-agent:latest"
     if method == "pip":
         if is_uv_tool_install():
-            return "uv tool upgrade hermes-agent"
+            return "uv tool upgrade hades-agent"
         import shutil
         if shutil.which("uv"):
-            return "uv pip install --upgrade hermes-agent"
-        return "pip install --upgrade hermes-agent"
-    return "hermes update"
+            return "uv pip install --upgrade hades-agent"
+        return "pip install --upgrade hades-agent"
+    return "hades update"
 
 
 def recommended_update_command() -> str:
