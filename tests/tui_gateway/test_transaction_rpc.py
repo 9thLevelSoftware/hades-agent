@@ -104,6 +104,17 @@ def test_transaction_rpc_validates_argv_without_echoing_content(rpc):
             assert bad[0] not in str(error.get("message", ""))
 
 
+def test_transaction_rpc_rejects_invalid_session_id_type_without_traceback(rpc):
+    resp = rpc("transaction.exec", {
+        "session_id": [], "argv": ["list"],
+    })
+    error = resp.get("error") or {}
+
+    assert error.get("code") == 4006
+    assert "Traceback" not in str(error.get("message", ""))
+    assert "[]" not in str(error.get("message", ""))
+
+
 def test_transaction_rpc_maps_validation_and_failure_codes(rpc):
     resp = rpc("transaction.exec", {
         "argv": ["explode"], "session_id": "sid",

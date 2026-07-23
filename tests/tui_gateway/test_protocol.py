@@ -2006,6 +2006,15 @@ def test_dispatch_offloads_long_handlers_and_emits_via_stdout(capture):
     assert written == {"jsonrpc": "2.0", "id": "r2", "result": {"output": "hi"}}
 
 
+@pytest.mark.parametrize("method", ["receipt.exec", "transaction.exec"])
+def test_dispatch_routes_native_exec_handlers_to_pool(server, method):
+    """Native profile-I/O RPCs must not run on the JSON-RPC reader thread."""
+    with patch.object(server._pool, "submit") as submit:
+        assert server.dispatch({"id": "native", "method": method, "params": {}}) is None
+
+    assert submit.call_count == 1
+
+
 def test_dispatch_long_handler_does_not_block_fast_handler(server):
     """A slow long handler must not prevent a concurrent fast handler from completing."""
     released = threading.Event()

@@ -198,6 +198,14 @@ def test_argv_must_be_a_list_of_strings(rpc_raw):
         assert resp["error"]["code"] == 4033, resp
 
 
+def test_invalid_session_id_type_is_rejected_without_traceback(rpc_raw):
+    resp = rpc_raw("autonomy.exec", {"session_id": [], "argv": ["status"]})
+
+    assert resp["error"]["code"] == 4004
+    assert "Traceback" not in resp["error"]["message"]
+    assert "[]" not in resp["error"]["message"]
+
+
 def test_argv_entry_count_is_bounded_to_64(rpc_raw):
     resp = rpc_raw("autonomy.exec", {"argv": ["list"] + ["--json"] * 64})
     assert resp["error"]["code"] == 4033

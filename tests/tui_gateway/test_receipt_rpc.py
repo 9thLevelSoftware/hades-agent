@@ -344,6 +344,14 @@ def test_argv_must_be_a_nonempty_list_of_strings(rpc):
         assert resp["error"]["code"] == 4004, resp
 
 
+def test_invalid_session_id_type_is_rejected_without_traceback(rpc):
+    resp = rpc("receipt.exec", {"session_id": {}, "argv": ["list"]})
+
+    assert resp["error"]["code"] == 4004
+    assert "Traceback" not in resp["error"]["message"]
+    assert "{}" not in resp["error"]["message"]
+
+
 def test_argv_entry_count_is_bounded_to_64(rpc):
     resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"] + ["x"] * 64})
     assert resp["error"]["code"] == 4004
