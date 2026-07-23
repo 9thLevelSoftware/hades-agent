@@ -361,12 +361,20 @@ def test_resume_publishes_profile_and_workspace_before_native_handlers(
         server, "_claim_active_session_slot", lambda *_args, **_kwargs: (None, None)
     )
     monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
-    monkeypatch.setattr(server, "_set_session_context", lambda _key: [])
+    monkeypatch.setattr(
+        server,
+        "_set_session_context",
+        lambda _key, **_kwargs: [],
+    )
     monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
     monkeypatch.setattr(server, "_SlashWorker", Worker)
     monkeypatch.setattr(server, "_register_session_cwd", lambda *_args: None)
     monkeypatch.setattr(server, "_wire_callbacks", lambda *_args: None)
-    monkeypatch.setattr(server, "_start_notification_poller", lambda *_args: None)
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args: None)
     monkeypatch.setattr(server, "_session_info", lambda *_args: {})
     monkeypatch.setattr(server, "_emit", lambda *_args: None)
