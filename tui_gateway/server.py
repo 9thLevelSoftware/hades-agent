@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -13544,6 +13545,93 @@ _NATIVE_MAX_OUTPUT_CHARS = 16_384
 _NATIVE_OUTPUT_TRUNCATION_SUFFIX = "... [truncated]"
 _NATIVE_MAX_RESULT_BYTES = 1_048_576  # 1 MiB UTF-8 default JSON-RPC frame + newline
 _TRANSACTION_MAX_PREVIEW_NODES = 256
+_NATIVE_MAX_SAFE_TEXT_CHARS = 4_096
+_NATIVE_MAX_SAFE_TEXT_BYTES = 16_384
+_NATIVE_MAX_SAFE_LIST_ITEMS = 256
+
+# Native RPC responses are a security boundary, not a normal transcript.  The
+# normal redactor knows credential forms but intentionally leaves filesystem
+# locations actionable for ordinary navigation.  Native results must do both:
+# force credential redaction regardless of config and remove absolute/local
+# locations from every free-text field before JSON serialization.
+_NATIVE_LOCATION_RE = re.compile(
+    r'''file://(?:localhost)?(?:[A-Za-z]:[\\/]|/)[^\s"'<>`)\]},;]+'''
+    r'''|(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/][^\s"'<>`)\]},;]+)'''
+    r'''|\\\\[^\\/\s]+(?:[\\/][^\\/\s]+)+'''
+    r'''|/(?:Users|home|private|tmp|var/tmp|var/folders)(?:/[^\s"'<>`)\]},;]+)*'''
+)
+
+
+def _cap_native_text(text: str, *, limit: int = _NATIVE_MAX_SAFE_TEXT_CHARS) -> str:
+    """Cap a text value by characters *and* UTF-8 bytes deterministically."""
+    if limit < 1:
+        return ""
+    if len(text) > limit:
+        text = (
+            text[: limit - len(_NATIVE_OUTPUT_TRUNCATION_SUFFIX)]
+            + _NATIVE_OUTPUT_TRUNCATION_SUFFIX
+        )
+    encoded = text.encode("utf-8")
+    if len(encoded) <= _NATIVE_MAX_SAFE_TEXT_BYTES:
+        return text
+    suffix = _NATIVE_OUTPUT_TRUNCATION_SUFFIX.encode("utf-8")
+    budget = max(0, _NATIVE_MAX_SAFE_TEXT_BYTES - len(suffix))
+    return encoded[:budget].decode("utf-8", errors="ignore") + _NATIVE_OUTPUT_TRUNCATION_SUFFIX
+
+
+def _native_safe_text(
+    value: Any,
+    *,
+    method: str,
+    limit: int = _NATIVE_MAX_SAFE_TEXT_CHARS,
+) -> str:
+    """Force-redact and location-scrub one producer-owned text value."""
+    try:
+        from agent.redact import redact_sensitive_text
+
+        text = "" if value is None else str(value)
+        text = redact_sensitive_text(
+            text,
+            force=True,
+            redact_url_credentials=True,
+        )
+        text = _NATIVE_LOCATION_RE.sub("[REDACTED_PATH]", text)
+        return _cap_native_text(text, limit=limit)
+    except Exception as exc:
+        logger.warning("%s producer text rejected (%s)", method, type(exc).__name__)
+        raise ValueError("producer text is not wire-safe") from None
+
+
+def _native_safe_text_list(
+    value: Any,
+    *,
+    method: str,
+    limit: int = _NATIVE_MAX_SAFE_TEXT_CHARS,
+) -> list[str]:
+    if type(value) is not list:
+        return []
+    return [
+        _native_safe_text(item, method=method, limit=limit)
+        for item in value[:_NATIVE_MAX_SAFE_LIST_ITEMS]
+        if isinstance(item, str)
+    ]
+
+
+def _native_safe_id(value: Any, *, method: str, limit: int = 256) -> str | None:
+    """Keep reviewed IDs/hashes exact while bounding and scrubbing odd values."""
+    if not isinstance(value, str):
+        return None
+    return _native_safe_text(value, method=method, limit=limit)
+
+
+def _native_safe_id_list(value: Any, *, method: str, limit: int = 256) -> list[str]:
+    if type(value) is not list:
+        return []
+    return [
+        safe
+        for item in value[:_NATIVE_MAX_SAFE_LIST_ITEMS]
+        if (safe := _native_safe_id(item, method=method, limit=limit)) is not None
+    ]
 
 
 def _native_error(rid, code: int, message: str) -> dict:
@@ -13617,17 +13705,7 @@ def _normalize_native_payload(payload: Any, *, method: str) -> dict:
 
 def _cap_native_output(value: Any, *, method: str) -> str:
     """Convert producer text without allowing conversion errors on the wire."""
-    try:
-        text = "" if value is None else str(value)
-        if len(text) <= _NATIVE_MAX_OUTPUT_CHARS:
-            return text
-        return (
-            text[: _NATIVE_MAX_OUTPUT_CHARS - len(_NATIVE_OUTPUT_TRUNCATION_SUFFIX)]
-            + _NATIVE_OUTPUT_TRUNCATION_SUFFIX
-        )
-    except Exception as exc:
-        logger.warning("%s producer output rejected (%s)", method, type(exc).__name__)
-        raise ValueError("producer output is not wire-safe") from None
+    return _native_safe_text(value, method=method, limit=_NATIVE_MAX_OUTPUT_CHARS)
 
 
 def _native_success(rid, response: dict, *, method: str, code: int) -> dict:
@@ -13669,56 +13747,50 @@ def _autonomy_contract_doc(payload: dict) -> dict | None:
         if value is not None and type(value) is not str:
             return None
         if value is not None:
-            doc["hash"] = value
+            doc["hash"] = _native_safe_id(value, method="autonomy.exec")
     for key in ("profile_id", "mode"):
         if key in payload:
             value = payload[key]
             if type(value) is not str:
                 return None
-            doc[key] = value
+            doc[key] = _native_safe_id(value, method="autonomy.exec")
     if "version" not in doc and "hash" not in doc:
         return None
     return doc
 
 
 def _autonomy_rule_doc(row: Any) -> dict | None:
-    """Construct the UI rule document without forwarding producer fields."""
+    """Construct the UI rule document from reviewed fields only."""
     if type(row) is not dict:
         return None
     required = ("rule_id", "source", "state", "effect")
     if any(key not in row or type(row[key]) is not str for key in required):
         return None
+    method = "autonomy.exec"
     doc: dict[str, Any] = {
-        "rule_id": row["rule_id"],
-        "source": row["source"],
-        "state": row["state"],
-        "effect": row["effect"],
+        "rule_id": _native_safe_id(row["rule_id"], method=method),
+        "source": _native_safe_id(row["source"], method=method),
+        "state": _native_safe_id(row["state"], method=method),
+        "effect": _native_safe_id(row["effect"], method=method),
     }
-    string_lists = (
-        "action_classes",
-        "data_classes",
-        "recipient_classes",
-    )
-    optional_strings = ("description", "edit_command", "provenance")
-    optional_ints = ("expires_at_ms", "max_uses", "remaining_uses")
-    for key in string_lists:
+    for key in ("action_classes", "data_classes", "recipient_classes"):
         if key in row:
             value = row[key]
             if type(value) is not list or not all(type(item) is str for item in value):
                 return None
-            doc[key] = list(value)
-    for key in optional_strings:
+            doc[key] = _native_safe_text_list(value, method=method, limit=256)
+    for key in ("description", "edit_command", "provenance"):
         if key in row:
             value = row[key]
             if type(value) is not str:
                 return None
-            doc[key] = value
+            doc[key] = _native_safe_text(value, method=method)
     if "confidence_ppm" in row:
         value = row["confidence_ppm"]
         if type(value) is not int:
             return None
         doc["confidence_ppm"] = value
-    for key in optional_ints:
+    for key in ("expires_at_ms", "max_uses", "remaining_uses"):
         if key in row:
             value = row[key]
             if value is not None and type(value) is not int:
@@ -13731,7 +13803,7 @@ def _autonomy_rule_rows(value: Any) -> list[dict]:
     if type(value) is not list:
         return []
     docs = []
-    for row in value:
+    for row in value[:_NATIVE_MAX_SAFE_LIST_ITEMS]:
         doc = _autonomy_rule_doc(row)
         if doc is not None:
             docs.append(doc)
@@ -13742,7 +13814,7 @@ def _autonomy_evidence_rows(value: Any) -> list[dict] | None:
     if type(value) is not list:
         return None
     docs = []
-    for row in value:
+    for row in value[:_NATIVE_MAX_SAFE_LIST_ITEMS]:
         if (
             type(row) is not dict
             or "kind" not in row
@@ -13751,12 +13823,15 @@ def _autonomy_evidence_rows(value: Any) -> list[dict] | None:
             or type(row["stage"]) is not str
         ):
             return None
-        docs.append({"kind": row["kind"], "stage": row["stage"]})
+        docs.append({
+            "kind": _native_safe_id(row["kind"], method="autonomy.exec"),
+            "stage": _native_safe_id(row["stage"], method="autonomy.exec"),
+        })
     return docs
 
 
 def _autonomy_decision_doc(row: Any, *, audit: bool = False) -> dict | None:
-    """Construct an allowlisted decision, with audit-only identity fields."""
+    """Construct an allowlisted decision with forced-redacted free text."""
     if type(row) is not dict:
         return None
     if (
@@ -13767,40 +13842,36 @@ def _autonomy_decision_doc(row: Any, *, audit: bool = False) -> dict | None:
         or type(row["code"]) is not str
     ):
         return None
+    method = "autonomy.exec"
     doc: dict[str, Any] = {
-        "verdict": row["verdict"],
-        "code": row["code"],
+        "verdict": _native_safe_id(row["verdict"], method=method),
+        "code": _native_safe_id(row["code"], method=method),
     }
-    optional_strings = (
-        "authority_hash",
-        "context_hash",
-        "reason",
-        "stage",
-    )
-    optional_ints = ("authority_version",)
-    optional_string_lists = (
-        "conflicting_rule_ids",
-        "edit_targets",
-        "matched_rule_ids",
-    )
-    for key in optional_strings:
+    for key in ("authority_hash", "context_hash", "reason", "stage"):
         if key in row:
             value = row[key]
             if type(value) is not str:
                 return None
-            doc[key] = value
-    for key in optional_ints:
-        if key in row:
-            value = row[key]
-            if type(value) is not int:
-                return None
-            doc[key] = value
-    for key in optional_string_lists:
+            doc[key] = (
+                _native_safe_text(value, method=method)
+                if key == "reason"
+                else _native_safe_id(value, method=method)
+            )
+    if "authority_version" in row:
+        value = row["authority_version"]
+        if type(value) is not int:
+            return None
+        doc["authority_version"] = value
+    for key in ("conflicting_rule_ids", "edit_targets", "matched_rule_ids"):
         if key in row:
             value = row[key]
             if type(value) is not list or not all(type(item) is str for item in value):
                 return None
-            doc[key] = list(value)
+            doc[key] = (
+                _native_safe_text_list(value, method=method)
+                if key == "edit_targets"
+                else _native_safe_id_list(value, method=method)
+            )
     if "expires_at_ms" in row:
         value = row["expires_at_ms"]
         if value is not None and type(value) is not int:
@@ -13825,13 +13896,15 @@ def _autonomy_decision_doc(row: Any, *, audit: bool = False) -> dict | None:
             ):
                 return None
             safe_clarification: dict[str, Any] = {
-                "question": clarification["question"],
-                "choices": list(clarification["choices"]),
+                "question": _native_safe_text(clarification["question"], method=method),
+                "choices": _native_safe_text_list(clarification["choices"], method=method),
             }
             if "code" in clarification:
                 if type(clarification["code"]) is not str:
                     return None
-                safe_clarification["code"] = clarification["code"]
+                safe_clarification["code"] = _native_safe_id(
+                    clarification["code"], method=method
+                )
             doc["clarification"] = safe_clarification
         else:
             return None
@@ -13841,7 +13914,7 @@ def _autonomy_decision_doc(row: Any, *, audit: bool = False) -> dict | None:
                 value = row[key]
                 if type(value) is not str:
                     return None
-                doc[key] = value
+                doc[key] = _native_safe_id(value, method=method)
         if "created_at_ms" in row:
             value = row["created_at_ms"]
             if type(value) is not int:
@@ -13854,7 +13927,7 @@ def _autonomy_audit_rows(value: Any) -> list[dict]:
     if type(value) is not list:
         return []
     docs = []
-    for row in value:
+    for row in value[:_NATIVE_MAX_SAFE_LIST_ITEMS]:
         doc = _autonomy_decision_doc(row, audit=True)
         if doc is not None:
             docs.append(doc)
@@ -13874,19 +13947,27 @@ def _autonomy_preview_doc(row: Any) -> dict | None:
         return None
     doc: dict[str, Any] = {
         "applied": False,
-        "before_contract_hash": row["before_contract_hash"],
-        "after_contract_hash": row["after_contract_hash"],
+        "before_contract_hash": _native_safe_id(
+            row["before_contract_hash"], method="autonomy.exec"
+        ),
+        "after_contract_hash": _native_safe_id(
+            row["after_contract_hash"], method="autonomy.exec"
+        ),
     }
     if "profile_id" in row:
         if type(row["profile_id"]) is not str:
             return None
-        doc["profile_id"] = row["profile_id"]
+        doc["profile_id"] = _native_safe_id(row["profile_id"], method="autonomy.exec")
     for key in ("added_rule_ids", "removed_rule_ids", "changed_rule_ids", "warnings"):
         if key in row:
             value = row[key]
             if type(value) is not list or not all(type(item) is str for item in value):
                 return None
-            doc[key] = list(value)
+            doc[key] = (
+                _native_safe_text_list(value, method="autonomy.exec")
+                if key == "warnings"
+                else _native_safe_id_list(value, method="autonomy.exec")
+            )
     return doc
 
 
@@ -13904,12 +13985,12 @@ def _autonomy_applied_doc(row: Any) -> dict | None:
     doc: dict[str, Any] = {
         "applied": True,
         "contract_version": row["contract_version"],
-        "contract_hash": row["contract_hash"],
+        "contract_hash": _native_safe_id(row["contract_hash"], method="autonomy.exec"),
     }
     if "config_hash" in row:
         if type(row["config_hash"]) is not str:
             return None
-        doc["config_hash"] = row["config_hash"]
+        doc["config_hash"] = _native_safe_id(row["config_hash"], method="autonomy.exec")
     return doc
 
 
@@ -13946,7 +14027,6 @@ def _(rid, params: dict) -> dict:
         import hades_cli.autonomy as _autonomy_cli
 
         result = _autonomy_cli.run_argv(list(argv), output_mode="structured")
-        resolved_home = str(get_hades_home())
         exit_ok = _autonomy_cli.EXIT_OK
         exit_denied = _autonomy_cli.EXIT_DENIED
         exit_validation = _autonomy_cli.EXIT_VALIDATION
@@ -13997,11 +14077,23 @@ def _(rid, params: dict) -> dict:
         decision = _autonomy_decision_doc(payload) if "verdict" in payload else None
         preview = _autonomy_preview_doc(payload)
         applied = _autonomy_applied_doc(payload)
+        action = _native_safe_id(argv[0].strip().lower(), method="autonomy.exec", limit=128)
+        if exit_code == exit_denied:
+            # A denial is a structured safety result, but the producer's
+            # renderer may include action arguments, paths, or credentials.
+            # Generate a fixed summary from the already-normalized decision.
+            output = _native_safe_text(
+                "autonomy denied"
+                + (f": {decision['code']}" if decision and decision.get("code") else ""),
+                method="autonomy.exec",
+            )
+        else:
+            output = _cap_native_output(producer_output, method="autonomy.exec")
         response = {
             "ok": exit_code == exit_ok,
-            "action": argv[0].strip().lower(),
+            "action": action or "autonomy",
             "exit_code": exit_code,
-            "output": _cap_native_output(producer_output, method="autonomy.exec"),
+            "output": output,
             "contract": _autonomy_contract_doc(payload),
             "rules": _autonomy_rule_rows(payload.get("rules")),
             "suggestions": _autonomy_rule_rows(payload.get("suggestions")),
@@ -14013,7 +14105,6 @@ def _(rid, params: dict) -> dict:
             # a previewed change needing the exact-hash apply, or a crashed
             # apply journal pending recovery (authority fails closed).
             "approval_pending": bool(preview) or bool(payload.get("pending_apply")),
-            "profile_home": resolved_home,
         }
     except Exception:
         return _native_internal_error(rid, method="autonomy.exec", code=5038)
@@ -14031,6 +14122,149 @@ def _(rid, params: dict) -> dict:
 
 _RECEIPT_MAX_ARGV_ENTRIES = 64
 _RECEIPT_MAX_ARGV_BYTES = 65_536  # 64 KiB total UTF-8
+
+
+def _receipt_summary_doc(row: Any) -> dict | None:
+    """Allowlist receipt list rows without source or artifact locators."""
+    if type(row) is not dict:
+        return None
+    required = (
+        "receipt_id", "status", "subject_id", "subject_kind", "decided_at",
+        "content_hash", "scorer_id", "scorer_version",
+    )
+    if any(type(row.get(key)) is not str for key in required):
+        return None
+    method = "receipt.exec"
+    doc = {
+        "receipt_id": _native_safe_id(row["receipt_id"], method=method),
+        "status": _native_safe_id(row["status"], method=method),
+        "subject_id": _native_safe_id(row["subject_id"], method=method),
+        "subject_kind": _native_safe_id(row["subject_kind"], method=method),
+        "decided_at": _native_safe_id(row["decided_at"], method=method),
+        "content_hash": _native_safe_id(row["content_hash"], method=method),
+        "scorer_id": _native_safe_id(row["scorer_id"], method=method),
+        "scorer_version": _native_safe_id(row["scorer_version"], method=method),
+    }
+    if "session_id" in row:
+        value = row["session_id"]
+        if value is not None and type(value) is not str:
+            return None
+        doc["session_id"] = (
+            None if value is None else _native_safe_id(value, method=method)
+        )
+    return doc
+
+
+def _receipt_detail_doc(row: Any, *, observation_count: int = 0) -> dict | None:
+    """Allowlist receipt identity/count fields; never forward raw evidence."""
+    if type(row) is not dict:
+        return None
+    required = (
+        "receipt_id", "status", "subject_id", "subject_kind", "content_hash",
+        "decided_at", "scorer_id", "scorer_version",
+    )
+    if any(type(row.get(key)) is not str for key in required):
+        return None
+    method = "receipt.exec"
+    doc: dict[str, Any] = {
+        key: _native_safe_id(row[key], method=method)
+        for key in required
+    }
+    for key in ("session_id", "turn_id", "mission_id", "transaction_id"):
+        if key in row:
+            value = row[key]
+            if value is not None and type(value) is not str:
+                return None
+            doc[key] = None if value is None else _native_safe_id(value, method=method)
+    uncertainty = row.get("uncertainty")
+    if uncertainty is not None:
+        if type(uncertainty) is not list or not all(type(item) is str for item in uncertainty):
+            return None
+        doc["uncertainty"] = _native_safe_text_list(uncertainty, method=method)
+    for source_key, output_key in (
+        ("claims", "claim_count"),
+        ("evidence", "evidence_count"),
+        ("artifacts", "artifact_count"),
+    ):
+        if source_key in row:
+            value = row[source_key]
+            if type(value) is not list:
+                return None
+            doc[output_key] = min(len(value), _NATIVE_MAX_SAFE_LIST_ITEMS)
+    doc["observation_count"] = max(0, min(observation_count, _NATIVE_MAX_SAFE_LIST_ITEMS))
+    return doc
+
+
+def _receipt_observation_doc(row: Any) -> dict | None:
+    """Keep observation identity/status/hash only; evidence remains local."""
+    if type(row) is not dict:
+        return None
+    required = ("observation_id", "receipt_id", "status", "observed_at")
+    if any(type(row.get(key)) is not str for key in required):
+        return None
+    method = "receipt.exec"
+    doc: dict[str, Any] = {key: _native_safe_id(row[key], method=method) for key in required}
+    for key in ("previous_observation_id", "content_hash", "scorer_id", "scorer_version"):
+        if key in row:
+            value = row[key]
+            if value is not None and type(value) is not str:
+                return None
+            doc[key] = None if value is None else _native_safe_id(value, method=method)
+    uncertainty = row.get("uncertainty")
+    if uncertainty is not None:
+        if type(uncertainty) is not list or not all(type(item) is str for item in uncertainty):
+            return None
+        doc["uncertainty"] = _native_safe_text_list(uncertainty, method=method)
+    return doc
+
+
+def _receipt_claim_edge_doc(row: Any) -> dict | None:
+    """Keep graph IDs plus forced-redacted claim text, never locators."""
+    if type(row) is not dict:
+        return None
+    if (
+        type(row.get("claim_id")) is not str
+        or type(row.get("verdict")) is not str
+        or type(row.get("required")) is not bool
+    ):
+        return None
+    method = "receipt.exec"
+    doc = {
+        "claim_id": _native_safe_id(row["claim_id"], method=method),
+        "verdict": _native_safe_id(row["verdict"], method=method),
+        "required": row["required"],
+    }
+    for key in ("claim_kind",):
+        if key in row:
+            if type(row[key]) is not str:
+                return None
+            doc[key] = _native_safe_id(row[key], method=method)
+    for key in ("evidence_ids", "artifact_ids"):
+        if key in row:
+            value = row[key]
+            if type(value) is not list or not all(type(item) is str for item in value):
+                return None
+            doc[key] = _native_safe_id_list(value, method=method)
+    if "statement" in row:
+        if type(row["statement"]) is not str:
+            return None
+        doc["statement"] = _native_safe_text(row["statement"], method=method)
+    if "uncertainty" in row:
+        if type(row["uncertainty"]) is not list or not all(type(item) is str for item in row["uncertainty"]):
+            return None
+        doc["uncertainty"] = _native_safe_text_list(row["uncertainty"], method=method)
+    return doc
+
+
+def _receipt_rows(value: Any, normalizer) -> list[dict]:
+    if type(value) is not list:
+        return []
+    rows = []
+    for row in value[:_NATIVE_MAX_SAFE_LIST_ITEMS]:
+        doc = normalizer(row)
+        if doc is not None:
+            rows.append(doc)
+    return rows
 
 
 @method("receipt.exec")
@@ -14068,7 +14302,6 @@ def _(rid, params: dict) -> dict:
         import hades_cli.receipts as _receipts_cli
 
         result = _receipts_cli.run_argv(list(argv), output="text")
-        resolved_home = str(get_hades_home())
         exit_ok = _receipts_cli.EXIT_OK
         exit_validation = _receipts_cli.EXIT_VALIDATION
         exit_unavailable = _receipts_cli.EXIT_UNAVAILABLE
@@ -14132,24 +14365,45 @@ def _(rid, params: dict) -> dict:
         if observations is None and payload.get("observation") is not None:
             observations = [payload["observation"]]
 
-        response = {
+        action_value = payload.get("action")
+        action = _native_safe_id(
+            action_value if isinstance(action_value, str) else argv[0].strip().lower(),
+            method="receipt.exec",
+            limit=128,
+        ) or "receipt"
+        safe_observations = _receipt_rows(observations, _receipt_observation_doc)
+        safe_receipt = _receipt_detail_doc(
+            payload.get("receipt"), observation_count=len(safe_observations)
+        )
+        safe_output = (
+            "receipt export completed (path withheld)"
+            if action == "export"
+            else _cap_native_output(producer_output, method="receipt.exec")
+        )
+        response: dict[str, Any] = {
             "ok": True,
-            "action": str(payload.get("action") or argv[0].strip().lower()),
+            "action": action,
             "exit_code": exit_code,
-            "output": _cap_native_output(producer_output, method="receipt.exec"),
-            "profile_home": resolved_home,
+            "output": safe_output,
         }
-        for key, value in (
-            ("receipts", payload.get("receipts")),
-            ("receipt", payload.get("receipt")),
-            ("observations", observations),
-            ("claim_edges", payload.get("claim_edges")),
-            ("export_path", payload.get("export_path")),
-            ("retention_plan_hash", payload.get("retention_plan_hash")),
-            ("warning", payload.get("warning")),
-        ):
-            if value is not None:
-                response[key] = value
+        if payload.get("receipts") is not None:
+            response["receipts"] = _receipt_rows(payload.get("receipts"), _receipt_summary_doc)
+        if safe_receipt is not None:
+            response["receipt"] = safe_receipt
+        if observations is not None:
+            response["observations"] = safe_observations
+        if payload.get("claim_edges") is not None:
+            response["claim_edges"] = _receipt_rows(
+                payload.get("claim_edges"), _receipt_claim_edge_doc
+            )
+        if action == "export" and (payload.get("export_path") is not None or payload.get("exported")):
+            response["exported"] = True
+        if payload.get("retention_plan_hash") is not None:
+            value = payload.get("retention_plan_hash")
+            if isinstance(value, str):
+                response["retention_plan_hash"] = _native_safe_id(value, method="receipt.exec")
+        if payload.get("warning") is not None:
+            response["warning"] = _native_safe_text(payload.get("warning"), method="receipt.exec")
     except Exception:
         return _native_internal_error(rid, method="receipt.exec", code=5043)
     return _native_success(rid, response, method="receipt.exec", code=5043)
@@ -14157,6 +14411,218 @@ def _(rid, params: dict) -> dict:
 
 _TRANSACTION_MAX_ARGV_ENTRIES = 64
 _TRANSACTION_MAX_ARGV_BYTES = 64 * 1024
+_TRANSACTION_UNCERTAIN_STATUSES = frozenset({
+    "unknown_effect",
+    "blocked",
+    "partially_compensated",
+    "failed",
+    "compensated",
+})
+
+
+def _transaction_doc(row: Any) -> dict | None:
+    if type(row) is not dict:
+        return None
+    if (
+        type(row.get("transaction_id")) is not str
+        or type(row.get("status")) is not str
+        or type(row.get("current_revision")) is not int
+    ):
+        return None
+    method = "transaction.exec"
+    doc: dict[str, Any] = {
+        "transaction_id": _native_safe_id(row["transaction_id"], method=method),
+        "status": _native_safe_id(row["status"], method=method),
+        "current_revision": row["current_revision"],
+    }
+    if "receipt_id" in row:
+        value = row["receipt_id"]
+        if value is not None and type(value) is not str:
+            return None
+        doc["receipt_id"] = None if value is None else _native_safe_id(value, method=method)
+    return doc
+
+
+def _transaction_docs(value: Any) -> list[dict]:
+    if type(value) is not list:
+        return []
+    docs = []
+    for row in value[:_NATIVE_MAX_SAFE_LIST_ITEMS]:
+        doc = _transaction_doc(row)
+        if doc is not None:
+            docs.append(doc)
+    return docs
+
+
+def _transaction_eligibility(value: Any) -> dict[str, dict]:
+    if type(value) is not dict:
+        return {}
+    method = "transaction.exec"
+    result: dict[str, dict] = {}
+    for node_id, row in list(value.items())[:_NATIVE_MAX_SAFE_LIST_ITEMS]:
+        if type(node_id) is not str or type(row) is not dict:
+            continue
+        if (
+            type(row.get("can_execute")) is not bool
+            or type(row.get("code")) is not str
+            or type(row.get("fidelity")) is not str
+            or type(row.get("reason")) is not str
+            or type(row.get("blockers")) is not list
+            or not all(type(item) is str for item in row["blockers"])
+            or type(row.get("required_cascade_node_ids")) is not list
+            or not all(type(item) is str for item in row["required_cascade_node_ids"])
+        ):
+            continue
+        result[_native_safe_id(node_id, method=method) or "node"] = {
+            "can_execute": row["can_execute"],
+            "code": _native_safe_id(row["code"], method=method),
+            "fidelity": _native_safe_id(row["fidelity"], method=method),
+            "reason": _native_safe_text(row["reason"], method=method),
+            "blockers": _native_safe_text_list(row["blockers"], method=method),
+            "required_cascade_node_ids": _native_safe_id_list(
+                row["required_cascade_node_ids"], method=method
+            ),
+        }
+    return result
+
+
+def _transaction_receipt_doc(row: Any) -> dict | None:
+    if type(row) is not dict:
+        return None
+    if (
+        type(row.get("receipt_id")) is not str
+        or type(row.get("status")) is not str
+        or type(row.get("content_hash")) is not str
+    ):
+        return None
+    method = "transaction.exec"
+    return {
+        "receipt_id": _native_safe_id(row["receipt_id"], method=method),
+        "status": _native_safe_id(row["status"], method=method),
+        "content_hash": _native_safe_id(row["content_hash"], method=method),
+    }
+
+
+def _transaction_observation_doc(row: Any) -> dict | None:
+    if type(row) is not dict:
+        return None
+    if type(row.get("observation_id")) is not str or type(row.get("status")) is not str:
+        return None
+    method = "transaction.exec"
+    doc = {
+        "observation_id": _native_safe_id(row["observation_id"], method=method),
+        "status": _native_safe_id(row["status"], method=method),
+    }
+    if "content_hash" in row:
+        if type(row["content_hash"]) is not str:
+            return None
+        doc["content_hash"] = _native_safe_id(row["content_hash"], method=method)
+    return doc
+
+
+def _transaction_preview_nodes(value: Any) -> list[dict]:
+    if type(value) is not list:
+        return []
+    nodes = []
+    for row in value[:_TRANSACTION_MAX_PREVIEW_NODES]:
+        if type(row) is not dict or type(row.get("node_id")) is not str:
+            continue
+        fidelity = row.get("fidelity")
+        if fidelity is not None and type(fidelity) is not str:
+            fidelity = None
+        requires_approval = row.get("requires_approval")
+        if type(requires_approval) is not bool:
+            requires_approval = False
+        nodes.append({
+            "node_id": _native_safe_id(row["node_id"], method="transaction.exec", limit=200),
+            "fidelity": (
+                None if fidelity is None
+                else _native_safe_id(fidelity, method="transaction.exec", limit=64)
+            ),
+            "requires_approval": requires_approval,
+        })
+    return nodes
+
+
+def _transaction_response(
+    payload: dict,
+    *,
+    action: str,
+    exit_code: int,
+    output: str,
+    ok: bool,
+    include_preview: bool = False,
+) -> dict:
+    method = "transaction.exec"
+    response: dict[str, Any] = {
+        "ok": ok,
+        "action": _native_safe_id(action, method=method, limit=128) or "transaction",
+        "exit_code": exit_code,
+        "output": _native_safe_text(output, method=method, limit=_NATIVE_MAX_OUTPUT_CHARS),
+    }
+    transaction = _transaction_doc(payload.get("transaction"))
+    transactions = _transaction_docs(payload.get("transactions"))
+    if transaction is not None:
+        response["transaction"] = transaction
+    if payload.get("transactions") is not None:
+        response["transactions"] = transactions
+    eligibility = _transaction_eligibility(payload.get("eligibility"))
+    if payload.get("eligibility") is not None:
+        response["eligibility"] = eligibility
+    receipt = _transaction_receipt_doc(payload.get("receipt"))
+    if receipt is not None:
+        response["receipt"] = receipt
+    observation = _transaction_observation_doc(payload.get("observation"))
+    if observation is not None:
+        response["observation"] = observation
+    if isinstance(payload.get("status"), str):
+        response["status"] = _native_safe_id(payload["status"], method=method)
+    if type(payload.get("counts")) is dict:
+        counts: dict[str, int] = {}
+        for key, value in list(payload["counts"].items())[:64]:
+            if isinstance(key, str) and type(value) is int:
+                counts[_native_safe_id(key, method=method, limit=64) or "unknown"] = value
+        response["counts"] = counts
+    for key in ("committed_nodes", "compensated_nodes"):
+        if payload.get(key) is not None:
+            response[key] = _native_safe_id_list(payload[key], method=method)
+    if payload.get("blocked_node") is not None:
+        value = _native_safe_id(payload.get("blocked_node"), method=method)
+        if value is not None:
+            response["blocked_node"] = value
+    if type(payload.get("revision")) is int:
+        response["revision"] = payload["revision"]
+    if include_preview:
+        response["nodes"] = _transaction_preview_nodes(payload.get("nodes"))
+        preview_hash = payload.get("preview_hash")
+        if isinstance(preview_hash, str):
+            response["preview_hash"] = _native_safe_id(preview_hash, method=method)
+    return response
+
+
+def _transaction_uncertainty_response(
+    payload: dict,
+    *,
+    argv: list[str],
+    exit_code: int,
+) -> dict | None:
+    status = payload.get("status")
+    if not isinstance(status, str) or status not in _TRANSACTION_UNCERTAIN_STATUSES:
+        return None
+    action_value = payload.get("action")
+    action = action_value if type(action_value) is str else argv[0]
+    safe_status = _native_safe_id(status, method="transaction.exec") or "unknown_effect"
+    output = (
+        f"transaction {action} ended with {safe_status}; do not retry; "
+        "reconcile required"
+    )
+    return _transaction_response(
+        payload,
+        action=action,
+        exit_code=exit_code,
+        output=output,
+        ok=False,
+    )
 
 
 @method("transaction.exec")
@@ -14225,6 +14691,11 @@ def _(rid, params: dict) -> dict:
             "hades transaction in a terminal)",
         )
     if exit_code != exit_ok:
+        uncertainty = _transaction_uncertainty_response(
+            payload, argv=argv, exit_code=exit_code
+        )
+        if uncertainty is not None:
+            return _native_success(rid, uncertainty, method="transaction.exec", code=5045)
         return _native_error(
             rid,
             5044,
@@ -14233,75 +14704,43 @@ def _(rid, params: dict) -> dict:
         )
     try:
         if _native_failure_payload(payload):
+            uncertainty = _transaction_uncertainty_response(
+                payload, argv=argv, exit_code=exit_code
+            )
+            if uncertainty is not None:
+                return _native_success(rid, uncertainty, method="transaction.exec", code=5045)
             return _native_error(
                 rid,
                 5044,
                 "transaction.exec: command failed (details withheld; run "
                 "hades transaction in a terminal)",
             )
-        action = str(payload.get("action") or argv[0].strip().lower())
-        safe_preview_nodes = None
-        safe_preview_hash = None
-        if action.strip().lower() == "preview":
-            safe_preview_hash = payload.get("preview_hash")
-            if not isinstance(safe_preview_hash, str):
-                safe_preview_hash = ""
-            safe_preview_hash = safe_preview_hash[:256]
-            safe_preview_nodes = []
-            rows = payload.get("nodes") or []
-            if not isinstance(rows, list):
-                rows = []
-            for row in rows[:_TRANSACTION_MAX_PREVIEW_NODES]:
-                if not isinstance(row, dict):
-                    continue
-                node_id = row.get("node_id")
-                if not isinstance(node_id, str):
-                    continue
-                fidelity = row.get("fidelity")
-                if fidelity is not None and not isinstance(fidelity, str):
-                    fidelity = None
-                requires_approval = row.get("requires_approval")
-                if not isinstance(requires_approval, bool):
-                    requires_approval = False
-                safe_preview_nodes.append(
-                    {
-                        "node_id": node_id[:200],
-                        "fidelity": None if fidelity is None else fidelity[:64],
-                        "requires_approval": requires_approval,
-                    }
-                )
+        action_value = payload.get("action")
+        action = action_value if type(action_value) is str else argv[0].strip().lower()
+        include_preview = action.strip().lower() == "preview"
+        if include_preview:
+            safe_nodes = _transaction_preview_nodes(payload.get("nodes"))
+            preview_hash = payload.get("preview_hash")
+            hash_text = preview_hash if isinstance(preview_hash, str) else ""
             output = "\n".join(
-                [f"preview ready (hash {safe_preview_hash})"]
+                [f"preview ready (hash {hash_text[:256]})"]
                 + [
                     "node "
                     f"{node['node_id']} fidelity {node['fidelity'] or '?'} "
                     f"approval {'yes' if node['requires_approval'] else 'no'}"
-                    for node in safe_preview_nodes
+                    for node in safe_nodes
                 ]
             )
         else:
             output = _cap_native_output(producer_output, method="transaction.exec")
-        output = _cap_native_output(output, method="transaction.exec")
-        response = {
-            "ok": True,
-            "action": action,
-            "exit_code": exit_code,
-            "output": output,
-        }
-        if safe_preview_nodes is not None:
-            response["nodes"] = safe_preview_nodes
-            response["preview_hash"] = safe_preview_hash
-        for key in (
-            "transaction", "transactions", "nodes", "preview", "preview_hash",
-            "eligibility", "receipt", "observation", "status", "counts",
-            "committed_nodes", "compensated_nodes", "blocked_node", "revision",
-            "rows",
-        ):
-            if safe_preview_nodes is not None and key in {"nodes", "preview", "preview_hash"}:
-                continue
-            value = payload.get(key)
-            if value is not None:
-                response[key] = value
+        response = _transaction_response(
+            payload,
+            action=action,
+            exit_code=exit_code,
+            output=output,
+            ok=True,
+            include_preview=include_preview,
+        )
     except Exception:
         return _native_internal_error(rid, method="transaction.exec", code=5045)
     return _native_success(rid, response, method="transaction.exec", code=5045)

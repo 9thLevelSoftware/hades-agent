@@ -329,7 +329,7 @@ def test_session_profile_home_override_is_honored(rpc, server, tmp_path):
     result = rpc(
         "receipt.exec", {"session_id": "sid-other", "argv": ["list"]}
     )
-    assert result["profile_home"] == str(other_home)
+    assert "profile_home" not in result
     assert [s["receipt_id"] for s in result["receipts"]] == [other.receipt_id]
 
 
@@ -347,7 +347,7 @@ def test_caller_supplied_profile_path_is_never_accepted(rpc, home, tmp_path, see
     )
     assert result["ok"] is True
     # Only the session registry may steer profile resolution.
-    assert result["profile_home"] == str(home)
+    assert "profile_home" not in result
     assert [s["receipt_id"] for s in result["receipts"]] == [
         seeded_receipt.receipt_id
     ]
@@ -599,10 +599,16 @@ def test_success_frame_bound_includes_default_rpc_envelope_and_newline(
 ):
     import hades_cli.receipts as receipts_mod
 
-    rows = [
-        {"receipt_id": f"r{i:05d}", "detail": "x" * 20}
-        for i in range(17_500)
-    ]
+    rows = [{
+        "receipt_id": f"r{i:05d}",
+        "status": "verified",
+        "subject_id": f"s{i}",
+        "subject_kind": "turn",
+        "decided_at": "2026-07-10T00:00:00Z",
+        "content_hash": f"sha256:{i}",
+        "scorer_id": "scorer",
+        "scorer_version": "1.0",
+    } for i in range(5_200)]
     payload = {"ok": True, "action": "list", "receipts": rows}
     expected_inner = {
         "ok": True,
@@ -636,8 +642,9 @@ def test_success_frame_bound_includes_default_rpc_envelope_and_newline(
 
     resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["list"]})
 
-    assert resp["error"]["code"] == 5043
-    final_frame = json.dumps(resp, ensure_ascii=False).encode("utf-8") + b"\n"
+    assert resp["ok"] is True
+    assert len(resp["receipts"]) <= 256
+    final_frame = json.dumps({"jsonrpc": "2.0", "id": 1, "result": resp}, ensure_ascii=False).encode("utf-8") + b"\n"
     assert len(final_frame) <= cap
 
 

@@ -115,65 +115,11 @@ export interface AutonomyExecResponse {
   ok: boolean
   output: string
   preview: AutonomyPreviewDoc | null
-  profile_home: string
   rules: AutonomyRuleDoc[]
   suggestions: AutonomyRuleDoc[]
 }
 
 // ── Verified outcome & artifact receipts (native /receipt) ───────────
-
-export interface ReceiptSourceKeyDoc {
-  source_id: string
-  source_kind: string
-}
-
-export interface ReceiptRequestedOutcomeDoc {
-  constraints: string[]
-  content_hash: string
-  description: string
-  outcome_kind: string
-  producer_id: string
-}
-
-export interface ReceiptClaimDoc {
-  artifact_ids: string[]
-  claim_id: string
-  claim_kind: string
-  content_hash: string
-  evidence_ids: string[]
-  expected_json: string
-  observed_json: string
-  required: boolean
-  statement: string
-  uncertainty: string[]
-  verdict: string
-}
-
-export interface ReceiptEvidenceDoc {
-  artifact_ids: string[]
-  content_hash: string
-  evidence_id: string
-  evidence_kind: string
-  fresh_until: null | string
-  observed_at: string
-  payload_hash: string
-  producer_id: string
-  source_ref: string
-  summary: string
-}
-
-export interface ReceiptArtifactDoc {
-  artifact_id: string
-  captured_at: string
-  content_hash: string
-  display_name: string
-  media_type: null | string
-  mtime_ns: null | number
-  sha256: string
-  size_bytes: number
-  source_kind: string
-  source_ref: string
-}
 
 export interface ReceiptSummary {
   content_hash: string
@@ -181,59 +127,82 @@ export interface ReceiptSummary {
   receipt_id: string
   scorer_id: string
   scorer_version: string
-  session_id: null | string
-  source: ReceiptSourceKeyDoc
+  session_id?: null | string
   status: string
   subject_id: string
   subject_kind: string
 }
 
 export interface ReceiptDetail {
-  artifacts: ReceiptArtifactDoc[]
-  claims: ReceiptClaimDoc[]
+  artifact_count?: number
+  claim_count?: number
   content_hash: string
   decided_at: string
-  evidence: ReceiptEvidenceDoc[]
-  mission_id: null | string
+  evidence_count?: number
+  mission_id?: null | string
+  observation_count?: number
   receipt_id: string
-  requested_outcome: ReceiptRequestedOutcomeDoc
   scorer_id: string
   scorer_version: string
-  session_id: null | string
-  source: ReceiptSourceKeyDoc
+  session_id?: null | string
   status: string
   subject_id: string
   subject_kind: string
-  transaction_id: null | string
-  turn_id: null | string
-  uncertainty: string[]
+  transaction_id?: null | string
+  turn_id?: null | string
+  uncertainty?: string[]
 }
 
 export interface ReceiptObservationDetail {
-  artifacts: ReceiptArtifactDoc[]
-  claims: ReceiptClaimDoc[]
-  content_hash: string
-  evidence: ReceiptEvidenceDoc[]
+  content_hash?: string
   observation_id: string
   observed_at: string
-  previous_observation_id: null | string
+  previous_observation_id?: null | string
   receipt_id: string
-  scorer_id: string
-  scorer_version: string
+  scorer_id?: string
+  scorer_version?: string
   status: string
-  uncertainty: string[]
+  uncertainty?: string[]
 }
 
-/** Every claim→evidence→artifact edge as one structured record. */
+/** Every reviewed claim→evidence→artifact edge as one structured record. */
 export interface ReceiptClaimEdge {
-  artifact_ids: string[]
+  artifact_ids?: string[]
   claim_id: string
-  claim_kind: string
-  evidence_ids: string[]
+  claim_kind?: string
+  evidence_ids?: string[]
   required: boolean
-  statement: string
-  uncertainty: string[]
+  statement?: string
+  uncertainty?: string[]
   verdict: string
+}
+
+export interface TransactionDoc {
+  current_revision: number
+  receipt_id?: null | string
+  status: string
+  transaction_id: string
+}
+
+export interface TransactionEligibility {
+  blockers: string[]
+  can_execute: boolean
+  code: string
+  fidelity: string
+  reason: string
+  required_cascade_node_ids: string[]
+}
+
+export interface TransactionReceiptDoc {
+  content_hash: string
+  receipt_id: string
+  status: string
+}
+
+export interface TransactionObservationDoc {
+  content_hash?: string
+  observation_id: string
+  status: string
 }
 
 export interface TransactionExecResponse {
@@ -242,48 +211,29 @@ export interface TransactionExecResponse {
   committed_nodes?: string[]
   compensated_nodes?: string[]
   counts?: Record<string, number>
-  eligibility?: Record<
-    string,
-    {
-      blockers: string[]
-      can_execute: boolean
-      code: string
-      fidelity: string
-      reason: string
-      required_cascade_node_ids: string[]
-    }
-  >
-  error?: string
+  eligibility?: Record<string, TransactionEligibility>
   exit_code: number
-  nodes?: Array<Record<string, unknown>>
+  nodes?: Array<{ fidelity: null | string; node_id: string; requires_approval: boolean }>
+  observation?: TransactionObservationDoc
   ok: boolean
-  /** Shared truthful text rendering from hades_cli.transactions. */
   output: string
   preview_hash?: string
-  observation?: { observation_id: string; status: string }
-  receipt?: { content_hash: string; receipt_id: string; status: string }
+  receipt?: TransactionReceiptDoc
   revision?: number
-  rows?: Array<Record<string, unknown>>
   status?: string
-  transaction?: {
-    current_revision: number
-    receipt_id: string | null
-    status: string
-    transaction_id: string
-  }
-  transactions?: Array<Record<string, unknown>>
+  transaction?: TransactionDoc
+  transactions?: TransactionDoc[]
 }
 
 export interface ReceiptExecResponse {
   action: string
   claim_edges?: ReceiptClaimEdge[]
   exit_code: number
-  export_path?: string
+  exported?: true
   observations?: ReceiptObservationDetail[]
   ok: boolean
-  /** Shared truthful text rendering from hades_cli.receipts (one renderer). */
+  /** Forced-redacted text rendering from hades_cli.receipts. */
   output: string
-  profile_home: string
   receipt?: ReceiptDetail
   receipts?: ReceiptSummary[]
   retention_plan_hash?: string

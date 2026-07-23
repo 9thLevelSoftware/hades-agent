@@ -118,7 +118,7 @@ def rpc(rpc_raw):
 def test_autonomy_exec_is_profile_local_and_structured(rpc, profile_home):
     result = rpc("autonomy.exec", {"session_id": "sid-1", "argv": ["list", "--effective"]})
     assert result["ok"] is True
-    assert result["profile_home"] == str(profile_home)
+    assert "profile_home" not in result
     assert {"contract", "rules", "suggestions", "output"} <= set(result)
     assert result["contract"]["hash"]
     assert [r["rule_id"] for r in result["rules"]] == ["allow-send"]
@@ -186,7 +186,7 @@ def test_session_profile_home_override_is_honored(rpc, server, tmp_path):
         "profile_home": str(other_home),
     }
     result = rpc("autonomy.exec", {"session_id": "sid-other", "argv": ["list", "--effective"]})
-    assert result["profile_home"] == str(other_home)
+    assert "profile_home" not in result
     assert result["rules"] == []
 
 
