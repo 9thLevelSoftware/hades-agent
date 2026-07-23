@@ -670,7 +670,7 @@ def test_valid_receipt_success_payload_forwards_only_minimal_nonlocator_fields(
                 "subject_id": "s1:t1",
                 "subject_kind": "turn",
                 "decided_at": "2026-07-10T00:00:00Z",
-                "content_hash": "sha256:receipt",
+                "content_hash": "sha256:deadbeef",
                 "scorer_id": "scorer",
                 "scorer_version": "1.0",
                 "session_id": "s1",
@@ -681,7 +681,7 @@ def test_valid_receipt_success_payload_forwards_only_minimal_nonlocator_fields(
                 "status": "verified",
                 "subject_id": "s1:t1",
                 "subject_kind": "turn",
-                "content_hash": "sha256:receipt",
+                "content_hash": "sha256:deadbeef",
                 "decided_at": "2026-07-10T00:00:00Z",
                 "scorer_id": "scorer",
                 "scorer_version": "1.0",
@@ -708,7 +708,7 @@ def test_valid_receipt_success_payload_forwards_only_minimal_nonlocator_fields(
                 "receipt_id": receipt_id,
                 "status": "verified",
                 "observed_at": "2026-07-11T09:00:00Z",
-                "content_hash": "sha256:observation",
+                "content_hash": "sha256:feedface",
                 "source_ref": f"observation {private_path}",
                 "evidence": [{"payload": secret}],
                 "artifacts": [{"locator": artifact_locator}],
@@ -824,16 +824,25 @@ def test_receipt_claim_edge_locator_ids_are_dropped_but_safe_ids_survive(
     invalid_ids = [
         "artifact://secret/path",
         "file:///tmp/x",
+        "artifact:secret",
+        "mailto:foo",
+        "urn:foo",
+        "prefix:/etc",
+        "//etc/passwd",
         "/etc/passwd",
         r"C:\\secret",
         "../relative",
+        "id..with-dotdot",
         "id with whitespace",
+        "control\nid",
+        "sha256:not-hex",
     ]
     valid_ids = [
         "550e8400-e29b-41d4-a716-446655440000",
         "evidence_id",
         "artifact.v1",
-        "sha256:abc123",
+        "sha256:abc12345",
+        "sha256:ABCDEF12",
     ]
     result = receipts_mod.ReceiptCommandResult(
         receipts_mod.EXIT_OK,
@@ -862,3 +871,48 @@ def test_receipt_claim_edge_locator_ids_are_dropped_but_safe_ids_survive(
         assert invalid_id not in wire
     for valid_id in valid_ids:
         assert valid_id in wire
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "artifact://secret/path",
+        "file:///etc/passwd",
+        "//etc/passwd",
+        "prefix:/etc/passwd",
+        "artifact:secret/path",
+        "mailto:foo@example.com",
+        "urn:secret:item",
+        "https://user:pass@example/x?token=secret",
+    ],
+)
+def test_receipt_native_scrubs_locator_tokens_from_warning_and_claim_text(
+    rpc, monkeypatch, probe
+):
+    import hades_cli.receipts as receipts_mod
+
+    text = f"producer free text {probe}"
+    result = receipts_mod.ReceiptCommandResult(
+        receipts_mod.EXIT_OK,
+        f"producer output {text}",
+        {
+            "ok": True,
+            "action": "show",
+            "warning": text,
+            "claim_edges": [{
+                "claim_id": "claim-1",
+                "verdict": "satisfied",
+                "required": True,
+                "statement": text,
+                "uncertainty": [text],
+            }],
+        },
+    )
+    monkeypatch.setattr(receipts_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("receipt.exec", {"session_id": "sid", "argv": ["show"]})
+
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert probe not in wire
+    for fragment in ("//secret", "secret/path", "secret/item", "/etc", "/root"):
+        assert fragment not in wire

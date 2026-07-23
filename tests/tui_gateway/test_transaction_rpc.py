@@ -8,6 +8,7 @@ bounded argv validation, structured results, and redacted errors.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -487,8 +488,8 @@ def test_valid_transaction_success_payload_forwards_only_minimal_schemas(
             },
             "rows": [{"title": f"row {secret}", "path": private_path}],
             "nodes": [{"node_id": "node-1", "title": f"node {secret}", "path": private_path}],
-            "receipt": {"receipt_id": "rct-1", "status": "verified", "content_hash": "sha256:r"},
-            "observation": {"observation_id": "obs-1", "status": "verified", "content_hash": "sha256:o"},
+            "receipt": {"receipt_id": "rct-1", "status": "verified", "content_hash": "sha256:deadbeef"},
+            "observation": {"observation_id": "obs-1", "status": "verified", "content_hash": "sha256:feedface"},
         },
     )
     monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
@@ -581,7 +582,89 @@ def test_transaction_rpc_uncertainty_wins_over_exit_ok_and_payload_ok(
 
     assert resp["ok"] is False, resp
     assert resp["status"] == status
-    assert resp["output"] == (
-        f"transaction commit ended with {status}; do not retry; reconcile required"
-    )
+    assert resp["output"] == "transaction effect uncertain — do not retry; reconcile first"
+    assert resp["action"] == "commit"
     assert "/etc/passwd" not in str(resp)
+
+
+@pytest.mark.parametrize(
+    "producer_action",
+    [
+        "artifact://secret/path",
+        "//etc/passwd",
+        "prefix:/etc/passwd",
+        "mailto:foo",
+        "/root",
+    ],
+)
+def test_transaction_uncertainty_uses_fixed_warning_and_safe_action(
+    rpc, monkeypatch, producer_action
+):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        f"producer output {producer_action}",
+        {
+            "ok": False,
+            "action": producer_action,
+            "status": "unknown_effect",
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("transaction.exec", {"argv": ["commit", "tx"], "session_id": "sid"})
+
+    assert resp["output"] == "transaction effect uncertain — do not retry; reconcile first"
+    assert resp["action"] == "command"
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert producer_action not in wire
+    for fragment in ("//secret", "secret/path", "/etc", "/root", "mailto:foo"):
+        assert fragment not in wire
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "artifact://secret/path",
+        "file:///etc/passwd",
+        "//etc/passwd",
+        "prefix:/etc/passwd",
+        "artifact:secret/path",
+        "mailto:foo@example.com",
+        "urn:secret:item",
+        "https://user:pass@example/x?token=secret",
+    ],
+)
+def test_transaction_native_scrubs_locator_tokens_from_output_and_free_text(
+    rpc, monkeypatch, probe
+):
+    import hades_cli.transactions as transactions_mod
+
+    text = f"producer free text {probe}"
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        f"producer output {text}",
+        {
+            "ok": True,
+            "action": "show",
+            "eligibility": {
+                "node-1": {
+                    "can_execute": False,
+                    "code": "blocked",
+                    "fidelity": "exact",
+                    "reason": text,
+                    "blockers": [text],
+                    "required_cascade_node_ids": ["node-2"],
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("transaction.exec", {"argv": ["show", "tx"], "session_id": "sid"})
+
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert probe not in wire
+    for fragment in ("//secret", "secret/path", "secret/item", "/etc", "/root"):
+        assert fragment not in wire

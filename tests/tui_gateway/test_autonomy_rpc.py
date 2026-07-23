@@ -868,3 +868,59 @@ def test_autonomy_exit_ok_ask_decision_remains_valid(rpc_raw, monkeypatch):
 
     assert resp["result"]["ok"] is True
     assert resp["result"]["decision"]["verdict"] == "ask"
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "artifact://secret/path",
+        "file:///etc/passwd",
+        "//etc/passwd",
+        "prefix:/etc/passwd",
+        "artifact:secret/path",
+        "mailto:foo@example.com",
+        "urn:secret:item",
+        "https://user:pass@example/x?token=secret",
+    ],
+)
+def test_autonomy_native_scrubs_locator_tokens_from_all_free_text_egress(
+    rpc_raw, monkeypatch, probe
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    text = f"producer free text {probe}"
+    result = autonomy_mod.CliResult(
+        autonomy_mod.EXIT_OK,
+        f"producer output {text}",
+        {
+            "ok": True,
+            "action": "evaluate",
+            "verdict": "allow",
+            "code": "explicit_allow",
+            "rules": [{
+                "rule_id": "safe-rule",
+                "source": "stable",
+                "state": "active",
+                "effect": "allow",
+                "description": text,
+                "edit_command": text,
+                "provenance": text,
+            }],
+            "reason": text,
+            "edit_targets": [text],
+            "clarification": {
+                "question": text,
+                "choices": [text],
+                "code": "clarify",
+            },
+        },
+    )
+    monkeypatch.setattr(autonomy_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc_raw("autonomy.exec", {"argv": ["evaluate"]})
+
+    assert "result" in resp and "error" not in resp, resp
+    wire = json.dumps(resp, ensure_ascii=False)
+    assert probe not in wire
+    for fragment in ("//secret", "secret/path", "secret/item", "/etc", "/root"):
+        assert fragment not in wire
