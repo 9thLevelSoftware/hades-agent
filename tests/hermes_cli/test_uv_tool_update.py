@@ -1,15 +1,15 @@
 """Tests for uv-tool install detection in the update path (issue #29700).
 
-``uv tool install hermes-agent`` lives outside any venv, so the previous
+``uv tool install hades-agent`` lives outside any venv, so the previous
 ``uv pip install --upgrade`` update path failed with ``No virtual
 environment found``. ``is_uv_tool_install`` should detect this layout and
 both the user-facing recommended command and the actual
-``_cmd_update_pip`` subprocess invocation should switch to
-``uv tool upgrade hermes-agent``.
+``_cmd_update_pip`` subprocess invocation should switch to the canonical
+``uv tool upgrade hades-agent`` command.
 
 Detection is restricted to properties of the running interpreter
 (``sys.prefix`` / ``sys.executable``) so a pip/venv install on a machine
-that also has ``uv tool install hermes-agent`` does not get misclassified.
+that also has a uv-tool install does not get misclassified.
 """
 from __future__ import annotations
 
@@ -57,13 +57,18 @@ def _patch_managed_uv(request):
 
 
 class TestIsUvToolInstall:
-    def test_returns_true_when_sys_prefix_matches_uv_tool_layout(self):
+    @pytest.mark.parametrize("distribution", ["hades-agent", "hermes-agent"])
+    def test_returns_true_when_sys_prefix_matches_uv_tool_layout(self, distribution):
         from hades_cli import config
 
-        with patch.object(config.sys, "prefix", "/home/user/.local/share/uv/tools/hermes-agent"):
+        prefix = f"/home/user/.local/share/uv/tools/{distribution}"
+        with patch.object(config.sys, "prefix", prefix):
             assert config.is_uv_tool_install() is True
 
-    def test_returns_true_when_sys_executable_matches_uv_tool_layout(self):
+    @pytest.mark.parametrize("distribution", ["hades-agent", "hermes-agent"])
+    def test_returns_true_when_sys_executable_matches_uv_tool_layout(
+        self, distribution
+    ):
         """Some uv-tool layouts surface the marker on ``sys.executable`` (bin/python)."""
         from hades_cli import config
 
@@ -71,7 +76,7 @@ class TestIsUvToolInstall:
              patch.object(
                  config.sys,
                  "executable",
-                 "/home/user/.local/share/uv/tools/hermes-agent/bin/python",
+                 f"/home/user/.local/share/uv/tools/{distribution}/bin/python",
              ):
             assert config.is_uv_tool_install() is True
 
@@ -98,14 +103,22 @@ class TestIsUvToolInstall:
 
     def test_case_insensitive_match(self):
         """Match must be case-insensitive — Windows paths preserve case
-        (e.g. ``...AppData\\Local\\UV\\Tools\\hermes-agent``) and a case-sensitive
+        (e.g. ``...AppData\\Local\\UV\\Tools\\hades-agent``) and a case-sensitive
         check would miss them. We exercise the lower-cased compare path here
         without monkey-patching ``os.sep``, which would break the whole suite."""
         from hades_cli import config
 
         with patch.object(
-            config.sys, "prefix", "/HOME/USER/.local/share/UV/Tools/hermes-agent"
+            config.sys, "prefix", "/HOME/USER/.local/share/UV/Tools/hades-agent"
         ):
+            assert config.is_uv_tool_install() is True
+
+    @pytest.mark.parametrize("distribution", ["hades-agent", "hermes-agent"])
+    def test_handles_windows_path_separators(self, distribution):
+        from hades_cli import config
+
+        prefix = rf"C:\Users\example\AppData\Local\UV\Tools\{distribution}"
+        with patch.object(config.sys, "prefix", prefix):
             assert config.is_uv_tool_install() is True
 
     def test_handles_empty_executable(self):
@@ -126,9 +139,9 @@ class TestRecommendedUpdateCommandForUvTool:
         from hades_cli import config
 
         with patch("shutil.which", return_value="/usr/local/bin/uv"), \
-             patch.object(config, "is_uv_tool_install", return_value=True):
+            patch.object(config, "is_uv_tool_install", return_value=True):
             cmd = config.recommended_update_command_for_method("pip")
-            assert cmd == "uv tool upgrade hermes-agent"
+            assert cmd == "uv tool upgrade hades-agent"
 
     def test_uv_tool_install_recommends_uv_tool_upgrade_even_without_uv_on_path(self):
         """Recommendation reflects the *install method*, not whether ``uv`` is
@@ -136,26 +149,26 @@ class TestRecommendedUpdateCommandForUvTool:
         from hades_cli import config
 
         with patch("shutil.which", return_value=None), \
-             patch.object(config, "is_uv_tool_install", return_value=True):
+            patch.object(config, "is_uv_tool_install", return_value=True):
             cmd = config.recommended_update_command_for_method("pip")
-            assert cmd == "uv tool upgrade hermes-agent"
+            assert cmd == "uv tool upgrade hades-agent"
 
-    def test_uv_pip_install_keeps_legacy_recommendation(self):
-        """Existing behavior: uv is on PATH but Hermes is a regular pip install."""
+    def test_uv_pip_install_recommends_canonical_distribution(self):
+        """uv is on PATH but the running Hades is a regular pip install."""
         from hades_cli import config
 
         with patch("shutil.which", return_value="/usr/local/bin/uv"), \
-             patch.object(config, "is_uv_tool_install", return_value=False):
+            patch.object(config, "is_uv_tool_install", return_value=False):
             cmd = config.recommended_update_command_for_method("pip")
-            assert cmd == "uv pip install --upgrade hermes-agent"
+            assert cmd == "uv pip install --upgrade hades-agent"
 
     def test_no_uv_falls_back_to_plain_pip(self):
         from hades_cli import config
 
         with patch("shutil.which", return_value=None), \
-             patch.object(config, "is_uv_tool_install", return_value=False):
+            patch.object(config, "is_uv_tool_install", return_value=False):
             cmd = config.recommended_update_command_for_method("pip")
-            assert cmd == "pip install --upgrade hermes-agent"
+            assert cmd == "pip install --upgrade hades-agent"
 
     def test_recommendation_does_not_spawn_subprocess(self):
         """Computing the recommendation string must be cheap — no ``uv tool list``
@@ -170,7 +183,7 @@ class TestRecommendedUpdateCommandForUvTool:
              patch("subprocess.run") as mock_run:
             cmd = config.recommended_update_command_for_method("pip")
             mock_run.assert_not_called()
-            assert cmd == "uv pip install --upgrade hermes-agent"
+            assert cmd == "uv pip install --upgrade hades-agent"
 
 
 # ---------------------------------------------------------------------------
@@ -263,11 +276,16 @@ class TestCmdUpdatePipInstallLayouts:
     """
 
     @patch("subprocess.run")
-    def test_pipx_managed_uses_pipx_upgrade(self, mock_run, monkeypatch):
+    @pytest.mark.parametrize("distribution", ["hades-agent", "hermes-agent"])
+    def test_pipx_managed_uses_pipx_upgrade(
+        self, mock_run, monkeypatch, distribution
+    ):
         from hades_cli import main as hm
 
         mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        monkeypatch.setattr(hm.sys, "prefix", "/home/u/.local/pipx/venvs/hermes-agent")
+        monkeypatch.setattr(
+            hm.sys, "prefix", f"/home/u/.local/pipx/venvs/{distribution}"
+        )
         monkeypatch.setattr(hm.sys, "base_prefix", "/usr")
 
         def _which(name):
@@ -288,7 +306,8 @@ class TestCmdUpdatePipInstallLayouts:
         from hades_cli import main as hm
 
         mock_run.return_value = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        monkeypatch.setattr(hm.sys, "prefix", "/home/u/.local/pipx/venvs/hermes-agent")
+        prefix = "/home/u/.local/pipx/venvs/hermes-agent"
+        monkeypatch.setattr(hm.sys, "prefix", prefix)
         monkeypatch.setattr(hm.sys, "base_prefix", "/usr")
 
         # pipx layout detected via prefix, but pipx binary missing on PATH.
@@ -303,7 +322,7 @@ class TestCmdUpdatePipInstallLayouts:
         assert mock_run.call_args[0][0] == [
             "/usr/bin/uv", "pip", "install", "--upgrade", "hades-agent",
         ]
-        assert mock_run.call_args.kwargs["env"]["VIRTUAL_ENV"].endswith("hades-agent")
+        assert mock_run.call_args.kwargs["env"]["VIRTUAL_ENV"] == prefix
 
     @patch("subprocess.run")
     def test_bare_pip_outside_venv_adds_system(self, mock_run, monkeypatch):

@@ -1,4 +1,5 @@
 import ast
+import fnmatch
 import re
 import tomllib
 from pathlib import Path
@@ -157,11 +158,45 @@ def test_bundled_plugin_manifests_ship_in_both_wheel_and_sdist():
 
 
 def test_distribution_metadata_includes_plugin_skills():
+    plugins_root = REPO_ROOT / "plugins"
+    on_disk = {
+        path.relative_to(plugins_root)
+        for path in plugins_root.rglob("SKILL.md")
+        if path.is_file()
+    }
+    assert on_disk, "expected bundled plugin skills under plugins/"
+
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    package_data = data["tool"]["setuptools"]["package-data"]
-    assert "**/skills/*/SKILL.md" in package_data["plugins"]
+    package_patterns = data["tool"]["setuptools"]["package-data"].get("plugins", [])
+    wheel_matches = {
+        path
+        for path in on_disk
+        if any(path.match(pattern) for pattern in package_patterns)
+    }
+    assert wheel_matches == on_disk, (
+        "plugin SKILL.md files omitted from wheel package-data: "
+        f"{sorted(str(path) for path in on_disk - wheel_matches)}"
+    )
+
     manifest = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
-    assert "recursive-include plugins SKILL.md" in manifest
+    recursive_patterns = []
+    for line in manifest.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[:2] == ["recursive-include", "plugins"]:
+            recursive_patterns.extend(fields[2:])
+    sdist_matches = {
+        path
+        for path in on_disk
+        if any(
+            fnmatch.fnmatch(path.name, pattern)
+            or fnmatch.fnmatch(path.as_posix(), pattern)
+            for pattern in recursive_patterns
+        )
+    }
+    assert sdist_matches == on_disk, (
+        "plugin SKILL.md files omitted from sdist manifest: "
+        f"{sorted(str(path) for path in on_disk - sdist_matches)}"
+    )
 
 
 # Minimum non-vulnerable Starlette: CVE-2026-48710 ("BadHost") was fixed in
