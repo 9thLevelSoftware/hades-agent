@@ -32,9 +32,9 @@ describe('JsonRpcGatewayClient connect() URL guard', () => {
   it('rejects a non-string IPC result object', async () => {
     const socketFactory = vi.fn()
     const client = new JsonRpcGatewayClient({ socketFactory })
-    await expect(
-      client.connect({ ok: true, wsUrl: 'ws://127.0.0.1:1/api/ws' } as unknown as string)
-    ).rejects.toThrow(/requires a ws:\/\/ or wss:\/\/ URL string, got type "object"/)
+    await expect(client.connect({ ok: true, wsUrl: 'ws://127.0.0.1:1/api/ws' } as unknown as string)).rejects.toThrow(
+      /requires a ws:\/\/ or wss:\/\/ URL string, got type "object"/
+    )
     expect(socketFactory).not.toHaveBeenCalled()
   })
 
@@ -53,6 +53,35 @@ describe('JsonRpcGatewayClient connect() URL guard', () => {
     await expect(client.connect('ws://')).rejects.toThrow(/requires a ws:\/\/ or wss:\/\/ URL string/)
     expect(client.connectionState).toBe('idle')
     expect(socketFactory).not.toHaveBeenCalled()
+  })
+
+  it.each(['ws://example.com/#fragment', 'wss://example.com/api/ws#'])(
+    'rejects the WebSocket-invalid fragment URL %s before opening a socket',
+    async url => {
+      const socketFactory = vi.fn()
+      const client = new JsonRpcGatewayClient({ socketFactory })
+
+      await expect(client.connect(url)).rejects.toThrow(/requires a ws:\/\/ or wss:\/\/ URL string/)
+      expect(client.connectionState).toBe('idle')
+      expect(socketFactory).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps the client retryable when socket construction throws', async () => {
+    const socketFactory = vi
+      .fn<(url: string) => WebSocket>()
+      .mockImplementationOnce(() => {
+        throw new DOMException('URL contains a fragment', 'SyntaxError')
+      })
+      .mockImplementation(() => new FakeSocket() as unknown as WebSocket)
+    const client = new JsonRpcGatewayClient({ socketFactory })
+
+    await expect(client.connect('ws://127.0.0.1:1234/api/ws')).rejects.toThrow(/URL contains a fragment/)
+    expect(client.connectionState).toBe('idle')
+
+    await expect(client.connect('ws://127.0.0.1:1234/api/ws')).resolves.toBeUndefined()
+    expect(client.connectionState).toBe('open')
+    expect(socketFactory).toHaveBeenCalledTimes(2)
   })
 
   it('keeps connection state idle on rejection', async () => {

@@ -114,15 +114,16 @@ export class JsonRpcGatewayClient {
       throw invalidUrl()
     }
 
-    if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+    // The WebSocket constructor rejects every fragment, including an empty
+    // trailing "#". URL.hash cannot distinguish an absent fragment from an
+    // empty one, while the serialized URL preserves the delimiter.
+    if ((url.protocol !== 'ws:' && url.protocol !== 'wss:') || url.href.includes('#')) {
       throw invalidUrl()
     }
 
     if (this.socket?.readyState === WebSocket.OPEN || this.state === 'connecting') {
       return
     }
-
-    this.setState('connecting')
 
     const socket = this.options.socketFactory?.(wsUrl) ?? new WebSocket(wsUrl)
     this.socket = socket
@@ -144,6 +145,10 @@ export class JsonRpcGatewayClient {
       this.setState('closed')
       this.rejectAllPending(new Error(this.options.closedErrorMessage))
     })
+
+    // Construct and wire the socket before publishing "connecting". A
+    // synchronous constructor failure must leave the client retryable.
+    this.setState('connecting')
 
     await new Promise<void>((resolve, reject) => {
       let settled = false
