@@ -184,6 +184,7 @@ def test_session_profile_home_override_is_honored(rpc, server, tmp_path):
     server._sessions["sid-other"] = {
         "session_key": "tui-autonomy-other",
         "profile_home": str(other_home),
+        "cwd": str(other_home),
     }
     result = rpc("autonomy.exec", {"session_id": "sid-other", "argv": ["list", "--effective"]})
     assert "profile_home" not in result
@@ -223,6 +224,72 @@ def test_autonomy_rpc_binds_session_workspace_for_native_run_argv(
     assert result["ok"] is True
     assert captured == [workspace.resolve()]
     assert Path.cwd() == launch
+
+
+@pytest.mark.parametrize("cwd", [None, "", 17, "/private/missing-autonomy-workspace"])
+def test_autonomy_rpc_fails_closed_for_invalid_registered_workspace(
+    rpc_raw, server, tmp_path, monkeypatch, cwd
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    launch = tmp_path / "gateway-launch"
+    launch.mkdir()
+    server._sessions["sid-autonomy-invalid-workspace"] = {
+        "session_key": "tui-autonomy-invalid-workspace",
+        "cwd": cwd,
+    }
+    called = False
+
+    def run(*args, **kwargs):
+        nonlocal called
+        called = True
+        return autonomy_mod.CliResult(autonomy_mod.EXIT_OK, "unsafe", {"ok": True})
+
+    monkeypatch.setattr(autonomy_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    response = rpc_raw(
+        "autonomy.exec",
+        {"session_id": "sid-autonomy-invalid-workspace", "argv": ["status"]},
+    )
+
+    assert response["error"]["code"] == 5038
+    assert "gateway-launch" not in str(response)
+    assert "/private/missing-autonomy-workspace" not in str(response)
+    assert called is False
+
+
+def test_autonomy_rpc_fails_closed_when_registered_workspace_is_deleted(
+    rpc_raw, server, tmp_path, monkeypatch
+):
+    import hades_cli.autonomy as autonomy_mod
+
+    launch = tmp_path / "gateway-launch"
+    workspace = tmp_path / "deleted-autonomy-workspace"
+    launch.mkdir()
+    workspace.mkdir()
+    server._sessions["sid-autonomy-deleted-workspace"] = {
+        "session_key": "tui-autonomy-deleted-workspace",
+        "cwd": str(workspace),
+    }
+    workspace.rmdir()
+    called = False
+
+    def run(*args, **kwargs):
+        nonlocal called
+        called = True
+        return autonomy_mod.CliResult(autonomy_mod.EXIT_OK, "unsafe", {"ok": True})
+
+    monkeypatch.setattr(autonomy_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    response = rpc_raw(
+        "autonomy.exec",
+        {"session_id": "sid-autonomy-deleted-workspace", "argv": ["status"]},
+    )
+
+    assert response["error"]["code"] == 5038
+    assert str(workspace) not in str(response)
+    assert str(launch) not in str(response)
+    assert called is False
 
 
 def test_autonomy_relative_action_file_uses_workspace_context(tmp_path, monkeypatch):

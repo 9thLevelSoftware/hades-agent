@@ -186,16 +186,36 @@ def test_transaction_rpc_redacts_nonvalidation_command_failure(rpc, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    ("action", "status", "extra"),
+    ("action", "status", "extra", "safe_output"),
     [
-        ("commit", "unknown_effect", {"committed_nodes": ["write"]}),
-        ("commit", "blocked", {"committed_nodes": ["write"], "blocked_node": "publish"}),
-        ("compensate", "partially_compensated", {"compensated_nodes": ["write"]}),
-        ("compensate", "failed", {}),
+        (
+            "commit",
+            "unknown_effect",
+            {"committed_nodes": ["write"]},
+            "transaction effect uncertain — do not retry; reconcile first",
+        ),
+        (
+            "commit",
+            "blocked",
+            {"committed_nodes": ["write"], "blocked_node": "publish"},
+            "transaction blocked — execution was prevented",
+        ),
+        (
+            "compensate",
+            "partially_compensated",
+            {"compensated_nodes": ["write"]},
+            "transaction partially compensated — compensation incomplete",
+        ),
+        (
+            "compensate",
+            "failed",
+            {},
+            "transaction failed — operation did not complete",
+        ),
     ],
 )
-def test_transaction_rpc_preserves_safety_uncertainty_on_nonzero_exit(
-    rpc, monkeypatch, action, status, extra
+def test_transaction_rpc_classifies_known_failures_separately_from_unknown_effect(
+    rpc, monkeypatch, action, status, extra, safe_output
 ):
     import hades_cli.transactions as transactions_mod
 
@@ -230,6 +250,42 @@ def test_transaction_rpc_preserves_safety_uncertainty_on_nonzero_exit(
     assert "/private/authority.yaml" not in str(resp)
     assert "Traceback" not in str(resp)
     assert resp["output"] != failed.output
+    assert resp["output"] == safe_output
+    if status != "unknown_effect":
+        assert "effect uncertain" not in resp["output"]
+        assert "do not retry" not in resp["output"]
+        assert "reconcile" not in resp["output"]
+
+
+def test_transaction_rpc_unknown_effect_wins_over_nonzero_exit_and_payload_ok(
+    rpc, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_ERROR,
+        "producer failed after dispatch /private/authority.yaml",
+        {
+            "ok": True,
+            "action": "commit",
+            "status": "unknown_effect",
+            "committed_nodes": ["write"],
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc(
+        "transaction.exec",
+        {"argv": ["commit", "tx-nonzero"], "session_id": "sid"},
+    )
+
+    assert resp["ok"] is False, resp
+    assert resp["status"] == "unknown_effect"
+    assert resp["transaction_id"] == "tx-nonzero"
+    assert resp["output"] == "transaction effect uncertain — do not retry; reconcile first"
+    assert resp.get("error") is None
+    assert "5044" not in str(resp)
+    assert "/private/authority.yaml" not in str(resp)
 
 
 @pytest.mark.parametrize(
@@ -461,6 +517,82 @@ def test_transaction_rpc_binds_relative_inputs_and_adapters_to_session_workspace
     assert result.get("ok") is True, result
     assert captured == [workspace.resolve()]
     assert Path.cwd() == launch
+
+
+@pytest.mark.parametrize("cwd", [None, "", 17, "/private/missing-transaction-workspace"])
+def test_transaction_rpc_fails_closed_for_invalid_registered_workspace(
+    rpc, server, tmp_path, monkeypatch, cwd
+):
+    import hades_cli.transactions as transactions_mod
+
+    launch = tmp_path / "gateway-launch"
+    launch.mkdir()
+    server._sessions["sid-transaction-invalid-workspace"] = {
+        "session_key": "tui-transaction-invalid-workspace",
+        "cwd": cwd,
+    }
+    called = False
+
+    def run(*args, **kwargs):
+        nonlocal called
+        called = True
+        return transactions_mod.TransactionCommandResult(
+            transactions_mod.EXIT_OK, "unsafe", {"ok": True}
+        )
+
+    monkeypatch.setattr(transactions_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    response = rpc(
+        "transaction.exec",
+        {
+            "session_id": "sid-transaction-invalid-workspace",
+            "argv": ["list"],
+        },
+    )
+
+    assert response["error"]["code"] == 5045
+    assert "gateway-launch" not in str(response)
+    assert "/private/missing-transaction-workspace" not in str(response)
+    assert called is False
+
+
+def test_transaction_rpc_fails_closed_when_registered_workspace_is_deleted(
+    rpc, server, tmp_path, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+
+    launch = tmp_path / "gateway-launch"
+    workspace = tmp_path / "deleted-transaction-workspace"
+    launch.mkdir()
+    workspace.mkdir()
+    server._sessions["sid-transaction-deleted-workspace"] = {
+        "session_key": "tui-transaction-deleted-workspace",
+        "cwd": str(workspace),
+    }
+    workspace.rmdir()
+    called = False
+
+    def run(*args, **kwargs):
+        nonlocal called
+        called = True
+        return transactions_mod.TransactionCommandResult(
+            transactions_mod.EXIT_OK, "unsafe", {"ok": True}
+        )
+
+    monkeypatch.setattr(transactions_mod, "run_argv", run)
+    monkeypatch.chdir(launch)
+    response = rpc(
+        "transaction.exec",
+        {
+            "session_id": "sid-transaction-deleted-workspace",
+            "argv": ["list"],
+        },
+    )
+
+    assert response["error"]["code"] == 5045
+    assert str(workspace) not in str(response)
+    assert str(launch) not in str(response)
+    assert called is False
 
 
 def test_transaction_rpc_preserves_safe_scalar_diagnostics(rpc, monkeypatch):
@@ -737,7 +869,7 @@ def test_transaction_native_redacts_generic_posix_paths_recursively(
 
 @pytest.mark.parametrize(
     "status",
-    ["unknown_effect", "blocked", "partially_compensated", "failed"],
+    ["unknown_effect"],
 )
 def test_transaction_rpc_uncertainty_wins_over_exit_ok_and_payload_ok(
     rpc, monkeypatch, status
@@ -762,6 +894,75 @@ def test_transaction_rpc_uncertainty_wins_over_exit_ok_and_payload_ok(
     assert resp["status"] == status
     assert resp["output"] == "transaction effect uncertain — do not retry; reconcile first"
     assert resp["action"] == "commit"
+    assert "/etc/passwd" not in str(resp)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_output"),
+    [
+        ("blocked", "transaction blocked — execution was prevented"),
+        ("failed", "transaction failed — operation did not complete"),
+        (
+            "partially_compensated",
+            "transaction partially compensated — compensation incomplete",
+        ),
+    ],
+)
+def test_transaction_rpc_known_failure_statuses_are_not_uncertain(
+    rpc, monkeypatch, status, expected_output
+):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        "producer output /etc/passwd",
+        {
+            "ok": True,
+            "action": "commit",
+            "status": status,
+            "committed_nodes": ["write"],
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc("transaction.exec", {"argv": ["commit", "tx"], "session_id": "sid"})
+
+    assert resp["ok"] is False, resp
+    assert resp["status"] == status
+    assert resp["output"] == expected_output
+    assert "effect uncertain" not in resp["output"]
+    assert "do not retry" not in resp["output"]
+    assert "reconcile" not in resp["output"]
+    assert "/etc/passwd" not in str(resp)
+
+
+def test_transaction_rpc_counts_unknown_promote_in_flight_result_to_uncertain(
+    rpc, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+
+    result = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        "reconcile output /etc/passwd",
+        {
+            "ok": True,
+            "action": "reconcile",
+            "status": "committing",
+            "counts": {"landed": 1, "not_landed": 0, "skipped": 0, "unknown": 1},
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: result)
+
+    resp = rpc(
+        "transaction.exec",
+        {"argv": ["reconcile", "tx-counts"], "session_id": "sid"},
+    )
+
+    assert resp["ok"] is False, resp
+    assert resp["status"] == "committing"
+    assert resp["counts"]["unknown"] == 1
+    assert resp["transaction_id"] == "tx-counts"
+    assert resp["output"] == "transaction effect uncertain — do not retry; reconcile first"
     assert "/etc/passwd" not in str(resp)
 
 
