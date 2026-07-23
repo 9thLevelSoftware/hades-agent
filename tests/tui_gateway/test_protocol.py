@@ -390,6 +390,57 @@ def test_session_resume_returns_hydrated_messages(server, monkeypatch):
     ]
 
 
+def test_session_resume_invalid_cols_defaults_to_80(server, monkeypatch):
+    """The validated handler width must reach the implementation unchanged."""
+    target = "20260723_010101_invalidcols"
+    init_cols = []
+
+    class _DB:
+        def get_session(self, _sid):
+            return {"id": target}
+
+        def get_session_by_title(self, _title):
+            return None
+
+        def resolve_resume_session_id(self, sid):
+            return sid
+
+        def reopen_session(self, _sid):
+            return None
+
+        def get_resume_conversations(self, _sid):
+            history = [{"role": "user", "content": "hello"}]
+            return history, history
+
+        def get_ancestor_display_prefix(self, _sid):
+            return []
+
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_make_agent", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        server,
+        "_init_session",
+        lambda _sid, _key, _agent, _history, *, cols=80, **_kwargs: init_cols.append(cols),
+    )
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "test/model"})
+
+    resp = server.handle_request(
+        {
+            "id": "invalid-cols",
+            "method": "session.resume",
+            "params": {
+                "session_id": target,
+                "cols": "not-a-number",
+                "eager_build": True,
+            },
+        }
+    )
+
+    assert "error" not in resp, resp
+    assert init_cols == [80]
+    assert resp["result"]["message_count"] == 1
+
+
 def test_session_resume_defaults_to_deferred_build(server, monkeypatch):
     """A normal cold resume (no ``eager_build``) must return the full display
     transcript immediately and register an upgradable live session WITHOUT
@@ -2905,6 +2956,97 @@ def test_reset_swaps_before_starting_candidate_side_machinery(server, monkeypatc
     assert dbs[0].close_calls == 1
 
 
+def test_reset_publication_failure_cleans_old_and_candidate_resources(
+    server, monkeypatch, tmp_path
+):
+    """A reset that loses its slot after publication must release both generations."""
+    sid = "reset-published-failure"
+    replacement = {"replacement": True}
+    old_stop = threading.Event()
+    old_thread_done = threading.Event()
+
+    def _old_poller():
+        old_stop.wait(5)
+        old_thread_done.set()
+
+    old_thread = threading.Thread(target=_old_poller, daemon=True)
+    old_thread.start()
+
+    class _Closable:
+        def __init__(self, name):
+            self.name = name
+            self.close_calls = 0
+            self._end_session_on_close = True
+
+        def close(self):
+            self.close_calls += 1
+
+    old_agent = _Closable("old-agent")
+    new_agent = _Closable("new-agent")
+    old_worker = _Closable("old-worker")
+    new_worker = _Closable("new-worker")
+    session = {
+        "agent": old_agent,
+        "session_key": "reset-published-key",
+        "profile_home": None,
+        "cwd": str(tmp_path),
+        "source": "tui",
+        "history": [],
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "_notif_stop": old_stop,
+        "_notif_thread": old_thread,
+        "slash_worker": old_worker,
+    }
+
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda _tokens: None)
+    monkeypatch.setattr(server, "_make_agent", lambda *_args, **_kwargs: new_agent)
+    monkeypatch.setattr(server, "_session_info", lambda *_args: {"model": "new/model"})
+    monkeypatch.setattr(server, "_config_model_target", lambda: "new/model")
+    monkeypatch.setattr(server, "_load_show_reasoning", lambda: False)
+    monkeypatch.setattr(server, "_load_tool_progress_mode", lambda: "all")
+
+    def _reap_after_publication(_sid, _session, build_only=False):
+        assert build_only is True
+        with server._sessions_lock:
+            server._sessions[sid] = replacement
+        return new_worker
+
+    monkeypatch.setattr(server, "_restart_slash_worker", _reap_after_publication)
+    monkeypatch.setattr(
+        server,
+        "_start_notification_poller",
+        lambda *_args, **_kwargs: pytest.fail("replacement must not receive a poller"),
+    )
+    monkeypatch.setattr(server, "_notify_session_boundary", lambda *_args: None)
+    monkeypatch.setattr(server, "_emit", lambda *_args: None)
+
+    with server._sessions_lock:
+        server._sessions[sid] = session
+    try:
+        with pytest.raises(RuntimeError, match="closed or replaced during reset"):
+            server._reset_session_agent(sid, session)
+
+        old_stop_set = old_stop.is_set()
+        old_thread_alive = old_thread.is_alive()
+        old_thread_finished = old_thread_done.is_set()
+        replacement_snapshot = dict(server._sessions[sid])
+        assert old_stop_set
+        assert not old_thread_alive
+        assert old_thread_finished
+        assert old_worker.close_calls == 1
+        assert old_agent.close_calls == 1
+        assert old_agent._end_session_on_close is False
+        assert new_agent.close_calls == 1
+        assert new_worker.close_calls == 1
+        assert replacement_snapshot == replacement
+    finally:
+        old_stop.set()
+        old_thread.join(timeout=1)
+        server._sessions.pop(sid, None)
+
+
 def test_profile_branch_limit_and_row_error_close_db_once(server, monkeypatch, tmp_path):
     """Profile branch failures before ownership transfer close their DB once."""
     profile_home = tmp_path / "profile"
@@ -3136,6 +3278,119 @@ def test_close_agent_once_is_atomic_for_non_weakref_concurrent_agent(server):
     first.join(1)
     second.join(1)
     assert not first.is_alive() and not second.is_alive()
+    assert agent.close_calls == 1
+
+
+def test_close_agent_once_serializes_virgin_mutable_agent_lock_installation(
+    server, monkeypatch
+):
+    """Concurrent first close calls must select one object-owned lock."""
+    real_lock = threading.Lock
+    factory_barrier = threading.Barrier(2)
+    factory_guard = real_lock()
+    factory_calls = [0]
+    close_count_lock = real_lock()
+    thread_state = threading.local()
+    installed_locks = []
+
+    class _Lock:
+        def __init__(self):
+            self._raw = real_lock()
+
+        def acquire(self, *args, **kwargs):
+            return self._raw.acquire(*args, **kwargs)
+
+        def release(self):
+            return self._raw.release()
+
+        def __enter__(self):
+            self.acquire()
+            thread_state.inside_close_lock = True
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            thread_state.inside_close_lock = False
+            self.release()
+            return False
+
+    def _lock_factory():
+        with factory_guard:
+            factory_calls[0] += 1
+            call_number = factory_calls[0]
+        if call_number <= 2:
+            try:
+                factory_barrier.wait(timeout=1)
+            except threading.BrokenBarrierError:
+                pass
+        lock = _Lock()
+        thread_state.expected_lock = lock
+        return lock
+
+    class _Agent:
+        def __init__(self):
+            self.close_calls = 0
+
+        def __setattr__(self, name, value):
+            if name == "_tui_close_lock":
+                installed_locks.append(value)
+            object.__setattr__(self, name, value)
+
+        def __getattribute__(self, name):
+            if name == "_tui_close_lock":
+                expected = getattr(thread_state, "expected_lock", None)
+                if expected is not None:
+                    return expected
+            if name == "_tui_closed":
+                expected = getattr(thread_state, "expected_lock", None)
+                if expected is not None and getattr(
+                    thread_state, "inside_close_lock", False
+                ):
+                    return False
+            return object.__getattribute__(self, name)
+
+        def close(self):
+            with close_count_lock:
+                self.close_calls += 1
+
+    agent = _Agent()
+    errors = []
+    threads = [
+        threading.Thread(
+            target=lambda: server._close_agent_once(agent),
+        )
+        for _ in range(2)
+    ]
+    monkeypatch.setattr(server.threading, "Lock", _lock_factory)
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+        if thread.is_alive():
+            errors.append("close thread did not finish")
+
+    assert not errors
+    assert len(installed_locks) == 1
+    assert agent.close_calls == 1
+    assert agent._tui_closed is True
+
+
+def test_close_agent_once_is_safe_when_agent_close_reenters(server):
+    """The close-once marker must short-circuit a recursive teardown."""
+
+    class _Agent:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            server._close_agent_once(self)
+
+    agent = _Agent()
+    thread = threading.Thread(target=server._close_agent_once, args=(agent,), daemon=True)
+    thread.start()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
     assert agent.close_calls == 1
 
 
