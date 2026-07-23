@@ -179,6 +179,76 @@ def test_transaction_rpc_redacts_nonvalidation_command_failure(rpc, monkeypatch)
     assert len(message) <= 256
 
 
+def test_transaction_rpc_redacts_false_payload_on_success_exit(rpc, monkeypatch):
+    import hades_cli.transactions as transactions_mod
+
+    secret = "transaction-secret-partial-compensation"
+    details = (
+        f"{secret} /private/authority.yaml\\n"
+        "Traceback (most recent call last)"
+    )
+    failed = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        f"error: {details}",
+        {
+            "ok": False,
+            "action": "compensate",
+            "status": "partially_compensated",
+            "error": details,
+        },
+    )
+    monkeypatch.setattr(transactions_mod, "run_argv", lambda *_a, **_k: failed)
+
+    resp = rpc("transaction.exec", {
+        "argv": ["compensate", "tx-partial"], "session_id": "sid",
+    })
+    assert resp.get("ok") is not True, resp
+    error = resp.get("error") or {}
+    message = str(error.get("message", ""))
+
+    assert error.get("code") == 5044, resp
+    assert secret not in str(resp)
+    assert "/private/authority.yaml" not in str(resp)
+    assert "Traceback" not in str(resp)
+    assert len(message) <= 256
+
+
+def test_transaction_rpc_bounds_success_output_and_omits_failure_error(
+    rpc, monkeypatch
+):
+    import hades_cli.transactions as transactions_mod
+
+    max_output_chars = 16_384
+    truncation_suffix = "... [truncated]"
+    secret = "transaction-secret-success-payload-error"
+    oversized_output = "transaction output\\n" + ("x" * 20_000)
+    successful = transactions_mod.TransactionCommandResult(
+        transactions_mod.EXIT_OK,
+        oversized_output,
+        {
+            "ok": True,
+            "action": "show",
+            "error": f"failure-only detail: {secret}",
+        },
+    )
+    monkeypatch.setattr(
+        transactions_mod, "run_argv", lambda *_a, **_k: successful
+    )
+
+    resp = rpc("transaction.exec", {
+        "argv": ["show", "tx-success"], "session_id": "sid",
+    })
+
+    assert resp.get("ok") is True, resp
+    assert "error" not in resp
+    assert secret not in str(resp)
+    assert len(resp["output"]) <= max_output_chars
+    assert resp["output"] == (
+        oversized_output[:max_output_chars - len(truncation_suffix)]
+        + truncation_suffix
+    )
+
+
 def test_transaction_rpc_runs_mutations_in_live_process(
     rpc, tmp_path, monkeypatch
 ):
