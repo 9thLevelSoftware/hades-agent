@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { readFileSync } from 'node:fs'
 
 import * as canonicalShared from '@hades/shared'
