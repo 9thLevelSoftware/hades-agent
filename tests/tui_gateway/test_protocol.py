@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1347,6 +1348,107 @@ def test_session_branch_forwards_original_timestamps(server, monkeypatch):
     assert "error" not in resp, resp
     assert len(append_calls) == 2
     assert [c.get("timestamp") for c in append_calls] == original_ts
+
+
+def test_session_branch_uses_parent_profile_context_for_db_and_agent(server, monkeypatch, tmp_path):
+    """A cross-profile branch must publish its row and agent through one profile DB."""
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    events = []
+    dbs = []
+    active_override = False
+
+    class _DB:
+        def get_session_title(self, _key):
+            assert active_override
+            return "parent-title"
+
+        def get_next_title_in_lineage(self, base):
+            assert active_override
+            return f"{base} 2"
+
+        def create_session(self, new_key, **kwargs):
+            assert active_override
+            events.append(("create", new_key, kwargs))
+
+        def append_message(self, **kwargs):
+            assert active_override
+            events.append(("append", kwargs))
+
+        def set_session_title(self, key, title):
+            assert active_override
+            events.append(("title", key, title))
+
+    class _SessionDB(_DB):
+        def __init__(self, *, db_path):
+            assert active_override
+            self.db_path = Path(db_path)
+            dbs.append(self)
+
+    def _set_override(home):
+        nonlocal active_override
+        assert Path(home) == profile_home
+        active_override = True
+        events.append(("set", str(home)))
+        return "profile-token"
+
+    def _reset_override(token):
+        nonlocal active_override
+        assert token == "profile-token"
+        events.append(("reset", token))
+        active_override = False
+
+    monkeypatch.setattr(server, "_get_db", lambda: pytest.fail("launch DB must not be opened"))
+    monkeypatch.setattr(server, "set_hermes_home_override", _set_override)
+    monkeypatch.setattr(server, "reset_hermes_home_override", _reset_override)
+    monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(SessionDB=_SessionDB))
+    monkeypatch.setattr(
+        server,
+        "_resolve_model",
+        lambda: (pytest.fail("model must resolve in profile context") if not active_override else "profile/model"),
+    )
+    monkeypatch.setattr(server, "_new_session_key", lambda: "20260101_000001_profile")
+    monkeypatch.setattr(server, "_claim_active_session_slot", lambda *_a, **_k: (None, None))
+    monkeypatch.setattr(server, "_set_session_context", lambda *_a, **_k: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda _sid, key, session_id=None, session_db=None, **_kwargs: (
+            pytest.fail("agent must build in profile context")
+            if not active_override or session_db is not dbs[0]
+            else types.SimpleNamespace(model="profile/model", session_id=session_id or key)
+        ),
+    )
+    init_calls = []
+    monkeypatch.setattr(server, "_init_session", lambda *args, **kwargs: init_calls.append((args, kwargs)))
+
+    parent_sid = "parent-profile"
+    parent_key = "20260101_000000_parent"
+    workspace = tmp_path / "workspace"
+    server._sessions[parent_sid] = {
+        "session_key": parent_key,
+        "history": [{"role": "user", "content": "hello"}],
+        "history_lock": threading.Lock(),
+        "cols": 100,
+        "cwd": str(workspace),
+        "profile_home": str(profile_home),
+    }
+    resp = server.handle_request(
+        {"id": "profile-branch", "method": "session.branch", "params": {"session_id": parent_sid}}
+    )
+
+    assert "error" not in resp, resp
+    assert dbs and dbs[0].db_path == profile_home / "state.db"
+    assert [event[0] for event in events] == ["set", "create", "append", "title", "reset"]
+    create = next(event for event in events if event[0] == "create")
+    assert create[2]["model"] == "profile/model"
+    assert create[2]["cwd"] == str(workspace)
+    assert create[2]["model_config"] == {"_branched_from": parent_key}
+    assert init_calls[0][1]["session_db"] is dbs[0]
+    assert init_calls[0][1]["profile_home"] == str(profile_home)
+    assert init_calls[0][1]["cwd"] == str(workspace)
+    assert active_override is False
 
 
 def test_persist_branch_seed_forwards_original_timestamps(server, monkeypatch):
