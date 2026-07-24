@@ -49,6 +49,11 @@ type PendingCall = {
   timer?: ReturnType<typeof setTimeout>
 }
 
+type PendingConnection = {
+  reject: (error: Error) => void
+  socket: WebSocketLike
+}
+
 export interface GatewayClientOptions {
   closedErrorMessage?: string
   connectErrorMessage?: string
@@ -70,6 +75,7 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
 export class JsonRpcGatewayClient {
   private nextId = 0
   private pending = new Map<GatewayRequestId, PendingCall>()
+  private pendingConnection: PendingConnection | null = null
   private socket: WebSocketLike | null = null
   private state: ConnectionState = 'idle'
   private readonly eventHandlers = new Map<string, Set<(event: GatewayEvent) => void>>()
@@ -95,11 +101,35 @@ export class JsonRpcGatewayClient {
   }
 
   async connect(wsUrl: string): Promise<void> {
+    // Refuse garbage; WebSocket coerces non-strings into
+    // `ws://<origin>/[object%20Object]` (#68250 stale-emit boot loop).
+    const invalidUrl = () => {
+      const got = typeof wsUrl === 'string' ? JSON.stringify(wsUrl) : `type "${typeof wsUrl}"`
+
+      return new Error(`gateway connect() requires a ws:// or wss:// URL string, got ${got}`)
+    }
+
+    if (typeof wsUrl !== 'string') {
+      throw invalidUrl()
+    }
+
+    let url: URL
+    try {
+      url = new URL(wsUrl)
+    } catch {
+      throw invalidUrl()
+    }
+
+    // The WebSocket constructor rejects every fragment, including an empty
+    // trailing "#". URL.hash cannot distinguish an absent fragment from an
+    // empty one, while the serialized URL preserves the delimiter.
+    if ((url.protocol !== 'ws:' && url.protocol !== 'wss:') || url.href.includes('#')) {
+      throw invalidUrl()
+    }
+
     if (this.socket?.readyState === WebSocket.OPEN || this.state === 'connecting') {
       return
     }
-
-    this.setState('connecting')
 
     const socket = this.options.socketFactory?.(wsUrl) ?? new WebSocket(wsUrl)
     this.socket = socket
@@ -112,17 +142,7 @@ export class JsonRpcGatewayClient {
       this.handleMessage(message.data)
     })
 
-    socket.addEventListener('close', () => {
-      if (this.socket !== socket) {
-        return
-      }
-
-      this.socket = null
-      this.setState('closed')
-      this.rejectAllPending(new Error(this.options.closedErrorMessage))
-    })
-
-    await new Promise<void>((resolve, reject) => {
+    const connection = new Promise<void>((resolve, reject) => {
       let settled = false
       let timer: ReturnType<typeof setTimeout> | undefined
 
@@ -133,6 +153,20 @@ export class JsonRpcGatewayClient {
 
         socket.removeEventListener('open', onOpen)
         socket.removeEventListener('error', onError)
+        socket.removeEventListener('close', onClose)
+        if (this.pendingConnection?.socket === socket) {
+          this.pendingConnection = null
+        }
+      }
+
+      const fail = (error: Error) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        cleanup()
+        reject(error)
       }
 
       const onOpen = () => {
@@ -151,14 +185,22 @@ export class JsonRpcGatewayClient {
           return
         }
 
-        settled = true
-        cleanup()
         this.setState('error')
-        reject(new Error(this.options.connectErrorMessage))
+        fail(new Error(this.options.connectErrorMessage))
       }
 
+      const onClose = () => {
+        if (settled || this.socket !== socket) {
+          return
+        }
+
+        fail(new Error(this.options.connectErrorMessage))
+      }
+
+      this.pendingConnection = { reject: fail, socket }
       socket.addEventListener('open', onOpen, { once: true })
       socket.addEventListener('error', onError, { once: true })
+      socket.addEventListener('close', onClose, { once: true })
 
       if (this.options.connectTimeoutMs > 0) {
         timer = setTimeout(() => {
@@ -166,26 +208,44 @@ export class JsonRpcGatewayClient {
             return
           }
 
-          settled = true
-          cleanup()
+          fail(new Error(this.options.connectErrorMessage))
 
           // Drop the half-open socket so the next connect() starts clean
           // instead of short-circuiting on a zombie 'connecting' state.
           if (this.socket === socket) {
+            this.socket = null
             try {
               socket.close()
             } catch {
               // ignore
             }
-
-            this.socket = null
           }
 
           this.setState('error')
-          reject(new Error(this.options.connectErrorMessage))
         }, this.options.connectTimeoutMs)
       }
     })
+
+    // Register the persistent lifecycle handler after the one-shot handshake
+    // listener. An early close rejects `connection` first, then publishes the
+    // durable closed state and clears the socket.
+    socket.addEventListener('close', () => {
+      if (this.socket !== socket) {
+        return
+      }
+
+      this.socket = null
+      this.setState('closed')
+      this.rejectAllPending(new Error(this.options.closedErrorMessage))
+    })
+
+    // The pending handshake must own its rejection path before publishing
+    // "connecting": state observers run synchronously and may call close().
+    // Socket construction still happens first so constructor failures leave
+    // the client idle and retryable.
+    this.setState('connecting')
+
+    await connection
   }
 
   close(): void {
@@ -193,6 +253,10 @@ export class JsonRpcGatewayClient {
 
     if (!socket) {
       return
+    }
+
+    if (this.pendingConnection?.socket === socket) {
+      this.pendingConnection.reject(new Error(this.options.closedErrorMessage))
     }
 
     try {

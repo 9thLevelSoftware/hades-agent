@@ -19,6 +19,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@hades/ink": "file:./packages/hermes-ink",
+    "@hades/shared": "file:../apps/shared",
     "@hermes/ink": "file:./packages/hermes-ink",
     "@hermes/shared": "file:../apps/shared",
     "@nanostores/react": "^1.1.0",
