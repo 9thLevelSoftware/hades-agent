@@ -1,5 +1,7 @@
 """Tests for Anthropic OAuth setup flow behavior."""
 
+import os
+
 from hades_cli.config import load_env, save_env_value
 
 
@@ -25,11 +27,18 @@ def test_run_anthropic_oauth_flow_prefers_claude_code_credentials(tmp_path, monk
     from hades_cli.main import _run_anthropic_oauth_flow
 
     save_env_value("ANTHROPIC_TOKEN", "stale-env-token")
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "stale-process-token")
     assert _run_anthropic_oauth_flow(save_env_value) is True
 
     env_vars = load_env()
-    assert env_vars["ANTHROPIC_TOKEN"] == ""
-    assert env_vars["ANTHROPIC_API_KEY"] == ""
+    assert "ANTHROPIC_TOKEN" not in env_vars
+    assert "ANTHROPIC_API_KEY" not in env_vars
+    assert "ANTHROPIC_TOKEN" not in os.environ
+    assert "ANTHROPIC_API_KEY" not in os.environ
+    dotenv = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "stale-env-token" not in dotenv
+    assert "ANTHROPIC_TOKEN" not in dotenv
+    assert "ANTHROPIC_API_KEY" not in dotenv
     output = capsys.readouterr().out
     assert "Claude Code credentials linked" in output
 
