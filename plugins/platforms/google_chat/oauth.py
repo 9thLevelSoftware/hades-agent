@@ -199,7 +199,7 @@ def load_user_credentials(email: Optional[str] = None) -> Optional[Any]:
     except ImportError:
         logger.warning(
             "[google_chat_user_oauth] google-auth not installed; user-OAuth "
-            "attachment delivery is disabled. Install hermes-agent[google_chat]."
+            "attachment delivery is disabled. Install hades-agent[google_chat]."
         )
         return None
 

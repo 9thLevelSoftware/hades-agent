@@ -12,6 +12,49 @@ import pytest
 from hades_cli import upstream_guard
 
 
+_UPSTREAM_INSTALL_HINT = re.compile(
+    r"\b(?:"
+    r"(?:uv\s+)?pip(?:3)?\s+install(?:\s+--[^\s]+)*|"
+    r"uv\s+tool\s+install(?:\s+--[^\s]+)*|"
+    r"pipx\s+install(?:\s+--[^\s]+)*|"
+    r"uvx\s+--from|"
+    r"(?:re)?install(?:\s+the)?(?:\s+extra)?\s*:?|"
+    r"(?:重新)?安装\s*:?|"
+    r"インストール\s*:?"
+    r")\s+[`'\"]?hermes-agent(?:\[[^\]]+\])?",
+    re.IGNORECASE,
+)
+_NEGATIVE_INSTALL_CONTEXT = re.compile(
+    r"\b(?:do\s+not|don't|never|avoid|unsupported|not\s+supported|installs\s+via)\b|请勿使用",
+    re.IGNORECASE,
+)
+
+
+def _has_positive_upstream_install_hint(line: str) -> bool:
+    return bool(_UPSTREAM_INSTALL_HINT.search(line)) and not _NEGATIVE_INSTALL_CONTEXT.search(line)
+
+
+def _active_user_facing_files(repo_root: Path):
+    source_roots = (
+        "tools", "hades_cli", "agent", "gateway", "cron", "plugins",
+        "providers", "acp_adapter", "acp_registry", "tui_gateway", "scripts",
+    )
+    for root_name in source_roots:
+        root = repo_root / root_name
+        if root.is_dir():
+            for suffix in ("*.py", "*.sh", "*.ps1"):
+                yield from root.rglob(suffix)
+    for root in (
+        repo_root / "skills",
+        repo_root / "optional-skills",
+        repo_root / "website" / "docs",
+        repo_root / "website" / "i18n",
+    ):
+        if root.is_dir():
+            for suffix in ("*.py", "*.md", "*.mdx"):
+                yield from root.rglob(suffix)
+
+
 @pytest.fixture(autouse=True)
 def _reset_guard_state():
     """Each test starts with a cold detection cache and unwarned process."""
@@ -82,28 +125,65 @@ def test_suppression_env_var_silences_warning(monkeypatch, var):
     assert stream.getvalue() == ""
 
 
-def test_no_pip_install_hermes_agent_strings_remain():
-    """No user-facing remediation may still tell users to pip install the
-    upstream hermes-agent distribution (it clobbers our hermes shims)."""
+def test_no_positive_upstream_install_hints_remain_in_active_user_surfaces():
+    """No user-facing remediation may direct users to upstream Hermes.
+
+    The wording is intentionally broader than only ``pip install``: startup
+    errors commonly say ``Install hermes-agent[...]`` without repeating the
+    package manager.  An uninstall command and compatibility prose are not
+    installation hints and therefore remain valid legacy references.
+    """
     repo_root = Path(__file__).resolve().parent.parent
-    pattern = re.compile(r"pip install ['\"]?hermes-agent")
     offenders = []
-    for top in ("tools", "hades_cli", "agent", "gateway", "cron",
-                 "plugins", "providers", "acp_adapter", "acp_registry",
-                 "tui_gateway", "scripts"):
-        top_dir = repo_root / top
-        if not top_dir.is_dir():
+    for source_file in sorted(set(_active_user_facing_files(repo_root))):
+        if "tests" in source_file.parts or "test" in source_file.name:
             continue
-        for py_file in sorted(top_dir.rglob("*.py")):
-            if "tests" in py_file.parts or "test" in py_file.name:
-                continue
-            try:
-                text = py_file.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            for lineno, line in enumerate(text.splitlines(), start=1):
-                if pattern.search(line):
-                    offenders.append(f"{py_file.relative_to(repo_root)}:{lineno}: {line.strip()}")
+        try:
+            text = source_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if _has_positive_upstream_install_hint(line):
+                offenders.append(f"{source_file.relative_to(repo_root)}:{lineno}: {line.strip()}")
     assert not offenders, (
-        "Found stale upstream pip-install remediation strings:\n" + "\n".join(offenders)
+        "Found stale upstream install remediation strings:\n" + "\n".join(offenders)
     )
+
+
+@pytest.mark.parametrize(
+    ("line", "is_hint"),
+    [
+        ("Install hermes-agent[google_chat].", True),
+        ("pip install 'hermes-agent[messaging]'", True),
+        ("pip install --force-reinstall hermes-agent", True),
+        ("reinstall hermes-agent", True),
+        ("重新安装 hermes-agent", True),
+        ("インストール hermes-agent", True),
+        ("pip uninstall hermes-agent", False),
+        ("Legacy hermes-agent[all] compatibility remains supported.", False),
+    ],
+)
+def test_upstream_install_hint_pattern_ignores_compatibility_and_uninstall(line, is_hint):
+    assert _has_positive_upstream_install_hint(line) is is_hint
+
+
+@pytest.mark.parametrize(
+    ("line", "is_hint"),
+    [
+        ("uv tool install hermes-agent", True),
+        ("uvx --from 'hermes-agent[acp]' hermes-acp", True),
+        ("Install the extra: `hermes-agent[vertex]`.", True),
+        ("Do not use `pip install hermes-agent`.", False),
+        ("请勿使用 `pip install hermes-agent`。", False),
+        ("installs via PyPI (e.g. `uv tool install hermes-agent`)", False),
+    ],
+)
+def test_upstream_install_hint_detection_preserves_negative_guidance(line, is_hint):
+    assert _has_positive_upstream_install_hint(line) is is_hint
+
+
+def test_active_hint_scan_includes_shell_and_powershell_installers():
+    repo_root = Path(__file__).resolve().parent.parent
+    active = set(_active_user_facing_files(repo_root))
+    assert repo_root / "scripts" / "install.sh" in active
+    assert repo_root / "scripts" / "install.ps1" in active

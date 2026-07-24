@@ -48,7 +48,7 @@ pip install -e '.[acp]'
 对于 Zed registry 安装，Zed 通过官方 ACP Registry 条目启动 Hermes。该条目使用 `uvx` 发行版运行：
 
 ```bash
-uvx --from 'hermes-agent[acp]==<version>' hermes-acp
+uvx --from 'hades-agent[acp]==<version>' hades-acp
 ```
 
 使用 registry 安装路径前，请确保 `uv` 已在 `PATH` 中可用。
@@ -134,7 +134,7 @@ Zed v0.221.x 及更新版本通过官方 ACP Registry 安装外部 agent。
 前提条件：
 
 - 先通过 `hermes model` 配置 Hermes provider 凭据，或在 `~/.hades/.env` / `~/.hades/config.yaml` 中设置。
-- 安装 `uv`，以便 registry 启动器可以运行 `uvx --from 'hermes-agent[acp]==<version>' hermes-acp`。
+- 安装 `uv`，以便 registry 启动器可以运行 `uvx --from 'hades-agent[acp]==<version>' hades-acp`。
 
 在 registry 条目可用之前进行本地开发时，在 Zed 设置中使用自定义 agent 服务器：
 
@@ -167,12 +167,12 @@ acp_registry/agent.json
 acp_registry/icon.svg
 ```
 
-上游 registry PR 将这些文件复制到 `agentclientprotocol/registry` 中的顶层 `hermes-agent/` 目录。
+上游 registry PR 将这些文件复制到 `agentclientprotocol/registry` 中的顶层 `hades-agent/` 目录。
 
-Registry 条目使用直接指向 `hermes-agent` PyPI 发行版的 `uvx` 发行版：
+Registry 条目使用直接指向 `hades-agent` PyPI 发行版的 `uvx` 发行版：
 
 ```text
-uvx --from 'hermes-agent[acp]==<version>' hermes-acp
+uvx --from 'hades-agent[acp]==<version>' hades-acp
 ```
 
 Registry CI 会验证固定版本是否存在于 PyPI，因此清单的 `version` 和 uvx `package` 固定版本必须始终与 `pyproject.toml` 匹配。`scripts/release.py` 会自动保持它们同步。

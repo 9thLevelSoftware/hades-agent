@@ -1,9 +1,15 @@
 import ast
+import fnmatch
 import re
+import shutil
+import subprocess
+import tarfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 # setuptools is declared in the [dev] extra and is the build backend, but
 # guard the import so a runner without it skips these packaging checks
@@ -157,11 +163,114 @@ def test_bundled_plugin_manifests_ship_in_both_wheel_and_sdist():
 
 
 def test_distribution_metadata_includes_plugin_skills():
+    plugins_root = REPO_ROOT / "plugins"
+    on_disk = {
+        path.relative_to(plugins_root)
+        for path in plugins_root.rglob("SKILL.md")
+        if path.is_file()
+    }
+    assert on_disk, "expected bundled plugin skills under plugins/"
+
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    package_data = data["tool"]["setuptools"]["package-data"]
-    assert "**/skills/*/SKILL.md" in package_data["plugins"]
+    package_patterns = data["tool"]["setuptools"]["package-data"].get("plugins", [])
+    wheel_matches = {
+        path
+        for path in on_disk
+        if any(path.match(pattern) for pattern in package_patterns)
+    }
+    assert wheel_matches == on_disk, (
+        "plugin SKILL.md files omitted from wheel package-data: "
+        f"{sorted(str(path) for path in on_disk - wheel_matches)}"
+    )
+
     manifest = (REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
-    assert "recursive-include plugins SKILL.md" in manifest
+    recursive_patterns = []
+    for line in manifest.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[:2] == ["recursive-include", "plugins"]:
+            recursive_patterns.extend(fields[2:])
+    sdist_matches = {
+        path
+        for path in on_disk
+        if any(
+            fnmatch.fnmatch(path.name, pattern)
+            or fnmatch.fnmatch(path.as_posix(), pattern)
+            for pattern in recursive_patterns
+        )
+    }
+    assert sdist_matches == on_disk, (
+        "plugin SKILL.md files omitted from sdist manifest: "
+        f"{sorted(str(path) for path in on_disk - sdist_matches)}"
+    )
+
+
+@pytest.mark.integration
+def test_built_artifacts_contain_direct_and_nested_plugin_skills(tmp_path):
+    """Wheel and sdist both retain plugin discovery instructions.
+
+    Package-data and MANIFEST declarations are useful fast checks, but they
+    don't prove what setuptools actually emitted.  Exercise the two packaging
+    channels in an isolated output directory and inspect the published member
+    paths, including a direct skill and one nested below a plugin subdirectory.
+    """
+    required = {
+        "plugins/google_meet/SKILL.md",
+        "plugins/auto_routing/skills/auto-routing/SKILL.md",
+    }
+    # setuptools writes ``*.egg-info`` beside its input source tree.  Build a
+    # disposable source copy so this verification never leaves generated
+    # metadata in a developer checkout or dirties a release branch.
+    source = tmp_path / "source"
+    source_egg_info_before = set(REPO_ROOT.glob("*.egg-info"))
+    shutil.copytree(
+        REPO_ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git", ".venv", "venv", "node_modules", "build", "dist",
+            "*.egg-info", "__pycache__", "*.pyc",
+        ),
+    )
+    output = tmp_path / "dist"
+    build = subprocess.run(
+        ["uv", "build", "--out-dir", str(output), "."],
+        cwd=source,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert build.returncode == 0, f"uv build failed:\n{build.stderr}"
+
+    wheels = list(output.glob("*.whl"))
+    tarballs = list(output.glob("*.tar.gz"))
+    assert len(wheels) == 1, f"expected one wheel, found: {wheels}"
+    assert len(tarballs) == 1, f"expected one sdist, found: {tarballs}"
+
+    with zipfile.ZipFile(wheels[0]) as archive:
+        wheel_members = set(archive.namelist())
+    missing_wheel = sorted(required - wheel_members)
+    assert not missing_wheel, f"wheel omitted plugin skills: {missing_wheel}"
+
+    with tarfile.open(tarballs[0]) as archive:
+        sdist_members = set(archive.getnames())
+    missing_sdist = sorted(
+        path for path in required if not any(member.endswith(f"/{path}") for member in sdist_members)
+    )
+    assert not missing_sdist, f"sdist omitted plugin skills: {missing_sdist}"
+    assert set(REPO_ROOT.glob("*.egg-info")) == source_egg_info_before
+
+
+def test_linux_packaged_wheel_job_runs_plugin_skill_artifact_proof():
+    """The slow artifact inspection stays in the dedicated Linux E2E job."""
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["e2e"]["steps"]
+    assert any(
+        "python -m pytest -m integration" in step.get("run", "")
+        and "tests/test_packaging_metadata.py::test_built_artifacts_contain_direct_and_nested_plugin_skills"
+        in step.get("run", "")
+        for step in steps
+    )
 
 
 # Minimum non-vulnerable Starlette: CVE-2026-48710 ("BadHost") was fixed in

@@ -385,6 +385,21 @@ def _install_method_project_root(project_root: Optional[Path] = None) -> Path:
     return Path(__file__).parent.parent.resolve()
 
 
+def _is_platform_source_tree(root: Path) -> bool:
+    """Whether ``root`` is a source install for the running platform.
+
+    A wheel or uv-tool environment can contain incidental project metadata, so
+    the installer for *this* platform is required as well.  This deliberately
+    mirrors the no-git Windows recovery predicate in ``hades_cli.main`` while
+    keeping install-method detection independent of the CLI module.
+    """
+    installer = "install.ps1" if sys.platform == "win32" else "install.sh"
+    return (
+        (root / "pyproject.toml").is_file()
+        and (root / "scripts" / installer).is_file()
+    )
+
+
 def detect_install_method(project_root: Optional[Path] = None) -> str:
     """Detect how Hermes was installed: 'docker', 'nixos', 'homebrew', 'git', or 'pip'.
 
@@ -392,8 +407,8 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     1. Code-scoped stamp ``<install tree>/.install_method`` (next to the
        running code) — the authoritative marker.
     2. Legacy home-scoped stamp ``$HADES_HOME/.install_method`` — read for
-       backward compatibility, but a ``docker`` value is IGNORED when we are
-       not actually running inside a container (see below).
+       backward compatibility; a ``git`` value is accepted only for a
+       platform-source tree (see below).
     3. HERMES_MANAGED env / .managed marker (NixOS, Homebrew)
     4. .git directory presence -> 'git'
     5. Fallback -> 'pip'
@@ -413,10 +428,14 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     its own truthful marker.
 
     Self-healing for already-poisoned homes: a legacy ``docker`` value in the
-    home-scoped stamp is only honoured when we are genuinely in a container.
-    On a host install that read a contaminating ``docker`` stamp, we fall
-    through to managed/.git/pip detection instead — so existing shared-home
-    setups recover without the user touching anything.
+    home-scoped stamp is only honoured when we are genuinely in a container,
+    and a legacy ``git`` value is accepted only when the running root still
+    proves it is a platform-specific source tree.  A package or uv-tool install
+    has no checkout to inspect, so an old shared-home ``git`` stamp must not
+    send its updater down the git path; a source checkout's ``.git`` remains
+    the authoritative signal.  On a host install that read a contaminating
+    ``docker`` stamp, we fall through to managed/.git/pip detection instead —
+    so existing shared-home setups recover without the user touching anything.
 
     Note: running inside a container is NOT treated as "docker" on its own.
     The supported installs self-identify via the code-scoped stamp:
@@ -438,10 +457,11 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     except OSError:
         pass
 
-    # 2. Legacy home-scoped stamp — back-compat. Ignore a ``docker`` value
-    #    when we are not actually containerised: that is the signature of a
-    #    host install whose shared $HADES_HOME was stamped by a co-located
-    #    container, and honouring it wrongly blocks ``hermes update``.
+    # 2. Legacy home-scoped stamp — back-compat. A shared ``git`` stamp is
+    #    intentionally not authoritative for a package/tool, but it remains
+    #    useful for a damaged source tree that lost its .git directory. Ignore
+    #    a ``docker`` value when we are not actually containerised for the
+    #    same reason.
     try:
         method = (
             (get_hades_home() / ".install_method")
@@ -449,7 +469,10 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
             .strip()
             .lower()
         )
-        if method and not (method == "docker" and not _running_in_container()):
+        if method == "git":
+            if _is_platform_source_tree(root):
+                return method
+        elif method and not (method == "docker" and not _running_in_container()):
             return method
     except OSError:
         pass
@@ -505,32 +528,52 @@ def stamp_install_method(method: str, project_root: Optional[Path] = None) -> No
         pass
 
 
-def is_uv_tool_install() -> bool:
-    """Return True when the *running* Hermes lives in a ``uv tool`` layout.
+def uv_tool_install_distribution() -> Optional[str]:
+    """Return the installed uv-tool distribution for the running interpreter.
 
-    ``uv tool install hermes-agent`` places the install at
-    ``.../uv/tools/hermes-agent/...`` (default ``~/.local/share/uv/tools``,
-    or ``$UV_TOOL_DIR/...``). Such installs live outside any virtualenv, so
-    ``uv pip install`` fails with ``No virtual environment found`` and the
-    update path must use ``uv tool upgrade`` instead.
+    Canonical installs live at ``.../uv/tools/hades-agent/...``. The legacy
+    ``.../uv/tools/hermes-agent/...`` layout must remain distinguishable:
+    ``uv tool upgrade hades-agent`` fails when only the legacy tool name is
+    installed, so that layout needs a forced canonical install instead.
 
     Detection is intentionally restricted to properties of the running
     interpreter (``sys.prefix`` / ``sys.executable``). We deliberately do
-    NOT consult ``uv tool list``: it would also return True when
-    ``hermes-agent`` happens to be uv-tool-installed on the machine while
-    the *active* Hermes is a regular pip/venv install, causing
-    ``hermes update`` to upgrade the wrong copy. It would also block on a
-    subprocess call (~seconds) just to compute a recommendation string.
+    NOT consult ``uv tool list``: it would also return True when another copy
+    is uv-tool-installed on the machine while the active Hades is a regular
+    pip/venv install, causing an update to target the wrong copy. It would
+    also block on a subprocess call (~seconds) just to compute a
+    recommendation string.
     """
-    def _has_uv_tool_marker(path: str) -> bool:
-        norm = os.path.normpath(path).replace(os.sep, "/").lower()
-        return "/uv/tools/hermes-agent/" in norm + "/"
+    def _distribution_in_path(path: str) -> Optional[str]:
+        normalized = "/" + path.replace("\\", "/").strip("/").casefold() + "/"
+        for distribution in ("hades-agent", "hermes-agent"):
+            if f"/uv/tools/{distribution}/" in normalized:
+                return distribution
+        return None
 
-    if _has_uv_tool_marker(sys.prefix):
-        return True
-    if _has_uv_tool_marker(sys.executable or ""):
-        return True
-    return False
+    return (
+        _distribution_in_path(sys.prefix)
+        or _distribution_in_path(sys.executable or "")
+    )
+
+
+def is_uv_tool_install() -> bool:
+    """Return True when the running Hades lives in any supported uv-tool layout."""
+    return uv_tool_install_distribution() is not None
+
+
+def pipx_install_distribution() -> Optional[str]:
+    """Return the pipx environment name for the running interpreter.
+
+    pipx owns environments below ``.../pipx/venvs/<distribution>/...``.
+    Normalize both path separators and case so an install retains its package
+    identity when inspected through Windows, WSL, POSIX, or Termux paths.
+    """
+    parts = sys.prefix.replace("\\", "/").strip("/").casefold().split("/")
+    for index in range(len(parts) - 2):
+        if parts[index:index + 2] == ["pipx", "venvs"]:
+            return parts[index + 2] or None
+    return None
 
 
 def recommended_update_command_for_method(method: str) -> str:
@@ -542,13 +585,20 @@ def recommended_update_command_for_method(method: str) -> str:
     if method == "docker":
         return "docker pull nousresearch/hermes-agent:latest"
     if method == "pip":
-        if is_uv_tool_install():
-            return "uv tool upgrade hermes-agent"
-        import shutil
+        uv_tool_distribution = uv_tool_install_distribution()
+        if uv_tool_distribution == "hades-agent":
+            return "uv tool upgrade hades-agent"
+        if uv_tool_distribution == "hermes-agent":
+            return "uv tool install --force hades-agent"
+        pipx_distribution = pipx_install_distribution()
+        if pipx_distribution == "hades-agent":
+            return "pipx upgrade hades-agent"
+        if pipx_distribution:
+            return "pipx install --force hades-agent"
         if shutil.which("uv"):
-            return "uv pip install --upgrade hermes-agent"
-        return "pip install --upgrade hermes-agent"
-    return "hermes update"
+            return "uv pip install --upgrade hades-agent"
+        return "pip install --upgrade hades-agent"
+    return "hades update"
 
 
 def recommended_update_command() -> str:

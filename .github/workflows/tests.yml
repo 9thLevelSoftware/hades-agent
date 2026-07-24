@@ -220,6 +220,11 @@ jobs:
           source .venv/bin/activate
           python -m pytest -m integration tests/test_wheel_locales_e2e.py -v
 
+      - name: Packaged-wheel bundled plugin skills proof
+        run: |
+          source .venv/bin/activate
+          python -m pytest -m integration tests/test_packaging_metadata.py::test_built_artifacts_contain_direct_and_nested_plugin_skills -v
+
       - name: Run e2e tests
         run: |
           source .venv/bin/activate

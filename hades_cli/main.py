@@ -7916,25 +7916,43 @@ def _install_python_dependencies_with_optional_fallback(
     _verify_console_scripts_installed(install_cmd_prefix, env=env)
 
 
+_CONSOLE_SCRIPT_FALLBACK = (
+    "hades",
+    "hades-agent",
+    "hades-acp",
+    "hermes",
+    "hermes-agent",
+    "hermes-acp",
+)
+
+
 def _load_console_script_names() -> list[str]:
-    """Return ``[project.scripts]`` entry-point names from pyproject.toml."""
+    """Return declared entry points, including aliases when metadata is absent.
+
+    Updates normally run from a source checkout with ``pyproject.toml``.  The
+    repair path can also run from an installed or partially extracted tree,
+    where that metadata is unavailable precisely when Windows launcher repair
+    is most needed.  Keep the six shipped Hades/Hermes compatibility aliases
+    as a stable fallback; ``_hermes_exe_shims`` adds its separate gateway shim.
+    """
     try:
         import tomllib  # Python 3.11+
     except ImportError:  # pragma: no cover
-        return []
+        return list(_CONSOLE_SCRIPT_FALLBACK)
 
     pyproject = PROJECT_ROOT / "pyproject.toml"
     if not pyproject.is_file():
-        return []
+        return list(_CONSOLE_SCRIPT_FALLBACK)
 
     try:
         with open(pyproject, "rb") as f:
             data = tomllib.load(f)
         scripts = data.get("project", {}).get("scripts", {}) or {}
-        return [str(name) for name in scripts if name]
+        names = [str(name) for name in scripts if name]
+        return names or list(_CONSOLE_SCRIPT_FALLBACK)
     except Exception as e:
         logger.debug("console script verification: failed to read pyproject.toml: %s", e)
-        return []
+        return list(_CONSOLE_SCRIPT_FALLBACK)
 
 
 def _verify_console_scripts_installed(
@@ -9581,6 +9599,14 @@ def _discard_lockfile_churn(git_cmd, repo_root):
         pass
 
 
+def _is_windows_source_recovery_tree(project_root: Path) -> bool:
+    """Whether a no-git Windows tree is a damaged source install, not a wheel."""
+    return (
+        (project_root / "pyproject.toml").is_file()
+        and (project_root / "scripts" / "install.ps1").is_file()
+    )
+
+
 def cmd_update(args):
     """Update Hades Agent to the latest version.
 
@@ -9643,23 +9669,18 @@ def cmd_update(args):
 
 
 def _cmd_update_pip(args):
-    """Update Hermes via pip (for PyPI installs)."""
+    """Update Hades via pip-compatible installation tools."""
     from hades_cli import __version__
-    from hades_cli.config import is_uv_tool_install
+    from hades_cli.config import (
+        pipx_install_distribution,
+        uv_tool_install_distribution,
+    )
 
     print(f"→ Current version: {__version__}")
     print("→ Checking PyPI for updates...")
 
-    from hades_cli.managed_uv import ensure_uv, update_managed_uv
-
-    # Keep managed uv current before using it.
-    update_managed_uv()
-
-    uv = ensure_uv()
-    in_venv = sys.prefix != sys.base_prefix
-    # pipx-managed installs live under .../pipx/venvs/<name>/...
-    pipx_managed = "pipx" in sys.prefix.split(os.sep)
-    pipx = shutil.which("pipx") if pipx_managed else None
+    pipx_distribution = pipx_install_distribution()
+    pipx = shutil.which("pipx") if pipx_distribution else None
 
     # Only the ``uv pip install`` path inside a venv needs VIRTUAL_ENV
     # exported (uv refuses to install without it when the launcher shim
@@ -9668,28 +9689,63 @@ def _cmd_update_pip(args):
     # set it for them.
     export_virtualenv = False
 
-    if is_uv_tool_install():
-        if not uv:
-            print("✗ Detected a uv-tool install but managed uv install failed.")
-            print("  Install uv manually: https://docs.astral.sh/uv/getting-started/installation/")
+    if pipx_distribution:
+        if not pipx:
+            recovery_command = (
+                "pipx upgrade hades-agent"
+                if pipx_distribution == "hades-agent"
+                else "pipx install --force hades-agent"
+            )
+            print(
+                f"✗ Detected a pipx-managed {pipx_distribution} install, "
+                "but pipx is not on PATH."
+            )
+            print("  Restore pipx, then run:")
+            print(f"    {recovery_command}")
+            print("  Installation help: https://pipx.pypa.io/stable/installation/")
             sys.exit(1)
-        cmd = [uv, "tool", "upgrade", "hades-agent"]
-    elif pipx_managed and pipx:
-        # pipx owns its own venv; ``pipx upgrade`` is the only correct path.
-        # Matches scripts/auto-update.sh, which already uses pipx upgrade.
-        cmd = [pipx, "upgrade", "hades-agent"]
-    elif uv:
-        cmd = [uv, "pip", "install", "--upgrade", "hades-agent"]
-        if in_venv:
-            # Launcher shim runs the venv interpreter but doesn't export
-            # VIRTUAL_ENV; without it uv errors "No virtual environment found".
-            export_virtualenv = True
+        if pipx_distribution == "hades-agent":
+            cmd = [pipx, "upgrade", "hades-agent"]
         else:
-            # Outside any venv, ``--system`` lets uv target the active
-            # interpreter, matching pip's default behaviour.
-            cmd.insert(3, "--system")
+            # pipx upgrades by installed environment name. A legacy tool is
+            # registered under ``hermes-agent``, so install the canonical
+            # distribution instead of mutating pipx's private venv directly.
+            # Installing with --force migrates the public shims without ever
+            # fetching the unrelated upstream Hermes distribution.
+            cmd = [pipx, "install", "--force", "hades-agent"]
     else:
-        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hades-agent"]
+        from hades_cli.managed_uv import ensure_uv, update_managed_uv
+
+        # Keep managed uv current before using it.
+        update_managed_uv()
+
+        uv = ensure_uv()
+        in_venv = sys.prefix != sys.base_prefix
+        uv_tool_distribution = uv_tool_install_distribution()
+        if uv_tool_distribution:
+            if not uv:
+                print("✗ Detected a uv-tool install but managed uv install failed.")
+                print("  Install uv manually: https://docs.astral.sh/uv/getting-started/installation/")
+                sys.exit(1)
+            if uv_tool_distribution == "hades-agent":
+                cmd = [uv, "tool", "upgrade", "hades-agent"]
+            else:
+                # A legacy uv tool is registered under ``hermes-agent``.
+                # ``upgrade hades-agent`` cannot rename it; force-install the
+                # canonical tool so its shims move to the Hades-owned environment.
+                cmd = [uv, "tool", "install", "--force", "hades-agent"]
+        elif uv:
+            cmd = [uv, "pip", "install", "--upgrade", "hades-agent"]
+            if in_venv:
+                # Launcher shim runs the venv interpreter but doesn't export
+                # VIRTUAL_ENV; without it uv errors "No virtual environment found".
+                export_virtualenv = True
+            else:
+                # Outside any venv, ``--system`` lets uv target the active
+                # interpreter, matching pip's default behaviour.
+                cmd.insert(3, "--system")
+        else:
+            cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hades-agent"]
 
     print(f"→ Running: {' '.join(cmd)}")
     run_kwargs = {}
@@ -9700,7 +9756,7 @@ def _cmd_update_pip(args):
         print("✗ Update failed")
         sys.exit(1)
 
-    print("✓ Update complete! Restart hermes to use the new version.")
+    print("✓ Update complete! Restart hades to use the new version.")
 
 
 def _cmd_update_impl(args, gateway_mode: bool):
@@ -9789,14 +9845,21 @@ def _cmd_update_impl(args, gateway_mode: bool):
     git_dir = PROJECT_ROOT / ".git"
 
     if not git_dir.exists():
+        from hades_cli.config import detect_install_method
+
+        method = detect_install_method(PROJECT_ROOT)
+        if method == "pip" and not (
+            sys.platform == "win32"
+            and _is_windows_source_recovery_tree(PROJECT_ROOT)
+        ):
+            try:
+                _cmd_update_pip(args)
+            finally:
+                _resume_windows_gateways_after_update(_windows_gateway_resume)
+            return
         if sys.platform == "win32":
             use_zip_update = True
         else:
-            from hades_cli.config import detect_install_method
-            method = detect_install_method(PROJECT_ROOT)
-            if method == "pip":
-                _cmd_update_pip(args)
-                return
             print("✗ Not a git repository. Please reinstall:")
             print(
                 "  curl -fsSL https://raw.githubusercontent.com/9thLevelSoftware/hades-agent/main/scripts/install.sh | bash"

@@ -1,12 +1,12 @@
 ---
 sidebar_position: 9
 title: "Optional Skills Catalog"
-description: "Official optional skills shipped with hermes-agent — install via hermes skills install official/<category>/<skill>"
+description: "Official optional skills shipped with hades-agent — install via hades skills install official/<category>/<skill>"
 ---
 
 # Optional Skills Catalog
 
-Optional skills ship with hermes-agent under `optional-skills/` but are **not active by default**. Install them explicitly:
+Optional skills ship with hades-agent under `optional-skills/` but are **not active by default**. Install them explicitly:
 
 ```bash
 hermes skills install official/<category>/<skill>

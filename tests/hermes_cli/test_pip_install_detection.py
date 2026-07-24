@@ -107,12 +107,12 @@ def test_home_docker_stamp_honored_inside_container(tmp_path):
         assert detect_install_method(project_root=code) == "docker"
 
 
-def test_home_non_docker_stamp_still_honored_for_backcompat(tmp_path):
-    """Legacy non-'docker' home stamps (e.g. 'git') are still respected.
+def test_stale_home_git_stamp_does_not_override_running_pip_package(tmp_path):
+    """A shared-home ``git`` stamp must not turn a package install into git.
 
-    Only the 'docker' value carries the cross-contamination risk, so a host
-    install that historically stamped 'git'/'pip' into $HADES_HOME keeps
-    resolving from there when no code-scoped stamp exists yet.
+    The install method describes the running code.  A pip/uv-tool install has
+    neither a code stamp nor a checkout, so its real fallback (``pip``) must
+    outrank an old ``git`` stamp left in a shared data home by another install.
     """
     code = tmp_path / "code"
     home = tmp_path / "home"
@@ -121,6 +121,58 @@ def test_home_non_docker_stamp_still_honored_for_backcompat(tmp_path):
     (home / ".install_method").write_text("git\n")
     with patch("hades_cli.config.get_managed_system", return_value=None), \
          patch("hades_cli.config.get_hades_home", return_value=home), \
+         patch("hades_cli.config._running_in_container", return_value=False):
+        from hades_cli.config import detect_install_method
+        assert detect_install_method(project_root=code) == "pip"
+
+
+def test_stale_home_git_stamp_does_not_override_running_source_tree(tmp_path):
+    """A source checkout's own ``.git`` evidence outranks a shared stamp."""
+    code = tmp_path / "code"
+    home = tmp_path / "home"
+    code.mkdir()
+    home.mkdir()
+    (code / ".git").mkdir()
+    (home / ".install_method").write_text("git\n")
+    with patch("hades_cli.config.get_managed_system", return_value=None), \
+         patch("hades_cli.config.get_hades_home", return_value=home), \
+         patch("hades_cli.config._running_in_container", return_value=False):
+        from hades_cli.config import detect_install_method
+        assert detect_install_method(project_root=code) == "git"
+
+
+def test_home_git_stamp_is_kept_only_for_a_platform_source_tree(tmp_path):
+    """A source marker must include this platform's installer, not just TOML."""
+    code = tmp_path / "code"
+    home = tmp_path / "home"
+    code.mkdir()
+    home.mkdir()
+    (code / "pyproject.toml").write_text("[project]\nname = 'hades-agent'\n")
+    (code / "scripts").mkdir()
+    # This is a Windows installer, so it cannot identify a damaged POSIX tree.
+    (code / "scripts" / "install.ps1").write_text("# Windows installer\n")
+    (home / ".install_method").write_text("git\n")
+    with patch("hades_cli.config.get_managed_system", return_value=None), \
+         patch("hades_cli.config.get_hades_home", return_value=home), \
+         patch("hades_cli.config.sys.platform", "linux"), \
+         patch("hades_cli.config._running_in_container", return_value=False):
+        from hades_cli.config import detect_install_method
+        assert detect_install_method(project_root=code) == "pip"
+
+
+def test_home_git_stamp_is_kept_for_damaged_posix_source_tree(tmp_path):
+    """The legacy marker remains useful when a real source tree lost ``.git``."""
+    code = tmp_path / "code"
+    home = tmp_path / "home"
+    code.mkdir()
+    home.mkdir()
+    (code / "pyproject.toml").write_text("[project]\nname = 'hades-agent'\n")
+    (code / "scripts").mkdir()
+    (code / "scripts" / "install.sh").write_text("#!/usr/bin/env bash\n")
+    (home / ".install_method").write_text("git\n")
+    with patch("hades_cli.config.get_managed_system", return_value=None), \
+         patch("hades_cli.config.get_hades_home", return_value=home), \
+         patch("hades_cli.config.sys.platform", "linux"), \
          patch("hades_cli.config._running_in_container", return_value=False):
         from hades_cli.config import detect_install_method
         assert detect_install_method(project_root=code) == "git"
